@@ -78,9 +78,10 @@ values ('01HQ5RJNXS6TPXK89PQWY4N8JD', 'admin'),
 
 -- Insert default admin user (email: admin@plainq.local, password: admin)
 -- Note: In production, use proper password hashing
-insert into users (user_id, email, password, is_email_verified)
+-- This will be replaced during first-time setup
+insert or ignore into users (user_id, email, password, verified)
 values ('01HQ5RJNXS6TPXK89PQWY4N8JG', 'admin@plainq.local', 'admin', true);
 
 -- Assign admin role to admin user
-insert into user_roles (user_id, role_id)
+insert or ignore into user_roles (user_id, role_id)
 values ('01HQ5RJNXS6TPXK89PQWY4N8JG', '01HQ5RJNXS6TPXK89PQWY4N8JD');

@@ -53,4 +53,9 @@ type Config struct {
 	MetricsRoute        string
 
 	ProfilerEnabled bool
+
+	// Authentication settings
+	AuthEnabled   bool
+	AuthJWTSecret string
+	AuthIssuer    string
 }
