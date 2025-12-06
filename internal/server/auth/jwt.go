@@ -6,34 +6,47 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/golang-jwt/jwt/v5"
+	"github.com/cristalhq/jwt/v5"
 )
 
 const (
 	// Token durations
-	AccessTokenDuration  = 15 * time.Minute // Short-lived access tokens
+	AccessTokenDuration  = 15 * time.Minute  // Short-lived access tokens
 	RefreshTokenDuration = 7 * 24 * time.Hour // Long-lived refresh tokens
 )
 
 // Claims represents the JWT claims with role information
 type Claims struct {
+	jwt.RegisteredClaims
 	UserID string   `json:"user_id"`
 	Email  string   `json:"email"`
 	Roles  []string `json:"roles"` // Array of role names
-	jwt.RegisteredClaims
 }
 
 // JWTService handles JWT token generation and validation
 type JWTService struct {
-	secretKey []byte
-	issuer    string
+	signer   jwt.Signer
+	verifier jwt.Verifier
+	issuer   string
 }
 
 // NewJWTService creates a new JWT service
 func NewJWTService(secretKey string, issuer string) *JWTService {
+	key := []byte(secretKey)
+	signer, err := jwt.NewSignerHS(jwt.HS256, key)
+	if err != nil {
+		panic(fmt.Sprintf("failed to create JWT signer: %v", err))
+	}
+
+	verifier, err := jwt.NewVerifierHS(jwt.HS256, key)
+	if err != nil {
+		panic(fmt.Sprintf("failed to create JWT verifier: %v", err))
+	}
+
 	return &JWTService{
-		secretKey: []byte(secretKey),
-		issuer:    issuer,
+		signer:   signer,
+		verifier: verifier,
+		issuer:   issuer,
 	}
 }
 
@@ -49,9 +62,6 @@ func (s *JWTService) GenerateAccessToken(userID, email string, roles []string) (
 	}
 
 	claims := &Claims{
-		UserID: userID,
-		Email:  email,
-		Roles:  roles,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ID:        jti,
 			Subject:   userID,
@@ -60,15 +70,19 @@ func (s *JWTService) GenerateAccessToken(userID, email string, roles []string) (
 			ExpiresAt: jwt.NewNumericDate(expiresAt),
 			NotBefore: jwt.NewNumericDate(now),
 		},
+		UserID: userID,
+		Email:  email,
+		Roles:  roles,
 	}
 
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	tokenString, err := token.SignedString(s.secretKey)
+	// Build and sign the token
+	builder := jwt.NewBuilder(s.signer)
+	token, err := builder.Build(claims)
 	if err != nil {
-		return "", fmt.Errorf("failed to sign token: %w", err)
+		return "", fmt.Errorf("failed to build token: %w", err)
 	}
 
-	return tokenString, nil
+	return token.String(), nil
 }
 
 // GenerateRefreshToken generates a new refresh token (opaque token, not JWT)
@@ -91,40 +105,53 @@ func (s *JWTService) GenerateRefreshToken() (token string, tokenHash string, err
 
 // ValidateToken validates a JWT token and returns the claims
 func (s *JWTService) ValidateToken(tokenString string) (*Claims, error) {
-	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
-		// Verify the signing method
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-		}
-		return s.secretKey, nil
-	})
-
+	// Parse the token
+	token, err := jwt.Parse([]byte(tokenString), s.verifier)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse token: %w", err)
 	}
 
-	claims, ok := token.Claims.(*Claims)
-	if !ok || !token.Valid {
-		return nil, fmt.Errorf("invalid token claims")
+	// Decode claims
+	var claims Claims
+	err = token.DecodeClaims(&claims)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode claims: %w", err)
 	}
 
-	return claims, nil
+	// Validate standard claims
+	now := time.Now()
+
+	// Check expiration
+	if claims.ExpiresAt != nil && claims.ExpiresAt.Time.Before(now) {
+		return nil, fmt.Errorf("token has expired")
+	}
+
+	// Check not before
+	if claims.NotBefore != nil && claims.NotBefore.Time.After(now) {
+		return nil, fmt.Errorf("token not yet valid")
+	}
+
+	// Check issuer
+	if claims.Issuer != s.issuer {
+		return nil, fmt.Errorf("invalid issuer")
+	}
+
+	return &claims, nil
 }
 
 // ExtractTokenID extracts the JTI from a token without full validation
 // This is useful for adding tokens to the deny list
 func (s *JWTService) ExtractTokenID(tokenString string) (string, error) {
-	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
-		return s.secretKey, nil
-	}, jwt.WithoutClaimsValidation())
-
+	// Parse without signature verification for extracting JTI
+	token, err := jwt.ParseNoVerify([]byte(tokenString))
 	if err != nil {
 		return "", fmt.Errorf("failed to parse token: %w", err)
 	}
 
-	claims, ok := token.Claims.(*Claims)
-	if !ok {
-		return "", fmt.Errorf("invalid token claims")
+	var claims Claims
+	err = token.DecodeClaims(&claims)
+	if err != nil {
+		return "", fmt.Errorf("failed to decode claims: %w", err)
 	}
 
 	return claims.ID, nil

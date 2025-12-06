@@ -5,9 +5,9 @@ go 1.25
 require (
 	github.com/VictoriaMetrics/metrics v1.35.1
 	github.com/cockroachdb/swiss v0.0.0-20250624142022-d6e517c1d961
+	github.com/cristalhq/jwt/v5 v5.4.0
 	github.com/go-chi/chi/v5 v5.2.0
 	github.com/go-chi/cors v1.2.1
-	github.com/golang-jwt/jwt/v5 v5.2.1
 	github.com/heartwilltell/hc v0.1.5
 	github.com/heartwilltell/scotty v0.2.1
 	github.com/maxatome/go-testdeep v1.14.0
