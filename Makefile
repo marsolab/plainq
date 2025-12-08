@@ -16,7 +16,7 @@ build: deps schema
 
 .PHONY: test
 test:
-	go test -v -race - ./...
+	go test -v -race ./...
 
 .PHONY: test-cover
 test-cover:

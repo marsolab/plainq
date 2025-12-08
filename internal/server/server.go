@@ -1,8 +1,10 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -21,7 +23,12 @@ import (
 	vtgrpc "github.com/planetscale/vtprotobuf/codec/grpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/encoding"
-	_ "google.golang.org/grpc/encoding/proto"
+	_ "google.golang.org/grpc/encoding/proto" // Register proto codec.
+)
+
+const (
+	// jwtSecretLength is the length of the generated JWT secret in bytes.
+	jwtSecretLength = 32
 )
 
 // PlainQ represents plainq logic.
@@ -38,16 +45,16 @@ type PlainQ struct {
 func (s *PlainQ) Mount(server *grpc.Server) { v1.RegisterPlainQServiceServer(server, s) }
 
 // NewServer returns a pointer to a new instance of the PlainQ.
-func NewServer(cfg *config.Config, logger *slog.Logger, storage storage.Storage, checker hc.HealthChecker) (*servekit.Server, error) {
+func NewServer(cfg *config.Config, logger *slog.Logger, stor storage.Storage, checker hc.HealthChecker) (*servekit.Server, error) {
 	// Create a server which holds and serve all listeners.
 	server := servekit.NewServer(logger)
 
-	// Initialize authentication if enabled
+	// Initialize authentication if enabled.
 	var authService *auth.AuthService
 	var authHandler *auth.Handler
 
 	if cfg.AuthEnabled {
-		// Generate a JWT secret if not provided
+		// Generate a JWT secret if not provided.
 		jwtSecret := cfg.AuthJWTSecret
 		if jwtSecret == "" {
 			logger.Warn("No JWT secret provided, generating random secret")
@@ -55,18 +62,18 @@ func NewServer(cfg *config.Config, logger *slog.Logger, storage storage.Storage,
 			logger.Info("Generated JWT secret (store this for production use)", slog.String("secret", jwtSecret))
 		}
 
-		// Create auth service
-		authStorage, ok := storage.(auth.AuthStorage)
+		// Create auth service.
+		authStorage, ok := stor.(auth.AuthStorage)
 		if !ok {
-			return nil, fmt.Errorf("storage does not implement auth.AuthStorage interface")
+			return nil, errors.New("storage does not implement auth.AuthStorage interface")
 		}
 
 		authService = auth.NewAuthService(authStorage, jwtSecret, cfg.AuthIssuer)
 
-		// Initialize deny list from storage
-		if err := authService.InitializeDenyList(server.Context()); err != nil {
+		// Initialize deny list from storage.
+		if err := authService.InitializeDenyList(context.Background()); err != nil {
 			logger.Error("Failed to initialize token deny list", slog.String("error", err.Error()))
-			// Continue anyway, deny list will be empty
+			// Continue anyway, deny list will be empty.
 		}
 
 		authHandler = auth.NewHandler(authService, authStorage)
@@ -76,7 +83,7 @@ func NewServer(cfg *config.Config, logger *slog.Logger, storage storage.Storage,
 
 	pq := PlainQ{
 		logger:      logger,
-		storage:     storage,
+		storage:     stor,
 		observer:    telemetry.NewObserver(),
 		authService: authService,
 		authHandler: authHandler,
@@ -94,14 +101,14 @@ func NewServer(cfg *config.Config, logger *slog.Logger, storage storage.Storage,
 		api.Use(cors.AllowAll().Handler)
 
 		api.Route("/v1", func(v1 chi.Router) {
-			// Authentication routes (public)
+			// Authentication routes (public).
 			if cfg.AuthEnabled && pq.authHandler != nil {
 				v1.Route("/auth", func(authRouter chi.Router) {
-					// Setup routes (only available before setup is complete)
+					// Setup routes (only available before setup is complete).
 					authRouter.Get("/setup/status", pq.authHandler.SetupStatus)
 					authRouter.Post("/setup", pq.authHandler.Setup)
 
-					// Public auth routes
+					// Public auth routes.
 					authRouter.Post("/login", pq.authHandler.Login)
 					authRouter.Post("/signup", pq.authHandler.Signup)
 					authRouter.Post("/refresh", pq.authHandler.Refresh)
@@ -109,9 +116,9 @@ func NewServer(cfg *config.Config, logger *slog.Logger, storage storage.Storage,
 				})
 			}
 
-			// Queue related routes (protected if auth is enabled)
+			// Queue related routes (protected if auth is enabled).
 			v1.Route("/queue", func(queue chi.Router) {
-				// Apply auth middleware if enabled
+				// Apply auth middleware if enabled.
 				if cfg.AuthEnabled && pq.authService != nil {
 					queue.Use(middleware.Auth(pq.authService))
 				}
@@ -186,11 +193,11 @@ func listenerHTTP(cfg *config.Config, logger *slog.Logger, checker hc.HealthChec
 
 func init() { encoding.RegisterCodec(vtgrpc.Codec{}) }
 
-// generateRandomSecret generates a cryptographically secure random secret
+// generateRandomSecret generates a cryptographically secure random secret.
 func generateRandomSecret() string {
-	bytes := make([]byte, 32)
+	bytes := make([]byte, jwtSecretLength)
 	if _, err := rand.Read(bytes); err != nil {
-		// Fallback to a less secure method if crypto/rand fails
+		// Fallback to a less secure method if crypto/rand fails.
 		panic("failed to generate random secret: " + err.Error())
 	}
 	return hex.EncodeToString(bytes)
