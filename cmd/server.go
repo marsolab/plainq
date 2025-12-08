@@ -166,6 +166,20 @@ func serverCommand() *scotty.Command {
 			f.BoolVar(&cfg.ProfilerEnabled, "profiler", false,
 				"enable the profiler endpoint",
 			)
+
+			// Authentication.
+
+			f.BoolVar(&cfg.AuthEnabled, "auth.enable", true,
+				"enable authentication and authorization",
+			)
+
+			f.StringVar(&cfg.AuthJWTSecret, "auth.jwt-secret", "",
+				"JWT signing secret (required if auth is enabled)",
+			)
+
+			f.StringVar(&cfg.AuthIssuer, "auth.issuer", "plainq",
+				"JWT issuer identifier",
+			)
 		},
 
 		Run: func(_ *scotty.Command, _ []string) error {
