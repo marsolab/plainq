@@ -15,7 +15,7 @@ var _ auth.AuthStorage = (*Storage)(nil)
 
 // CreateUser creates a new user
 func (s *Storage) CreateUser(ctx context.Context, email, passwordHash string) (*auth.User, error) {
-	userID := idkit.NewID()
+	userID := idkit.XID()
 	now := time.Now()
 
 	query := `
@@ -205,7 +205,7 @@ func (s *Storage) MarkSetupCompleted(ctx context.Context) error {
 
 // CreateRefreshToken creates a new refresh token
 func (s *Storage) CreateRefreshToken(ctx context.Context, userID, tokenHash string, expiresAt time.Time, deviceInfo, ipAddress string) (*auth.RefreshToken, error) {
-	tokenID := idkit.NewID()
+	tokenID := idkit.XID()
 	now := time.Now()
 
 	query := `
@@ -408,7 +408,7 @@ func (s *Storage) CleanupExpiredDeniedTokens(ctx context.Context) error {
 
 // LogAuthEvent logs an authentication event
 func (s *Storage) LogAuthEvent(ctx context.Context, userID, eventType string, success bool, ipAddress, userAgent, metadata string) error {
-	logID := idkit.NewID()
+	logID := idkit.XID()
 
 	query := `
 		INSERT INTO auth_audit_log (log_id, user_id, event_type, success, ip_address, user_agent, metadata, created_at)
@@ -429,7 +429,7 @@ func (s *Storage) LogAuthEvent(ctx context.Context, userID, eventType string, su
 
 // CreateOAuthProvider creates a new OAuth provider
 func (s *Storage) CreateOAuthProvider(ctx context.Context, provider *auth.OAuthProvider) error {
-	provider.ProviderID = idkit.NewID()
+	provider.ProviderID = idkit.XID()
 	provider.CreatedAt = time.Now()
 	provider.UpdatedAt = time.Now()
 
@@ -576,7 +576,7 @@ func (s *Storage) UpdateOAuthProvider(ctx context.Context, provider *auth.OAuthP
 
 // CreateOAuthConnection creates a new OAuth connection
 func (s *Storage) CreateOAuthConnection(ctx context.Context, conn *auth.OAuthConnection) error {
-	conn.ConnectionID = idkit.NewID()
+	conn.ConnectionID = idkit.XID()
 	conn.CreatedAt = time.Now()
 	conn.UpdatedAt = time.Now()
 

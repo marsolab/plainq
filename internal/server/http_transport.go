@@ -63,6 +63,7 @@ func (s *PlainQ) listQueuesHandler(w http.ResponseWriter, r *http.Request) {
 			respond.ErrorHTTP(w, r, fmt.Errorf("%w: limit value too large", errkit.ErrInvalidArgument))
 			return
 		}
+		//nolint:gosec // Safe: value checked against MaxInt32 above
 		input.Limit = int32(limit)
 	}
 
@@ -145,17 +146,4 @@ func (*PlainQ) houstonStaticHandler(w http.ResponseWriter, r *http.Request) {
 	pathPrefix := strings.TrimSuffix(routeCtx.RoutePattern(), "/*")
 
 	http.StripPrefix(pathPrefix, http.FileServerFS(houston.Bundle())).ServeHTTP(w, r)
-}
-
-func dropPolicyToString(policy v1.EvictionPolicy) string {
-	switch policy {
-	case v1.EvictionPolicy_EVICTION_POLICY_DROP:
-		return "Drop Message"
-
-	case v1.EvictionPolicy_EVICTION_POLICY_DEAD_LETTER:
-		return "Dead Letter Queue"
-
-	default:
-		return ""
-	}
 }
