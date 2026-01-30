@@ -11,7 +11,7 @@ import (
 
 const (
 	// Token durations
-	AccessTokenDuration  = 15 * time.Minute  // Short-lived access tokens
+	AccessTokenDuration  = 15 * time.Minute   // Short-lived access tokens
 	RefreshTokenDuration = 7 * 24 * time.Hour // Long-lived refresh tokens
 )
 

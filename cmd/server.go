@@ -180,6 +180,10 @@ func serverCommand() *scotty.Command {
 			f.StringVar(&cfg.AuthIssuer, "auth.issuer", "plainq",
 				"JWT issuer identifier",
 			)
+
+			f.StringVar(&cfg.AuthOAuthBaseURL, "auth.oauth-base-url", "http://localhost:8081",
+				"Base URL for OAuth callbacks (e.g., https://example.com)",
+			)
 		},
 
 		Run: func(_ *scotty.Command, _ []string) error {

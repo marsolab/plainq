@@ -7,12 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/cors"
 	"github.com/heartwilltell/hc"
 	"github.com/plainq/plainq/internal/server/auth"
 	"github.com/plainq/plainq/internal/server/config"
+	"github.com/plainq/plainq/internal/server/interceptor"
 	"github.com/plainq/plainq/internal/server/middleware"
 	v1 "github.com/plainq/plainq/internal/server/schema/v1"
 	"github.com/plainq/plainq/internal/server/storage"
@@ -35,11 +37,12 @@ const (
 type PlainQ struct {
 	v1.UnimplementedPlainQServiceServer
 
-	logger      *slog.Logger
-	storage     storage.Storage
-	observer    telemetry.Observer
-	authService *auth.AuthService
-	authHandler *auth.Handler
+	logger            *slog.Logger
+	storage           storage.Storage
+	observer          telemetry.Observer
+	authService       *auth.AuthService
+	authHandler       *auth.Handler
+	permissionService *auth.PermissionService
 }
 
 func (s *PlainQ) Mount(server *grpc.Server) { v1.RegisterPlainQServiceServer(server, s) }
@@ -52,6 +55,7 @@ func NewServer(cfg *config.Config, logger *slog.Logger, stor storage.Storage, ch
 	// Initialize authentication if enabled.
 	var authService *auth.AuthService
 	var authHandler *auth.Handler
+	var permissionService *auth.PermissionService
 
 	if cfg.AuthEnabled {
 		// Generate a JWT secret if not provided.
@@ -78,15 +82,23 @@ func NewServer(cfg *config.Config, logger *slog.Logger, stor storage.Storage, ch
 
 		authHandler = auth.NewHandler(authService, authStorage)
 
+		// Create OAuth service with configurable base URL.
+		oauthService := auth.NewOAuthService(authStorage, authService, cfg.AuthOAuthBaseURL)
+		authHandler.SetOAuthService(oauthService)
+
+		// Create permission service.
+		permissionService = auth.NewPermissionService(authStorage)
+
 		logger.Info("Authentication enabled", slog.String("issuer", cfg.AuthIssuer))
 	}
 
 	pq := PlainQ{
-		logger:      logger,
-		storage:     stor,
-		observer:    telemetry.NewObserver(),
-		authService: authService,
-		authHandler: authHandler,
+		logger:            logger,
+		storage:           stor,
+		observer:          telemetry.NewObserver(),
+		authService:       authService,
+		authHandler:       authHandler,
+		permissionService: permissionService,
 	}
 
 	// Create the HTTP listener.
@@ -113,6 +125,14 @@ func NewServer(cfg *config.Config, logger *slog.Logger, stor storage.Storage, ch
 					authRouter.Post("/signup", pq.authHandler.Signup)
 					authRouter.Post("/refresh", pq.authHandler.Refresh)
 					authRouter.Post("/logout", pq.authHandler.Logout)
+
+					// OAuth routes.
+					authRouter.Get("/oauth/providers", pq.authHandler.ListOAuthProviders)
+					authRouter.Post("/oauth/init", pq.authHandler.OAuthInit)
+					authRouter.Get("/oauth/{provider}/callback", func(w http.ResponseWriter, r *http.Request) {
+						provider := chi.URLParam(r, "provider")
+						pq.authHandler.OAuthCallback(w, r, provider)
+					})
 				})
 			}
 
@@ -143,7 +163,18 @@ func NewServer(cfg *config.Config, logger *slog.Logger, stor storage.Storage, ch
 	// Register the HTTP listener with a server.
 	server.RegisterListener("HTTP", httpListener)
 
-	grpcListener, grpcListenerErr := grpckit.NewListenerGRPC(cfg.GRPCAddr)
+	// Configure gRPC listener options.
+	grpcOpts := []grpckit.Option[grpckit.ListenerConfig]{}
+
+	// Add auth interceptor if authentication is enabled.
+	if cfg.AuthEnabled && authService != nil {
+		grpcOpts = append(grpcOpts, grpckit.WithUnaryInterceptors(
+			interceptor.AuthInterceptor(authService),
+		))
+		logger.Info("gRPC authentication interceptor enabled")
+	}
+
+	grpcListener, grpcListenerErr := grpckit.NewListenerGRPC(cfg.GRPCAddr, grpcOpts...)
 	if grpcListenerErr != nil {
 		return nil, fmt.Errorf("create gRPC listener: %w", grpcListenerErr)
 	}

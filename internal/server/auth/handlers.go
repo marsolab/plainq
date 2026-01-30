@@ -1,14 +1,17 @@
 package auth
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 )
 
 // Handler wraps authentication service for HTTP handlers
 type Handler struct {
-	service *AuthService
-	storage AuthStorage
+	service      *AuthService
+	storage      AuthStorage
+	oauthService *OAuthService
 }
 
 // NewHandler creates a new authentication handler
@@ -17,6 +20,11 @@ func NewHandler(service *AuthService, storage AuthStorage) *Handler {
 		service: service,
 		storage: storage,
 	}
+}
+
+// SetOAuthService sets the OAuth service for the handler
+func (h *Handler) SetOAuthService(oauthService *OAuthService) {
+	h.oauthService = oauthService
 }
 
 // LoginRequest represents a login request
@@ -49,8 +57,8 @@ type SetupRequest struct {
 
 // AuthResponse represents a successful authentication response
 type AuthResponse struct {
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
+	AccessToken  string   `json:"access_token"`
+	RefreshToken string   `json:"refresh_token"`
 	User         UserInfo `json:"user"`
 }
 
@@ -340,4 +348,140 @@ func (h *Handler) SetupStatus(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]bool{
 		"setup_completed": completed,
 	})
+}
+
+// OAuthProviderResponse represents an OAuth provider in the API response
+type OAuthProviderResponse struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
+// ListOAuthProviders returns a list of enabled OAuth providers
+func (h *Handler) ListOAuthProviders(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, `{"error": "method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	providers, err := h.storage.ListEnabledOAuthProviders(r.Context())
+	if err != nil {
+		http.Error(w, `{"error": "failed to list providers"}`, http.StatusInternalServerError)
+		return
+	}
+
+	response := make([]OAuthProviderResponse, len(providers))
+	for i, p := range providers {
+		response[i] = OAuthProviderResponse{
+			Name: p.ProviderName,
+			Type: p.ProviderType,
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"providers": response,
+	})
+}
+
+// OAuthInitRequest represents a request to initiate OAuth flow
+type OAuthInitRequest struct {
+	Provider string `json:"provider"`
+}
+
+// OAuthInit initiates the OAuth flow by returning the authorization URL
+func (h *Handler) OAuthInit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error": "method not allowed"}`, http.StatusMethodNotAllowed)
+		return
+	}
+
+	if h.oauthService == nil {
+		http.Error(w, `{"error": "OAuth not configured"}`, http.StatusServiceUnavailable)
+		return
+	}
+
+	var req OAuthInitRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error": "invalid request body"}`, http.StatusBadRequest)
+		return
+	}
+
+	if req.Provider == "" {
+		http.Error(w, `{"error": "provider is required"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Generate a secure state parameter
+	state, err := generateOAuthState()
+	if err != nil {
+		http.Error(w, `{"error": "failed to generate state"}`, http.StatusInternalServerError)
+		return
+	}
+
+	authURL, err := h.oauthService.GetAuthorizationURL(req.Provider, state)
+	if err != nil {
+		http.Error(w, `{"error": "`+err.Error()+`"}`, http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"authorization_url": authURL,
+		"state":             state,
+	})
+}
+
+// OAuthCallback handles the OAuth callback from the provider
+func (h *Handler) OAuthCallback(w http.ResponseWriter, r *http.Request, providerName string) {
+	if h.oauthService == nil {
+		http.Error(w, `{"error": "OAuth not configured"}`, http.StatusServiceUnavailable)
+		return
+	}
+
+	// Get the authorization code from query params
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		// Check for error from provider
+		errorParam := r.URL.Query().Get("error")
+		errorDesc := r.URL.Query().Get("error_description")
+		if errorParam != "" {
+			http.Error(w, `{"error": "`+errorParam+`: `+errorDesc+`"}`, http.StatusBadRequest)
+			return
+		}
+		http.Error(w, `{"error": "missing authorization code"}`, http.StatusBadRequest)
+		return
+	}
+
+	// Process the callback
+	deviceInfo := r.UserAgent()
+	ipAddress := r.RemoteAddr
+
+	result, err := h.oauthService.HandleCallback(r.Context(), providerName, code, deviceInfo, ipAddress)
+	if err != nil {
+		http.Error(w, `{"error": "`+err.Error()+`"}`, http.StatusInternalServerError)
+		return
+	}
+
+	response := AuthResponse{
+		AccessToken:  result.AccessToken,
+		RefreshToken: result.RefreshToken,
+		User: UserInfo{
+			UserID:   result.User.UserID,
+			Email:    result.User.Email,
+			Verified: result.User.Verified,
+			Roles:    result.Roles,
+		},
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+// generateOAuthState generates a secure random state parameter for OAuth
+func generateOAuthState() (string, error) {
+	bytes := make([]byte, 32)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(bytes), nil
 }

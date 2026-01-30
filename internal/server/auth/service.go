@@ -8,9 +8,9 @@ import (
 
 // AuthService handles authentication operations
 type AuthService struct {
-	storage   AuthStorage
-	jwt       *JWTService
-	denyList  *TokenDenyList
+	storage  AuthStorage
+	jwt      *JWTService
+	denyList *TokenDenyList
 }
 
 // NewAuthService creates a new authentication service
