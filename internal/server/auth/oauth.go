@@ -10,14 +10,14 @@ import (
 	"strings"
 )
 
-// OAuthService handles OAuth provider integrations
+// OAuthService handles OAuth provider integrations.
 type OAuthService struct {
 	storage     AuthStorage
 	authService *AuthService
 	baseURL     string // Base URL for OAuth callbacks (e.g., "https://example.com")
 }
 
-// NewOAuthService creates a new OAuth service
+// NewOAuthService creates a new OAuth service.
 func NewOAuthService(storage AuthStorage, authService *AuthService, baseURL string) *OAuthService {
 	// Ensure baseURL doesn't have trailing slash
 	baseURL = strings.TrimSuffix(baseURL, "/")
@@ -31,12 +31,12 @@ func NewOAuthService(storage AuthStorage, authService *AuthService, baseURL stri
 	}
 }
 
-// GetRedirectURL returns the OAuth redirect URL for a provider
+// GetRedirectURL returns the OAuth redirect URL for a provider.
 func (s *OAuthService) GetRedirectURL(providerName string) string {
 	return fmt.Sprintf("%s/api/v1/auth/oauth/%s/callback", s.baseURL, providerName)
 }
 
-// OAuthConfig represents OAuth configuration for a provider
+// OAuthConfig represents OAuth configuration for a provider.
 type OAuthConfig struct {
 	ClientID     string
 	ClientSecret string
@@ -47,7 +47,7 @@ type OAuthConfig struct {
 	UserinfoURL  string
 }
 
-// GetAuthorizationURL generates the OAuth authorization URL
+// GetAuthorizationURL generates the OAuth authorization URL.
 func (s *OAuthService) GetAuthorizationURL(providerName, state string) (string, error) {
 	provider, err := s.storage.GetOAuthProvider(context.Background(), providerName)
 	if err != nil {
@@ -84,7 +84,7 @@ func (s *OAuthService) GetAuthorizationURL(providerName, state string) (string, 
 	return authURL + "?" + params.Encode(), nil
 }
 
-// ExchangeCodeForToken exchanges an authorization code for tokens
+// ExchangeCodeForToken exchanges an authorization code for tokens.
 func (s *OAuthService) ExchangeCodeForToken(ctx context.Context, providerName, code string) (map[string]interface{}, error) {
 	provider, err := s.storage.GetOAuthProvider(ctx, providerName)
 	if err != nil {
@@ -136,7 +136,7 @@ func (s *OAuthService) ExchangeCodeForToken(ctx context.Context, providerName, c
 	return tokenResponse, nil
 }
 
-// GetUserInfo retrieves user information from the OAuth provider
+// GetUserInfo retrieves user information from the OAuth provider.
 func (s *OAuthService) GetUserInfo(ctx context.Context, providerName, accessToken string) (map[string]interface{}, error) {
 	provider, err := s.storage.GetOAuthProvider(ctx, providerName)
 	if err != nil {
@@ -180,7 +180,7 @@ func (s *OAuthService) GetUserInfo(ctx context.Context, providerName, accessToke
 	return userInfo, nil
 }
 
-// HandleCallback processes the OAuth callback and creates/links user account
+// HandleCallback processes the OAuth callback and creates/links user account.
 func (s *OAuthService) HandleCallback(ctx context.Context, providerName, code, deviceInfo, ipAddress string) (*LoginResult, error) {
 	// Exchange code for tokens
 	tokenResponse, err := s.ExchangeCodeForToken(ctx, providerName, code)

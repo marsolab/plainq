@@ -5,12 +5,12 @@ import (
 	"fmt"
 )
 
-// PermissionService handles queue permission checks
+// PermissionService handles queue permission checks.
 type PermissionService struct {
 	storage AuthStorage
 }
 
-// NewPermissionService creates a new permission service
+// NewPermissionService creates a new permission service.
 func NewPermissionService(storage AuthStorage) *PermissionService {
 	return &PermissionService{storage: storage}
 }
@@ -70,7 +70,7 @@ func (s *PermissionService) CheckQueuePermission(ctx context.Context, queueID st
 	return nil
 }
 
-// HasRole checks if the given roles contain a specific role
+// HasRole checks if the given roles contain a specific role.
 func HasRole(roles []string, targetRole string) bool {
 	for _, role := range roles {
 		if role == targetRole {
@@ -80,7 +80,7 @@ func HasRole(roles []string, targetRole string) bool {
 	return false
 }
 
-// IsAdmin checks if the user has admin role
+// IsAdmin checks if the user has admin role.
 func IsAdmin(roles []string) bool {
 	return HasRole(roles, "admin")
 }

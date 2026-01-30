@@ -710,7 +710,7 @@ func (s *Storage) DeleteOAuthConnection(ctx context.Context, connectionID string
 	return nil
 }
 
-// Queue permission operations
+// Queue permission operations.
 
 // GetQueuePermissions retrieves aggregated permissions for a queue across multiple roles.
 // Returns combined permissions (OR of all role permissions) for the given queue and roles.
@@ -758,7 +758,7 @@ func (s *Storage) GetQueuePermissions(ctx context.Context, queueID string, roleI
 	}, nil
 }
 
-// SetQueuePermissions creates or updates permissions for a role on a queue
+// SetQueuePermissions creates or updates permissions for a role on a queue.
 func (s *Storage) SetQueuePermissions(ctx context.Context, perm *auth.QueuePermission) error {
 	now := time.Now()
 
@@ -783,7 +783,7 @@ func (s *Storage) SetQueuePermissions(ctx context.Context, perm *auth.QueuePermi
 	return nil
 }
 
-// DeleteQueuePermissions removes permissions for a role on a queue
+// DeleteQueuePermissions removes permissions for a role on a queue.
 func (s *Storage) DeleteQueuePermissions(ctx context.Context, queueID, roleID string) error {
 	query := `
 		DELETE FROM queue_permissions
@@ -798,7 +798,7 @@ func (s *Storage) DeleteQueuePermissions(ctx context.Context, queueID, roleID st
 	return nil
 }
 
-// GetRoleByName retrieves a role by its name
+// GetRoleByName retrieves a role by its name.
 func (s *Storage) GetRoleByName(ctx context.Context, roleName string) (*auth.Role, error) {
 	query := `
 		SELECT role_id, role_name, created_at

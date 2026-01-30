@@ -350,13 +350,13 @@ func (h *Handler) SetupStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// OAuthProviderResponse represents an OAuth provider in the API response
+// OAuthProviderResponse represents an OAuth provider in the API response.
 type OAuthProviderResponse struct {
 	Name string `json:"name"`
 	Type string `json:"type"`
 }
 
-// ListOAuthProviders returns a list of enabled OAuth providers
+// ListOAuthProviders returns a list of enabled OAuth providers.
 func (h *Handler) ListOAuthProviders(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, `{"error": "method not allowed"}`, http.StatusMethodNotAllowed)
@@ -383,12 +383,12 @@ func (h *Handler) ListOAuthProviders(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// OAuthInitRequest represents a request to initiate OAuth flow
+// OAuthInitRequest represents a request to initiate OAuth flow.
 type OAuthInitRequest struct {
 	Provider string `json:"provider"`
 }
 
-// OAuthInit initiates the OAuth flow by returning the authorization URL
+// OAuthInit initiates the OAuth flow by returning the authorization URL.
 func (h *Handler) OAuthInit(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, `{"error": "method not allowed"}`, http.StatusMethodNotAllowed)
@@ -431,7 +431,7 @@ func (h *Handler) OAuthInit(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// OAuthCallback handles the OAuth callback from the provider
+// OAuthCallback handles the OAuth callback from the provider.
 func (h *Handler) OAuthCallback(w http.ResponseWriter, r *http.Request, providerName string) {
 	if h.oauthService == nil {
 		http.Error(w, `{"error": "OAuth not configured"}`, http.StatusServiceUnavailable)
@@ -477,7 +477,7 @@ func (h *Handler) OAuthCallback(w http.ResponseWriter, r *http.Request, provider
 	json.NewEncoder(w).Encode(response)
 }
 
-// generateOAuthState generates a secure random state parameter for OAuth
+// generateOAuthState generates a secure random state parameter for OAuth.
 func generateOAuthState() (string, error) {
 	bytes := make([]byte, 32)
 	if _, err := rand.Read(bytes); err != nil {

@@ -72,7 +72,7 @@ type OAuthConnection struct {
 	UpdatedAt      time.Time
 }
 
-// QueuePermission represents permissions for a role on a specific queue
+// QueuePermission represents permissions for a role on a specific queue.
 type QueuePermission struct {
 	QueueID    string
 	RoleID     string
@@ -84,7 +84,7 @@ type QueuePermission struct {
 	UpdatedAt  time.Time
 }
 
-// PermissionAction represents an action that can be performed on a queue
+// PermissionAction represents an action that can be performed on a queue.
 type PermissionAction string
 
 const (
