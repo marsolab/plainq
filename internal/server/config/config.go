@@ -55,7 +55,8 @@ type Config struct {
 	ProfilerEnabled bool
 
 	// Authentication settings
-	AuthEnabled   bool
-	AuthJWTSecret string
-	AuthIssuer    string
+	AuthEnabled      bool
+	AuthJWTSecret    string
+	AuthIssuer       string
+	AuthOAuthBaseURL string // Base URL for OAuth callbacks (e.g., "https://example.com")
 }

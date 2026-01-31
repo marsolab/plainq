@@ -10,21 +10,33 @@ import (
 	"strings"
 )
 
-// OAuthService handles OAuth provider integrations
+// OAuthService handles OAuth provider integrations.
 type OAuthService struct {
-	storage    AuthStorage
+	storage     AuthStorage
 	authService *AuthService
+	baseURL     string // Base URL for OAuth callbacks (e.g., "https://example.com")
 }
 
-// NewOAuthService creates a new OAuth service
-func NewOAuthService(storage AuthStorage, authService *AuthService) *OAuthService {
+// NewOAuthService creates a new OAuth service.
+func NewOAuthService(storage AuthStorage, authService *AuthService, baseURL string) *OAuthService {
+	// Ensure baseURL doesn't have trailing slash
+	baseURL = strings.TrimSuffix(baseURL, "/")
+	if baseURL == "" {
+		baseURL = "http://localhost:8081"
+	}
 	return &OAuthService{
-		storage:    storage,
+		storage:     storage,
 		authService: authService,
+		baseURL:     baseURL,
 	}
 }
 
-// OAuthConfig represents OAuth configuration for a provider
+// GetRedirectURL returns the OAuth redirect URL for a provider.
+func (s *OAuthService) GetRedirectURL(providerName string) string {
+	return fmt.Sprintf("%s/api/v1/auth/oauth/%s/callback", s.baseURL, providerName)
+}
+
+// OAuthConfig represents OAuth configuration for a provider.
 type OAuthConfig struct {
 	ClientID     string
 	ClientSecret string
@@ -35,7 +47,7 @@ type OAuthConfig struct {
 	UserinfoURL  string
 }
 
-// GetAuthorizationURL generates the OAuth authorization URL
+// GetAuthorizationURL generates the OAuth authorization URL.
 func (s *OAuthService) GetAuthorizationURL(providerName, state string) (string, error) {
 	provider, err := s.storage.GetOAuthProvider(context.Background(), providerName)
 	if err != nil {
@@ -59,7 +71,7 @@ func (s *OAuthService) GetAuthorizationURL(providerName, state string) (string, 
 	// Build authorization URL
 	params := url.Values{}
 	params.Add("client_id", provider.ClientID)
-	params.Add("redirect_uri", getRedirectURL(providerName))
+	params.Add("redirect_uri", s.GetRedirectURL(providerName))
 	params.Add("response_type", "code")
 	params.Add("scope", strings.Join(scopes, " "))
 	params.Add("state", state)
@@ -72,7 +84,7 @@ func (s *OAuthService) GetAuthorizationURL(providerName, state string) (string, 
 	return authURL + "?" + params.Encode(), nil
 }
 
-// ExchangeCodeForToken exchanges an authorization code for tokens
+// ExchangeCodeForToken exchanges an authorization code for tokens.
 func (s *OAuthService) ExchangeCodeForToken(ctx context.Context, providerName, code string) (map[string]interface{}, error) {
 	provider, err := s.storage.GetOAuthProvider(ctx, providerName)
 	if err != nil {
@@ -85,7 +97,7 @@ func (s *OAuthService) ExchangeCodeForToken(ctx context.Context, providerName, c
 	data.Set("code", code)
 	data.Set("client_id", provider.ClientID)
 	data.Set("client_secret", provider.ClientSecret)
-	data.Set("redirect_uri", getRedirectURL(providerName))
+	data.Set("redirect_uri", s.GetRedirectURL(providerName))
 
 	tokenURL := provider.TokenURL
 	if tokenURL == "" && provider.IssuerURL != "" {
@@ -124,7 +136,7 @@ func (s *OAuthService) ExchangeCodeForToken(ctx context.Context, providerName, c
 	return tokenResponse, nil
 }
 
-// GetUserInfo retrieves user information from the OAuth provider
+// GetUserInfo retrieves user information from the OAuth provider.
 func (s *OAuthService) GetUserInfo(ctx context.Context, providerName, accessToken string) (map[string]interface{}, error) {
 	provider, err := s.storage.GetOAuthProvider(ctx, providerName)
 	if err != nil {
@@ -168,7 +180,7 @@ func (s *OAuthService) GetUserInfo(ctx context.Context, providerName, accessToke
 	return userInfo, nil
 }
 
-// HandleCallback processes the OAuth callback and creates/links user account
+// HandleCallback processes the OAuth callback and creates/links user account.
 func (s *OAuthService) HandleCallback(ctx context.Context, providerName, code, deviceInfo, ipAddress string) (*LoginResult, error) {
 	// Exchange code for tokens
 	tokenResponse, err := s.ExchangeCodeForToken(ctx, providerName, code)
@@ -274,13 +286,6 @@ func (s *OAuthService) HandleCallback(ctx context.Context, providerName, code, d
 
 	// Login the user
 	return s.authService.Login(ctx, user.Email, "", deviceInfo, ipAddress)
-}
-
-// getRedirectURL returns the OAuth redirect URL for a provider
-// This should be configured based on your deployment
-func getRedirectURL(providerName string) string {
-	// TODO: Make this configurable
-	return fmt.Sprintf("http://localhost:8081/api/v1/auth/oauth/%s/callback", providerName)
 }
 
 // generateRandomPassword generates a random password

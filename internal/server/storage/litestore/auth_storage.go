@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/plainq/plainq/internal/server/auth"
@@ -707,4 +708,114 @@ func (s *Storage) DeleteOAuthConnection(ctx context.Context, connectionID string
 	}
 
 	return nil
+}
+
+// Queue permission operations.
+
+// GetQueuePermissions retrieves aggregated permissions for a queue across multiple roles.
+// Returns combined permissions (OR of all role permissions) for the given queue and roles.
+func (s *Storage) GetQueuePermissions(ctx context.Context, queueID string, roleIDs []string) (*auth.QueuePermission, error) {
+	if len(roleIDs) == 0 {
+		return &auth.QueuePermission{QueueID: queueID}, nil
+	}
+
+	// Build placeholders for IN clause
+	placeholders := make([]string, len(roleIDs))
+	args := make([]interface{}, len(roleIDs)+1)
+	args[0] = queueID
+	for i, roleID := range roleIDs {
+		placeholders[i] = "?"
+		args[i+1] = roleID
+	}
+
+	query := fmt.Sprintf(`
+		SELECT
+			MAX(can_send) as can_send,
+			MAX(can_receive) as can_receive,
+			MAX(can_purge) as can_purge,
+			MAX(can_delete) as can_delete
+		FROM queue_permissions
+		WHERE queue_id = ? AND role_id IN (%s)
+	`, strings.Join(placeholders, ","))
+
+	var canSend, canReceive, canPurge, canDelete sql.NullBool
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(
+		&canSend, &canReceive, &canPurge, &canDelete,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return &auth.QueuePermission{QueueID: queueID}, nil
+		}
+		return nil, fmt.Errorf("failed to get queue permissions: %w", err)
+	}
+
+	return &auth.QueuePermission{
+		QueueID:    queueID,
+		CanSend:    canSend.Bool,
+		CanReceive: canReceive.Bool,
+		CanPurge:   canPurge.Bool,
+		CanDelete:  canDelete.Bool,
+	}, nil
+}
+
+// SetQueuePermissions creates or updates permissions for a role on a queue.
+func (s *Storage) SetQueuePermissions(ctx context.Context, perm *auth.QueuePermission) error {
+	now := time.Now()
+
+	query := `
+		INSERT INTO queue_permissions (queue_id, role_id, can_send, can_receive, can_purge, can_delete, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (queue_id, role_id) DO UPDATE SET
+			can_send = excluded.can_send,
+			can_receive = excluded.can_receive,
+			can_purge = excluded.can_purge,
+			can_delete = excluded.can_delete,
+			updated_at = excluded.updated_at
+	`
+
+	_, err := s.db.ExecContext(ctx, query,
+		perm.QueueID, perm.RoleID, perm.CanSend, perm.CanReceive, perm.CanPurge, perm.CanDelete, now, now,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to set queue permissions: %w", err)
+	}
+
+	return nil
+}
+
+// DeleteQueuePermissions removes permissions for a role on a queue.
+func (s *Storage) DeleteQueuePermissions(ctx context.Context, queueID, roleID string) error {
+	query := `
+		DELETE FROM queue_permissions
+		WHERE queue_id = ? AND role_id = ?
+	`
+
+	_, err := s.db.ExecContext(ctx, query, queueID, roleID)
+	if err != nil {
+		return fmt.Errorf("failed to delete queue permissions: %w", err)
+	}
+
+	return nil
+}
+
+// GetRoleByName retrieves a role by its name.
+func (s *Storage) GetRoleByName(ctx context.Context, roleName string) (*auth.Role, error) {
+	query := `
+		SELECT role_id, role_name, created_at
+		FROM roles
+		WHERE role_name = ?
+	`
+
+	var role auth.Role
+	err := s.db.QueryRowContext(ctx, query, roleName).Scan(
+		&role.RoleID, &role.RoleName, &role.CreatedAt,
+	)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("role not found")
+		}
+		return nil, fmt.Errorf("failed to get role: %w", err)
+	}
+
+	return &role, nil
 }

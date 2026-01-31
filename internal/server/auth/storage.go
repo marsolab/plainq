@@ -38,23 +38,23 @@ type RefreshToken struct {
 
 // OAuthProvider represents an OAuth/OIDC provider configuration
 type OAuthProvider struct {
-	ProviderID     string
-	ProviderName   string
-	ProviderType   string
-	Enabled        bool
-	ClientID       string
-	ClientSecret   string
-	IssuerURL      string
-	AuthURL        string
-	TokenURL       string
-	UserinfoURL    string
-	JWKSURL        string
-	Scopes         string
+	ProviderID      string
+	ProviderName    string
+	ProviderType    string
+	Enabled         bool
+	ClientID        string
+	ClientSecret    string
+	IssuerURL       string
+	AuthURL         string
+	TokenURL        string
+	UserinfoURL     string
+	JWKSURL         string
+	Scopes          string
 	SAMLMetadataURL string
-	SAMLEntityID   string
-	ConfigJSON     string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	SAMLEntityID    string
+	ConfigJSON      string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
 
 // OAuthConnection represents a user's connection to an OAuth provider
@@ -71,6 +71,28 @@ type OAuthConnection struct {
 	CreatedAt      time.Time
 	UpdatedAt      time.Time
 }
+
+// QueuePermission represents permissions for a role on a specific queue.
+type QueuePermission struct {
+	QueueID    string
+	RoleID     string
+	CanSend    bool
+	CanReceive bool
+	CanPurge   bool
+	CanDelete  bool
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+}
+
+// PermissionAction represents an action that can be performed on a queue.
+type PermissionAction string
+
+const (
+	ActionSend    PermissionAction = "send"
+	ActionReceive PermissionAction = "receive"
+	ActionPurge   PermissionAction = "purge"
+	ActionDelete  PermissionAction = "delete"
+)
 
 // AuthStorage defines the interface for authentication-related storage operations
 type AuthStorage interface {
@@ -117,4 +139,10 @@ type AuthStorage interface {
 
 	// Audit log
 	LogAuthEvent(ctx context.Context, userID, eventType string, success bool, ipAddress, userAgent, metadata string) error
+
+	// Queue permission operations
+	GetQueuePermissions(ctx context.Context, queueID string, roleIDs []string) (*QueuePermission, error)
+	SetQueuePermissions(ctx context.Context, perm *QueuePermission) error
+	DeleteQueuePermissions(ctx context.Context, queueID, roleID string) error
+	GetRoleByName(ctx context.Context, roleName string) (*Role, error)
 }

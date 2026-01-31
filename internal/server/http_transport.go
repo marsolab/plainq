@@ -11,12 +11,23 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/plainq/plainq/internal/houston"
+	"github.com/plainq/plainq/internal/server/auth"
+	"github.com/plainq/plainq/internal/server/middleware"
 	v1 "github.com/plainq/plainq/internal/server/schema/v1"
 	"github.com/plainq/servekit/errkit"
 	"github.com/plainq/servekit/respond"
 )
 
 func (s *PlainQ) createQueueHandler(w http.ResponseWriter, r *http.Request) {
+	// Queue creation requires admin role.
+	if s.permissionService != nil {
+		claims, ok := middleware.GetClaimsFromContext(r.Context())
+		if !ok || !auth.IsAdmin(claims.Roles) {
+			http.Error(w, `{"error": "admin role required to create queues"}`, http.StatusForbidden)
+			return
+		}
+	}
+
 	var input v1.CreateQueueRequest
 
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
@@ -103,6 +114,19 @@ func (s *PlainQ) deleteQueueHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check delete permission.
+	if s.permissionService != nil {
+		claims, ok := middleware.GetClaimsFromContext(r.Context())
+		if !ok {
+			http.Error(w, `{"error": "unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		if err := s.permissionService.CheckQueuePermission(r.Context(), id, claims.Roles, auth.ActionDelete); err != nil {
+			http.Error(w, `{"error": "`+err.Error()+`"}`, http.StatusForbidden)
+			return
+		}
+	}
+
 	force, parseErr := strconv.ParseBool(r.URL.Query().Get("force"))
 	if parseErr != nil {
 		force = false
@@ -128,6 +152,19 @@ func (s *PlainQ) purgeQueueHandler(w http.ResponseWriter, r *http.Request) {
 	if err := validateQueueID(id); err != nil {
 		respond.ErrorHTTP(w, r, fmt.Errorf("validation error: %w", err))
 		return
+	}
+
+	// Check purge permission.
+	if s.permissionService != nil {
+		claims, ok := middleware.GetClaimsFromContext(r.Context())
+		if !ok {
+			http.Error(w, `{"error": "unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		if err := s.permissionService.CheckQueuePermission(r.Context(), id, claims.Roles, auth.ActionPurge); err != nil {
+			http.Error(w, `{"error": "`+err.Error()+`"}`, http.StatusForbidden)
+			return
+		}
 	}
 
 	output, purgeErr := s.storage.PurgeQueue(r.Context(), &v1.PurgeQueueRequest{

@@ -10,11 +10,11 @@ import (
 
 const (
 	// Argon2 parameters (OWASP recommended values for interactive logins)
-	argon2Time      = 2       // Number of iterations
+	argon2Time      = 2         // Number of iterations
 	argon2Memory    = 64 * 1024 // 64 MB
-	argon2Threads   = 4       // Number of threads
-	argon2KeyLength = 32      // 32 bytes = 256 bits
-	saltLength      = 16      // 16 bytes = 128 bits
+	argon2Threads   = 4         // Number of threads
+	argon2KeyLength = 32        // 32 bytes = 256 bits
+	saltLength      = 16        // 16 bytes = 128 bits
 )
 
 // HashPassword hashes a plaintext password using Argon2id
