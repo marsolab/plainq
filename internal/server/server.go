@@ -19,7 +19,9 @@ import (
 	v1 "github.com/plainq/plainq/internal/server/schema/v1"
 	"github.com/plainq/plainq/internal/server/storage"
 	"github.com/plainq/plainq/internal/server/telemetry"
+	"github.com/plainq/plainq/internal/server/telemetry/collector"
 	"github.com/plainq/servekit"
+	"github.com/plainq/servekit/dbkit/litekit"
 	"github.com/plainq/servekit/grpckit"
 	"github.com/plainq/servekit/httpkit"
 	vtgrpc "github.com/planetscale/vtprotobuf/codec/grpc"
@@ -43,12 +45,17 @@ type PlainQ struct {
 	authService       *auth.AuthService
 	authHandler       *auth.Handler
 	permissionService *auth.PermissionService
+
+	// Telemetry components.
+	metricsCollector *collector.Collector
+	metricsStore     *collector.SQLiteStore
+	metricsHandler   *MetricsHandler
 }
 
 func (s *PlainQ) Mount(server *grpc.Server) { v1.RegisterPlainQServiceServer(server, s) }
 
 // NewServer returns a pointer to a new instance of the PlainQ.
-func NewServer(cfg *config.Config, logger *slog.Logger, stor storage.Storage, checker hc.HealthChecker) (*servekit.Server, error) {
+func NewServer(cfg *config.Config, logger *slog.Logger, stor storage.Storage, checker hc.HealthChecker, opts ...ServerOption) (*servekit.Server, error) {
 	// Create a server which holds and serve all listeners.
 	server := servekit.NewServer(logger)
 
@@ -101,6 +108,22 @@ func NewServer(cfg *config.Config, logger *slog.Logger, stor storage.Storage, ch
 		permissionService: permissionService,
 	}
 
+	// Apply server options.
+	for _, opt := range opts {
+		opt(&pq)
+	}
+
+	// Initialize metrics collector if telemetry database is provided.
+	if pq.metricsStore != nil {
+		pq.metricsCollector = collector.New(pq.metricsStore, collector.WithLogger(logger))
+		pq.metricsHandler = NewMetricsHandler(pq.metricsCollector, pq.metricsStore)
+
+		// Start the collector in background.
+		go pq.metricsCollector.Start(context.Background())
+
+		logger.Info("Telemetry metrics collector started")
+	}
+
 	// Create the HTTP listener.
 	httpListener, httpListenerErr := listenerHTTP(cfg, logger, checker)
 	if httpListenerErr != nil {
@@ -149,6 +172,39 @@ func NewServer(cfg *config.Config, logger *slog.Logger, stor storage.Storage, ch
 				queue.Post("/{id}/purge", pq.purgeQueueHandler)
 				queue.Delete("/{id}", pq.deleteQueueHandler)
 			})
+
+			// Metrics API routes for dashboard.
+			if pq.metricsHandler != nil {
+				v1.Route("/metrics", func(metrics chi.Router) {
+					// Overview dashboard data.
+					metrics.Get("/overview", pq.metricsHandler.GetDashboardOverview)
+
+					// Time-series chart data.
+					metrics.Get("/chart", pq.metricsHandler.GetMetricsChart)
+
+					// System-wide rates.
+					metrics.Get("/rates", pq.metricsHandler.GetRatesChart)
+
+					// In-flight metrics.
+					metrics.Get("/inflight", pq.metricsHandler.GetInFlightMetrics)
+
+					// Available metrics list.
+					metrics.Get("/available", pq.metricsHandler.GetAvailableMetrics)
+
+					// Time range presets.
+					metrics.Get("/time-ranges", pq.metricsHandler.GetTimeRangePresets)
+
+					// Export metrics (for Metabase/custom charts).
+					metrics.Get("/export", pq.metricsHandler.ExportMetrics)
+
+					// Queue-specific metrics.
+					metrics.Route("/queue/{id}", func(queueMetrics chi.Router) {
+						queueMetrics.Get("/", pq.metricsHandler.GetQueueMetrics)
+						queueMetrics.Get("/rates", pq.metricsHandler.GetRatesChart)
+						queueMetrics.Get("/inflight", pq.metricsHandler.GetInFlightMetrics)
+					})
+				})
+			}
 		})
 	})
 
@@ -232,4 +288,19 @@ func generateRandomSecret() string {
 		panic("failed to generate random secret: " + err.Error())
 	}
 	return hex.EncodeToString(bytes)
+}
+
+// ServerOption configures the PlainQ server.
+type ServerOption func(*PlainQ)
+
+// WithMetricsStore sets the metrics store for telemetry collection.
+func WithMetricsStore(db *litekit.Conn) ServerOption {
+	return func(pq *PlainQ) {
+		pq.metricsStore = collector.NewSQLiteStore(db)
+	}
+}
+
+// GetMetricsCollector returns the metrics collector for external use.
+func (pq *PlainQ) GetMetricsCollector() *collector.Collector {
+	return pq.metricsCollector
 }

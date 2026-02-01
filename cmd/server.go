@@ -218,7 +218,21 @@ func serverCommand() *scotty.Command {
 				checker = hc.NewMultiChecker(sqliteStorage)
 			}
 
-			plainqServer, serverErr := server.NewServer(&cfg, logger, sqliteStorage, checker)
+			// Initialize telemetry database if enabled.
+			var serverOpts []server.ServerOption
+			if cfg.TelemetryEnabled {
+				telemetryDB, telemetryErr := initTelemetryDB(&cfg, logger)
+				if telemetryErr != nil {
+					logger.Warn("Failed to initialize telemetry database, metrics dashboard will be disabled",
+						slog.String("error", telemetryErr.Error()),
+					)
+				} else {
+					serverOpts = append(serverOpts, server.WithMetricsStore(telemetryDB))
+					logger.Info("Telemetry metrics database initialized")
+				}
+			}
+
+			plainqServer, serverErr := server.NewServer(&cfg, logger, sqliteStorage, checker, serverOpts...)
 			if serverErr != nil {
 				return fmt.Errorf("create PlainQ server: %s", serverErr.Error())
 			}
@@ -337,4 +351,46 @@ func printAddrHTTP(addr string) string {
 	}
 
 	return addr
+}
+
+func initTelemetryDB(cfg *config.Config, logger *slog.Logger) (*litekit.Conn, error) {
+	// Use same path as storage but with _telemetry suffix, or use configured path.
+	dbPath := cfg.TelemetryLiteDBPath
+	if dbPath == "" {
+		// Derive from storage path.
+		if cfg.StorageDBPath != "" {
+			dbPath = strings.TrimSuffix(cfg.StorageDBPath, ".db") + "_telemetry.db"
+		} else {
+			pwd, pwdErr := os.Getwd()
+			if pwdErr != nil {
+				return nil, fmt.Errorf("get current working directory: %w", pwdErr)
+			}
+
+			dbPath, _ = filepath.Abs(filepath.Join(pwd, "plainq_telemetry.db"))
+		}
+	}
+
+	logger.Info("Initializing telemetry database", slog.String("path", dbPath))
+
+	connOption := make([]litekit.Option, 0, 2)
+
+	// Use WAL mode for better concurrent performance.
+	connOption = append(connOption, litekit.WithJournalMode(litekit.JournalModeWAL))
+
+	conn, conErr := litekit.New(dbPath, connOption...)
+	if conErr != nil {
+		return nil, fmt.Errorf("connect to telemetry database: %w", conErr)
+	}
+
+	// Apply telemetry schema migrations.
+	evolver, evolverErr := litekit.NewEvolver(conn, mutations.TelemetryMutation())
+	if evolverErr != nil {
+		return nil, fmt.Errorf("create telemetry schema evolver: %w", evolverErr)
+	}
+
+	if err := evolver.MutateSchema(); err != nil {
+		return nil, fmt.Errorf("telemetry schema mutation: %w", err)
+	}
+
+	return conn, nil
 }
