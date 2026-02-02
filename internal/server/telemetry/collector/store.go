@@ -154,65 +154,42 @@ func (s *SQLiteStore) CleanupOldMetrics(ctx context.Context, rawBefore, m1Before
 
 // GetMetrics retrieves metrics for a time range.
 // resolution: "raw", "1m", "5m", "1h", "1d".
+// When queueID is empty, returns system-wide metrics (queue_id = '').
 func (s *SQLiteStore) GetMetrics(ctx context.Context, metricName, queueID string, from, to int64, resolution string) ([]DataPoint, error) {
 	var query string
 	var args []interface{}
 
+	// Always filter by queue_id - empty string means system-wide metrics.
 	switch resolution {
 	case "raw":
 		query = `SELECT timestamp, metric_value, metric_value, metric_value, metric_value, metric_value, 1
-			FROM metrics_raw WHERE metric_name = ? AND timestamp >= ? AND timestamp <= ?`
-		args = []interface{}{metricName, from, to}
-		if queueID != "" {
-			query = `SELECT timestamp, metric_value, metric_value, metric_value, metric_value, metric_value, 1
-				FROM metrics_raw WHERE metric_name = ? AND queue_id = ? AND timestamp >= ? AND timestamp <= ?`
-			args = []interface{}{metricName, queueID, from, to}
-		}
-		query += " ORDER BY timestamp ASC"
+			FROM metrics_raw WHERE metric_name = ? AND queue_id = ? AND timestamp >= ? AND timestamp <= ?
+			ORDER BY timestamp ASC`
+		args = []interface{}{metricName, queueID, from, to}
 
 	case "1m":
 		query = `SELECT bucket_start, avg_value, min_value, max_value, avg_value, sum_value, count
-			FROM metrics_1m WHERE metric_name = ? AND bucket_start >= ? AND bucket_start <= ?`
-		args = []interface{}{metricName, from, to}
-		if queueID != "" {
-			query = `SELECT bucket_start, avg_value, min_value, max_value, avg_value, sum_value, count
-				FROM metrics_1m WHERE metric_name = ? AND queue_id = ? AND bucket_start >= ? AND bucket_start <= ?`
-			args = []interface{}{metricName, queueID, from, to}
-		}
-		query += " ORDER BY bucket_start ASC"
+			FROM metrics_1m WHERE metric_name = ? AND queue_id = ? AND bucket_start >= ? AND bucket_start <= ?
+			ORDER BY bucket_start ASC`
+		args = []interface{}{metricName, queueID, from, to}
 
 	case "5m":
 		query = `SELECT timestamp, metric_value_avg, metric_value_min, metric_value_max, metric_value_avg, metric_value_avg, 1
-			FROM metrics_5m WHERE metric_name = ? AND timestamp >= ? AND timestamp <= ?`
-		args = []interface{}{metricName, from, to}
-		if queueID != "" {
-			query = `SELECT timestamp, metric_value_avg, metric_value_min, metric_value_max, metric_value_avg, metric_value_avg, 1
-				FROM metrics_5m WHERE metric_name = ? AND queue_id = ? AND timestamp >= ? AND timestamp <= ?`
-			args = []interface{}{metricName, queueID, from, to}
-		}
-		query += " ORDER BY timestamp ASC"
+			FROM metrics_5m WHERE metric_name = ? AND queue_id = ? AND timestamp >= ? AND timestamp <= ?
+			ORDER BY timestamp ASC`
+		args = []interface{}{metricName, queueID, from, to}
 
 	case "1h":
 		query = `SELECT bucket_start, avg_value, min_value, max_value, avg_value, sum_value, count
-			FROM metrics_1h WHERE metric_name = ? AND bucket_start >= ? AND bucket_start <= ?`
-		args = []interface{}{metricName, from, to}
-		if queueID != "" {
-			query = `SELECT bucket_start, avg_value, min_value, max_value, avg_value, sum_value, count
-				FROM metrics_1h WHERE metric_name = ? AND queue_id = ? AND bucket_start >= ? AND bucket_start <= ?`
-			args = []interface{}{metricName, queueID, from, to}
-		}
-		query += " ORDER BY bucket_start ASC"
+			FROM metrics_1h WHERE metric_name = ? AND queue_id = ? AND bucket_start >= ? AND bucket_start <= ?
+			ORDER BY bucket_start ASC`
+		args = []interface{}{metricName, queueID, from, to}
 
 	case "1d":
 		query = `SELECT bucket_start, avg_value, min_value, max_value, avg_value, sum_value, count
-			FROM metrics_1d WHERE metric_name = ? AND bucket_start >= ? AND bucket_start <= ?`
-		args = []interface{}{metricName, from, to}
-		if queueID != "" {
-			query = `SELECT bucket_start, avg_value, min_value, max_value, avg_value, sum_value, count
-				FROM metrics_1d WHERE metric_name = ? AND queue_id = ? AND bucket_start >= ? AND bucket_start <= ?`
-			args = []interface{}{metricName, queueID, from, to}
-		}
-		query += " ORDER BY bucket_start ASC"
+			FROM metrics_1d WHERE metric_name = ? AND queue_id = ? AND bucket_start >= ? AND bucket_start <= ?
+			ORDER BY bucket_start ASC`
+		args = []interface{}{metricName, queueID, from, to}
 
 	default:
 		return nil, fmt.Errorf("unknown resolution: %s", resolution)
@@ -317,23 +294,16 @@ func (s *SQLiteStore) GetInFlightCounts(ctx context.Context) (map[string]int64, 
 }
 
 // GetRateHistory retrieves rate history for a metric.
+// When queueID is empty, returns system-wide metrics (queue_id = '').
 func (s *SQLiteStore) GetRateHistory(ctx context.Context, metricName, queueID string, from, to int64) ([]DataPoint, error) {
+	// Always filter by queue_id - empty string means system-wide metrics.
 	query := `
 		SELECT timestamp, rate_per_second, rate_per_second, rate_per_second, rate_per_second, rate_per_second, 1
 		FROM rate_snapshots
-		WHERE metric_name = ? AND timestamp >= ? AND timestamp <= ?
+		WHERE metric_name = ? AND queue_id = ? AND timestamp >= ? AND timestamp <= ?
+		ORDER BY timestamp ASC
 	`
-	args := []interface{}{metricName, from, to}
-
-	if queueID != "" {
-		query = `
-			SELECT timestamp, rate_per_second, rate_per_second, rate_per_second, rate_per_second, rate_per_second, 1
-			FROM rate_snapshots
-			WHERE metric_name = ? AND queue_id = ? AND timestamp >= ? AND timestamp <= ?
-		`
-		args = []interface{}{metricName, queueID, from, to}
-	}
-	query += " ORDER BY timestamp ASC"
+	args := []interface{}{metricName, queueID, from, to}
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
