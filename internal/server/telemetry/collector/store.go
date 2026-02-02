@@ -154,7 +154,7 @@ func (s *SQLiteStore) CleanupOldMetrics(ctx context.Context, rawBefore, m1Before
 
 // GetMetrics retrieves metrics for a time range.
 // resolution: "raw", "1m", "5m", "1h", "1d".
-// When queueID is empty, returns system-wide metrics (queue_id = '').
+// When queueID is empty, returns system-wide metrics (queue_id = ”).
 func (s *SQLiteStore) GetMetrics(ctx context.Context, metricName, queueID string, from, to int64, resolution string) ([]DataPoint, error) {
 	var query string
 	var args []interface{}
@@ -294,7 +294,7 @@ func (s *SQLiteStore) GetInFlightCounts(ctx context.Context) (map[string]int64, 
 }
 
 // GetRateHistory retrieves rate history for a metric.
-// When queueID is empty, returns system-wide metrics (queue_id = '').
+// When queueID is empty, returns system-wide metrics (queue_id = ”).
 func (s *SQLiteStore) GetRateHistory(ctx context.Context, metricName, queueID string, from, to int64) ([]DataPoint, error) {
 	// Always filter by queue_id - empty string means system-wide metrics.
 	query := `
@@ -323,7 +323,7 @@ func (s *SQLiteStore) GetRateHistory(ctx context.Context, metricName, queueID st
 	return points, rows.Err()
 }
 
-// GetSystemMetrics retrieves system-wide metrics (queue_id = '').
+// GetSystemMetrics retrieves system-wide metrics (queue_id = ”).
 func (s *SQLiteStore) GetSystemMetrics(ctx context.Context, metricName string, from, to int64, resolution string) ([]DataPoint, error) {
 	return s.GetMetrics(ctx, metricName, "", from, to, resolution)
 }

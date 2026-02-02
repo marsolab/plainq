@@ -116,22 +116,22 @@ func SelectResolution(tr TimeRange) string {
 
 // DashboardOverviewResponse represents the overview dashboard data.
 type DashboardOverviewResponse struct {
-	SystemMetrics  SystemMetricsData   `json:"systemMetrics"`
-	QueueMetrics   []QueueMetricsData  `json:"queueMetrics"`
-	TimeRange      TimeRange           `json:"timeRange"`
-	UpdatedAt      int64               `json:"updatedAt"`
+	SystemMetrics SystemMetricsData  `json:"systemMetrics"`
+	QueueMetrics  []QueueMetricsData `json:"queueMetrics"`
+	TimeRange     TimeRange          `json:"timeRange"`
+	UpdatedAt     int64              `json:"updatedAt"`
 }
 
 // SystemMetricsData represents system-wide metrics.
 type SystemMetricsData struct {
-	QueuesExist       int64   `json:"queuesExist"`
-	TotalInFlight     int64   `json:"totalInFlight"`
-	SendRate          float64 `json:"sendRate"`
-	ReceiveRate       float64 `json:"receiveRate"`
-	DeleteRate        float64 `json:"deleteRate"`
-	TotalSent         uint64  `json:"totalSent"`
-	TotalReceived     uint64  `json:"totalReceived"`
-	TotalDeleted      uint64  `json:"totalDeleted"`
+	QueuesExist   int64   `json:"queuesExist"`
+	TotalInFlight int64   `json:"totalInFlight"`
+	SendRate      float64 `json:"sendRate"`
+	ReceiveRate   float64 `json:"receiveRate"`
+	DeleteRate    float64 `json:"deleteRate"`
+	TotalSent     uint64  `json:"totalSent"`
+	TotalReceived uint64  `json:"totalReceived"`
+	TotalDeleted  uint64  `json:"totalDeleted"`
 }
 
 // QueueMetricsData represents metrics for a single queue.
@@ -150,11 +150,11 @@ type QueueMetricsData struct {
 
 // MetricsChartResponse represents time-series data for charts.
 type MetricsChartResponse struct {
-	MetricName string                 `json:"metricName"`
-	QueueID    string                 `json:"queueId,omitempty"`
-	TimeRange  TimeRange              `json:"timeRange"`
-	Resolution string                 `json:"resolution"`
-	DataPoints []collector.DataPoint  `json:"dataPoints"`
+	MetricName string                `json:"metricName"`
+	QueueID    string                `json:"queueId,omitempty"`
+	TimeRange  TimeRange             `json:"timeRange"`
+	Resolution string                `json:"resolution"`
+	DataPoints []collector.DataPoint `json:"dataPoints"`
 }
 
 // MultiMetricsChartResponse represents multiple metrics for comparison.
@@ -310,9 +310,9 @@ func (h *MetricsHandler) GetQueueMetrics(w http.ResponseWriter, r *http.Request)
 
 	resp := struct {
 		*collector.MetricsSummary
-		CurrentSendRate    float64 `json:"currentSendRate"`
-		CurrentReceiveRate float64 `json:"currentReceiveRate"`
-		CurrentDeleteRate  float64 `json:"currentDeleteRate"`
+		CurrentSendRate    float64   `json:"currentSendRate"`
+		CurrentReceiveRate float64   `json:"currentReceiveRate"`
+		CurrentDeleteRate  float64   `json:"currentDeleteRate"`
 		TimeRange          TimeRange `json:"timeRange"`
 	}{
 		MetricsSummary:     summary,

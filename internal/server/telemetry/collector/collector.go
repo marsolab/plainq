@@ -6,6 +6,7 @@ package collector
 import (
 	"context"
 	"log/slog"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -80,15 +81,15 @@ const (
 // QueueMetrics holds metrics for a specific queue.
 type QueueMetrics struct {
 	// Counters (atomic for thread safety).
-	messagesSent     atomic.Uint64
-	messagesReceived atomic.Uint64
-	messagesDeleted  atomic.Uint64
-	messagesDropped  atomic.Uint64
-	emptyReceives    atomic.Uint64
+	messagesSent        atomic.Uint64
+	messagesReceived    atomic.Uint64
+	messagesDeleted     atomic.Uint64
+	messagesDropped     atomic.Uint64
+	emptyReceives       atomic.Uint64
 	messagesRedelivered atomic.Uint64
-	messagesToDLQ    atomic.Uint64
-	bytesSent        atomic.Uint64
-	bytesReceived    atomic.Uint64
+	messagesToDLQ       atomic.Uint64
+	bytesSent           atomic.Uint64
+	bytesReceived       atomic.Uint64
 
 	// In-flight tracking.
 	messagesInFlight atomic.Int64
@@ -202,12 +203,12 @@ type DataPoint struct {
 
 // QueueStatsPoint represents queue statistics at a point in time.
 type QueueStatsPoint struct {
-	Timestamp        int64   `json:"timestamp"`
-	QueueDepth       int64   `json:"queueDepth"`
-	MessagesVisible  int64   `json:"messagesVisible"`
-	MessagesInvisible int64  `json:"messagesInvisible"`
-	OldestMessageAge float64 `json:"oldestMessageAge"`
-	AvgMessageAge    float64 `json:"avgMessageAge"`
+	Timestamp         int64   `json:"timestamp"`
+	QueueDepth        int64   `json:"queueDepth"`
+	MessagesVisible   int64   `json:"messagesVisible"`
+	MessagesInvisible int64   `json:"messagesInvisible"`
+	OldestMessageAge  float64 `json:"oldestMessageAge"`
+	AvgMessageAge     float64 `json:"avgMessageAge"`
 }
 
 // Option configures the Collector.
@@ -629,9 +630,9 @@ func (c *Collector) cleanupWorker(ctx context.Context) {
 
 // Helper functions for atomic float64 operations.
 func float64ToBits(f float64) uint64 {
-	return *(*uint64)((*[8]byte)((*[8]byte)(&f))[:])
+	return math.Float64bits(f)
 }
 
 func float64FromBits(b uint64) float64 {
-	return *(*float64)((*[8]byte)((*[8]byte)(&b))[:])
+	return math.Float64frombits(b)
 }

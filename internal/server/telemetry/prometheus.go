@@ -28,10 +28,10 @@ type PrometheusMetrics struct {
 	systemMessagesInFlight *metrics.Gauge
 
 	// Queue depth gauges.
-	queueDepth         map[string]*metrics.Gauge
-	messagesVisible    map[string]*metrics.Gauge
-	messagesInvisible  map[string]*metrics.Gauge
-	oldestMessageAge   map[string]*metrics.Gauge
+	queueDepth        map[string]*metrics.Gauge
+	messagesVisible   map[string]*metrics.Gauge
+	messagesInvisible map[string]*metrics.Gauge
+	oldestMessageAge  map[string]*metrics.Gauge
 
 	// Throughput gauges.
 	throughputIn  map[string]*metrics.Gauge
@@ -328,21 +328,21 @@ var observedMetricsEnhanced = map[string]struct{}{
 	"gc_duration":               {},
 
 	// New rate metrics.
-	"plainq_send_rate":                       {},
-	"plainq_receive_rate":                    {},
-	"plainq_delete_rate":                     {},
-	"plainq_system_send_rate":                {},
-	"plainq_system_receive_rate":             {},
-	"plainq_system_delete_rate":              {},
+	"plainq_send_rate":           {},
+	"plainq_receive_rate":        {},
+	"plainq_delete_rate":         {},
+	"plainq_system_send_rate":    {},
+	"plainq_system_receive_rate": {},
+	"plainq_system_delete_rate":  {},
 
 	// New gauge metrics.
-	"plainq_messages_in_flight":              {},
-	"plainq_system_messages_in_flight":       {},
-	"plainq_queue_depth":                     {},
-	"plainq_messages_visible":                {},
-	"plainq_messages_invisible":              {},
-	"plainq_oldest_message_age_seconds":      {},
-	"plainq_throughput_bytes_per_second":     {},
+	"plainq_messages_in_flight":          {},
+	"plainq_system_messages_in_flight":   {},
+	"plainq_queue_depth":                 {},
+	"plainq_messages_visible":            {},
+	"plainq_messages_invisible":          {},
+	"plainq_oldest_message_age_seconds":  {},
+	"plainq_throughput_bytes_per_second": {},
 
 	// New histogram metrics.
 	"plainq_message_processing_duration_seconds": {},
@@ -351,8 +351,8 @@ var observedMetricsEnhanced = map[string]struct{}{
 	"plainq_message_size_bytes":                  {},
 
 	// New counter metrics.
-	"plainq_messages_redelivered_total":      {},
-	"plainq_messages_to_dlq_total":           {},
+	"plainq_messages_redelivered_total": {},
+	"plainq_messages_to_dlq_total":      {},
 }
 
 // IsObservableEnhanced checks if a metric is observed (including new metrics).
@@ -364,10 +364,10 @@ func IsObservableEnhanced(metric string) bool {
 // EnhancedCounter wraps Counter with rate tracking capability.
 type EnhancedCounter struct {
 	Counter
-	lastValue    uint64
-	lastTime     time.Time
-	currentRate  float64
-	rateMu       sync.Mutex
+	lastValue   uint64
+	lastTime    time.Time
+	currentRate float64
+	rateMu      sync.Mutex
 }
 
 // NewEnhancedCounter wraps a Counter.
