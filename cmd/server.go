@@ -375,7 +375,7 @@ func initTelemetryDB(cfg *config.Config, logger *slog.Logger) (*litekit.Conn, er
 	connOption := make([]litekit.Option, 0, 2)
 
 	// Use WAL mode for better concurrent performance.
-	connOption = append(connOption, litekit.WithJournalMode(litekit.JournalModeWAL))
+	connOption = append(connOption, litekit.WithJournalMode(litekit.WAL))
 
 	conn, conErr := litekit.New(dbPath, connOption...)
 	if conErr != nil {
