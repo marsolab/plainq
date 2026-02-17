@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,22 +13,22 @@ import (
 
 // OAuthService handles OAuth provider integrations.
 type OAuthService struct {
-	storage     AuthStorage
-	authService *AuthService
+	storage     Storage
+	authService *Service
 	baseURL     string // Base URL for OAuth callbacks (e.g., "https://example.com")
 }
 
 // NewOAuthService creates a new OAuth service.
-func NewOAuthService(storage AuthStorage, authService *AuthService, baseURL string) *OAuthService {
-	// Ensure baseURL doesn't have trailing slash
-	baseURL = strings.TrimSuffix(baseURL, "/")
-	if baseURL == "" {
-		baseURL = "http://localhost:8081"
+func NewOAuthService(storage Storage, authService *Service, baseURL string) *OAuthService {
+	// Ensure baseURL doesn't have trailing slash.
+	resolvedURL := strings.TrimSuffix(baseURL, "/")
+	if resolvedURL == "" {
+		resolvedURL = "http://localhost:8081"
 	}
 	return &OAuthService{
 		storage:     storage,
 		authService: authService,
-		baseURL:     baseURL,
+		baseURL:     resolvedURL,
 	}
 }
 
@@ -55,10 +56,10 @@ func (s *OAuthService) GetAuthorizationURL(providerName, state string) (string, 
 	}
 
 	if !provider.Enabled {
-		return "", fmt.Errorf("provider is disabled")
+		return "", errors.New("provider is disabled")
 	}
 
-	// Parse scopes from JSON
+	// Parse scopes from JSON.
 	var scopes []string
 	if provider.Scopes != "" {
 		if err := json.Unmarshal([]byte(provider.Scopes), &scopes); err != nil {
@@ -68,7 +69,7 @@ func (s *OAuthService) GetAuthorizationURL(providerName, state string) (string, 
 		scopes = []string{"openid", "email", "profile"}
 	}
 
-	// Build authorization URL
+	// Build authorization URL.
 	params := url.Values{}
 	params.Add("client_id", provider.ClientID)
 	params.Add("redirect_uri", s.GetRedirectURL(providerName))
@@ -85,13 +86,13 @@ func (s *OAuthService) GetAuthorizationURL(providerName, state string) (string, 
 }
 
 // ExchangeCodeForToken exchanges an authorization code for tokens.
-func (s *OAuthService) ExchangeCodeForToken(ctx context.Context, providerName, code string) (map[string]interface{}, error) {
+func (s *OAuthService) ExchangeCodeForToken(ctx context.Context, providerName, code string) (map[string]any, error) {
 	provider, err := s.storage.GetOAuthProvider(ctx, providerName)
 	if err != nil {
 		return nil, fmt.Errorf("provider not found: %w", err)
 	}
 
-	// Prepare token request
+	// Prepare token request.
 	data := url.Values{}
 	data.Set("grant_type", "authorization_code")
 	data.Set("code", code)
@@ -109,8 +110,8 @@ func (s *OAuthService) ExchangeCodeForToken(ctx context.Context, providerName, c
 		return nil, fmt.Errorf("failed to create token request: %w", err)
 	}
 
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
+	req.Header.Set(headerContentType, "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", contentTypeJSON)
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
@@ -128,7 +129,7 @@ func (s *OAuthService) ExchangeCodeForToken(ctx context.Context, providerName, c
 		return nil, fmt.Errorf("token exchange failed: %s", string(body))
 	}
 
-	var tokenResponse map[string]interface{}
+	var tokenResponse map[string]any
 	if err := json.Unmarshal(body, &tokenResponse); err != nil {
 		return nil, fmt.Errorf("failed to parse token response: %w", err)
 	}
@@ -137,7 +138,7 @@ func (s *OAuthService) ExchangeCodeForToken(ctx context.Context, providerName, c
 }
 
 // GetUserInfo retrieves user information from the OAuth provider.
-func (s *OAuthService) GetUserInfo(ctx context.Context, providerName, accessToken string) (map[string]interface{}, error) {
+func (s *OAuthService) GetUserInfo(ctx context.Context, providerName, accessToken string) (map[string]any, error) {
 	provider, err := s.storage.GetOAuthProvider(ctx, providerName)
 	if err != nil {
 		return nil, fmt.Errorf("provider not found: %w", err)
@@ -148,13 +149,13 @@ func (s *OAuthService) GetUserInfo(ctx context.Context, providerName, accessToke
 		userinfoURL = provider.IssuerURL + "/userinfo"
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", userinfoURL, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", userinfoURL, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create userinfo request: %w", err)
 	}
 
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Accept", contentTypeJSON)
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
@@ -172,7 +173,7 @@ func (s *OAuthService) GetUserInfo(ctx context.Context, providerName, accessToke
 		return nil, fmt.Errorf("userinfo request failed: %s", string(body))
 	}
 
-	var userInfo map[string]interface{}
+	var userInfo map[string]any
 	if err := json.Unmarshal(body, &userInfo); err != nil {
 		return nil, fmt.Errorf("failed to parse userinfo response: %w", err)
 	}
@@ -181,8 +182,10 @@ func (s *OAuthService) GetUserInfo(ctx context.Context, providerName, accessToke
 }
 
 // HandleCallback processes the OAuth callback and creates/links user account.
+//
+//nolint:revive // argument-limit: all parameters are contextually required
 func (s *OAuthService) HandleCallback(ctx context.Context, providerName, code, deviceInfo, ipAddress string) (*LoginResult, error) {
-	// Exchange code for tokens
+	// Exchange code for tokens.
 	tokenResponse, err := s.ExchangeCodeForToken(ctx, providerName, code)
 	if err != nil {
 		return nil, fmt.Errorf("failed to exchange code: %w", err)
@@ -190,48 +193,63 @@ func (s *OAuthService) HandleCallback(ctx context.Context, providerName, code, d
 
 	accessToken, ok := tokenResponse["access_token"].(string)
 	if !ok {
-		return nil, fmt.Errorf("no access token in response")
+		return nil, errors.New("no access token in response")
 	}
 
-	// Get user info from provider
+	// Get user info from provider.
 	userInfo, err := s.GetUserInfo(ctx, providerName, accessToken)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get user info: %w", err)
 	}
 
-	// Extract user details
+	// Extract user details.
 	providerUserID, ok := userInfo["sub"].(string)
 	if !ok {
-		return nil, fmt.Errorf("no user ID in userinfo")
+		return nil, errors.New("no user ID in userinfo")
 	}
 
-	email, _ := userInfo["email"].(string)
-	if email == "" {
-		return nil, fmt.Errorf("email is required")
+	email, ok := userInfo["email"].(string)
+	if !ok || email == "" {
+		return nil, errors.New("email is required")
 	}
 
-	// Get provider
+	return s.processOAuthUser(ctx, providerName, providerUserID, email, userInfo, deviceInfo, ipAddress)
+}
+
+// processOAuthUser handles creating or linking the OAuth user account.
+//
+//nolint:revive // cyclomatic + argument-limit: OAuth user processing requires multiple steps and parameters
+func (s *OAuthService) processOAuthUser(
+	ctx context.Context, providerName, providerUserID, email string,
+	userInfo map[string]any, deviceInfo, ipAddress string,
+) (*LoginResult, error) {
+	// Get provider.
 	provider, err := s.storage.GetOAuthProvider(ctx, providerName)
 	if err != nil {
 		return nil, err
 	}
 
-	// Check if OAuth connection exists
+	// Check if OAuth connection exists.
 	conn, err := s.storage.GetOAuthConnection(ctx, provider.ProviderID, providerUserID)
 	if err == nil {
-		// Connection exists, login the user
+		// Connection exists, login the user.
 		user, err := s.storage.GetUserByID(ctx, conn.UserID)
 		if err != nil {
 			return nil, fmt.Errorf("user not found: %w", err)
 		}
 
-		// Update connection with latest info
-		profileData, _ := json.Marshal(userInfo)
+		// Update connection with latest info.
+		profileData, marshalErr := json.Marshal(userInfo)
+		if marshalErr != nil {
+			return nil, fmt.Errorf("failed to marshal profile data: %w", marshalErr)
+		}
 		conn.ProfileData = string(profileData)
 		conn.Email = email
-		_ = s.storage.UpdateOAuthConnection(ctx, conn)
+		if updateErr := s.storage.UpdateOAuthConnection(ctx, conn); updateErr != nil {
+			return nil, fmt.Errorf("failed to update OAuth connection: %w", updateErr)
+		}
 
-		// Generate tokens
+		// Generate tokens.
 		roles, err := s.storage.GetUserRoles(ctx, user.UserID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get user roles: %w", err)
@@ -242,16 +260,19 @@ func (s *OAuthService) HandleCallback(ctx context.Context, providerName, code, d
 			roleNames[i] = role.RoleName
 		}
 
-		// Use the auth service to generate tokens
+		// Use the auth service to generate tokens.
 		return s.authService.Login(ctx, user.Email, "", deviceInfo, ipAddress)
 	}
 
-	// Connection doesn't exist, check if user exists by email
+	// Connection doesn't exist, check if user exists by email.
 	user, err := s.storage.GetUserByEmail(ctx, email)
 	if err != nil {
 		// User doesn't exist, create new user
-		// Generate a random password (user will login via OAuth)
-		randomPassword, _ := generateRandomPassword(32)
+		// Generate a random password (user will login via OAuth).
+		randomPassword, passErr := generateRandomPassword(oauthStateLength)
+		if passErr != nil {
+			return nil, fmt.Errorf("failed to generate random password: %w", passErr)
+		}
 		hashedPassword, err := HashPassword(randomPassword)
 		if err != nil {
 			return nil, err
@@ -262,15 +283,22 @@ func (s *OAuthService) HandleCallback(ctx context.Context, providerName, code, d
 			return nil, fmt.Errorf("failed to create user: %w", err)
 		}
 
-		// Assign consumer role
-		_ = s.storage.AssignRole(ctx, user.UserID, "01HQ5RJNXS6TPXK89PQWY4N8JF")
+		// Assign consumer role.
+		if assignErr := s.storage.AssignRole(ctx, user.UserID, "01HQ5RJNXS6TPXK89PQWY4N8JF"); assignErr != nil {
+			return nil, fmt.Errorf("failed to assign role: %w", assignErr)
+		}
 
-		// Mark as verified (OAuth email is trusted)
-		_ = s.storage.UpdateUserVerified(ctx, user.UserID, true)
+		// Mark as verified (OAuth email is trusted).
+		if verifyErr := s.storage.UpdateUserVerified(ctx, user.UserID, true); verifyErr != nil {
+			return nil, fmt.Errorf("failed to verify user: %w", verifyErr)
+		}
 	}
 
-	// Create OAuth connection
-	profileData, _ := json.Marshal(userInfo)
+	// Create OAuth connection.
+	profileData, marshalErr := json.Marshal(userInfo)
+	if marshalErr != nil {
+		return nil, fmt.Errorf("failed to marshal profile data: %w", marshalErr)
+	}
 	newConn := &OAuthConnection{
 		UserID:         user.UserID,
 		ProviderID:     provider.ProviderID,
@@ -284,13 +312,13 @@ func (s *OAuthService) HandleCallback(ctx context.Context, providerName, code, d
 		return nil, fmt.Errorf("failed to create OAuth connection: %w", err)
 	}
 
-	// Login the user
+	// Login the user.
 	return s.authService.Login(ctx, user.Email, "", deviceInfo, ipAddress)
 }
 
-// generateRandomPassword generates a random password
+// generateRandomPassword generates a random password.
 func generateRandomPassword(length int) (string, error) {
-	// Reuse the refresh token generation logic
+	// Reuse the refresh token generation logic.
 	jwtService := NewJWTService("temp", "temp")
 	token, _, err := jwtService.GenerateRefreshToken()
 	if err != nil {

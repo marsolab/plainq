@@ -4,65 +4,80 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"log"
 	"net/http"
 )
 
-// Handler wraps authentication service for HTTP handlers
+const (
+	headerContentType       = "Content-Type"
+	contentTypeJSON         = "application/json"
+	errMethodNotAllowedJSON = `{"error": "method not allowed"}`
+	oauthStateLength        = 32
+)
+
+// writeJSON encodes v as JSON to the response writer, logging any encoding error.
+func writeJSON(w http.ResponseWriter, v any) {
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		log.Printf("failed to encode JSON response: %v", err)
+	}
+}
+
+// Handler wraps authentication service for HTTP handlers.
 type Handler struct {
-	service      *AuthService
-	storage      AuthStorage
+	service      *Service
+	storage      Storage
 	oauthService *OAuthService
 }
 
-// NewHandler creates a new authentication handler
-func NewHandler(service *AuthService, storage AuthStorage) *Handler {
+// NewHandler creates a new authentication handler.
+func NewHandler(service *Service, storage Storage) *Handler {
 	return &Handler{
 		service: service,
 		storage: storage,
 	}
 }
 
-// SetOAuthService sets the OAuth service for the handler
+// SetOAuthService sets the OAuth service for the handler.
 func (h *Handler) SetOAuthService(oauthService *OAuthService) {
 	h.oauthService = oauthService
 }
 
-// LoginRequest represents a login request
+// LoginRequest represents a login request.
 type LoginRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
 }
 
-// SignupRequest represents a signup request
+// SignupRequest represents a signup request.
 type SignupRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
 }
 
-// RefreshRequest represents a token refresh request
+// RefreshRequest represents a token refresh request.
 type RefreshRequest struct {
 	RefreshToken string `json:"refresh_token"`
 }
 
-// LogoutRequest represents a logout request
+// LogoutRequest represents a logout request.
 type LogoutRequest struct {
 	RefreshToken string `json:"refresh_token"`
 }
 
-// SetupRequest represents the initial admin setup request
+// SetupRequest represents the initial admin setup request.
 type SetupRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
 }
 
-// AuthResponse represents a successful authentication response
-type AuthResponse struct {
+// Response represents a successful authentication response.
+type Response struct {
 	AccessToken  string   `json:"access_token"`
 	RefreshToken string   `json:"refresh_token"`
 	User         UserInfo `json:"user"`
 }
 
-// UserInfo represents user information in the response
+// UserInfo represents user information in the response.
 type UserInfo struct {
 	UserID   string   `json:"user_id"`
 	Email    string   `json:"email"`
@@ -70,15 +85,15 @@ type UserInfo struct {
 	Roles    []string `json:"roles"`
 }
 
-// ErrorResponse represents an error response
+// ErrorResponse represents an error response.
 type ErrorResponse struct {
 	Error string `json:"error"`
 }
 
-// Login handles login requests
+// Login handles login requests.
 func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, `{"error": "method not allowed"}`, http.StatusMethodNotAllowed)
+		http.Error(w, errMethodNotAllowedJSON, http.StatusMethodNotAllowed)
 		return
 	}
 
@@ -88,7 +103,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get device info and IP address
+	// Get device info and IP address.
 	deviceInfo := r.UserAgent()
 	ipAddress := r.RemoteAddr
 
@@ -98,7 +113,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response := AuthResponse{
+	response := Response{
 		AccessToken:  result.AccessToken,
 		RefreshToken: result.RefreshToken,
 		User: UserInfo{
@@ -109,14 +124,14 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	w.Header().Set(headerContentType, contentTypeJSON)
+	writeJSON(w, response)
 }
 
-// Signup handles signup requests
+// Signup handles signup requests.
 func (h *Handler) Signup(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, `{"error": "method not allowed"}`, http.StatusMethodNotAllowed)
+		http.Error(w, errMethodNotAllowedJSON, http.StatusMethodNotAllowed)
 		return
 	}
 
@@ -126,7 +141,7 @@ func (h *Handler) Signup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate password strength (basic validation)
+	// Validate password strength (basic validation).
 	if len(req.Password) < 8 {
 		http.Error(w, `{"error": "password must be at least 8 characters"}`, http.StatusBadRequest)
 		return
@@ -141,7 +156,7 @@ func (h *Handler) Signup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response := AuthResponse{
+	response := Response{
 		AccessToken:  result.AccessToken,
 		RefreshToken: result.RefreshToken,
 		User: UserInfo{
@@ -152,15 +167,15 @@ func (h *Handler) Signup(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(headerContentType, contentTypeJSON)
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(response)
+	writeJSON(w, response)
 }
 
-// Refresh handles token refresh requests
+// Refresh handles token refresh requests.
 func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, `{"error": "method not allowed"}`, http.StatusMethodNotAllowed)
+		http.Error(w, errMethodNotAllowedJSON, http.StatusMethodNotAllowed)
 		return
 	}
 
@@ -179,7 +194,7 @@ func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response := AuthResponse{
+	response := Response{
 		AccessToken:  result.AccessToken,
 		RefreshToken: result.RefreshToken,
 		User: UserInfo{
@@ -190,18 +205,18 @@ func (h *Handler) Refresh(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	w.Header().Set(headerContentType, contentTypeJSON)
+	writeJSON(w, response)
 }
 
-// Logout handles logout requests
+// Logout handles logout requests.
 func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, `{"error": "method not allowed"}`, http.StatusMethodNotAllowed)
+		http.Error(w, errMethodNotAllowedJSON, http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Get access token from Authorization header
+	// Get access token from Authorization header.
 	authHeader := r.Header.Get("Authorization")
 	var accessToken string
 	if authHeader != "" && len(authHeader) > 7 && authHeader[:7] == "Bearer " {
@@ -210,7 +225,7 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 
 	var req LogoutRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		// Logout can work with just the access token
+		// Logout can work with just the access token.
 		if accessToken == "" {
 			http.Error(w, `{"error": "invalid request"}`, http.StatusBadRequest)
 			return
@@ -220,25 +235,22 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 	ipAddress := r.RemoteAddr
 	userAgent := r.UserAgent()
 
-	err := h.service.Logout(r.Context(), accessToken, req.RefreshToken, ipAddress, userAgent)
-	if err != nil {
-		// Even if logout fails, return success to the client
-		// This prevents information leakage about token validity
-	}
+	// Even if logout fails, return success to prevent information leakage about token validity.
+	_ = h.service.Logout(r.Context(), accessToken, req.RefreshToken, ipAddress, userAgent) //nolint:errcheck // best-effort logout
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(headerContentType, contentTypeJSON)
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"message": "logged out successfully"})
+	writeJSON(w, map[string]string{"message": "logged out successfully"})
 }
 
-// Setup handles initial admin account creation
+// Setup handles initial admin account creation.
 func (h *Handler) Setup(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, `{"error": "method not allowed"}`, http.StatusMethodNotAllowed)
+		http.Error(w, errMethodNotAllowedJSON, http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Check if setup is already completed
+	// Check if setup is already completed.
 	completed, err := h.storage.IsSetupCompleted(r.Context())
 	if err != nil {
 		http.Error(w, `{"error": "internal server error"}`, http.StatusInternalServerError)
@@ -256,66 +268,66 @@ func (h *Handler) Setup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate password strength
+	// Validate password strength.
 	if len(req.Password) < 8 {
 		http.Error(w, `{"error": "password must be at least 8 characters"}`, http.StatusBadRequest)
 		return
 	}
 
-	// Hash the password
+	// Hash the password.
 	hashedPassword, err := HashPassword(req.Password)
 	if err != nil {
 		http.Error(w, `{"error": "failed to hash password"}`, http.StatusInternalServerError)
 		return
 	}
 
-	// Create the admin user
+	// Create the admin user.
 	user, err := h.storage.CreateUser(r.Context(), req.Email, hashedPassword)
 	if err != nil {
 		http.Error(w, `{"error": "failed to create admin user"}`, http.StatusInternalServerError)
 		return
 	}
 
-	// Assign admin role (ID from migration: 01HQ5RJNXS6TPXK89PQWY4N8JD)
+	// Assign admin role (ID from migration: 01HQ5RJNXS6TPXK89PQWY4N8JD).
 	err = h.storage.AssignRole(r.Context(), user.UserID, "01HQ5RJNXS6TPXK89PQWY4N8JD")
 	if err != nil {
 		http.Error(w, `{"error": "failed to assign admin role"}`, http.StatusInternalServerError)
 		return
 	}
 
-	// Mark user as verified (admin doesn't need email verification)
+	// Mark user as verified (admin doesn't need email verification).
 	err = h.storage.UpdateUserVerified(r.Context(), user.UserID, true)
 	if err != nil {
 		http.Error(w, `{"error": "failed to verify user"}`, http.StatusInternalServerError)
 		return
 	}
 
-	// Mark setup as completed
+	// Mark setup as completed.
 	err = h.storage.MarkSetupCompleted(r.Context())
 	if err != nil {
 		http.Error(w, `{"error": "failed to complete setup"}`, http.StatusInternalServerError)
 		return
 	}
 
-	// Log the setup event
-	_ = h.storage.LogAuthEvent(r.Context(), user.UserID, "setup", true, r.RemoteAddr, r.UserAgent(), "initial admin setup")
+	// Log the setup event.
+	h.storage.LogAuthEvent(r.Context(), user.UserID, "setup", true, r.RemoteAddr, r.UserAgent(), "initial admin setup") //nolint:errcheck // best-effort logging
 
-	// Auto-login the admin user
+	// Auto-login the admin user.
 	deviceInfo := r.UserAgent()
 	ipAddress := r.RemoteAddr
 
 	result, err := h.service.Login(r.Context(), req.Email, req.Password, deviceInfo, ipAddress)
 	if err != nil {
-		// Setup succeeded but login failed - that's OK, user can login manually
-		w.Header().Set("Content-Type", "application/json")
+		// Setup succeeded but login failed - that's OK, user can login manually.
+		w.Header().Set(headerContentType, contentTypeJSON)
 		w.WriteHeader(http.StatusCreated)
-		json.NewEncoder(w).Encode(map[string]string{
+		writeJSON(w, map[string]string{
 			"message": "setup completed successfully, please login",
 		})
 		return
 	}
 
-	response := AuthResponse{
+	response := Response{
 		AccessToken:  result.AccessToken,
 		RefreshToken: result.RefreshToken,
 		User: UserInfo{
@@ -326,15 +338,15 @@ func (h *Handler) Setup(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(headerContentType, contentTypeJSON)
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(response)
+	writeJSON(w, response)
 }
 
-// SetupStatus checks if initial setup has been completed
+// SetupStatus checks if initial setup has been completed.
 func (h *Handler) SetupStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, `{"error": "method not allowed"}`, http.StatusMethodNotAllowed)
+		http.Error(w, errMethodNotAllowedJSON, http.StatusMethodNotAllowed)
 		return
 	}
 
@@ -344,8 +356,8 @@ func (h *Handler) SetupStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]bool{
+	w.Header().Set(headerContentType, contentTypeJSON)
+	writeJSON(w, map[string]bool{
 		"setup_completed": completed,
 	})
 }
@@ -359,7 +371,7 @@ type OAuthProviderResponse struct {
 // ListOAuthProviders returns a list of enabled OAuth providers.
 func (h *Handler) ListOAuthProviders(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, `{"error": "method not allowed"}`, http.StatusMethodNotAllowed)
+		http.Error(w, errMethodNotAllowedJSON, http.StatusMethodNotAllowed)
 		return
 	}
 
@@ -377,8 +389,8 @@ func (h *Handler) ListOAuthProviders(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	w.Header().Set(headerContentType, contentTypeJSON)
+	writeJSON(w, map[string]any{
 		"providers": response,
 	})
 }
@@ -391,7 +403,7 @@ type OAuthInitRequest struct {
 // OAuthInit initiates the OAuth flow by returning the authorization URL.
 func (h *Handler) OAuthInit(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, `{"error": "method not allowed"}`, http.StatusMethodNotAllowed)
+		http.Error(w, errMethodNotAllowedJSON, http.StatusMethodNotAllowed)
 		return
 	}
 
@@ -411,7 +423,7 @@ func (h *Handler) OAuthInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate a secure state parameter
+	// Generate a secure state parameter.
 	state, err := generateOAuthState()
 	if err != nil {
 		http.Error(w, `{"error": "failed to generate state"}`, http.StatusInternalServerError)
@@ -424,8 +436,8 @@ func (h *Handler) OAuthInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
+	w.Header().Set(headerContentType, contentTypeJSON)
+	writeJSON(w, map[string]string{
 		"authorization_url": authURL,
 		"state":             state,
 	})
@@ -438,10 +450,10 @@ func (h *Handler) OAuthCallback(w http.ResponseWriter, r *http.Request, provider
 		return
 	}
 
-	// Get the authorization code from query params
+	// Get the authorization code from query params.
 	code := r.URL.Query().Get("code")
 	if code == "" {
-		// Check for error from provider
+		// Check for error from provider.
 		errorParam := r.URL.Query().Get("error")
 		errorDesc := r.URL.Query().Get("error_description")
 		if errorParam != "" {
@@ -452,7 +464,7 @@ func (h *Handler) OAuthCallback(w http.ResponseWriter, r *http.Request, provider
 		return
 	}
 
-	// Process the callback
+	// Process the callback.
 	deviceInfo := r.UserAgent()
 	ipAddress := r.RemoteAddr
 
@@ -462,7 +474,7 @@ func (h *Handler) OAuthCallback(w http.ResponseWriter, r *http.Request, provider
 		return
 	}
 
-	response := AuthResponse{
+	response := Response{
 		AccessToken:  result.AccessToken,
 		RefreshToken: result.RefreshToken,
 		User: UserInfo{
@@ -473,13 +485,13 @@ func (h *Handler) OAuthCallback(w http.ResponseWriter, r *http.Request, provider
 		},
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	w.Header().Set(headerContentType, contentTypeJSON)
+	writeJSON(w, response)
 }
 
 // generateOAuthState generates a secure random state parameter for OAuth.
 func generateOAuthState() (string, error) {
-	bytes := make([]byte, 32)
+	bytes := make([]byte, oauthStateLength)
 	if _, err := rand.Read(bytes); err != nil {
 		return "", err
 	}

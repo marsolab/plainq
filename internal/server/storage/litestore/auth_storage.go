@@ -3,6 +3,7 @@ package litestore
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -11,10 +12,10 @@ import (
 	"github.com/plainq/servekit/idkit"
 )
 
-// Ensure Storage implements auth.AuthStorage
-var _ auth.AuthStorage = (*Storage)(nil)
+// Ensure Storage implements auth.Storage.
+var _ auth.Storage = (*Storage)(nil)
 
-// CreateUser creates a new user
+// CreateUser creates a new user.
 func (s *Storage) CreateUser(ctx context.Context, email, passwordHash string) (*auth.User, error) {
 	userID := idkit.XID()
 	now := time.Now()
@@ -39,7 +40,7 @@ func (s *Storage) CreateUser(ctx context.Context, email, passwordHash string) (*
 	}, nil
 }
 
-// GetUserByEmail retrieves a user by email
+// GetUserByEmail retrieves a user by email.
 func (s *Storage) GetUserByEmail(ctx context.Context, email string) (*auth.User, error) {
 	query := `
 		SELECT user_id, email, password, verified, created_at, updated_at
@@ -58,7 +59,7 @@ func (s *Storage) GetUserByEmail(ctx context.Context, email string) (*auth.User,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("user not found")
+			return nil, errors.New("user not found")
 		}
 		return nil, fmt.Errorf("failed to get user: %w", err)
 	}
@@ -66,7 +67,7 @@ func (s *Storage) GetUserByEmail(ctx context.Context, email string) (*auth.User,
 	return &user, nil
 }
 
-// GetUserByID retrieves a user by ID
+// GetUserByID retrieves a user by ID.
 func (s *Storage) GetUserByID(ctx context.Context, userID string) (*auth.User, error) {
 	query := `
 		SELECT user_id, email, password, verified, created_at, updated_at
@@ -85,7 +86,7 @@ func (s *Storage) GetUserByID(ctx context.Context, userID string) (*auth.User, e
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("user not found")
+			return nil, errors.New("user not found")
 		}
 		return nil, fmt.Errorf("failed to get user: %w", err)
 	}
@@ -93,7 +94,7 @@ func (s *Storage) GetUserByID(ctx context.Context, userID string) (*auth.User, e
 	return &user, nil
 }
 
-// UpdateUserPassword updates a user's password
+// UpdateUserPassword updates a user's password.
 func (s *Storage) UpdateUserPassword(ctx context.Context, userID, passwordHash string) error {
 	query := `
 		UPDATE users
@@ -109,7 +110,7 @@ func (s *Storage) UpdateUserPassword(ctx context.Context, userID, passwordHash s
 	return nil
 }
 
-// UpdateUserVerified updates a user's verified status
+// UpdateUserVerified updates a user's verified status.
 func (s *Storage) UpdateUserVerified(ctx context.Context, userID string, verified bool) error {
 	query := `
 		UPDATE users
@@ -125,7 +126,7 @@ func (s *Storage) UpdateUserVerified(ctx context.Context, userID string, verifie
 	return nil
 }
 
-// GetUserRoles retrieves all roles for a user
+// GetUserRoles retrieves all roles for a user.
 func (s *Storage) GetUserRoles(ctx context.Context, userID string) ([]auth.Role, error) {
 	query := `
 		SELECT r.role_id, r.role_name, r.created_at
@@ -153,7 +154,7 @@ func (s *Storage) GetUserRoles(ctx context.Context, userID string) ([]auth.Role,
 	return roles, nil
 }
 
-// AssignRole assigns a role to a user
+// AssignRole assigns a role to a user.
 func (s *Storage) AssignRole(ctx context.Context, userID, roleID string) error {
 	query := `
 		INSERT INTO user_roles (user_id, role_id, created_at)
@@ -168,7 +169,7 @@ func (s *Storage) AssignRole(ctx context.Context, userID, roleID string) error {
 	return nil
 }
 
-// IsSetupCompleted checks if initial setup has been completed
+// IsSetupCompleted checks if initial setup has been completed.
 func (s *Storage) IsSetupCompleted(ctx context.Context) (bool, error) {
 	query := `
 		SELECT value
@@ -188,7 +189,7 @@ func (s *Storage) IsSetupCompleted(ctx context.Context) (bool, error) {
 	return value == "true", nil
 }
 
-// MarkSetupCompleted marks the initial setup as completed
+// MarkSetupCompleted marks the initial setup as completed.
 func (s *Storage) MarkSetupCompleted(ctx context.Context) error {
 	query := `
 		UPDATE system_state
@@ -204,8 +205,13 @@ func (s *Storage) MarkSetupCompleted(ctx context.Context) error {
 	return nil
 }
 
-// CreateRefreshToken creates a new refresh token
-func (s *Storage) CreateRefreshToken(ctx context.Context, userID, tokenHash string, expiresAt time.Time, deviceInfo, ipAddress string) (*auth.RefreshToken, error) {
+// CreateRefreshToken creates a new refresh token.
+//
+//nolint:revive // argument-limit: implements auth.Storage interface
+func (s *Storage) CreateRefreshToken(
+	ctx context.Context, userID, tokenHash string, expiresAt time.Time,
+	deviceInfo, ipAddress string,
+) (*auth.RefreshToken, error) {
 	tokenID := idkit.XID()
 	now := time.Now()
 
@@ -232,7 +238,7 @@ func (s *Storage) CreateRefreshToken(ctx context.Context, userID, tokenHash stri
 	}, nil
 }
 
-// GetRefreshToken retrieves a refresh token by its hash
+// GetRefreshToken retrieves a refresh token by its hash.
 func (s *Storage) GetRefreshToken(ctx context.Context, tokenHash string) (*auth.RefreshToken, error) {
 	query := `
 		SELECT token_id, user_id, token_hash, expires_at, revoked, revoked_at, created_at, last_used_at, device_info, ip_address
@@ -257,7 +263,7 @@ func (s *Storage) GetRefreshToken(ctx context.Context, tokenHash string) (*auth.
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("refresh token not found")
+			return nil, errors.New("refresh token not found")
 		}
 		return nil, fmt.Errorf("failed to get refresh token: %w", err)
 	}
@@ -269,7 +275,7 @@ func (s *Storage) GetRefreshToken(ctx context.Context, tokenHash string) (*auth.
 	return &token, nil
 }
 
-// RevokeRefreshToken revokes a refresh token
+// RevokeRefreshToken revokes a refresh token.
 func (s *Storage) RevokeRefreshToken(ctx context.Context, tokenID string) error {
 	query := `
 		UPDATE refresh_tokens
@@ -285,7 +291,7 @@ func (s *Storage) RevokeRefreshToken(ctx context.Context, tokenID string) error 
 	return nil
 }
 
-// RevokeAllUserRefreshTokens revokes all refresh tokens for a user
+// RevokeAllUserRefreshTokens revokes all refresh tokens for a user.
 func (s *Storage) RevokeAllUserRefreshTokens(ctx context.Context, userID string) error {
 	query := `
 		UPDATE refresh_tokens
@@ -301,7 +307,7 @@ func (s *Storage) RevokeAllUserRefreshTokens(ctx context.Context, userID string)
 	return nil
 }
 
-// UpdateRefreshTokenLastUsed updates the last used timestamp
+// UpdateRefreshTokenLastUsed updates the last used timestamp.
 func (s *Storage) UpdateRefreshTokenLastUsed(ctx context.Context, tokenID string) error {
 	query := `
 		UPDATE refresh_tokens
@@ -317,7 +323,7 @@ func (s *Storage) UpdateRefreshTokenLastUsed(ctx context.Context, tokenID string
 	return nil
 }
 
-// CleanupExpiredRefreshTokens removes expired refresh tokens
+// CleanupExpiredRefreshTokens removes expired refresh tokens.
 func (s *Storage) CleanupExpiredRefreshTokens(ctx context.Context) error {
 	query := `
 		DELETE FROM refresh_tokens
@@ -332,7 +338,9 @@ func (s *Storage) CleanupExpiredRefreshTokens(ctx context.Context) error {
 	return nil
 }
 
-// AddToDenyList adds a token to the deny list
+// AddToDenyList adds a token to the deny list.
+//
+//nolint:revive // argument-limit: implements auth.Storage interface
 func (s *Storage) AddToDenyList(ctx context.Context, jti, userID string, expiresAt time.Time, reason string) error {
 	query := `
 		INSERT INTO token_denylist (jti, user_id, expires_at, revoked_at, reason)
@@ -347,7 +355,7 @@ func (s *Storage) AddToDenyList(ctx context.Context, jti, userID string, expires
 	return nil
 }
 
-// IsTokenDenied checks if a token is in the deny list
+// IsTokenDenied checks if a token is in the deny list.
 func (s *Storage) IsTokenDenied(ctx context.Context, jti string) (bool, error) {
 	query := `
 		SELECT COUNT(*)
@@ -364,7 +372,7 @@ func (s *Storage) IsTokenDenied(ctx context.Context, jti string) (bool, error) {
 	return count > 0, nil
 }
 
-// GetActiveDeniedTokens retrieves all active denied tokens (not expired)
+// GetActiveDeniedTokens retrieves all active denied tokens (not expired).
 func (s *Storage) GetActiveDeniedTokens(ctx context.Context) (map[string]time.Time, error) {
 	query := `
 		SELECT jti, expires_at
@@ -392,7 +400,7 @@ func (s *Storage) GetActiveDeniedTokens(ctx context.Context) (map[string]time.Ti
 	return tokens, nil
 }
 
-// CleanupExpiredDeniedTokens removes expired tokens from the deny list
+// CleanupExpiredDeniedTokens removes expired tokens from the deny list.
 func (s *Storage) CleanupExpiredDeniedTokens(ctx context.Context) error {
 	query := `
 		DELETE FROM token_denylist
@@ -407,7 +415,9 @@ func (s *Storage) CleanupExpiredDeniedTokens(ctx context.Context) error {
 	return nil
 }
 
-// LogAuthEvent logs an authentication event
+// LogAuthEvent logs an authentication event.
+//
+//nolint:revive // argument-limit: implements auth.Storage interface
 func (s *Storage) LogAuthEvent(ctx context.Context, userID, eventType string, success bool, ipAddress, userAgent, metadata string) error {
 	logID := idkit.XID()
 
@@ -418,7 +428,7 @@ func (s *Storage) LogAuthEvent(ctx context.Context, userID, eventType string, su
 
 	_, err := s.db.ExecContext(ctx, query, logID, userID, eventType, success, ipAddress, userAgent, metadata, time.Now())
 	if err != nil {
-		// Don't fail the operation if logging fails, just log the error
+		// Don't fail the operation if logging fails, just log the error.
 		s.logger.Error("failed to log auth event", "error", err)
 		return nil
 	}
@@ -426,9 +436,9 @@ func (s *Storage) LogAuthEvent(ctx context.Context, userID, eventType string, su
 	return nil
 }
 
-// OAuth provider operations
+// OAuth provider operations.
 
-// CreateOAuthProvider creates a new OAuth provider
+// CreateOAuthProvider creates a new OAuth provider.
 func (s *Storage) CreateOAuthProvider(ctx context.Context, provider *auth.OAuthProvider) error {
 	provider.ProviderID = idkit.XID()
 	provider.CreatedAt = time.Now()
@@ -456,7 +466,7 @@ func (s *Storage) CreateOAuthProvider(ctx context.Context, provider *auth.OAuthP
 	return nil
 }
 
-// GetOAuthProvider retrieves an OAuth provider by name
+// GetOAuthProvider retrieves an OAuth provider by name.
 func (s *Storage) GetOAuthProvider(ctx context.Context, providerName string) (*auth.OAuthProvider, error) {
 	query := `
 		SELECT provider_id, provider_name, provider_type, enabled,
@@ -476,7 +486,7 @@ func (s *Storage) GetOAuthProvider(ctx context.Context, providerName string) (*a
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("OAuth provider not found")
+			return nil, errors.New("OAuth provider not found")
 		}
 		return nil, fmt.Errorf("failed to get OAuth provider: %w", err)
 	}
@@ -484,7 +494,7 @@ func (s *Storage) GetOAuthProvider(ctx context.Context, providerName string) (*a
 	return &provider, nil
 }
 
-// GetOAuthProviderByID retrieves an OAuth provider by ID
+// GetOAuthProviderByID retrieves an OAuth provider by ID.
 func (s *Storage) GetOAuthProviderByID(ctx context.Context, providerID string) (*auth.OAuthProvider, error) {
 	query := `
 		SELECT provider_id, provider_name, provider_type, enabled,
@@ -504,7 +514,7 @@ func (s *Storage) GetOAuthProviderByID(ctx context.Context, providerID string) (
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("OAuth provider not found")
+			return nil, errors.New("OAuth provider not found")
 		}
 		return nil, fmt.Errorf("failed to get OAuth provider: %w", err)
 	}
@@ -512,7 +522,7 @@ func (s *Storage) GetOAuthProviderByID(ctx context.Context, providerID string) (
 	return &provider, nil
 }
 
-// ListEnabledOAuthProviders retrieves all enabled OAuth providers
+// ListEnabledOAuthProviders retrieves all enabled OAuth providers.
 func (s *Storage) ListEnabledOAuthProviders(ctx context.Context) ([]auth.OAuthProvider, error) {
 	query := `
 		SELECT provider_id, provider_name, provider_type, enabled,
@@ -547,7 +557,7 @@ func (s *Storage) ListEnabledOAuthProviders(ctx context.Context) ([]auth.OAuthPr
 	return providers, nil
 }
 
-// UpdateOAuthProvider updates an OAuth provider
+// UpdateOAuthProvider updates an OAuth provider.
 func (s *Storage) UpdateOAuthProvider(ctx context.Context, provider *auth.OAuthProvider) error {
 	provider.UpdatedAt = time.Now()
 
@@ -573,9 +583,9 @@ func (s *Storage) UpdateOAuthProvider(ctx context.Context, provider *auth.OAuthP
 	return nil
 }
 
-// OAuth connection operations
+// OAuth connection operations.
 
-// CreateOAuthConnection creates a new OAuth connection
+// CreateOAuthConnection creates a new OAuth connection.
 func (s *Storage) CreateOAuthConnection(ctx context.Context, conn *auth.OAuthConnection) error {
 	conn.ConnectionID = idkit.XID()
 	conn.CreatedAt = time.Now()
@@ -601,7 +611,7 @@ func (s *Storage) CreateOAuthConnection(ctx context.Context, conn *auth.OAuthCon
 	return nil
 }
 
-// GetOAuthConnection retrieves an OAuth connection
+// GetOAuthConnection retrieves an OAuth connection.
 func (s *Storage) GetOAuthConnection(ctx context.Context, providerID, providerUserID string) (*auth.OAuthConnection, error) {
 	query := `
 		SELECT connection_id, user_id, provider_id, provider_user_id,
@@ -621,7 +631,7 @@ func (s *Storage) GetOAuthConnection(ctx context.Context, providerID, providerUs
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("OAuth connection not found")
+			return nil, errors.New("OAuth connection not found")
 		}
 		return nil, fmt.Errorf("failed to get OAuth connection: %w", err)
 	}
@@ -633,7 +643,7 @@ func (s *Storage) GetOAuthConnection(ctx context.Context, providerID, providerUs
 	return &conn, nil
 }
 
-// GetUserOAuthConnections retrieves all OAuth connections for a user
+// GetUserOAuthConnections retrieves all OAuth connections for a user.
 func (s *Storage) GetUserOAuthConnections(ctx context.Context, userID string) ([]auth.OAuthConnection, error) {
 	query := `
 		SELECT connection_id, user_id, provider_id, provider_user_id,
@@ -673,7 +683,7 @@ func (s *Storage) GetUserOAuthConnections(ctx context.Context, userID string) ([
 	return connections, nil
 }
 
-// UpdateOAuthConnection updates an OAuth connection
+// UpdateOAuthConnection updates an OAuth connection.
 func (s *Storage) UpdateOAuthConnection(ctx context.Context, conn *auth.OAuthConnection) error {
 	conn.UpdatedAt = time.Now()
 
@@ -695,7 +705,7 @@ func (s *Storage) UpdateOAuthConnection(ctx context.Context, conn *auth.OAuthCon
 	return nil
 }
 
-// DeleteOAuthConnection deletes an OAuth connection
+// DeleteOAuthConnection deletes an OAuth connection.
 func (s *Storage) DeleteOAuthConnection(ctx context.Context, connectionID string) error {
 	query := `
 		DELETE FROM oauth_connections
@@ -719,9 +729,9 @@ func (s *Storage) GetQueuePermissions(ctx context.Context, queueID string, roleI
 		return &auth.QueuePermission{QueueID: queueID}, nil
 	}
 
-	// Build placeholders for IN clause
+	// Build placeholders for IN clause.
 	placeholders := make([]string, len(roleIDs))
-	args := make([]interface{}, len(roleIDs)+1)
+	args := make([]any, len(roleIDs)+1)
 	args[0] = queueID
 	for i, roleID := range roleIDs {
 		placeholders[i] = "?"
@@ -812,7 +822,7 @@ func (s *Storage) GetRoleByName(ctx context.Context, roleName string) (*auth.Rol
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("role not found")
+			return nil, errors.New("role not found")
 		}
 		return nil, fmt.Errorf("failed to get role: %w", err)
 	}

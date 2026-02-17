@@ -2,66 +2,71 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 )
 
 // PermissionService handles queue permission checks.
 type PermissionService struct {
-	storage AuthStorage
+	storage Storage
 }
 
 // NewPermissionService creates a new permission service.
-func NewPermissionService(storage AuthStorage) *PermissionService {
+func NewPermissionService(storage Storage) *PermissionService {
 	return &PermissionService{storage: storage}
 }
 
 // CheckQueuePermission checks if a user with the given roles has permission to perform an action on a queue.
 // Admins have full access to all queues regardless of specific permissions.
 func (s *PermissionService) CheckQueuePermission(ctx context.Context, queueID string, roles []string, action PermissionAction) error {
-	// Admin role has full access to all queues
+	// Admin role has full access to all queues.
 	for _, role := range roles {
 		if role == "admin" {
 			return nil
 		}
 	}
 
-	// Get role IDs from role names
+	// Get role IDs from role names.
 	roleIDs := make([]string, 0, len(roles))
 	for _, roleName := range roles {
 		role, err := s.storage.GetRoleByName(ctx, roleName)
 		if err != nil {
-			continue // Skip roles that don't exist
+			continue // Skip roles that don't exist.
 		}
 		roleIDs = append(roleIDs, role.RoleID)
 	}
 
 	if len(roleIDs) == 0 {
-		return fmt.Errorf("no valid roles found")
+		return errors.New("no valid roles found")
 	}
 
-	// Get permissions for this queue and user's roles
+	// Get permissions for this queue and user's roles.
 	perm, err := s.storage.GetQueuePermissions(ctx, queueID, roleIDs)
 	if err != nil {
 		return fmt.Errorf("failed to get permissions: %w", err)
 	}
 
-	// Check specific action permission
+	return checkActionPermission(perm, action)
+}
+
+// checkActionPermission checks if the given permission allows the specified action.
+func checkActionPermission(perm *QueuePermission, action PermissionAction) error {
 	switch action {
 	case ActionSend:
 		if !perm.CanSend {
-			return fmt.Errorf("permission denied: cannot send to queue")
+			return errors.New("permission denied: cannot send to queue")
 		}
 	case ActionReceive:
 		if !perm.CanReceive {
-			return fmt.Errorf("permission denied: cannot receive from queue")
+			return errors.New("permission denied: cannot receive from queue")
 		}
 	case ActionPurge:
 		if !perm.CanPurge {
-			return fmt.Errorf("permission denied: cannot purge queue")
+			return errors.New("permission denied: cannot purge queue")
 		}
 	case ActionDelete:
 		if !perm.CanDelete {
-			return fmt.Errorf("permission denied: cannot delete queue")
+			return errors.New("permission denied: cannot delete queue")
 		}
 	default:
 		return fmt.Errorf("unknown action: %s", action)

@@ -54,7 +54,7 @@ type Config struct {
 
 	ProfilerEnabled bool
 
-	// Authentication settings
+	// Authentication settings.
 	AuthEnabled      bool
 	AuthJWTSecret    string
 	AuthIssuer       string

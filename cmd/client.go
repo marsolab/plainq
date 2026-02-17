@@ -19,6 +19,27 @@ import (
 const (
 	// defaultLimit represents the default limit for listing queues.
 	defaultLimit = 500
+
+	// flagGRPCAddr is the flag name for the gRPC address.
+	flagGRPCAddr = "grpc.addr"
+
+	// flagGRPCAddrUsage is the usage description for the gRPC address flag.
+	flagGRPCAddrUsage = "sets PlainQ gRPC address."
+
+	// flagJSON is the flag name for JSON output.
+	flagJSON = "json"
+
+	// flagJSONUsage is the usage description for the JSON output flag.
+	flagJSONUsage = "enables json output"
+
+	// fmtCreateClientError is the error format string for client creation failures.
+	fmtCreateClientError = "create client: %w"
+
+	// fmtEncodeResponseError is the error format string for response encoding failures.
+	fmtEncodeResponseError = "encode response: %w"
+
+	// defaultGRPCAddr is the default gRPC server address.
+	defaultGRPCAddr = "localhost:8080"
 )
 
 func listQueueCommand() *scotty.Command {
@@ -33,12 +54,12 @@ func listQueueCommand() *scotty.Command {
 		Name:  "list",
 		Short: "List queues",
 		SetFlags: func(flags *scotty.FlagSet) {
-			flags.StringVar(&addr, "grpc.addr", "localhost:8080",
-				"sets PlainQ gRPC address.",
+			flags.StringVar(&addr, flagGRPCAddr, defaultGRPCAddr,
+				flagGRPCAddrUsage,
 			)
 
-			flags.BoolVar(&jsonOut, "json", false,
-				"enables json output",
+			flags.BoolVar(&jsonOut, flagJSON, false,
+				flagJSONUsage,
 			)
 
 			flags.UintVar(&limit, "limit", defaultLimit,
@@ -51,7 +72,7 @@ func listQueueCommand() *scotty.Command {
 
 			cli, cliErr := client.New(addr)
 			if cliErr != nil {
-				return fmt.Errorf("create client: %w", cliErr)
+				return fmt.Errorf(fmtCreateClientError, cliErr)
 			}
 
 			if limit > math.MaxInt32 {
@@ -103,11 +124,11 @@ func createQueueCommand() *scotty.Command {
 		Name:  "create",
 		Short: "Create a queue",
 		SetFlags: func(flags *scotty.FlagSet) {
-			flags.StringVar(&addr, "grpc.addr", "localhost:8080",
-				"sets PlainQ gRPC address.",
+			flags.StringVar(&addr, flagGRPCAddr, defaultGRPCAddr,
+				flagGRPCAddrUsage,
 			)
-			flags.BoolVar(&jsonOut, "json", false,
-				"enables json output",
+			flags.BoolVar(&jsonOut, flagJSON, false,
+				flagJSONUsage,
 			)
 			flags.UintVar(&retentionPeriodSeconds, "retention-period", 0,
 				"",
@@ -137,7 +158,7 @@ func createQueueCommand() *scotty.Command {
 
 			cli, cliErr := client.New(addr)
 			if cliErr != nil {
-				return fmt.Errorf("create client: %w", cliErr)
+				return fmt.Errorf(fmtCreateClientError, cliErr)
 			}
 
 			var queueDropPolicy v1.EvictionPolicy
@@ -173,7 +194,7 @@ func createQueueCommand() *scotty.Command {
 
 			if jsonOut {
 				if err := json.NewEncoder(os.Stdout).Encode(create); err != nil {
-					return fmt.Errorf("encode response: %w", err)
+					return fmt.Errorf(fmtEncodeResponseError, err)
 				}
 
 				return nil
@@ -198,12 +219,12 @@ func describeQueueCommand() *scotty.Command {
 		Name:  "describe",
 		Short: "describe a queue",
 		SetFlags: func(flags *scotty.FlagSet) {
-			flags.StringVar(&addr, "grpc.addr", "localhost:8080",
-				"sets PlainQ gRPC address.",
+			flags.StringVar(&addr, flagGRPCAddr, defaultGRPCAddr,
+				flagGRPCAddrUsage,
 			)
 
-			flags.BoolVar(&jsonOut, "json", false,
-				"enables json output",
+			flags.BoolVar(&jsonOut, flagJSON, false,
+				flagJSONUsage,
 			)
 		},
 		Run: func(_ *scotty.Command, args []string) error {
@@ -222,7 +243,7 @@ func describeQueueCommand() *scotty.Command {
 
 			cli, cliErr := client.New(addr)
 			if cliErr != nil {
-				return fmt.Errorf("create client: %w", cliErr)
+				return fmt.Errorf(fmtCreateClientError, cliErr)
 			}
 
 			in := &v1.DescribeQueueRequest{
@@ -236,7 +257,7 @@ func describeQueueCommand() *scotty.Command {
 
 			if jsonOut {
 				if err := json.NewEncoder(os.Stdout).Encode(purge); err != nil {
-					return fmt.Errorf("encode response: %w", err)
+					return fmt.Errorf(fmtEncodeResponseError, err)
 				}
 
 				return nil
@@ -259,11 +280,11 @@ func purgeQueueCommand() *scotty.Command {
 		Name:  "purge",
 		Short: "Purge a queue",
 		SetFlags: func(flags *scotty.FlagSet) {
-			flags.StringVar(&addr, "grpc.addr", "localhost:8080",
-				"sets PlainQ gRPC address.",
+			flags.StringVar(&addr, flagGRPCAddr, defaultGRPCAddr,
+				flagGRPCAddrUsage,
 			)
-			flags.BoolVar(&jsonOut, "json", false,
-				"enables json output",
+			flags.BoolVar(&jsonOut, flagJSON, false,
+				flagJSONUsage,
 			)
 		},
 		Run: func(_ *scotty.Command, args []string) error {
@@ -282,7 +303,7 @@ func purgeQueueCommand() *scotty.Command {
 
 			cli, cliErr := client.New(addr)
 			if cliErr != nil {
-				return fmt.Errorf("create client: %w", cliErr)
+				return fmt.Errorf(fmtCreateClientError, cliErr)
 			}
 
 			in := &v1.PurgeQueueRequest{
@@ -296,7 +317,7 @@ func purgeQueueCommand() *scotty.Command {
 
 			if jsonOut {
 				if err := json.NewEncoder(os.Stdout).Encode(purge); err != nil {
-					return fmt.Errorf("encode response: %w", err)
+					return fmt.Errorf(fmtEncodeResponseError, err)
 				}
 
 				return nil
@@ -321,11 +342,11 @@ func deleteQueueCommand() *scotty.Command {
 		Name:  "delete",
 		Short: "Delete a queue",
 		SetFlags: func(flags *scotty.FlagSet) {
-			flags.StringVar(&addr, "grpc.addr", "localhost:8080",
-				"sets PlainQ gRPC address.",
+			flags.StringVar(&addr, flagGRPCAddr, defaultGRPCAddr,
+				flagGRPCAddrUsage,
 			)
-			flags.BoolVar(&jsonOut, "json", false,
-				"enables json output",
+			flags.BoolVar(&jsonOut, flagJSON, false,
+				flagJSONUsage,
 			)
 			flags.BoolVar(&force, "force", false,
 				"enables force delete",
@@ -347,7 +368,7 @@ func deleteQueueCommand() *scotty.Command {
 
 			cli, cliErr := client.New(addr)
 			if cliErr != nil {
-				return fmt.Errorf("create client: %w", cliErr)
+				return fmt.Errorf(fmtCreateClientError, cliErr)
 			}
 
 			in := &v1.DeleteQueueRequest{
@@ -362,7 +383,7 @@ func deleteQueueCommand() *scotty.Command {
 
 			if jsonOut {
 				if err := json.NewEncoder(os.Stdout).Encode(deleteq); err != nil {
-					return fmt.Errorf("encode response: %w", err)
+					return fmt.Errorf(fmtEncodeResponseError, err)
 				}
 
 				return nil
@@ -386,14 +407,14 @@ func sendCommand() *scotty.Command {
 		Name:  "send",
 		Short: "Sent a message to the queue",
 		SetFlags: func(flags *scotty.FlagSet) {
-			flags.StringVar(&addr, "grpc.addr", "localhost:8080",
-				"sets PlainQ gRPC address.",
+			flags.StringVar(&addr, flagGRPCAddr, defaultGRPCAddr,
+				flagGRPCAddrUsage,
 			)
 			flags.StringVar(&message, "message", "",
 				"sets message as a string",
 			)
-			flags.BoolVar(&jsonOut, "json", false,
-				"enables json output",
+			flags.BoolVar(&jsonOut, flagJSON, false,
+				flagJSONUsage,
 			)
 		},
 		Run: func(_ *scotty.Command, args []string) error {
@@ -412,7 +433,7 @@ func sendCommand() *scotty.Command {
 
 			cli, cliErr := client.New(addr)
 			if cliErr != nil {
-				return fmt.Errorf("create client: %w", cliErr)
+				return fmt.Errorf(fmtCreateClientError, cliErr)
 			}
 
 			in := &v1.SendRequest{
@@ -429,7 +450,7 @@ func sendCommand() *scotty.Command {
 
 			if jsonOut {
 				if err := json.NewEncoder(os.Stdout).Encode(send); err != nil {
-					return fmt.Errorf("encode response: %w", err)
+					return fmt.Errorf(fmtEncodeResponseError, err)
 				}
 
 				return nil
@@ -455,14 +476,14 @@ func receiveCommand() *scotty.Command {
 		Name:  "receive",
 		Short: "Receive a messages from the queue",
 		SetFlags: func(flags *scotty.FlagSet) {
-			flags.StringVar(&addr, "grpc.addr", "localhost:8080",
-				"sets PlainQ gRPC address.",
+			flags.StringVar(&addr, flagGRPCAddr, defaultGRPCAddr,
+				flagGRPCAddrUsage,
 			)
 			flags.UintVar(&batch, "batch", 1,
 				"set receive batch size",
 			)
-			flags.BoolVar(&jsonOut, "json", false,
-				"enables json output",
+			flags.BoolVar(&jsonOut, flagJSON, false,
+				flagJSONUsage,
 			)
 		},
 		Run: func(_ *scotty.Command, args []string) error {
@@ -481,7 +502,7 @@ func receiveCommand() *scotty.Command {
 
 			cli, cliErr := client.New(addr)
 			if cliErr != nil {
-				return fmt.Errorf("create client: %w", cliErr)
+				return fmt.Errorf(fmtCreateClientError, cliErr)
 			}
 
 			if batch > math.MaxUint32 {
@@ -499,7 +520,7 @@ func receiveCommand() *scotty.Command {
 
 			if jsonOut {
 				if err := json.NewEncoder(os.Stdout).Encode(receive); err != nil {
-					return fmt.Errorf("encode response: %w", err)
+					return fmt.Errorf(fmtEncodeResponseError, err)
 				}
 
 				return nil

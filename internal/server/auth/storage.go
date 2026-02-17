@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// User represents a user account
+// User represents a user account.
 type User struct {
 	UserID    string
 	Email     string
@@ -15,14 +15,14 @@ type User struct {
 	UpdatedAt time.Time
 }
 
-// Role represents a role
+// Role represents a role.
 type Role struct {
 	RoleID    string
 	RoleName  string
 	CreatedAt time.Time
 }
 
-// RefreshToken represents a refresh token
+// RefreshToken represents a refresh token.
 type RefreshToken struct {
 	TokenID    string
 	UserID     string
@@ -36,7 +36,7 @@ type RefreshToken struct {
 	IPAddress  string
 }
 
-// OAuthProvider represents an OAuth/OIDC provider configuration
+// OAuthProvider represents an OAuth/OIDC provider configuration.
 type OAuthProvider struct {
 	ProviderID      string
 	ProviderName    string
@@ -57,7 +57,7 @@ type OAuthProvider struct {
 	UpdatedAt       time.Time
 }
 
-// OAuthConnection represents a user's connection to an OAuth provider
+// OAuthConnection represents a user's connection to an OAuth provider.
 type OAuthConnection struct {
 	ConnectionID   string
 	UserID         string
@@ -94,9 +94,9 @@ const (
 	ActionDelete  PermissionAction = "delete"
 )
 
-// AuthStorage defines the interface for authentication-related storage operations
-type AuthStorage interface {
-	// User operations
+// Storage defines the interface for authentication-related storage operations.
+type Storage interface {
+	// User operations.
 	CreateUser(ctx context.Context, email, passwordHash string) (*User, error)
 	GetUserByEmail(ctx context.Context, email string) (*User, error)
 	GetUserByID(ctx context.Context, userID string) (*User, error)
@@ -105,11 +105,11 @@ type AuthStorage interface {
 	GetUserRoles(ctx context.Context, userID string) ([]Role, error)
 	AssignRole(ctx context.Context, userID, roleID string) error
 
-	// System state operations
+	// System state operations.
 	IsSetupCompleted(ctx context.Context) (bool, error)
 	MarkSetupCompleted(ctx context.Context) error
 
-	// Refresh token operations
+	// Refresh token operations.
 	CreateRefreshToken(ctx context.Context, userID, tokenHash string, expiresAt time.Time, deviceInfo, ipAddress string) (*RefreshToken, error)
 	GetRefreshToken(ctx context.Context, tokenHash string) (*RefreshToken, error)
 	RevokeRefreshToken(ctx context.Context, tokenID string) error
@@ -117,30 +117,30 @@ type AuthStorage interface {
 	UpdateRefreshTokenLastUsed(ctx context.Context, tokenID string) error
 	CleanupExpiredRefreshTokens(ctx context.Context) error
 
-	// Token deny list operations
+	// Token deny list operations.
 	AddToDenyList(ctx context.Context, jti, userID string, expiresAt time.Time, reason string) error
 	IsTokenDenied(ctx context.Context, jti string) (bool, error)
 	GetActiveDeniedTokens(ctx context.Context) (map[string]time.Time, error)
 	CleanupExpiredDeniedTokens(ctx context.Context) error
 
-	// OAuth provider operations
+	// OAuth provider operations.
 	CreateOAuthProvider(ctx context.Context, provider *OAuthProvider) error
 	GetOAuthProvider(ctx context.Context, providerName string) (*OAuthProvider, error)
 	GetOAuthProviderByID(ctx context.Context, providerID string) (*OAuthProvider, error)
 	ListEnabledOAuthProviders(ctx context.Context) ([]OAuthProvider, error)
 	UpdateOAuthProvider(ctx context.Context, provider *OAuthProvider) error
 
-	// OAuth connection operations
+	// OAuth connection operations.
 	CreateOAuthConnection(ctx context.Context, conn *OAuthConnection) error
 	GetOAuthConnection(ctx context.Context, providerID, providerUserID string) (*OAuthConnection, error)
 	GetUserOAuthConnections(ctx context.Context, userID string) ([]OAuthConnection, error)
 	UpdateOAuthConnection(ctx context.Context, conn *OAuthConnection) error
 	DeleteOAuthConnection(ctx context.Context, connectionID string) error
 
-	// Audit log
+	// Audit log.
 	LogAuthEvent(ctx context.Context, userID, eventType string, success bool, ipAddress, userAgent, metadata string) error
 
-	// Queue permission operations
+	// Queue permission operations.
 	GetQueuePermissions(ctx context.Context, queueID string, roleIDs []string) (*QueuePermission, error)
 	SetQueuePermissions(ctx context.Context, perm *QueuePermission) error
 	DeleteQueuePermissions(ctx context.Context, queueID, roleID string) error

@@ -281,7 +281,7 @@ func (pm *PrometheusMetrics) IncrementRedelivered(queueID string) {
 }
 
 // IncrementDLQ increments the DLQ counter.
-func (pm *PrometheusMetrics) IncrementDLQ(queueID string, sourceQueue string) {
+func (pm *PrometheusMetrics) IncrementDLQ(queueID, sourceQueue string) {
 	pm.mu.Lock()
 	key := queueID + "_" + sourceQueue
 	counter, ok := pm.messagesToDLQ[key]
@@ -383,7 +383,7 @@ func (ec *EnhancedCounter) CalculateRate() float64 {
 	ec.rateMu.Lock()
 	defer ec.rateMu.Unlock()
 
-	currentValue := ec.Counter.Get()
+	currentValue := ec.Get()
 	currentTime := time.Now()
 
 	elapsed := currentTime.Sub(ec.lastTime).Seconds()

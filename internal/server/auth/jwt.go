@@ -3,6 +3,7 @@ package auth
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"time"
 
@@ -10,28 +11,33 @@ import (
 )
 
 const (
-	// Token durations
-	AccessTokenDuration  = 15 * time.Minute   // Short-lived access tokens
-	RefreshTokenDuration = 7 * 24 * time.Hour // Long-lived refresh tokens
+	// Token durations.
+	AccessTokenDuration  = 15 * time.Minute   // Short-lived access tokens.
+	RefreshTokenDuration = 7 * 24 * time.Hour // Long-lived refresh tokens.
+
+	// refreshTokenLength is the byte length for refresh tokens.
+	refreshTokenLength = 32
+	// jtiLength is the byte length for JWT IDs.
+	jtiLength = 16
 )
 
-// Claims represents the JWT claims with role information
+// Claims represents the JWT claims with role information.
 type Claims struct {
 	jwt.RegisteredClaims
 	UserID string   `json:"user_id"`
 	Email  string   `json:"email"`
-	Roles  []string `json:"roles"` // Array of role names
+	Roles  []string `json:"roles"` // Array of role names.
 }
 
-// JWTService handles JWT token generation and validation
+// JWTService handles JWT token generation and validation.
 type JWTService struct {
 	signer   jwt.Signer
 	verifier jwt.Verifier
 	issuer   string
 }
 
-// NewJWTService creates a new JWT service
-func NewJWTService(secretKey string, issuer string) *JWTService {
+// NewJWTService creates a new JWT service.
+func NewJWTService(secretKey, issuer string) *JWTService {
 	key := []byte(secretKey)
 	signer, err := jwt.NewSignerHS(jwt.HS256, key)
 	if err != nil {
@@ -50,12 +56,12 @@ func NewJWTService(secretKey string, issuer string) *JWTService {
 	}
 }
 
-// GenerateAccessToken generates a new access token with role claims
+// GenerateAccessToken generates a new access token with role claims.
 func (s *JWTService) GenerateAccessToken(userID, email string, roles []string) (string, error) {
 	now := time.Now()
 	expiresAt := now.Add(AccessTokenDuration)
 
-	// Generate a unique JWT ID for token revocation
+	// Generate a unique JWT ID for token revocation.
 	jti, err := generateJTI()
 	if err != nil {
 		return "", fmt.Errorf("failed to generate JTI: %w", err)
@@ -75,7 +81,7 @@ func (s *JWTService) GenerateAccessToken(userID, email string, roles []string) (
 		Roles:  roles,
 	}
 
-	// Build and sign the token
+	// Build and sign the token.
 	builder := jwt.NewBuilder(s.signer)
 	token, err := builder.Build(claims)
 	if err != nil {
@@ -86,10 +92,10 @@ func (s *JWTService) GenerateAccessToken(userID, email string, roles []string) (
 }
 
 // GenerateRefreshToken generates a new refresh token (opaque token, not JWT)
-// Returns the raw token and its hash for storage
-func (s *JWTService) GenerateRefreshToken() (token string, tokenHash string, err error) {
-	// Generate a 32-byte random token
-	tokenBytes := make([]byte, 32)
+// Returns the raw token and its hash for storage.
+func (*JWTService) GenerateRefreshToken() (token, tokenHash string, err error) { //nolint:revive // three returns needed for token+hash+error
+	// Generate a random token.
+	tokenBytes := make([]byte, refreshTokenLength)
 	if _, err := rand.Read(tokenBytes); err != nil {
 		return "", "", fmt.Errorf("failed to generate refresh token: %w", err)
 	}
@@ -97,52 +103,52 @@ func (s *JWTService) GenerateRefreshToken() (token string, tokenHash string, err
 	token = hex.EncodeToString(tokenBytes)
 
 	// For simplicity, we'll use the token itself as the hash
-	// In a production system, you'd want to hash this
+	// In a production system, you'd want to hash this.
 	tokenHash = token
 
 	return token, tokenHash, nil
 }
 
-// ValidateToken validates a JWT token and returns the claims
+// ValidateToken validates a JWT token and returns the claims.
 func (s *JWTService) ValidateToken(tokenString string) (*Claims, error) {
-	// Parse the token
+	// Parse the token.
 	token, err := jwt.Parse([]byte(tokenString), s.verifier)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse token: %w", err)
 	}
 
-	// Decode claims
+	// Decode claims.
 	var claims Claims
 	err = token.DecodeClaims(&claims)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode claims: %w", err)
 	}
 
-	// Validate standard claims
+	// Validate standard claims.
 	now := time.Now()
 
-	// Check expiration
-	if claims.ExpiresAt != nil && claims.ExpiresAt.Time.Before(now) {
-		return nil, fmt.Errorf("token has expired")
+	// Check expiration.
+	if claims.ExpiresAt != nil && claims.ExpiresAt.Before(now) {
+		return nil, errors.New("token has expired")
 	}
 
-	// Check not before
-	if claims.NotBefore != nil && claims.NotBefore.Time.After(now) {
-		return nil, fmt.Errorf("token not yet valid")
+	// Check not before.
+	if claims.NotBefore != nil && claims.NotBefore.After(now) {
+		return nil, errors.New("token not yet valid")
 	}
 
-	// Check issuer
+	// Check issuer.
 	if claims.Issuer != s.issuer {
-		return nil, fmt.Errorf("invalid issuer")
+		return nil, errors.New("invalid issuer")
 	}
 
 	return &claims, nil
 }
 
 // ExtractTokenID extracts the JTI from a token without full validation
-// This is useful for adding tokens to the deny list
-func (s *JWTService) ExtractTokenID(tokenString string) (string, error) {
-	// Parse without signature verification for extracting JTI
+// This is useful for adding tokens to the deny list.
+func (*JWTService) ExtractTokenID(tokenString string) (string, error) {
+	// Parse without signature verification for extracting JTI.
 	token, err := jwt.ParseNoVerify([]byte(tokenString))
 	if err != nil {
 		return "", fmt.Errorf("failed to parse token: %w", err)
@@ -157,9 +163,9 @@ func (s *JWTService) ExtractTokenID(tokenString string) (string, error) {
 	return claims.ID, nil
 }
 
-// generateJTI generates a unique JWT ID
+// generateJTI generates a unique JWT ID.
 func generateJTI() (string, error) {
-	bytes := make([]byte, 16)
+	bytes := make([]byte, jtiLength)
 	if _, err := rand.Read(bytes); err != nil {
 		return "", err
 	}
