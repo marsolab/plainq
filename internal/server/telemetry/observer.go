@@ -36,7 +36,7 @@ func ObservableCount() uint32 {
 	if len(observedMetrics) > math.MaxUint32 {
 		return math.MaxUint32
 	}
-	return uint32(len(observedMetrics))
+	return uint32(len(observedMetrics)) //nolint:gosec // G115: observedMetrics is a small fixed-size map, checked above against MaxUint32
 }
 
 // Observer interface abstracts the logic of observing events and
@@ -330,7 +330,6 @@ func (c *observe) Upd(n float64)       { c.upd(n) }
 
 type obsPool[T observe] struct{ pool sync.Pool }
 
-func (p *obsPool[T]) put(v *T) { p.pool.Put(v) }
 func (p *obsPool[T]) get() *T {
 	v, ok := p.pool.Get().(*T)
 	if !ok {

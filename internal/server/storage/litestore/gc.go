@@ -119,7 +119,7 @@ func (s *Storage) queuesForGC(ctx context.Context) (_ []string, sErr error) {
 			return nil, fmt.Errorf("query queues: %w", err)
 		}
 
-		if len(queues) != int(limit) {
+		if len(queues) != int(limit) { //nolint:gosec // G115: limit is a small pagination value
 			break
 		}
 
@@ -128,7 +128,7 @@ func (s *Storage) queuesForGC(ctx context.Context) (_ []string, sErr error) {
 	}
 
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit transaction: %w", err)
+		return nil, fmt.Errorf(fmtCommitTxError, err)
 	}
 
 	return queues, nil
@@ -144,7 +144,7 @@ func (s *Storage) sweep(ctx context.Context, queueID string) (_ *sweepResult, sE
 
 	tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if txErr != nil {
-		panic(fmt.Errorf("begin transaction: %w", txErr))
+		panic(fmt.Errorf(fmtBeginTxError, txErr))
 	}
 
 	defer func() {
@@ -181,11 +181,11 @@ func (s *Storage) sweep(ctx context.Context, queueID string) (_ *sweepResult, sE
 	}
 
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit transaction: %w", err)
+		return nil, fmt.Errorf(fmtCommitTxError, err)
 	}
 
-	s.observer.MessageDropped(queueID, v1.EvictionPolicy(props.EvictionPolicy)).
-		Add(messagesDropped)
+	s.observer.MessageDropped(queueID, v1.EvictionPolicy(props.EvictionPolicy)). //nolint:gosec // G115: EvictionPolicy values are small enum constants
+											Add(messagesDropped)
 
 	result := sweepResult{
 		Duration:        time.Since(start),

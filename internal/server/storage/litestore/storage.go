@@ -180,7 +180,7 @@ func (s *Storage) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit transaction: %w", err)
+		return nil, fmt.Errorf(fmtCommitTxError, err)
 	}
 
 	props := QueueProps{
@@ -189,7 +189,7 @@ func (s *Storage) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest)
 		RetentionPeriodSeconds:   input.RetentionPeriodSeconds,
 		VisibilityTimeoutSeconds: input.VisibilityTimeoutSeconds,
 		MaxReceiveAttempts:       input.MaxReceiveAttempts,
-		EvictionPolicy:           uint32(input.EvictionPolicy),
+		EvictionPolicy:           uint32(input.EvictionPolicy), //nolint:gosec // G115: EvictionPolicy values are small enum constants
 		DeadLetterQueueID:        input.DeadLetterQueueId,
 	}
 
@@ -216,7 +216,7 @@ func (s *Storage) ListQueues(ctx context.Context, input *v1.ListQueuesRequest) (
 
 	query := queryListQueues(limit, input.Cursor, input.OrderBy, input.SortBy)
 
-	queues, listErr := s.listQueues(ctx, query, uint32(limit))
+	queues, listErr := s.queryQueues(ctx, query, uint32(limit)) //nolint:gosec // G115: limit is always positive (pageSize + 1)
 	if listErr != nil {
 		return nil, fmt.Errorf("list queues: %w", listErr)
 	}
@@ -266,7 +266,7 @@ func (s *Storage) DescribeQueue(ctx context.Context, input *v1.DescribeQueueRequ
 
 	tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if txErr != nil {
-		return nil, fmt.Errorf("begin transaction: %w", txErr)
+		return nil, fmt.Errorf(fmtBeginTxError, txErr)
 	}
 
 	defer func() {
@@ -313,7 +313,7 @@ func (s *Storage) DescribeQueue(ctx context.Context, input *v1.DescribeQueueRequ
 	output.CreatedAt = timestamppb.New(createdAt)
 
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit transaction: %w", err)
+		return nil, fmt.Errorf(fmtCommitTxError, err)
 	}
 
 	s.cache.put(propsFromProto(&output))
@@ -324,7 +324,7 @@ func (s *Storage) DescribeQueue(ctx context.Context, input *v1.DescribeQueueRequ
 func (s *Storage) PurgeQueue(ctx context.Context, input *v1.PurgeQueueRequest) (_ *v1.PurgeQueueResponse, sErr error) {
 	tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if txErr != nil {
-		return nil, fmt.Errorf("begin transaction: %w", txErr)
+		return nil, fmt.Errorf(fmtBeginTxError, txErr)
 	}
 
 	defer func() {
@@ -355,7 +355,7 @@ func (s *Storage) PurgeQueue(ctx context.Context, input *v1.PurgeQueueRequest) (
 	}
 
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit transaction: %w", err)
+		return nil, fmt.Errorf(fmtCommitTxError, err)
 	}
 
 	output := v1.PurgeQueueResponse{}
@@ -373,7 +373,7 @@ func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest)
 
 	tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if txErr != nil {
-		return nil, fmt.Errorf("begin transaction: %w", txErr)
+		return nil, fmt.Errorf(fmtBeginTxError, txErr)
 	}
 
 	defer func() {
@@ -401,7 +401,7 @@ func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit transaction: %w", err)
+		return nil, fmt.Errorf(fmtCommitTxError, err)
 	}
 
 	s.cache.delete(props.ID, props.Name)
@@ -420,7 +420,7 @@ func (s *Storage) Send(ctx context.Context, input *v1.SendRequest) (_ *v1.SendRe
 
 	tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if txErr != nil {
-		return nil, fmt.Errorf("begin transaction: %w", txErr)
+		return nil, fmt.Errorf(fmtBeginTxError, txErr)
 	}
 
 	defer func() {
@@ -457,7 +457,7 @@ func (s *Storage) Send(ctx context.Context, input *v1.SendRequest) (_ *v1.SendRe
 	}
 
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit transaction: %w", err)
+		return nil, fmt.Errorf(fmtCommitTxError, err)
 	}
 
 	s.observer.MessagesSent(queueID).Add(uint64(len(output.MessageIds)))
@@ -477,7 +477,7 @@ func (s *Storage) Receive(ctx context.Context, input *v1.ReceiveRequest) (_ *v1.
 
 	tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if txErr != nil {
-		return nil, fmt.Errorf("begin transaction: %w", txErr)
+		return nil, fmt.Errorf(fmtBeginTxError, txErr)
 	}
 
 	defer func() {
@@ -520,6 +520,7 @@ func (s *Storage) Receive(ctx context.Context, input *v1.ReceiveRequest) (_ *v1.
 		Messages: make([]*v1.ReceiveMessage, 0, input.BatchSize),
 	}
 
+	//nolint:gosec // G115: VisibilityTimeoutSeconds is a small duration value, well within int64 range.
 	visibleAt := time.Now().UTC().Add(time.Duration(info.VisibilityTimeoutSeconds) * time.Second)
 
 	for rows.Next() {
@@ -537,7 +538,7 @@ func (s *Storage) Receive(ctx context.Context, input *v1.ReceiveRequest) (_ *v1.
 	}
 
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit transaction: %w", err)
+		return nil, fmt.Errorf(fmtCommitTxError, err)
 	}
 
 	if len(output.Messages) == 0 {
@@ -556,7 +557,7 @@ func (s *Storage) Delete(ctx context.Context, input *v1.DeleteRequest) (_ *v1.De
 
 	tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if txErr != nil {
-		return nil, fmt.Errorf("begin transaction: %w", txErr)
+		return nil, fmt.Errorf(fmtBeginTxError, txErr)
 	}
 
 	defer func() {
@@ -590,9 +591,8 @@ func (s *Storage) Delete(ctx context.Context, input *v1.DeleteRequest) (_ *v1.De
 			continue
 		}
 
-		if xID, err := idkit.ParseXID(id); err == nil {
-			s.observer.TimeInQueue(queueID).Dur(xID.Time())
-		} else {
+		xID, err := idkit.ParseXID(id)
+		if err != nil {
 			// The fact that queue contains messages with invalid ID format
 			// means that something is really wrong with the queue. Looks like
 			// someone has modified the storage manually.
@@ -602,11 +602,13 @@ func (s *Storage) Delete(ctx context.Context, input *v1.DeleteRequest) (_ *v1.De
 			))
 		}
 
+		s.observer.TimeInQueue(queueID).Dur(xID.Time())
+
 		output.Successful = append(output.Successful, id)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit transaction: %w", err)
+		return nil, fmt.Errorf(fmtCommitTxError, err)
 	}
 
 	messagesCount := uint64(len(output.Successful))
@@ -630,10 +632,10 @@ func (s *Storage) Close() error {
 	return nil
 }
 
-func (s *Storage) listQueues(ctx context.Context, query string, pageSize uint32) (_ []*v1.DescribeQueueResponse, sErr error) {
+func (s *Storage) queryQueues(ctx context.Context, query string, pageSize uint32) (_ []*v1.DescribeQueueResponse, sErr error) {
 	tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if txErr != nil {
-		return nil, fmt.Errorf("begin transaction: %w", txErr)
+		return nil, fmt.Errorf(fmtBeginTxError, txErr)
 	}
 
 	defer func() {
@@ -688,7 +690,7 @@ func (s *Storage) listQueues(ctx context.Context, query string, pageSize uint32)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit transaction: %w", err)
+		return nil, fmt.Errorf(fmtCommitTxError, err)
 	}
 
 	return queues, nil
@@ -712,7 +714,7 @@ func (s *Storage) fillCache(ctx context.Context, cursor string) error {
 			RetentionPeriodSeconds:   q.RetentionPeriodSeconds,
 			VisibilityTimeoutSeconds: q.VisibilityTimeoutSeconds,
 			MaxReceiveAttempts:       q.MaxReceiveAttempts,
-			EvictionPolicy:           uint32(q.EvictionPolicy),
+			EvictionPolicy:           uint32(q.EvictionPolicy), //nolint:gosec // G115: EvictionPolicy is a small enum value
 			DeadLetterQueueID:        q.DeadLetterQueueId,
 		}
 

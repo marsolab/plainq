@@ -11,6 +11,29 @@ import (
 	"github.com/plainq/servekit/respond"
 )
 
+const (
+	// durationMinutes15 is the number of minutes for the 15m time range preset.
+	durationMinutes15 = 15
+
+	// durationHours12 is the number of hours for the 12h time range preset.
+	durationHours12 = 12
+
+	// durationDays90 is the number of days for the 90d time range preset.
+	durationDays90 = 90
+
+	// durationDays365 is the number of days for the 1y time range preset.
+	durationDays365 = 365
+
+	// metricTypeGauge is the metric type label for gauge metrics.
+	metricTypeGauge = "gauge"
+
+	// metricTypeCounter is the metric type label for counter metrics.
+	metricTypeCounter = "counter"
+
+	// csvSeparator is the comma separator used in CSV export.
+	csvSeparator = ","
+)
+
 // MetricsHandler handles metrics API requests.
 type MetricsHandler struct {
 	collector *collector.Collector
@@ -35,22 +58,22 @@ type TimeRange struct {
 type TimeRangePreset string
 
 const (
-	TimeRangeLast5m  TimeRangePreset = "5m"
-	TimeRangeLast15m TimeRangePreset = "15m"
-	TimeRangeLast30m TimeRangePreset = "30m"
-	TimeRangeLast1h  TimeRangePreset = "1h"
-	TimeRangeLast3h  TimeRangePreset = "3h"
-	TimeRangeLast6h  TimeRangePreset = "6h"
-	TimeRangeLast12h TimeRangePreset = "12h"
-	TimeRangeLast24h TimeRangePreset = "24h"
-	TimeRangeLast2d  TimeRangePreset = "2d"
-	TimeRangeLast7d  TimeRangePreset = "7d"
-	TimeRangeLast30d TimeRangePreset = "30d"
-	TimeRangeLast90d TimeRangePreset = "90d"
-	TimeRangeLast1y  TimeRangePreset = "1y"
+	TimeRangeLast5m     TimeRangePreset = "5m"
+	TimeRangeLast15m    TimeRangePreset = "15m"
+	TimeRangeLast30m    TimeRangePreset = "30m"
+	TimeRangeLast1h     TimeRangePreset = "1h"
+	TimeRangeLast3h     TimeRangePreset = "3h"
+	TimeRangeLast6h     TimeRangePreset = "6h"
+	TimeRangeLast12h    TimeRangePreset = "12h"
+	TimeRangeLast24h    TimeRangePreset = "24h"
+	TimeRangeLast2d     TimeRangePreset = "2d"
+	TimeRangeLastSevenD TimeRangePreset = "7d"
+	TimeRangeLast30d    TimeRangePreset = "30d"
+	TimeRangeLast90d    TimeRangePreset = "90d"
+	TimeRangeLast1y     TimeRangePreset = "1y"
 )
 
-// ParseTimeRange parses a time range preset or custom range.
+//nolint:revive // cyclomatic: this function is a simple range selector
 func ParseTimeRange(preset string, customFrom, customTo int64) TimeRange {
 	now := time.Now().UnixMilli()
 
@@ -63,7 +86,7 @@ func ParseTimeRange(preset string, customFrom, customTo int64) TimeRange {
 	case TimeRangeLast5m:
 		duration = 5 * time.Minute
 	case TimeRangeLast15m:
-		duration = 15 * time.Minute
+		duration = durationMinutes15 * time.Minute
 	case TimeRangeLast30m:
 		duration = 30 * time.Minute
 	case TimeRangeLast1h:
@@ -73,25 +96,25 @@ func ParseTimeRange(preset string, customFrom, customTo int64) TimeRange {
 	case TimeRangeLast6h:
 		duration = 6 * time.Hour
 	case TimeRangeLast12h:
-		duration = 12 * time.Hour
+		duration = durationHours12 * time.Hour
 	case TimeRangeLast24h:
 		duration = 24 * time.Hour
 	case TimeRangeLast2d:
 		duration = 2 * 24 * time.Hour
-	case TimeRangeLast7d:
+	case TimeRangeLastSevenD:
 		duration = 7 * 24 * time.Hour
 	case TimeRangeLast30d:
 		duration = 30 * 24 * time.Hour
 	case TimeRangeLast90d:
-		duration = 90 * 24 * time.Hour
+		duration = durationDays90 * 24 * time.Hour
 	case TimeRangeLast1y:
-		duration = 365 * 24 * time.Hour
+		duration = durationDays365 * 24 * time.Hour
 	default:
-		duration = 1 * time.Hour // Default to last hour
+		duration = 1 * time.Hour // Default to last hour.
 	}
 
 	return TimeRange{
-		From: now - int64(duration.Milliseconds()),
+		From: now - duration.Milliseconds(),
 		To:   now,
 	}
 }
@@ -166,14 +189,14 @@ type MultiMetricsChartResponse struct {
 // GetDashboardOverview returns the overview dashboard data.
 func (h *MetricsHandler) GetDashboardOverview(w http.ResponseWriter, r *http.Request) {
 	// Get system rates.
-	sendRate, receiveRate, deleteRate := h.collector.GetSystemRates()
+	sysRates := h.collector.GetSystemRates()
 
 	// Build system metrics.
 	systemMetrics := SystemMetricsData{
 		TotalInFlight: h.collector.GetSystemInFlightCount(),
-		SendRate:      sendRate,
-		ReceiveRate:   receiveRate,
-		DeleteRate:    deleteRate,
+		SendRate:      sysRates.SendRate,
+		ReceiveRate:   sysRates.ReceiveRate,
+		DeleteRate:    sysRates.DeleteRate,
 	}
 
 	// Build per-queue metrics.
@@ -181,15 +204,15 @@ func (h *MetricsHandler) GetDashboardOverview(w http.ResponseWriter, r *http.Req
 	queueMetrics := make([]QueueMetricsData, 0, len(queueIDs))
 
 	for _, queueID := range queueIDs {
-		sr, rr, dr := h.collector.GetRates(queueID)
+		rates := h.collector.GetRates(queueID)
 		counters := h.collector.GetCounters(queueID)
 
 		queueMetrics = append(queueMetrics, QueueMetricsData{
 			QueueID:          queueID,
 			InFlight:         h.collector.GetInFlightCount(queueID),
-			SendRate:         sr,
-			ReceiveRate:      rr,
-			DeleteRate:       dr,
+			SendRate:         rates.SendRate,
+			ReceiveRate:      rates.ReceiveRate,
+			DeleteRate:       rates.DeleteRate,
 			MessagesSent:     counters[collector.MetricMessagesSentTotal],
 			MessagesReceived: counters[collector.MetricMessagesReceivedTotal],
 			MessagesDeleted:  counters[collector.MetricMessagesDeletedTotal],
@@ -221,10 +244,20 @@ func (h *MetricsHandler) GetMetricsChart(w http.ResponseWriter, r *http.Request)
 
 	var customFrom, customTo int64
 	if fromStr := r.URL.Query().Get("from"); fromStr != "" {
-		customFrom, _ = strconv.ParseInt(fromStr, 10, 64)
+		v, err := strconv.ParseInt(fromStr, 10, 64)
+		if err != nil {
+			http.Error(w, `{"error": "invalid 'from' parameter"}`, http.StatusBadRequest)
+			return
+		}
+		customFrom = v
 	}
 	if toStr := r.URL.Query().Get("to"); toStr != "" {
-		customTo, _ = strconv.ParseInt(toStr, 10, 64)
+		v, err := strconv.ParseInt(toStr, 10, 64)
+		if err != nil {
+			http.Error(w, `{"error": "invalid 'to' parameter"}`, http.StatusBadRequest)
+			return
+		}
+		customTo = v
 	}
 
 	tr := ParseTimeRange(preset, customFrom, customTo)
@@ -258,18 +291,28 @@ func (h *MetricsHandler) GetRatesChart(w http.ResponseWriter, r *http.Request) {
 
 	var customFrom, customTo int64
 	if fromStr := r.URL.Query().Get("from"); fromStr != "" {
-		customFrom, _ = strconv.ParseInt(fromStr, 10, 64)
+		v, err := strconv.ParseInt(fromStr, 10, 64)
+		if err != nil {
+			http.Error(w, `{"error": "invalid 'from' parameter"}`, http.StatusBadRequest)
+			return
+		}
+		customFrom = v
 	}
 	if toStr := r.URL.Query().Get("to"); toStr != "" {
-		customTo, _ = strconv.ParseInt(toStr, 10, 64)
+		v, err := strconv.ParseInt(toStr, 10, 64)
+		if err != nil {
+			http.Error(w, `{"error": "invalid 'to' parameter"}`, http.StatusBadRequest)
+			return
+		}
+		customTo = v
 	}
 
 	tr := ParseTimeRange(preset, customFrom, customTo)
 
 	// Get rate history for all rate types.
-	sendRates, _ := h.store.GetRateHistory(r.Context(), collector.MetricSendRate, queueID, tr.From, tr.To)
-	receiveRates, _ := h.store.GetRateHistory(r.Context(), collector.MetricReceiveRate, queueID, tr.From, tr.To)
-	deleteRates, _ := h.store.GetRateHistory(r.Context(), collector.MetricDeleteRate, queueID, tr.From, tr.To)
+	sendRates, _ := h.store.GetRateHistory(r.Context(), collector.MetricSendRate, queueID, tr.From, tr.To)       //nolint:errcheck // best-effort
+	receiveRates, _ := h.store.GetRateHistory(r.Context(), collector.MetricReceiveRate, queueID, tr.From, tr.To) //nolint:errcheck // best-effort
+	deleteRates, _ := h.store.GetRateHistory(r.Context(), collector.MetricDeleteRate, queueID, tr.From, tr.To)   //nolint:errcheck // best-effort
 
 	resp := MultiMetricsChartResponse{
 		Metrics: []MetricsChartResponse{
@@ -290,10 +333,20 @@ func (h *MetricsHandler) GetQueueMetrics(w http.ResponseWriter, r *http.Request)
 
 	var customFrom, customTo int64
 	if fromStr := r.URL.Query().Get("from"); fromStr != "" {
-		customFrom, _ = strconv.ParseInt(fromStr, 10, 64)
+		v, err := strconv.ParseInt(fromStr, 10, 64)
+		if err != nil {
+			http.Error(w, `{"error": "invalid 'from' parameter"}`, http.StatusBadRequest)
+			return
+		}
+		customFrom = v
 	}
 	if toStr := r.URL.Query().Get("to"); toStr != "" {
-		customTo, _ = strconv.ParseInt(toStr, 10, 64)
+		v, err := strconv.ParseInt(toStr, 10, 64)
+		if err != nil {
+			http.Error(w, `{"error": "invalid 'to' parameter"}`, http.StatusBadRequest)
+			return
+		}
+		customTo = v
 	}
 
 	tr := ParseTimeRange(preset, customFrom, customTo)
@@ -306,7 +359,7 @@ func (h *MetricsHandler) GetQueueMetrics(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Get current rates.
-	sr, rr, dr := h.collector.GetRates(queueID)
+	rates := h.collector.GetRates(queueID)
 
 	resp := struct {
 		*collector.MetricsSummary
@@ -316,9 +369,9 @@ func (h *MetricsHandler) GetQueueMetrics(w http.ResponseWriter, r *http.Request)
 		TimeRange          TimeRange `json:"timeRange"`
 	}{
 		MetricsSummary:     summary,
-		CurrentSendRate:    sr,
-		CurrentReceiveRate: rr,
-		CurrentDeleteRate:  dr,
+		CurrentSendRate:    rates.SendRate,
+		CurrentReceiveRate: rates.ReceiveRate,
+		CurrentDeleteRate:  rates.DeleteRate,
 		TimeRange:          tr,
 	}
 
@@ -340,6 +393,7 @@ func (h *MetricsHandler) GetInFlightMetrics(w http.ResponseWriter, r *http.Reque
 	preset := r.URL.Query().Get("range")
 	tr := ParseTimeRange(preset, 0, 0)
 
+	//nolint:errcheck // best-effort metrics query
 	history, _ := h.store.GetMetrics(r.Context(), collector.MetricMessagesInFlight, queueID, tr.From, tr.To, SelectResolution(tr))
 
 	resp := struct {
@@ -358,26 +412,26 @@ func (h *MetricsHandler) GetInFlightMetrics(w http.ResponseWriter, r *http.Reque
 }
 
 // GetAvailableMetrics returns list of available metrics.
-func (h *MetricsHandler) GetAvailableMetrics(w http.ResponseWriter, r *http.Request) {
+func (*MetricsHandler) GetAvailableMetrics(w http.ResponseWriter, r *http.Request) {
 	metrics := []struct {
 		Name        string `json:"name"`
 		Type        string `json:"type"`
 		Description string `json:"description"`
 	}{
-		{collector.MetricSendRate, "gauge", "Messages sent per second"},
-		{collector.MetricReceiveRate, "gauge", "Messages received per second"},
-		{collector.MetricDeleteRate, "gauge", "Messages deleted per second"},
-		{collector.MetricMessagesInFlight, "gauge", "Messages currently being processed"},
-		{collector.MetricQueueDepth, "gauge", "Total messages in queue"},
-		{collector.MetricMessagesVisible, "gauge", "Messages available to receive"},
-		{collector.MetricMessagesInvisible, "gauge", "Messages being processed"},
-		{collector.MetricOldestMessageAge, "gauge", "Age of oldest message in seconds"},
-		{collector.MetricMessagesSentTotal, "counter", "Total messages sent"},
-		{collector.MetricMessagesReceivedTotal, "counter", "Total messages received"},
-		{collector.MetricMessagesDeletedTotal, "counter", "Total messages deleted"},
-		{collector.MetricEmptyReceivesTotal, "counter", "Total empty receive attempts"},
-		{collector.MetricMessagesRedelivered, "counter", "Total messages redelivered"},
-		{collector.MetricMessagesToDLQ, "counter", "Total messages moved to DLQ"},
+		{collector.MetricSendRate, metricTypeGauge, "Messages sent per second"},
+		{collector.MetricReceiveRate, metricTypeGauge, "Messages received per second"},
+		{collector.MetricDeleteRate, metricTypeGauge, "Messages deleted per second"},
+		{collector.MetricMessagesInFlight, metricTypeGauge, "Messages currently being processed"},
+		{collector.MetricQueueDepth, metricTypeGauge, "Total messages in queue"},
+		{collector.MetricMessagesVisible, metricTypeGauge, "Messages available to receive"},
+		{collector.MetricMessagesInvisible, metricTypeGauge, "Messages being processed"},
+		{collector.MetricOldestMessageAge, metricTypeGauge, "Age of oldest message in seconds"},
+		{collector.MetricMessagesSentTotal, metricTypeCounter, "Total messages sent"},
+		{collector.MetricMessagesReceivedTotal, metricTypeCounter, "Total messages received"},
+		{collector.MetricMessagesDeletedTotal, metricTypeCounter, "Total messages deleted"},
+		{collector.MetricEmptyReceivesTotal, metricTypeCounter, "Total empty receive attempts"},
+		{collector.MetricMessagesRedelivered, metricTypeCounter, "Total messages redelivered"},
+		{collector.MetricMessagesToDLQ, metricTypeCounter, "Total messages moved to DLQ"},
 		{collector.MetricMessageProcessingDuration, "histogram", "Message processing duration"},
 		{collector.MetricMessageDwellTime, "histogram", "Time from send to receive"},
 		{collector.MetricBatchSize, "histogram", "Batch operation sizes"},
@@ -388,7 +442,7 @@ func (h *MetricsHandler) GetAvailableMetrics(w http.ResponseWriter, r *http.Requ
 }
 
 // GetTimeRangePresets returns available time range presets.
-func (h *MetricsHandler) GetTimeRangePresets(w http.ResponseWriter, r *http.Request) {
+func (*MetricsHandler) GetTimeRangePresets(w http.ResponseWriter, r *http.Request) {
 	presets := []struct {
 		Value string `json:"value"`
 		Label string `json:"label"`
@@ -402,7 +456,7 @@ func (h *MetricsHandler) GetTimeRangePresets(w http.ResponseWriter, r *http.Requ
 		{string(TimeRangeLast12h), "Last 12 hours"},
 		{string(TimeRangeLast24h), "Last 24 hours"},
 		{string(TimeRangeLast2d), "Last 2 days"},
-		{string(TimeRangeLast7d), "Last 7 days"},
+		{string(TimeRangeLastSevenD), "Last 7 days"},
 		{string(TimeRangeLast30d), "Last 30 days"},
 		{string(TimeRangeLast90d), "Last 90 days"},
 		{string(TimeRangeLast1y), "Last 1 year"},
@@ -424,10 +478,20 @@ func (h *MetricsHandler) ExportMetrics(w http.ResponseWriter, r *http.Request) {
 
 	var customFrom, customTo int64
 	if fromStr := r.URL.Query().Get("from"); fromStr != "" {
-		customFrom, _ = strconv.ParseInt(fromStr, 10, 64)
+		v, err := strconv.ParseInt(fromStr, 10, 64)
+		if err != nil {
+			http.Error(w, `{"error": "invalid 'from' parameter"}`, http.StatusBadRequest)
+			return
+		}
+		customFrom = v
 	}
 	if toStr := r.URL.Query().Get("to"); toStr != "" {
-		customTo, _ = strconv.ParseInt(toStr, 10, 64)
+		v, err := strconv.ParseInt(toStr, 10, 64)
+		if err != nil {
+			http.Error(w, `{"error": "invalid 'to' parameter"}`, http.StatusBadRequest)
+			return
+		}
+		customTo = v
 	}
 
 	tr := ParseTimeRange(preset, customFrom, customTo)
@@ -443,29 +507,29 @@ func (h *MetricsHandler) ExportMetrics(w http.ResponseWriter, r *http.Request) {
 	case "csv":
 		w.Header().Set("Content-Type", "text/csv")
 		w.Header().Set("Content-Disposition", "attachment; filename=metrics.csv")
-		w.Write([]byte("timestamp,value,min,max,avg,sum,count\n"))
+		_, _ = w.Write([]byte("timestamp,value,min,max,avg,sum,count\n")) //nolint:errcheck // HTTP write failure is not recoverable
 		for _, p := range dataPoints {
-			line := strconv.FormatInt(p.Timestamp, 10) + "," +
-				strconv.FormatFloat(p.Value, 'f', 6, 64) + "," +
-				strconv.FormatFloat(p.Min, 'f', 6, 64) + "," +
-				strconv.FormatFloat(p.Max, 'f', 6, 64) + "," +
-				strconv.FormatFloat(p.Avg, 'f', 6, 64) + "," +
-				strconv.FormatFloat(p.Sum, 'f', 6, 64) + "," +
+			line := strconv.FormatInt(p.Timestamp, 10) + csvSeparator +
+				strconv.FormatFloat(p.Value, 'f', 6, 64) + csvSeparator +
+				strconv.FormatFloat(p.Min, 'f', 6, 64) + csvSeparator +
+				strconv.FormatFloat(p.Max, 'f', 6, 64) + csvSeparator +
+				strconv.FormatFloat(p.Avg, 'f', 6, 64) + csvSeparator +
+				strconv.FormatFloat(p.Sum, 'f', 6, 64) + csvSeparator +
 				strconv.FormatInt(p.Count, 10) + "\n"
-			w.Write([]byte(line))
+			_, _ = w.Write([]byte(line)) //nolint:errcheck // HTTP write failure is not recoverable
 		}
 	default:
 		// Metabase-friendly JSON format.
 		export := struct {
-			Columns []string        `json:"columns"`
-			Rows    [][]interface{} `json:"rows"`
+			Columns []string `json:"columns"`
+			Rows    [][]any  `json:"rows"`
 		}{
 			Columns: []string{"timestamp", "datetime", "value", "min", "max", "avg", "sum", "count"},
-			Rows:    make([][]interface{}, len(dataPoints)),
+			Rows:    make([][]any, len(dataPoints)),
 		}
 
 		for i, p := range dataPoints {
-			export.Rows[i] = []interface{}{
+			export.Rows[i] = []any{
 				p.Timestamp,
 				time.UnixMilli(p.Timestamp).Format(time.RFC3339),
 				p.Value,
@@ -478,6 +542,6 @@ func (h *MetricsHandler) ExportMetrics(w http.ResponseWriter, r *http.Request) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(export)
+		_ = json.NewEncoder(w).Encode(export) //nolint:errcheck // best-effort HTTP response encoding
 	}
 }

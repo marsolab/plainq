@@ -219,7 +219,7 @@ func serverCommand() *scotty.Command {
 			}
 
 			// Initialize telemetry database if enabled.
-			var serverOpts []server.ServerOption
+			var serverOpts []server.Option
 			if cfg.TelemetryEnabled {
 				telemetryDB, telemetryErr := initTelemetryDB(&cfg, logger)
 				if telemetryErr != nil {
@@ -366,7 +366,11 @@ func initTelemetryDB(cfg *config.Config, logger *slog.Logger) (*litekit.Conn, er
 				return nil, fmt.Errorf("get current working directory: %w", pwdErr)
 			}
 
-			dbPath, _ = filepath.Abs(filepath.Join(pwd, "plainq_telemetry.db"))
+			var absErr error
+			dbPath, absErr = filepath.Abs(filepath.Join(pwd, "plainq_telemetry.db"))
+			if absErr != nil {
+				return nil, fmt.Errorf("resolve telemetry database path: %w", absErr)
+			}
 		}
 	}
 

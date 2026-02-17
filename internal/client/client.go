@@ -46,10 +46,7 @@ func New(addr string, options ...Option) (*Client, error) {
 		option(&opts)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), opts.dialTimeout)
-	defer cancel()
-
-	conn, dialErr := grpc.DialContext(ctx, addr,
+	conn, dialErr := grpc.NewClient(addr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithUserAgent(opts.userAgent),
 		grpc.WithChainUnaryInterceptor(opts.interceptors...),

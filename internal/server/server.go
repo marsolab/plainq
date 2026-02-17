@@ -42,7 +42,7 @@ type PlainQ struct {
 	logger            *slog.Logger
 	storage           storage.Storage
 	observer          telemetry.Observer
-	authService       *auth.AuthService
+	authService       *auth.Service
 	authHandler       *auth.Handler
 	permissionService *auth.PermissionService
 
@@ -54,13 +54,13 @@ type PlainQ struct {
 
 func (s *PlainQ) Mount(server *grpc.Server) { v1.RegisterPlainQServiceServer(server, s) }
 
-// NewServer returns a pointer to a new instance of the PlainQ.
-func NewServer(cfg *config.Config, logger *slog.Logger, stor storage.Storage, checker hc.HealthChecker, opts ...ServerOption) (*servekit.Server, error) {
+//nolint:revive // cyclomatic: server initialization requires many configuration steps
+func NewServer(cfg *config.Config, logger *slog.Logger, stor storage.Storage, checker hc.HealthChecker, opts ...Option) (*servekit.Server, error) {
 	// Create a server which holds and serve all listeners.
 	server := servekit.NewServer(logger)
 
 	// Initialize authentication if enabled.
-	var authService *auth.AuthService
+	var authService *auth.Service
 	var authHandler *auth.Handler
 	var permissionService *auth.PermissionService
 
@@ -74,9 +74,9 @@ func NewServer(cfg *config.Config, logger *slog.Logger, stor storage.Storage, ch
 		}
 
 		// Create auth service.
-		authStorage, ok := stor.(auth.AuthStorage)
+		authStorage, ok := stor.(auth.Storage)
 		if !ok {
-			return nil, errors.New("storage does not implement auth.AuthStorage interface")
+			return nil, errors.New("storage does not implement auth.Storage interface")
 		}
 
 		authService = auth.NewAuthService(authStorage, jwtSecret, cfg.AuthIssuer)
@@ -290,17 +290,17 @@ func generateRandomSecret() string {
 	return hex.EncodeToString(bytes)
 }
 
-// ServerOption configures the PlainQ server.
-type ServerOption func(*PlainQ)
+// Option configures the PlainQ server.
+type Option func(*PlainQ)
 
 // WithMetricsStore sets the metrics store for telemetry collection.
-func WithMetricsStore(db *litekit.Conn) ServerOption {
+func WithMetricsStore(db *litekit.Conn) Option {
 	return func(pq *PlainQ) {
 		pq.metricsStore = collector.NewSQLiteStore(db)
 	}
 }
 
 // GetMetricsCollector returns the metrics collector for external use.
-func (pq *PlainQ) GetMetricsCollector() *collector.Collector {
-	return pq.metricsCollector
+func (s *PlainQ) GetMetricsCollector() *collector.Collector {
+	return s.metricsCollector
 }

@@ -17,7 +17,8 @@ const (
 	queuePropsTable = "queue_properties"
 
 	// querySelectQueueForGC returns queue_id from the queuePropsTable.
-	querySelectQueueForGC = `select queue_id from queue_properties where gc_at < datetime('now', '{{gcTimeout}}') order by gc_at limit {{limit}} offset {{offset}};`
+	querySelectQueueForGC = `select queue_id from queue_properties ` +
+		`where gc_at < datetime('now', '{{gcTimeout}}') order by gc_at limit {{limit}} offset {{offset}};`
 
 	// queryUpdateQueueAfterGC updates the gc_at in the queuePropsTable for given queue_id.
 	queryUpdateQueueAfterGC = `update queue_properties set gc_at = current_timestamp where queue_id = ?;`
@@ -177,6 +178,9 @@ func queryListQueues(pageSize int32, cursor string, orderBy v1.ListQueuesRequest
 
 	case v1.ListQueuesRequest_ORDER_BY_CREATED_AT:
 		orderByStr = "created_at"
+
+	default:
+		// Use default orderByStr ("queue_id").
 	}
 
 	switch sortBy {
@@ -193,6 +197,9 @@ func queryListQueues(pageSize int32, cursor string, orderBy v1.ListQueuesRequest
 		if cursor != "" {
 			where = fmt.Sprintf("where %s < '%s'", orderByStr, cursor)
 		}
+
+	default:
+		// Use default sortByStr ("desc").
 	}
 
 	q := fmt.Sprintf(`select * from queue_properties %s order by %s %s limit %d;`, where, orderByStr, sortByStr, pageSize)

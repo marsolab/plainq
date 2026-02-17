@@ -2,30 +2,37 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
 
-// AuthService handles authentication operations
-type AuthService struct {
-	storage  AuthStorage
+const (
+	eventLogin        = "login"
+	eventSignup       = "signup"
+	eventTokenRefresh = "token_refresh"
+)
+
+// Service handles authentication operations.
+type Service struct {
+	storage  Storage
 	jwt      *JWTService
 	denyList *TokenDenyList
 }
 
-// NewAuthService creates a new authentication service
-func NewAuthService(storage AuthStorage, jwtSecret, issuer string) *AuthService {
+// NewAuthService creates a new authentication service.
+func NewAuthService(storage Storage, jwtSecret, issuer string) *Service {
 	jwtService := NewJWTService(jwtSecret, issuer)
 	denyList := NewTokenDenyList(storage)
 
-	return &AuthService{
+	return &Service{
 		storage:  storage,
 		jwt:      jwtService,
 		denyList: denyList,
 	}
 }
 
-// LoginResult contains the result of a successful login
+// LoginResult contains the result of a successful login.
 type LoginResult struct {
 	AccessToken  string
 	RefreshToken string
@@ -33,45 +40,52 @@ type LoginResult struct {
 	Roles        []string
 }
 
-// Login authenticates a user and returns tokens
-func (s *AuthService) Login(ctx context.Context, email, password, deviceInfo, ipAddress string) (*LoginResult, error) {
-	// Get user by email
+// Login authenticates a user and returns tokens.
+//
+//nolint:revive // argument-limit: all parameters are contextually required
+func (s *Service) Login(ctx context.Context, email, password, deviceInfo, ipAddress string) (*LoginResult, error) {
+	// Get user by email.
 	user, err := s.storage.GetUserByEmail(ctx, email)
 	if err != nil {
-		_ = s.storage.LogAuthEvent(ctx, "", "login", false, ipAddress, deviceInfo, fmt.Sprintf("user not found: %s", email))
+		//nolint:errcheck // best-effort logging
+		s.storage.LogAuthEvent(ctx, "", eventLogin, false, ipAddress, deviceInfo, fmt.Sprintf("user not found: %s", email))
 		return nil, fmt.Errorf("invalid credentials")
 	}
 
 	// Verify password
-	// Handle migration from plaintext passwords
+	// Handle migration from plaintext passwords.
 	var valid bool
 	if IsPasswordHashed(user.Password) {
 		valid, err = VerifyPassword(password, user.Password)
 		if err != nil {
-			_ = s.storage.LogAuthEvent(ctx, user.UserID, "login", false, ipAddress, deviceInfo, "password verification error")
+			//nolint:errcheck // best-effort logging
+			s.storage.LogAuthEvent(ctx, user.UserID, eventLogin, false, ipAddress, deviceInfo, "password verification error")
 			return nil, fmt.Errorf("invalid credentials")
 		}
 	} else {
-		// Plaintext password (migration mode)
+		// Plaintext password (migration mode).
 		valid = user.Password == password
-		// Hash the password for next time
+		// Hash the password for next time.
 		if valid {
 			hashedPassword, err := HashPassword(password)
 			if err == nil {
-				_ = s.storage.UpdateUserPassword(ctx, user.UserID, hashedPassword)
+				//nolint:errcheck // best-effort password migration
+				s.storage.UpdateUserPassword(ctx, user.UserID, hashedPassword)
 			}
 		}
 	}
 
 	if !valid {
-		_ = s.storage.LogAuthEvent(ctx, user.UserID, "login", false, ipAddress, deviceInfo, "invalid password")
+		//nolint:errcheck // best-effort logging
+		s.storage.LogAuthEvent(ctx, user.UserID, eventLogin, false, ipAddress, deviceInfo, "invalid password")
 		return nil, fmt.Errorf("invalid credentials")
 	}
 
-	// Get user roles
+	// Get user roles.
 	roles, err := s.storage.GetUserRoles(ctx, user.UserID)
 	if err != nil {
-		_ = s.storage.LogAuthEvent(ctx, user.UserID, "login", false, ipAddress, deviceInfo, "failed to get roles")
+		//nolint:errcheck // best-effort logging
+		s.storage.LogAuthEvent(ctx, user.UserID, eventLogin, false, ipAddress, deviceInfo, "failed to get roles")
 		return nil, fmt.Errorf("failed to get user roles: %w", err)
 	}
 
@@ -80,30 +94,34 @@ func (s *AuthService) Login(ctx context.Context, email, password, deviceInfo, ip
 		roleNames[i] = role.RoleName
 	}
 
-	// Generate access token with role claims
+	// Generate access token with role claims.
 	accessToken, err := s.jwt.GenerateAccessToken(user.UserID, user.Email, roleNames)
 	if err != nil {
-		_ = s.storage.LogAuthEvent(ctx, user.UserID, "login", false, ipAddress, deviceInfo, "failed to generate access token")
+		//nolint:errcheck // best-effort logging
+		s.storage.LogAuthEvent(ctx, user.UserID, eventLogin, false, ipAddress, deviceInfo, "failed to generate access token")
 		return nil, fmt.Errorf("failed to generate access token: %w", err)
 	}
 
-	// Generate refresh token
+	// Generate refresh token.
 	refreshToken, tokenHash, err := s.jwt.GenerateRefreshToken()
 	if err != nil {
-		_ = s.storage.LogAuthEvent(ctx, user.UserID, "login", false, ipAddress, deviceInfo, "failed to generate refresh token")
+		//nolint:errcheck // best-effort logging
+		s.storage.LogAuthEvent(ctx, user.UserID, eventLogin, false, ipAddress, deviceInfo, "failed to generate refresh token")
 		return nil, fmt.Errorf("failed to generate refresh token: %w", err)
 	}
 
-	// Store refresh token
+	// Store refresh token.
 	expiresAt := time.Now().Add(RefreshTokenDuration)
 	_, err = s.storage.CreateRefreshToken(ctx, user.UserID, tokenHash, expiresAt, deviceInfo, ipAddress)
 	if err != nil {
-		_ = s.storage.LogAuthEvent(ctx, user.UserID, "login", false, ipAddress, deviceInfo, "failed to store refresh token")
+		//nolint:errcheck // best-effort logging
+		s.storage.LogAuthEvent(ctx, user.UserID, eventLogin, false, ipAddress, deviceInfo, "failed to store refresh token")
 		return nil, fmt.Errorf("failed to store refresh token: %w", err)
 	}
 
 	// Log successful login
-	_ = s.storage.LogAuthEvent(ctx, user.UserID, "login", true, ipAddress, deviceInfo, "")
+	//nolint:errcheck // best-effort logging
+	s.storage.LogAuthEvent(ctx, user.UserID, eventLogin, true, ipAddress, deviceInfo, "")
 
 	return &LoginResult{
 		AccessToken:  accessToken,
@@ -113,38 +131,44 @@ func (s *AuthService) Login(ctx context.Context, email, password, deviceInfo, ip
 	}, nil
 }
 
-// Signup creates a new user account
-func (s *AuthService) Signup(ctx context.Context, email, password, deviceInfo, ipAddress string) (*LoginResult, error) {
-	// Hash the password
+// Signup creates a new user account.
+//
+//nolint:revive // argument-limit: all parameters are contextually required
+func (s *Service) Signup(ctx context.Context, email, password, deviceInfo, ipAddress string) (*LoginResult, error) {
+	// Hash the password.
 	hashedPassword, err := HashPassword(password)
 	if err != nil {
-		_ = s.storage.LogAuthEvent(ctx, "", "signup", false, ipAddress, deviceInfo, "failed to hash password")
+		//nolint:errcheck // best-effort logging
+		s.storage.LogAuthEvent(ctx, "", eventSignup, false, ipAddress, deviceInfo, "failed to hash password")
 		return nil, fmt.Errorf("failed to hash password: %w", err)
 	}
 
-	// Create the user
+	// Create the user.
 	user, err := s.storage.CreateUser(ctx, email, hashedPassword)
 	if err != nil {
-		_ = s.storage.LogAuthEvent(ctx, "", "signup", false, ipAddress, deviceInfo, fmt.Sprintf("failed to create user: %s", email))
+		//nolint:errcheck // best-effort logging
+		s.storage.LogAuthEvent(ctx, "", eventSignup, false, ipAddress, deviceInfo, fmt.Sprintf("failed to create user: %s", email))
 		return nil, fmt.Errorf("failed to create user: %w", err)
 	}
 
-	// Assign default role (consumer) - get the role ID first
+	// Assign default role (consumer) - get the role ID first.
 	roles, err := s.storage.GetUserRoles(ctx, user.UserID)
 	if err != nil {
-		_ = s.storage.LogAuthEvent(ctx, user.UserID, "signup", false, ipAddress, deviceInfo, "failed to get roles")
+		//nolint:errcheck // best-effort logging
+		s.storage.LogAuthEvent(ctx, user.UserID, eventSignup, false, ipAddress, deviceInfo, "failed to get roles")
 		return nil, fmt.Errorf("failed to get user roles: %w", err)
 	}
 
-	// If user has no roles, assign consumer role (ID from migration)
+	// If user has no roles, assign consumer role (ID from migration).
 	if len(roles) == 0 {
-		err = s.storage.AssignRole(ctx, user.UserID, "01HQ5RJNXS6TPXK89PQWY4N8JF") // consumer role
+		err = s.storage.AssignRole(ctx, user.UserID, "01HQ5RJNXS6TPXK89PQWY4N8JF") // consumer role.
 		if err != nil {
-			_ = s.storage.LogAuthEvent(ctx, user.UserID, "signup", false, ipAddress, deviceInfo, "failed to assign default role")
+			//nolint:errcheck // best-effort logging
+			s.storage.LogAuthEvent(ctx, user.UserID, eventSignup, false, ipAddress, deviceInfo, "failed to assign default role")
 			return nil, fmt.Errorf("failed to assign default role: %w", err)
 		}
 
-		// Refresh roles
+		// Refresh roles.
 		roles, err = s.storage.GetUserRoles(ctx, user.UserID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get user roles: %w", err)
@@ -156,28 +180,32 @@ func (s *AuthService) Signup(ctx context.Context, email, password, deviceInfo, i
 		roleNames[i] = role.RoleName
 	}
 
-	// Generate tokens
+	// Generate tokens.
 	accessToken, err := s.jwt.GenerateAccessToken(user.UserID, user.Email, roleNames)
 	if err != nil {
-		_ = s.storage.LogAuthEvent(ctx, user.UserID, "signup", false, ipAddress, deviceInfo, "failed to generate access token")
+		//nolint:errcheck // best-effort logging
+		s.storage.LogAuthEvent(ctx, user.UserID, eventSignup, false, ipAddress, deviceInfo, "failed to generate access token")
 		return nil, fmt.Errorf("failed to generate access token: %w", err)
 	}
 
 	refreshToken, tokenHash, err := s.jwt.GenerateRefreshToken()
 	if err != nil {
-		_ = s.storage.LogAuthEvent(ctx, user.UserID, "signup", false, ipAddress, deviceInfo, "failed to generate refresh token")
+		//nolint:errcheck // best-effort logging
+		s.storage.LogAuthEvent(ctx, user.UserID, eventSignup, false, ipAddress, deviceInfo, "failed to generate refresh token")
 		return nil, fmt.Errorf("failed to generate refresh token: %w", err)
 	}
 
 	expiresAt := time.Now().Add(RefreshTokenDuration)
 	_, err = s.storage.CreateRefreshToken(ctx, user.UserID, tokenHash, expiresAt, deviceInfo, ipAddress)
 	if err != nil {
-		_ = s.storage.LogAuthEvent(ctx, user.UserID, "signup", false, ipAddress, deviceInfo, "failed to store refresh token")
+		//nolint:errcheck // best-effort logging
+		s.storage.LogAuthEvent(ctx, user.UserID, eventSignup, false, ipAddress, deviceInfo, "failed to store refresh token")
 		return nil, fmt.Errorf("failed to store refresh token: %w", err)
 	}
 
 	// Log successful signup
-	_ = s.storage.LogAuthEvent(ctx, user.UserID, "signup", true, ipAddress, deviceInfo, "")
+	//nolint:errcheck // best-effort logging
+	s.storage.LogAuthEvent(ctx, user.UserID, eventSignup, true, ipAddress, deviceInfo, "")
 
 	return &LoginResult{
 		AccessToken:  accessToken,
@@ -187,38 +215,43 @@ func (s *AuthService) Signup(ctx context.Context, email, password, deviceInfo, i
 	}, nil
 }
 
-// RefreshAccessToken generates a new access token using a refresh token
-func (s *AuthService) RefreshAccessToken(ctx context.Context, refreshToken, deviceInfo, ipAddress string) (*LoginResult, error) {
-	// Get refresh token from storage
+// RefreshAccessToken generates a new access token using a refresh token.
+func (s *Service) RefreshAccessToken(ctx context.Context, refreshToken, deviceInfo, ipAddress string) (*LoginResult, error) {
+	// Get refresh token from storage.
 	storedToken, err := s.storage.GetRefreshToken(ctx, refreshToken)
 	if err != nil {
-		_ = s.storage.LogAuthEvent(ctx, "", "token_refresh", false, ipAddress, deviceInfo, "refresh token not found")
-		return nil, fmt.Errorf("invalid refresh token")
+		//nolint:errcheck // best-effort logging
+		s.storage.LogAuthEvent(ctx, "", eventTokenRefresh, false, ipAddress, deviceInfo, "refresh token not found")
+		return nil, errors.New("invalid refresh token")
 	}
 
-	// Check if token is revoked
+	// Check if token is revoked.
 	if storedToken.Revoked {
-		_ = s.storage.LogAuthEvent(ctx, storedToken.UserID, "token_refresh", false, ipAddress, deviceInfo, "refresh token revoked")
-		return nil, fmt.Errorf("refresh token has been revoked")
+		//nolint:errcheck // best-effort logging
+		s.storage.LogAuthEvent(ctx, storedToken.UserID, eventTokenRefresh, false, ipAddress, deviceInfo, "refresh token revoked")
+		return nil, errors.New("refresh token has been revoked")
 	}
 
-	// Check if token is expired
+	// Check if token is expired.
 	if time.Now().After(storedToken.ExpiresAt) {
-		_ = s.storage.LogAuthEvent(ctx, storedToken.UserID, "token_refresh", false, ipAddress, deviceInfo, "refresh token expired")
-		return nil, fmt.Errorf("refresh token has expired")
+		//nolint:errcheck // best-effort logging
+		s.storage.LogAuthEvent(ctx, storedToken.UserID, eventTokenRefresh, false, ipAddress, deviceInfo, "refresh token expired")
+		return nil, errors.New("refresh token has expired")
 	}
 
-	// Get user
+	// Get user.
 	user, err := s.storage.GetUserByID(ctx, storedToken.UserID)
 	if err != nil {
-		_ = s.storage.LogAuthEvent(ctx, storedToken.UserID, "token_refresh", false, ipAddress, deviceInfo, "user not found")
-		return nil, fmt.Errorf("user not found")
+		//nolint:errcheck // best-effort logging
+		s.storage.LogAuthEvent(ctx, storedToken.UserID, eventTokenRefresh, false, ipAddress, deviceInfo, "user not found")
+		return nil, errors.New("user not found")
 	}
 
-	// Get user roles
+	// Get user roles.
 	roles, err := s.storage.GetUserRoles(ctx, user.UserID)
 	if err != nil {
-		_ = s.storage.LogAuthEvent(ctx, user.UserID, "token_refresh", false, ipAddress, deviceInfo, "failed to get roles")
+		//nolint:errcheck // best-effort logging
+		s.storage.LogAuthEvent(ctx, user.UserID, eventTokenRefresh, false, ipAddress, deviceInfo, "failed to get roles")
 		return nil, fmt.Errorf("failed to get user roles: %w", err)
 	}
 
@@ -227,87 +260,101 @@ func (s *AuthService) RefreshAccessToken(ctx context.Context, refreshToken, devi
 		roleNames[i] = role.RoleName
 	}
 
-	// Generate new access token
+	// Generate new access token.
 	accessToken, err := s.jwt.GenerateAccessToken(user.UserID, user.Email, roleNames)
 	if err != nil {
-		_ = s.storage.LogAuthEvent(ctx, user.UserID, "token_refresh", false, ipAddress, deviceInfo, "failed to generate access token")
+		//nolint:errcheck // best-effort logging
+		s.storage.LogAuthEvent(ctx, user.UserID, eventTokenRefresh, false, ipAddress, deviceInfo, "failed to generate access token")
 		return nil, fmt.Errorf("failed to generate access token: %w", err)
 	}
 
 	// Update last used time
-	_ = s.storage.UpdateRefreshTokenLastUsed(ctx, storedToken.TokenID)
+	//nolint:errcheck // best-effort update
+	s.storage.UpdateRefreshTokenLastUsed(ctx, storedToken.TokenID)
 
 	// Log successful refresh
-	_ = s.storage.LogAuthEvent(ctx, user.UserID, "token_refresh", true, ipAddress, deviceInfo, "")
+	//nolint:errcheck // best-effort logging
+	s.storage.LogAuthEvent(ctx, user.UserID, eventTokenRefresh, true, ipAddress, deviceInfo, "")
 
 	return &LoginResult{
 		AccessToken:  accessToken,
-		RefreshToken: refreshToken, // Return the same refresh token
+		RefreshToken: refreshToken, // Return the same refresh token.
 		User:         user,
 		Roles:        roleNames,
 	}, nil
 }
 
-// Logout invalidates tokens for a user
-func (s *AuthService) Logout(ctx context.Context, accessToken, refreshToken string, ipAddress, userAgent string) error {
-	// Extract user ID and JTI from access token
+// Logout invalidates tokens for a user.
+//
+//nolint:revive // argument-limit: all parameters are contextually required
+func (s *Service) Logout(ctx context.Context, accessToken, refreshToken, ipAddress, userAgent string) error {
+	// Extract user ID and JTI from access token.
 	claims, err := s.jwt.ValidateToken(accessToken)
 	if err != nil {
-		// Even if token is invalid, try to revoke refresh token
+		// Even if token is invalid, try to revoke refresh token.
 		if refreshToken != "" {
 			storedToken, err := s.storage.GetRefreshToken(ctx, refreshToken)
 			if err == nil {
-				_ = s.storage.RevokeRefreshToken(ctx, storedToken.TokenID)
+				//nolint:errcheck // best-effort revocation
+				s.storage.RevokeRefreshToken(ctx, storedToken.TokenID)
 			}
 		}
 		return fmt.Errorf("invalid access token: %w", err)
 	}
 
-	// Add access token to deny list (TTL+1)
+	// Add access token to deny list (TTL+1).
 	expiresAt := claims.ExpiresAt.Time
-	err = s.denyList.Add(ctx, claims.ID, claims.UserID, expiresAt, "logout")
+	err = s.denyList.Add(ctx, DenyListEntry{
+		JTI:       claims.ID,
+		UserID:    claims.UserID,
+		ExpiresAt: expiresAt,
+		Reason:    "logout",
+	})
 	if err != nil {
-		_ = s.storage.LogAuthEvent(ctx, claims.UserID, "logout", false, ipAddress, userAgent, "failed to add to deny list")
+		//nolint:errcheck // best-effort logging
+		s.storage.LogAuthEvent(ctx, claims.UserID, "logout", false, ipAddress, userAgent, "failed to add to deny list")
 		return fmt.Errorf("failed to revoke access token: %w", err)
 	}
 
-	// Revoke refresh token if provided
+	// Revoke refresh token if provided.
 	if refreshToken != "" {
 		storedToken, err := s.storage.GetRefreshToken(ctx, refreshToken)
 		if err == nil {
 			err = s.storage.RevokeRefreshToken(ctx, storedToken.TokenID)
 			if err != nil {
-				_ = s.storage.LogAuthEvent(ctx, claims.UserID, "logout", false, ipAddress, userAgent, "failed to revoke refresh token")
+				//nolint:errcheck // best-effort logging
+				s.storage.LogAuthEvent(ctx, claims.UserID, "logout", false, ipAddress, userAgent, "failed to revoke refresh token")
 				return fmt.Errorf("failed to revoke refresh token: %w", err)
 			}
 		}
 	}
 
 	// Log successful logout
-	_ = s.storage.LogAuthEvent(ctx, claims.UserID, "logout", true, ipAddress, userAgent, "")
+	//nolint:errcheck // best-effort logging
+	s.storage.LogAuthEvent(ctx, claims.UserID, "logout", true, ipAddress, userAgent, "")
 
 	return nil
 }
 
-// ValidateToken validates an access token and returns claims
-func (s *AuthService) ValidateToken(ctx context.Context, token string) (*Claims, error) {
-	// Parse and validate token
+// ValidateToken validates an access token and returns claims.
+func (s *Service) ValidateToken(_ context.Context, token string) (*Claims, error) {
+	// Parse and validate token.
 	claims, err := s.jwt.ValidateToken(token)
 	if err != nil {
 		return nil, err
 	}
 
-	// Check if token is in deny list
+	// Check if token is in deny list.
 	if s.denyList.IsRevoked(claims.ID) {
-		return nil, fmt.Errorf("token has been revoked")
+		return nil, errors.New("token has been revoked")
 	}
 
 	return claims, nil
 }
 
-// RevokeAllUserTokens revokes all tokens for a user (e.g., on password change)
-func (s *AuthService) RevokeAllUserTokens(ctx context.Context, userID string) error {
-	// Revoke all refresh tokens
+// RevokeAllUserTokens revokes all tokens for a user (e.g., on password change).
+func (s *Service) RevokeAllUserTokens(ctx context.Context, userID string) error {
+	// Revoke all refresh tokens.
 	err := s.storage.RevokeAllUserRefreshTokens(ctx, userID)
 	if err != nil {
 		return fmt.Errorf("failed to revoke refresh tokens: %w", err)
@@ -315,17 +362,17 @@ func (s *AuthService) RevokeAllUserTokens(ctx context.Context, userID string) er
 
 	// Note: We don't add all access tokens to deny list since we don't have a way to enumerate them
 	// Instead, we rely on short access token TTL (15 minutes)
-	// In a production system, you might want to maintain a session table to track all active access tokens
+	// In a production system, you might want to maintain a session table to track all active access tokens.
 
 	return nil
 }
 
-// InitializeDenyList loads denied tokens from storage
-func (s *AuthService) InitializeDenyList(ctx context.Context) error {
+// InitializeDenyList loads denied tokens from storage.
+func (s *Service) InitializeDenyList(ctx context.Context) error {
 	return s.denyList.LoadFromStorage(ctx)
 }
 
-// Stop stops background services
-func (s *AuthService) Stop() {
+// Stop stops background services.
+func (s *Service) Stop() {
 	s.denyList.Stop()
 }
