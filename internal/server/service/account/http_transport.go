@@ -10,11 +10,11 @@ import (
 	"time"
 
 	"github.com/cristalhq/jwt/v5"
-	"github.com/plainq/servekit/authkit/jwtkit"
-	"github.com/plainq/servekit/errkit"
-	"github.com/plainq/servekit/idkit"
-	"github.com/plainq/servekit/mailkit"
-	"github.com/plainq/servekit/respond"
+	"github.com/marsolab/servekit/authkit/jwtkit"
+	"github.com/marsolab/servekit/errkit"
+	"github.com/marsolab/servekit/httpkit"
+	"github.com/marsolab/servekit/idkit"
+	"github.com/marsolab/servekit/mailkit"
 )
 
 const (
@@ -24,7 +24,7 @@ const (
 func (s *Service) signUpHandler(w http.ResponseWriter, r *http.Request) {
 	// Check if registration is enabled
 	if !s.cfg.AuthRegistrationEnable {
-		respond.ErrorHTTP(w, r, fmt.Errorf("%w: user registration is disabled", errkit.ErrUnauthorized))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: user registration is disabled", errkit.ErrUnauthorized))
 		return
 	}
 
@@ -37,7 +37,7 @@ func (s *Service) signUpHandler(w http.ResponseWriter, r *http.Request) {
 	var req request
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("%w: decode request json: %s", errkit.ErrInvalidArgument, err.Error()))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: decode request json: %s", errkit.ErrInvalidArgument, err.Error()))
 		return
 	}
 
@@ -51,19 +51,19 @@ func (s *Service) signUpHandler(w http.ResponseWriter, r *http.Request) {
 
 	if req.Name != "" {
 		if err := validateUserName(req.Name); err != nil {
-			respond.ErrorHTTP(w, r, fmt.Errorf("validate user name: %w", err))
+			httpkit.ErrorHTTP(w, r, fmt.Errorf("validate user name: %w", err))
 			return
 		}
 	}
 
 	if err := validatePassword(req.Password); err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("validate user password: %w", err))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("validate user password: %w", err))
 		return
 	}
 
 	hashedPassword, hashErr := s.hasher.HashPassword(req.Password)
 	if hashErr != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("hash user password: %w", hashErr))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("hash user password: %w", hashErr))
 		return
 	}
 
@@ -84,11 +84,11 @@ func (s *Service) signUpHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.storage.CreateAccount(r.Context(), userAccount); err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("create user record: %w", err))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("create user record: %w", err))
 		return
 	}
 
-	respond.Status(w, r, http.StatusCreated)
+	httpkit.Status(w, r, http.StatusCreated)
 }
 
 func (s *Service) signInHandler(w http.ResponseWriter, r *http.Request) {
@@ -100,7 +100,7 @@ func (s *Service) signInHandler(w http.ResponseWriter, r *http.Request) {
 	var req request
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("%w: decode request json: %s", errkit.ErrInvalidArgument, err.Error()))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: decode request json: %s", errkit.ErrInvalidArgument, err.Error()))
 		return
 	}
 
@@ -113,34 +113,34 @@ func (s *Service) signInHandler(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	if err := validateEmail(req.Email); err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("validate email: %w", err))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("validate email: %w", err))
 		return
 	}
 
 	account, err := s.storage.GetAccountByEmail(r.Context(), req.Email)
 	if err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("get account: %w", err))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("get account: %w", err))
 		return
 	}
 
 	if err := s.hasher.CheckPassword(account.Password, req.Password); err != nil {
-		respond.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
+		httpkit.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
 		return
 	}
 
 	session, err := s.createSession(r.Context(), account.ID, idkit.ULID(), time.Now())
 	if err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("create session: %w", err))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("create session: %w", err))
 		return
 	}
 
-	respond.JSON(w, r, session)
+	httpkit.JSON(w, r, session)
 }
 
 func (s *Service) signOutHandler(w http.ResponseWriter, r *http.Request) {
 	token := r.Header.Get("Authorization")
 	if token == "" {
-		respond.ErrorHTTP(w, r, errkit.ErrUnauthorized)
+		httpkit.ErrorHTTP(w, r, errkit.ErrUnauthorized)
 		return
 	}
 
@@ -148,11 +148,11 @@ func (s *Service) signOutHandler(w http.ResponseWriter, r *http.Request) {
 	token = strings.TrimSpace(token)
 
 	if err := s.storage.DenyAccessToken(r.Context(), token, s.cfg.AuthAccessTokenTTL); err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("deny access token: %w", err))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("deny access token: %w", err))
 		return
 	}
 
-	respond.Status(w, r, http.StatusOK)
+	httpkit.Status(w, r, http.StatusOK)
 }
 
 func (s *Service) refreshHandler(w http.ResponseWriter, r *http.Request) {
@@ -163,7 +163,7 @@ func (s *Service) refreshHandler(w http.ResponseWriter, r *http.Request) {
 	var req request
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("%w: decode request json: %s", errkit.ErrInvalidArgument, err.Error()))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: decode request json: %s", errkit.ErrInvalidArgument, err.Error()))
 		return
 	}
 
@@ -177,36 +177,36 @@ func (s *Service) refreshHandler(w http.ResponseWriter, r *http.Request) {
 
 	token, parseErr := s.tokman.ParseVerify(req.RefreshToken)
 	if parseErr != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("%w: parse refresh token: %s", errkit.ErrUnauthenticated, parseErr.Error()))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: parse refresh token: %s", errkit.ErrUnauthenticated, parseErr.Error()))
 		return
 	}
 
 	aid, ok := token.Meta["aid"]
 	if !ok {
-		respond.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
+		httpkit.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
 		return
 	}
 
 	accountID, ok := aid.(string)
 	if !ok {
-		respond.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
+		httpkit.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
 		return
 	}
 
 	// Delete the old refresh token.
 	if err := s.storage.DeleteRefreshToken(r.Context(), req.RefreshToken); err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("delete refresh token: %w", err))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("delete refresh token: %w", err))
 		return
 	}
 
 	// Create new session.
 	session, err := s.createSession(r.Context(), accountID, idkit.ULID(), time.Now())
 	if err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("create session: %w", err))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("create session: %w", err))
 		return
 	}
 
-	respond.JSON(w, r, session)
+	httpkit.JSON(w, r, session)
 }
 
 func (s *Service) emailVerificationHandler(w http.ResponseWriter, r *http.Request) {
@@ -216,13 +216,13 @@ func (s *Service) emailVerificationHandler(w http.ResponseWriter, r *http.Reques
 
 	var req request
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("%w: decode request json: %s", errkit.ErrInvalidArgument, err.Error()))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: decode request json: %s", errkit.ErrInvalidArgument, err.Error()))
 		return
 	}
 	defer r.Body.Close()
 
 	if err := validateEmail(req.Email); err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("validate email: %w", err))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("validate email: %w", err))
 		return
 	}
 
@@ -235,11 +235,11 @@ func (s *Service) emailVerificationHandler(w http.ResponseWriter, r *http.Reques
 		HTML:    fmt.Sprintf("<p>Click <a href='https://plainq.com/verify?code=%s'>here</a> to verify your email.</p>", code),
 		Text:    fmt.Sprintf("Click here to verify your email: https://plainq.com/verify?code=%s", code),
 	}); err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("send email: %w", err))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("send email: %w", err))
 		return
 	}
 
-	respond.Status(w, r, http.StatusOK)
+	httpkit.Status(w, r, http.StatusOK)
 }
 
 func (s *Service) verifyEmailHandler(w http.ResponseWriter, r *http.Request) {
@@ -249,7 +249,7 @@ func (s *Service) verifyEmailHandler(w http.ResponseWriter, r *http.Request) {
 
 	var req request
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("%w: decode request json: %s", errkit.ErrInvalidArgument, err.Error()))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: decode request json: %s", errkit.ErrInvalidArgument, err.Error()))
 		return
 	}
 
@@ -263,7 +263,7 @@ func (s *Service) verifyEmailHandler(w http.ResponseWriter, r *http.Request) {
 
 	// TODO: Implement verification code validation logic
 
-	respond.Status(w, r, http.StatusOK)
+	httpkit.Status(w, r, http.StatusOK)
 }
 
 func (s *Service) resetPasswordHandler(w http.ResponseWriter, r *http.Request) {
@@ -273,7 +273,7 @@ func (s *Service) resetPasswordHandler(w http.ResponseWriter, r *http.Request) {
 
 	var req request
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("%w: decode request json: %s", errkit.ErrInvalidArgument, err.Error()))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: decode request json: %s", errkit.ErrInvalidArgument, err.Error()))
 		return
 	}
 
@@ -286,13 +286,13 @@ func (s *Service) resetPasswordHandler(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	if err := validateEmail(req.Email); err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("validate email: %w", err))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("validate email: %w", err))
 		return
 	}
 
 	// TODO: Implement password reset code sending logic
 
-	respond.Status(w, r, http.StatusOK)
+	httpkit.Status(w, r, http.StatusOK)
 }
 
 func (s *Service) verifyPasswordResetCodeHandler(w http.ResponseWriter, r *http.Request) {
@@ -303,7 +303,7 @@ func (s *Service) verifyPasswordResetCodeHandler(w http.ResponseWriter, r *http.
 	var req request
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("%w: decode request json: %s", errkit.ErrInvalidArgument, err.Error()))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: decode request json: %s", errkit.ErrInvalidArgument, err.Error()))
 		return
 	}
 
@@ -317,7 +317,7 @@ func (s *Service) verifyPasswordResetCodeHandler(w http.ResponseWriter, r *http.
 
 	// TODO: Implement password reset code validation logic
 
-	respond.Status(w, r, http.StatusOK)
+	httpkit.Status(w, r, http.StatusOK)
 }
 
 // createSession is a helper function to create a new session.

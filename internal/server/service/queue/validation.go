@@ -3,8 +3,8 @@ package queue
 import (
 	"strings"
 
-	"github.com/plainq/servekit/errkit"
-	"github.com/plainq/servekit/idkit"
+	"github.com/marsolab/servekit/errkit"
+	"github.com/marsolab/servekit/idkit"
 )
 
 // validateQueueIDFromRequest performs validation of the queue identifier.

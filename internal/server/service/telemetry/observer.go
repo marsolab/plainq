@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/VictoriaMetrics/metrics"
-	v1 "github.com/plainq/plainq/internal/server/schema/v1"
+	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 )
 
 // observedMetrics represents a set of observed metrics.

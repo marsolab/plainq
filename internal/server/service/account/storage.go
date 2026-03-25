@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/plainq/servekit/authkit/hashkit"
+	"github.com/marsolab/servekit/authkit/hashkit"
 )
 
 // SQLiteStorage implements the account Storage interface using SQLite

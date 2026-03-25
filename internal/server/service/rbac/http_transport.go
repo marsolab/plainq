@@ -7,10 +7,10 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/plainq/plainq/internal/server/middleware"
-	"github.com/plainq/servekit/errkit"
-	"github.com/plainq/servekit/idkit"
-	"github.com/plainq/servekit/respond"
+	"github.com/marsolab/plainq/internal/server/middleware"
+	"github.com/marsolab/servekit/errkit"
+	"github.com/marsolab/servekit/httpkit"
+	"github.com/marsolab/servekit/idkit"
 )
 
 // Role Management Handlers
@@ -18,11 +18,11 @@ import (
 func (s *Service) listRolesHandler(w http.ResponseWriter, r *http.Request) {
 	roles, err := s.storage.GetAllRoles(r.Context())
 	if err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("get all roles: %w", err))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("get all roles: %w", err))
 		return
 	}
 
-	respond.JSON(w, r, roles)
+	httpkit.JSON(w, r, roles)
 }
 
 func (s *Service) createRoleHandler(w http.ResponseWriter, r *http.Request) {
@@ -32,7 +32,7 @@ func (s *Service) createRoleHandler(w http.ResponseWriter, r *http.Request) {
 
 	var req request
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("%w: decode request json: %s", errkit.ErrInvalidArgument, err.Error()))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: decode request json: %s", errkit.ErrInvalidArgument, err.Error()))
 		return
 	}
 
@@ -43,7 +43,7 @@ func (s *Service) createRoleHandler(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	if req.RoleName == "" {
-		respond.ErrorHTTP(w, r, fmt.Errorf("%w: role name is required", errkit.ErrInvalidArgument))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: role name is required", errkit.ErrInvalidArgument))
 		return
 	}
 
@@ -53,33 +53,33 @@ func (s *Service) createRoleHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.storage.CreateRole(r.Context(), role); err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("create role: %w", err))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("create role: %w", err))
 		return
 	}
 
-	respond.JSON(w, r, role)
+	httpkit.JSON(w, r, role)
 }
 
 func (s *Service) getRoleHandler(w http.ResponseWriter, r *http.Request) {
 	roleID := chi.URLParam(r, "roleID")
 	if roleID == "" {
-		respond.ErrorHTTP(w, r, fmt.Errorf("%w: role ID is required", errkit.ErrInvalidArgument))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: role ID is required", errkit.ErrInvalidArgument))
 		return
 	}
 
 	role, err := s.storage.GetRoleByID(r.Context(), roleID)
 	if err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("get role: %w", err))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("get role: %w", err))
 		return
 	}
 
-	respond.JSON(w, r, role)
+	httpkit.JSON(w, r, role)
 }
 
 func (s *Service) updateRoleHandler(w http.ResponseWriter, r *http.Request) {
 	roleID := chi.URLParam(r, "roleID")
 	if roleID == "" {
-		respond.ErrorHTTP(w, r, fmt.Errorf("%w: role ID is required", errkit.ErrInvalidArgument))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: role ID is required", errkit.ErrInvalidArgument))
 		return
 	}
 
@@ -89,7 +89,7 @@ func (s *Service) updateRoleHandler(w http.ResponseWriter, r *http.Request) {
 
 	var req request
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("%w: decode request json: %s", errkit.ErrInvalidArgument, err.Error()))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: decode request json: %s", errkit.ErrInvalidArgument, err.Error()))
 		return
 	}
 
@@ -100,14 +100,14 @@ func (s *Service) updateRoleHandler(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	if req.RoleName == "" {
-		respond.ErrorHTTP(w, r, fmt.Errorf("%w: role name is required", errkit.ErrInvalidArgument))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: role name is required", errkit.ErrInvalidArgument))
 		return
 	}
 
 	// Get existing role
 	role, err := s.storage.GetRoleByID(r.Context(), roleID)
 	if err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("get role: %w", err))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("get role: %w", err))
 		return
 	}
 
@@ -115,26 +115,26 @@ func (s *Service) updateRoleHandler(w http.ResponseWriter, r *http.Request) {
 	role.RoleName = req.RoleName
 
 	if err := s.storage.UpdateRole(r.Context(), *role); err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("update role: %w", err))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("update role: %w", err))
 		return
 	}
 
-	respond.JSON(w, r, role)
+	httpkit.JSON(w, r, role)
 }
 
 func (s *Service) deleteRoleHandler(w http.ResponseWriter, r *http.Request) {
 	roleID := chi.URLParam(r, "roleID")
 	if roleID == "" {
-		respond.ErrorHTTP(w, r, fmt.Errorf("%w: role ID is required", errkit.ErrInvalidArgument))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: role ID is required", errkit.ErrInvalidArgument))
 		return
 	}
 
 	if err := s.storage.DeleteRole(r.Context(), roleID); err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("delete role: %w", err))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("delete role: %w", err))
 		return
 	}
 
-	respond.Status(w, r, http.StatusNoContent)
+	httpkit.Status(w, r, http.StatusNoContent)
 }
 
 // User Role Assignment Handlers
@@ -142,17 +142,17 @@ func (s *Service) deleteRoleHandler(w http.ResponseWriter, r *http.Request) {
 func (s *Service) getUserRolesHandler(w http.ResponseWriter, r *http.Request) {
 	userID := chi.URLParam(r, "userID")
 	if userID == "" {
-		respond.ErrorHTTP(w, r, fmt.Errorf("%w: user ID is required", errkit.ErrInvalidArgument))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: user ID is required", errkit.ErrInvalidArgument))
 		return
 	}
 
 	roles, err := s.storage.GetUserRoles(r.Context(), userID)
 	if err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("get user roles: %w", err))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("get user roles: %w", err))
 		return
 	}
 
-	respond.JSON(w, r, roles)
+	httpkit.JSON(w, r, roles)
 }
 
 func (s *Service) assignRoleToUserHandler(w http.ResponseWriter, r *http.Request) {
@@ -160,16 +160,16 @@ func (s *Service) assignRoleToUserHandler(w http.ResponseWriter, r *http.Request
 	roleID := chi.URLParam(r, "roleID")
 
 	if userID == "" || roleID == "" {
-		respond.ErrorHTTP(w, r, fmt.Errorf("%w: user ID and role ID are required", errkit.ErrInvalidArgument))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: user ID and role ID are required", errkit.ErrInvalidArgument))
 		return
 	}
 
 	if err := s.storage.AssignRoleToUser(r.Context(), userID, roleID); err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("assign role to user: %w", err))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("assign role to user: %w", err))
 		return
 	}
 
-	respond.Status(w, r, http.StatusCreated)
+	httpkit.Status(w, r, http.StatusCreated)
 }
 
 func (s *Service) removeRoleFromUserHandler(w http.ResponseWriter, r *http.Request) {
@@ -177,16 +177,16 @@ func (s *Service) removeRoleFromUserHandler(w http.ResponseWriter, r *http.Reque
 	roleID := chi.URLParam(r, "roleID")
 
 	if userID == "" || roleID == "" {
-		respond.ErrorHTTP(w, r, fmt.Errorf("%w: user ID and role ID are required", errkit.ErrInvalidArgument))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: user ID and role ID are required", errkit.ErrInvalidArgument))
 		return
 	}
 
 	if err := s.storage.RemoveRoleFromUser(r.Context(), userID, roleID); err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("remove role from user: %w", err))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("remove role from user: %w", err))
 		return
 	}
 
-	respond.Status(w, r, http.StatusNoContent)
+	httpkit.Status(w, r, http.StatusNoContent)
 }
 
 // Queue Permission Handlers
@@ -194,14 +194,14 @@ func (s *Service) removeRoleFromUserHandler(w http.ResponseWriter, r *http.Reque
 func (s *Service) getQueuePermissionsHandler(w http.ResponseWriter, r *http.Request) {
 	queueID := chi.URLParam(r, "queueID")
 	if queueID == "" {
-		respond.ErrorHTTP(w, r, fmt.Errorf("%w: queue ID is required", errkit.ErrInvalidArgument))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: queue ID is required", errkit.ErrInvalidArgument))
 		return
 	}
 
 	// Get all roles and their permissions for this queue
 	roles, err := s.storage.GetAllRoles(r.Context())
 	if err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("get all roles: %w", err))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("get all roles: %w", err))
 		return
 	}
 
@@ -231,7 +231,7 @@ func (s *Service) getQueuePermissionsHandler(w http.ResponseWriter, r *http.Requ
 		})
 	}
 
-	respond.JSON(w, r, permissions)
+	httpkit.JSON(w, r, permissions)
 }
 
 func (s *Service) getQueueRolePermissionHandler(w http.ResponseWriter, r *http.Request) {
@@ -239,17 +239,17 @@ func (s *Service) getQueueRolePermissionHandler(w http.ResponseWriter, r *http.R
 	roleID := chi.URLParam(r, "roleID")
 
 	if queueID == "" || roleID == "" {
-		respond.ErrorHTTP(w, r, fmt.Errorf("%w: queue ID and role ID are required", errkit.ErrInvalidArgument))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: queue ID and role ID are required", errkit.ErrInvalidArgument))
 		return
 	}
 
 	permission, err := s.storage.GetQueuePermissions(r.Context(), queueID, roleID)
 	if err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("get queue permission: %w", err))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("get queue permission: %w", err))
 		return
 	}
 
-	respond.JSON(w, r, permission)
+	httpkit.JSON(w, r, permission)
 }
 
 func (s *Service) updateQueuePermissionHandler(w http.ResponseWriter, r *http.Request) {
@@ -257,7 +257,7 @@ func (s *Service) updateQueuePermissionHandler(w http.ResponseWriter, r *http.Re
 	roleID := chi.URLParam(r, "roleID")
 
 	if queueID == "" || roleID == "" {
-		respond.ErrorHTTP(w, r, fmt.Errorf("%w: queue ID and role ID are required", errkit.ErrInvalidArgument))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: queue ID and role ID are required", errkit.ErrInvalidArgument))
 		return
 	}
 
@@ -270,7 +270,7 @@ func (s *Service) updateQueuePermissionHandler(w http.ResponseWriter, r *http.Re
 
 	var req request
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("%w: decode request json: %s", errkit.ErrInvalidArgument, err.Error()))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: decode request json: %s", errkit.ErrInvalidArgument, err.Error()))
 		return
 	}
 
@@ -294,19 +294,19 @@ func (s *Service) updateQueuePermissionHandler(w http.ResponseWriter, r *http.Re
 	if err != nil {
 		// Create new permission if it doesn't exist
 		if err := s.storage.CreateQueuePermission(r.Context(), permission); err != nil {
-			respond.ErrorHTTP(w, r, fmt.Errorf("create queue permission: %w", err))
+			httpkit.ErrorHTTP(w, r, fmt.Errorf("create queue permission: %w", err))
 			return
 		}
 	} else {
 		// Update existing permission
 		permission.CreatedAt = existingPerm.CreatedAt
 		if err := s.storage.UpdateQueuePermission(r.Context(), permission); err != nil {
-			respond.ErrorHTTP(w, r, fmt.Errorf("update queue permission: %w", err))
+			httpkit.ErrorHTTP(w, r, fmt.Errorf("update queue permission: %w", err))
 			return
 		}
 	}
 
-	respond.JSON(w, r, permission)
+	httpkit.JSON(w, r, permission)
 }
 
 func (s *Service) deleteQueuePermissionHandler(w http.ResponseWriter, r *http.Request) {
@@ -314,16 +314,16 @@ func (s *Service) deleteQueuePermissionHandler(w http.ResponseWriter, r *http.Re
 	roleID := chi.URLParam(r, "roleID")
 
 	if queueID == "" || roleID == "" {
-		respond.ErrorHTTP(w, r, fmt.Errorf("%w: queue ID and role ID are required", errkit.ErrInvalidArgument))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: queue ID and role ID are required", errkit.ErrInvalidArgument))
 		return
 	}
 
 	if err := s.storage.DeleteQueuePermission(r.Context(), queueID, roleID); err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("delete queue permission: %w", err))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("delete queue permission: %w", err))
 		return
 	}
 
-	respond.Status(w, r, http.StatusNoContent)
+	httpkit.Status(w, r, http.StatusNoContent)
 }
 
 // Permission Checking Handler
@@ -333,14 +333,14 @@ func (s *Service) checkQueuePermissionHandler(w http.ResponseWriter, r *http.Req
 	permissionStr := chi.URLParam(r, "permission")
 
 	if queueID == "" || permissionStr == "" {
-		respond.ErrorHTTP(w, r, fmt.Errorf("%w: queue ID and permission are required", errkit.ErrInvalidArgument))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: queue ID and permission are required", errkit.ErrInvalidArgument))
 		return
 	}
 
 	// Get user from context
 	userInfo, ok := middleware.GetUserFromContext(r.Context())
 	if !ok {
-		respond.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
+		httpkit.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
 		return
 	}
 
@@ -356,13 +356,13 @@ func (s *Service) checkQueuePermissionHandler(w http.ResponseWriter, r *http.Req
 	case "delete":
 		permission = PermissionDelete
 	default:
-		respond.ErrorHTTP(w, r, fmt.Errorf("%w: invalid permission type", errkit.ErrInvalidArgument))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: invalid permission type", errkit.ErrInvalidArgument))
 		return
 	}
 
 	hasPermission, err := s.storage.HasQueuePermission(r.Context(), userInfo.UserID, queueID, permission)
 	if err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("check queue permission: %w", err))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("check queue permission: %w", err))
 		return
 	}
 
@@ -370,5 +370,5 @@ func (s *Service) checkQueuePermissionHandler(w http.ResponseWriter, r *http.Req
 		HasPermission bool `json:"has_permission"`
 	}
 
-	respond.JSON(w, r, response{HasPermission: hasPermission})
+	httpkit.JSON(w, r, response{HasPermission: hasPermission})
 }

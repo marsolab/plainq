@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/plainq/servekit/idkit"
+	"github.com/marsolab/servekit/idkit"
 )
 
 // SQLiteStorage implements the RBAC Storage interface using SQLite

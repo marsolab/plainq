@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/cristalhq/jwt/v5"
-	"github.com/plainq/servekit/errkit"
-	"github.com/plainq/servekit/respond"
+	"github.com/marsolab/servekit/errkit"
+	"github.com/marsolab/servekit/httpkit"
 )
 
 // OAuthProvider interface for OAuth provider validation
@@ -46,13 +46,13 @@ type OAuthClaims struct {
 
 // OAuthUser represents a user from OAuth claims
 type OAuthUser struct {
-	Subject      string            `json:"sub"`
-	Email        string            `json:"email"`
-	Name         string            `json:"name,omitempty"`
-	Picture      string            `json:"picture,omitempty"`
-	Roles        []string          `json:"roles,omitempty"`
-	Organization string            `json:"organization,omitempty"`
-	Teams        []string          `json:"teams,omitempty"`
+	Subject      string                 `json:"sub"`
+	Email        string                 `json:"email"`
+	Name         string                 `json:"name,omitempty"`
+	Picture      string                 `json:"picture,omitempty"`
+	Roles        []string               `json:"roles,omitempty"`
+	Organization string                 `json:"organization,omitempty"`
+	Teams        []string               `json:"teams,omitempty"`
 	Claims       map[string]interface{} `json:"claims,omitempty"`
 }
 
@@ -74,21 +74,21 @@ func AuthenticateOAuth(provider OAuthProvider, syncer UserSyncer, providerName s
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			authHeader := r.Header.Get("Authorization")
 			if authHeader == "" {
-				respond.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
+				httpkit.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
 				return
 			}
 
 			// Remove "Bearer " prefix
 			tokenString := strings.TrimPrefix(authHeader, "Bearer ")
 			if tokenString == authHeader {
-				respond.ErrorHTTP(w, r, fmt.Errorf("%w: invalid authorization header format", errkit.ErrUnauthenticated))
+				httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: invalid authorization header format", errkit.ErrUnauthenticated))
 				return
 			}
 
 			// Validate the OAuth token
 			claims, err := provider.ValidateToken(r.Context(), tokenString)
 			if err != nil {
-				respond.ErrorHTTP(w, r, fmt.Errorf("%w: invalid oauth token: %s", errkit.ErrUnauthenticated, err.Error()))
+				httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: invalid oauth token: %s", errkit.ErrUnauthenticated, err.Error()))
 				return
 			}
 
@@ -98,7 +98,7 @@ func AuthenticateOAuth(provider OAuthProvider, syncer UserSyncer, providerName s
 			// Sync user with local database
 			syncedUser, err := syncer.SyncUser(r.Context(), oauthUser, providerName)
 			if err != nil {
-				respond.ErrorHTTP(w, r, fmt.Errorf("sync oauth user: %w", err))
+				httpkit.ErrorHTTP(w, r, fmt.Errorf("sync oauth user: %w", err))
 				return
 			}
 

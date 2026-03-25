@@ -10,9 +10,9 @@ import (
 	"time"
 
 	"github.com/cristalhq/jwt/v5"
-	"github.com/plainq/servekit/authkit/jwtkit"
-	"github.com/plainq/servekit/errkit"
-	"github.com/plainq/servekit/respond"
+	"github.com/marsolab/servekit/authkit/jwtkit"
+	"github.com/marsolab/servekit/errkit"
+	"github.com/marsolab/servekit/httpkit"
 )
 
 const (
@@ -23,7 +23,7 @@ const (
 func (s *Service) getOnboardingStatusHandler(w http.ResponseWriter, r *http.Request) {
 	needsOnboarding, err := s.NeedsOnboarding(r.Context())
 	if err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("check onboarding status: %w", err))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("check onboarding status: %w", err))
 		return
 	}
 
@@ -32,7 +32,7 @@ func (s *Service) getOnboardingStatusHandler(w http.ResponseWriter, r *http.Requ
 		HasAdminUsers:   !needsOnboarding,
 	}
 
-	respond.JSON(w, r, status)
+	httpkit.JSON(w, r, status)
 }
 
 // completeOnboardingHandler handles the creation of the initial admin user
@@ -40,12 +40,12 @@ func (s *Service) completeOnboardingHandler(w http.ResponseWriter, r *http.Reque
 	// First, verify that onboarding is actually needed
 	needsOnboarding, err := s.NeedsOnboarding(r.Context())
 	if err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("check onboarding status: %w", err))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("check onboarding status: %w", err))
 		return
 	}
 
 	if !needsOnboarding {
-		respond.ErrorHTTP(w, r, fmt.Errorf("%w: onboarding has already been completed", errkit.ErrInvalidArgument))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: onboarding has already been completed", errkit.ErrInvalidArgument))
 		return
 	}
 
@@ -57,7 +57,7 @@ func (s *Service) completeOnboardingHandler(w http.ResponseWriter, r *http.Reque
 
 	var req request
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("%w: decode request json: %s", errkit.ErrInvalidArgument, err.Error()))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: decode request json: %s", errkit.ErrInvalidArgument, err.Error()))
 		return
 	}
 
@@ -69,21 +69,21 @@ func (s *Service) completeOnboardingHandler(w http.ResponseWriter, r *http.Reque
 
 	// Validate input
 	if err := s.validateOnboardingRequest(req); err != nil {
-		respond.ErrorHTTP(w, r, err)
+		httpkit.ErrorHTTP(w, r, err)
 		return
 	}
 
 	// Create the initial admin user
 	admin, err := s.CreateInitialAdmin(r.Context(), req.Email, req.Password, req.Name)
 	if err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("create initial admin: %w", err))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("create initial admin: %w", err))
 		return
 	}
 
 	// Generate session tokens for the new admin
 	session, err := s.createAdminSession(r.Context(), admin.UserID, admin.Email, time.Now())
 	if err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("create admin session: %w", err))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("create admin session: %w", err))
 		return
 	}
 
@@ -99,11 +99,11 @@ func (s *Service) completeOnboardingHandler(w http.ResponseWriter, r *http.Reque
 		Message: "Onboarding completed successfully. Welcome to PlainQ!",
 	}
 
-	s.logger.Info("onboarding completed", 
+	s.logger.Info("onboarding completed",
 		slog.String("admin_email", admin.Email),
 		slog.String("admin_id", admin.UserID))
 
-	respond.JSON(w, r, resp)
+	httpkit.JSON(w, r, resp)
 }
 
 // validateOnboardingRequest validates the onboarding request data
@@ -146,7 +146,7 @@ type Session struct {
 func (s *Service) createAdminSession(ctx context.Context, userID, email string, t time.Time) (*Session, error) {
 	// Admin users get the admin role
 	roles := []string{"admin"}
-	
+
 	tokenID := generateUserID() // Generate a unique token ID
 
 	accessToken, aErr := s.tokman.Sign(&jwtkit.Token{

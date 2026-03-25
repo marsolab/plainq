@@ -7,10 +7,10 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/plainq/plainq/internal/server/config"
-	"github.com/plainq/servekit/authkit/hashkit"
-	"github.com/plainq/servekit/authkit/jwtkit"
-	"github.com/plainq/servekit/idkit"
+	"github.com/marsolab/plainq/internal/server/config"
+	"github.com/marsolab/servekit/authkit/hashkit"
+	"github.com/marsolab/servekit/authkit/jwtkit"
+	"github.com/marsolab/servekit/idkit"
 )
 
 // Storage encapsulates interaction with onboarding storage operations.

@@ -4,7 +4,7 @@ This document describes the OAuth integration system and multi-tenant organizati
 
 ## Overview
 
-PlainQ supports integration with external OAuth providers (like Kinde, Auth0, Okta, Google, etc.) while maintaining its internal RBAC system. The system provides:
+PlainQ supports integation with external OAuth providers (like Kinde, Auth0, Okta, Google, etc.) while maintaining its internal RBAC system. The system provides:
 
 - **OAuth Provider Integration**: Support for multiple OAuth providers
 - **User Synchronization**: Automatic user sync from OAuth to local database

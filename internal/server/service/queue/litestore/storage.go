@@ -9,13 +9,13 @@ import (
 	"time"
 
 	"github.com/heartwilltell/hc"
-	v1 "github.com/plainq/plainq/internal/server/schema/v1"
-	"github.com/plainq/plainq/internal/server/service/telemetry"
-	"github.com/plainq/plainq/internal/shared/pqerr"
-	"github.com/plainq/servekit/dbkit/litekit"
-	"github.com/plainq/servekit/errkit"
-	"github.com/plainq/servekit/idkit"
-	"github.com/plainq/servekit/logkit"
+	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
+	"github.com/marsolab/plainq/internal/server/service/telemetry"
+	"github.com/marsolab/plainq/internal/shared/pqerr"
+	"github.com/marsolab/servekit/dbkit/litekit"
+	"github.com/marsolab/servekit/errkit"
+	"github.com/marsolab/servekit/idkit"
+	"github.com/marsolab/servekit/logkit"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 

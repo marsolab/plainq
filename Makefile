@@ -8,7 +8,7 @@ schema:
 
 .PHONY: houston
 houston:
-	cd internal/houston && npm install && npm run build
+	cd internal/houston/ui && npm install && npm run build
 
 .PHONY: build
 build: deps schema

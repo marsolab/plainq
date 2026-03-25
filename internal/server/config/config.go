@@ -28,38 +28,33 @@ type Config struct {
 	StorageJournalMode string
 
 	// Authentication configuration
-	AuthEnable             bool
-	AuthRegistrationEnable bool
-	AuthAccessTokenTTL     time.Duration
-	AuthRefreshTokenTTL    time.Duration
-
-	// OAuth configuration
-	OAuthEnable             bool
-	OAuthProvider           string // "kinde", "auth0", "okta", "google", etc.
-	OAuthClientID           string
-	OAuthClientSecret       string
-	OAuthDomain             string
-	OAuthAudience           string
-	OAuthCallbackURL        string
-	OAuthScope              string
-	OAuthJWKSURL            string
-	OAuthUserSyncEnable     bool // Whether to sync users from OAuth to local DB
-	OAuthUserSyncInterval   time.Duration
-	OAuthRoleClaimName      string // JWT claim name for roles (e.g., "roles", "permissions")
-	OAuthOrgClaimName       string // JWT claim name for organization (e.g., "org_code", "organization")
-	OAuthTeamClaimName      string // JWT claim name for teams (e.g., "teams", "groups")
-
-	// Organization and team features
-	MultiTenancyEnable      bool   // Enable organization-based multi-tenancy
-	DefaultOrganization     string // Default organization for single-tenant mode
-	TeamBasedPermissions    bool   // Enable team-based permissions
-
 	AuthEnable                  bool
 	AuthRegistrationEnable      bool
 	AuthAccessTokenTTL          time.Duration
 	AuthRefreshTokenTTL         time.Duration
 	AuthEmailVerificationEnable bool
-	
+
+	// OAuth configuration
+	OAuthEnable           bool
+	OAuthProvider         string // "kinde", "auth0", "okta", "google", etc.
+	OAuthClientID         string
+	OAuthClientSecret     string
+	OAuthDomain           string
+	OAuthAudience         string
+	OAuthCallbackURL      string
+	OAuthScope            string
+	OAuthJWKSURL          string
+	OAuthUserSyncEnable   bool // Whether to sync users from OAuth to local DB
+	OAuthUserSyncInterval time.Duration
+	OAuthRoleClaimName    string // JWT claim name for roles (e.g., "roles", "permissions")
+	OAuthOrgClaimName     string // JWT claim name for organization (e.g., "org_code", "organization")
+	OAuthTeamClaimName    string // JWT claim name for teams (e.g., "teams", "groups")
+
+	// Organization and team features
+	MultiTenancyEnable   bool   // Enable organization-based multi-tenancy
+	DefaultOrganization  string // Default organization for single-tenant mode
+	TeamBasedPermissions bool   // Enable team-based permissions
+
 	TelemetryEnabled   bool
 	TelemetryLogEnable bool
 	TelemetryProvider  string

@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/plainq/plainq/internal/server/config"
+	"github.com/marsolab/plainq/internal/server/config"
 )
 
 // Storage encapsulates interaction with RBAC storage.

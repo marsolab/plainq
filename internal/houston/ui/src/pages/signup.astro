@@ -1,8 +1,8 @@
 ---
-import Layout from "../layouts/Layout.astro"
-import SignupForm from "@/components/signup.jsx"
+import AuthLayout from "@/layouts/AuthLayout.astro";
+import { SignupForm } from "@/components/auth/signup-form";
 ---
 
-<Layout title="Signup" description="Signup" ogimage="">
-	<SignupForm/>
-</Layout>
+<AuthLayout title="Sign up — PlainQ">
+  <SignupForm client:load />
+</AuthLayout>

@@ -8,16 +8,16 @@ import (
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
-	v1 "github.com/plainq/plainq/internal/server/schema/v1"
-	"github.com/plainq/servekit/errkit"
-	"github.com/plainq/servekit/respond"
+	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
+	"github.com/marsolab/servekit/errkit"
+	"github.com/marsolab/servekit/httpkit"
 )
 
 func (s *Service) createQueueHandler(w http.ResponseWriter, r *http.Request) {
 	var input v1.CreateQueueRequest
 
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		respond.ErrorHTTP(w, r, err)
+		httpkit.ErrorHTTP(w, r, err)
 		return
 	}
 
@@ -31,11 +31,11 @@ func (s *Service) createQueueHandler(w http.ResponseWriter, r *http.Request) {
 
 	output, createErr := s.storage.CreateQueue(r.Context(), &input)
 	if createErr != nil {
-		respond.ErrorHTTP(w, r, createErr)
+		httpkit.ErrorHTTP(w, r, createErr)
 		return
 	}
 
-	respond.JSON(w, r, output, respond.WithStatus(http.StatusCreated))
+	httpkit.JSON(w, r, output, httpkit.WithStatus(http.StatusCreated))
 }
 
 func (s *Service) listQueuesHandler(w http.ResponseWriter, r *http.Request) {
@@ -47,12 +47,12 @@ func (s *Service) listQueuesHandler(w http.ResponseWriter, r *http.Request) {
 	if l := r.URL.Query().Get("limit"); l != "" {
 		limit, parseErr := strconv.Atoi(l)
 		if parseErr != nil {
-			respond.ErrorHTTP(w, r, fmt.Errorf("%w: invalid limit", errkit.ErrInvalidArgument))
+			httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: invalid limit", errkit.ErrInvalidArgument))
 			return
 		}
 
 		if limit < 1 {
-			respond.ErrorHTTP(w, r, fmt.Errorf("%w: invalid limit", errkit.ErrInvalidArgument))
+			httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: invalid limit", errkit.ErrInvalidArgument))
 			return
 		}
 
@@ -61,18 +61,18 @@ func (s *Service) listQueuesHandler(w http.ResponseWriter, r *http.Request) {
 
 	output, listErr := s.storage.ListQueues(r.Context(), &input)
 	if listErr != nil {
-		respond.ErrorHTTP(w, r, listErr)
+		httpkit.ErrorHTTP(w, r, listErr)
 		return
 	}
 
-	respond.JSON(w, r, output)
+	httpkit.JSON(w, r, output)
 }
 
 func (s *Service) describeQueueHandler(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
 	if err := validateQueueID(id); err != nil {
-		respond.ErrorHTTP(w, r, err)
+		httpkit.ErrorHTTP(w, r, err)
 		return
 	}
 
@@ -80,18 +80,18 @@ func (s *Service) describeQueueHandler(w http.ResponseWriter, r *http.Request) {
 
 	output, describeErr := s.storage.DescribeQueue(r.Context(), &input)
 	if describeErr != nil {
-		respond.ErrorHTTP(w, r, describeErr)
+		httpkit.ErrorHTTP(w, r, describeErr)
 		return
 	}
 
-	respond.JSON(w, r, output, respond.WithStatus(http.StatusOK))
+	httpkit.JSON(w, r, output, httpkit.WithStatus(http.StatusOK))
 }
 
 func (s *Service) deleteQueueHandler(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
 	if err := validateQueueID(id); err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("validation error: %w", err))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("validation error: %w", err))
 		return
 	}
 
@@ -107,18 +107,18 @@ func (s *Service) deleteQueueHandler(w http.ResponseWriter, r *http.Request) {
 
 	output, deleteErr := s.storage.DeleteQueue(r.Context(), &input)
 	if deleteErr != nil {
-		respond.ErrorHTTP(w, r, deleteErr)
+		httpkit.ErrorHTTP(w, r, deleteErr)
 		return
 	}
 
-	respond.JSON(w, r, output, respond.WithStatus(http.StatusOK))
+	httpkit.JSON(w, r, output, httpkit.WithStatus(http.StatusOK))
 }
 
 func (s *Service) purgeQueueHandler(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
 	if err := validateQueueID(id); err != nil {
-		respond.ErrorHTTP(w, r, fmt.Errorf("validation error: %w", err))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("validation error: %w", err))
 		return
 	}
 
@@ -126,9 +126,9 @@ func (s *Service) purgeQueueHandler(w http.ResponseWriter, r *http.Request) {
 		QueueId: id,
 	})
 	if purgeErr != nil {
-		respond.ErrorHTTP(w, r, purgeErr)
+		httpkit.ErrorHTTP(w, r, purgeErr)
 		return
 	}
 
-	respond.JSON(w, r, output, respond.WithStatus(http.StatusOK))
+	httpkit.JSON(w, r, output, httpkit.WithStatus(http.StatusOK))
 }

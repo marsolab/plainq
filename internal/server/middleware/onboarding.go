@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/plainq/servekit/respond"
+	"github.com/marsolab/servekit/httpkit"
 )
 
 // OnboardingChecker interface for checking if onboarding is needed
@@ -32,7 +32,7 @@ func RequireOnboarding(checker OnboardingChecker) func(next http.Handler) http.H
 
 			needsOnboarding, err := checker.NeedsOnboarding(r.Context())
 			if err != nil {
-				respond.ErrorHTTP(w, r, err)
+				httpkit.ErrorHTTP(w, r, err)
 				return
 			}
 
@@ -41,12 +41,12 @@ func RequireOnboarding(checker OnboardingChecker) func(next http.Handler) http.H
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusPreconditionRequired) // 428 status code
 				response := map[string]interface{}{
-					"error":             "System requires onboarding",
-					"needs_onboarding":  true,
-					"onboarding_url":    "/onboarding",
-					"message":           "No admin users found. Please complete the initial setup.",
+					"error":            "System requires onboarding",
+					"needs_onboarding": true,
+					"onboarding_url":   "/onboarding",
+					"message":          "No admin users found. Please complete the initial setup.",
 				}
-				respond.JSON(w, r, response)
+				httpkit.JSON(w, r, response)
 				return
 			}
 

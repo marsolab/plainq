@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/plainq/servekit/ctxkit"
+	"github.com/marsolab/servekit/ctxkit"
 )
 
 // Logging represents logging middleware.

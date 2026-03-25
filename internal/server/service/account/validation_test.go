@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/maxatome/go-testdeep/td"
-	"github.com/plainq/servekit/errkit"
+	"github.com/marsolab/servekit/errkit"
 )
 
 func TestValidateUserName(t *testing.T) {

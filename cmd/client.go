@@ -9,9 +9,9 @@ import (
 	"strings"
 
 	"github.com/heartwilltell/scotty"
-	"github.com/plainq/plainq/internal/client"
-	v1 "github.com/plainq/plainq/internal/server/schema/v1"
-	"github.com/plainq/servekit/idkit"
+	"github.com/marsolab/plainq/internal/client"
+	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
+	"github.com/marsolab/servekit/idkit"
 )
 
 func listQueueCommand() *scotty.Command {

@@ -6,8 +6,8 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/plainq/servekit/errkit"
-	"github.com/plainq/servekit/respond"
+	"github.com/marsolab/servekit/errkit"
+	"github.com/marsolab/servekit/httpkit"
 )
 
 // PermissionType represents different types of permissions
@@ -32,7 +32,7 @@ func RequireQueuePermission(permissionChecker PermissionChecker, permission Perm
 			// Get user from context
 			userInfo, ok := GetUserFromContext(r.Context())
 			if !ok {
-				respond.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
+				httpkit.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
 				return
 			}
 
@@ -51,19 +51,19 @@ func RequireQueuePermission(permissionChecker PermissionChecker, permission Perm
 				queueID = chi.URLParam(r, "queue_id")
 			}
 			if queueID == "" {
-				respond.ErrorHTTP(w, r, fmt.Errorf("%w: queue ID is required", errkit.ErrInvalidArgument))
+				httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: queue ID is required", errkit.ErrInvalidArgument))
 				return
 			}
 
 			// Check if user has the required permission
 			hasPermission, err := permissionChecker.HasQueuePermission(r.Context(), userInfo.UserID, queueID, permission)
 			if err != nil {
-				respond.ErrorHTTP(w, r, fmt.Errorf("check permission: %w", err))
+				httpkit.ErrorHTTP(w, r, fmt.Errorf("check permission: %w", err))
 				return
 			}
 
 			if !hasPermission {
-				respond.ErrorHTTP(w, r, errkit.ErrUnauthorized)
+				httpkit.ErrorHTTP(w, r, errkit.ErrUnauthorized)
 				return
 			}
 
@@ -99,7 +99,7 @@ func RequireAdminOrPermission(permissionChecker PermissionChecker, permission Pe
 			// Get user from context
 			userInfo, ok := GetUserFromContext(r.Context())
 			if !ok {
-				respond.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
+				httpkit.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
 				return
 			}
 
@@ -117,19 +117,19 @@ func RequireAdminOrPermission(permissionChecker PermissionChecker, permission Pe
 				queueID = chi.URLParam(r, "queue_id")
 			}
 			if queueID == "" {
-				respond.ErrorHTTP(w, r, fmt.Errorf("%w: queue ID is required", errkit.ErrInvalidArgument))
+				httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: queue ID is required", errkit.ErrInvalidArgument))
 				return
 			}
 
 			// Check if user has the required permission
 			hasPermission, err := permissionChecker.HasQueuePermission(r.Context(), userInfo.UserID, queueID, permission)
 			if err != nil {
-				respond.ErrorHTTP(w, r, fmt.Errorf("check permission: %w", err))
+				httpkit.ErrorHTTP(w, r, fmt.Errorf("check permission: %w", err))
 				return
 			}
 
 			if !hasPermission {
-				respond.ErrorHTTP(w, r, errkit.ErrUnauthorized)
+				httpkit.ErrorHTTP(w, r, errkit.ErrUnauthorized)
 				return
 			}
 

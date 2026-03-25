@@ -12,16 +12,16 @@ import (
 
 	"github.com/heartwilltell/hc"
 	"github.com/heartwilltell/scotty"
-	"github.com/plainq/plainq/internal/server"
-	"github.com/plainq/plainq/internal/server/config"
-	"github.com/plainq/plainq/internal/server/mutations"
-	"github.com/plainq/plainq/internal/server/service/account"
-	"github.com/plainq/plainq/internal/server/service/queue"
-	queuestore "github.com/plainq/plainq/internal/server/service/queue/litestore"
-	accountstore "github.com/plainq/plainq/internal/server/service/account/litestore"
-	"github.com/plainq/servekit/authkit/hashkit"
-	"github.com/plainq/servekit/dbkit/litekit"
-	"github.com/plainq/servekit/logkit"
+	"github.com/marsolab/plainq/internal/server"
+	"github.com/marsolab/plainq/internal/server/config"
+	"github.com/marsolab/plainq/internal/server/mutations"
+	"github.com/marsolab/plainq/internal/server/service/account"
+	"github.com/marsolab/plainq/internal/server/service/queue"
+	queuestore "github.com/marsolab/plainq/internal/server/service/queue/litestore"
+	accountstore "github.com/marsolab/plainq/internal/server/service/account/litestore"
+	"github.com/marsolab/servekit/authkit/hashkit"
+	"github.com/marsolab/servekit/dbkit/litekit"
+	"github.com/marsolab/servekit/logkit"
 )
 
 func serverCommand() *scotty.Command {

@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	v1 "github.com/plainq/plainq/internal/server/schema/v1"
-	"github.com/plainq/servekit/tern"
+	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
+	"github.com/marsolab/servekit/tern"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -139,7 +139,11 @@ func (c *QueuePropsCache) list(options ...QueuePropsListOption) []QueueProps {
 		return true
 	}
 
-	c.byID.All(iter)
+	for k, v := range c.byName {
+		if !iter(k, v) {
+			break
+		}
+	}
 
 	sortProps(props, listOptions)
 
@@ -155,22 +159,22 @@ func (c *QueuePropsCache) put(props QueueProps) {
 	}
 
 	entry := c.props.PushBack(props)
-	c.byID.Put(props.ID, entry)
-	c.byName.Put(props.Name, entry)
+	c.byID[props.ID] = entry
+	c.byName[props.Name] = entry
 }
 
 func (c *QueuePropsCache) delete(id, name string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	e, ok := c.byID.Get(id)
+	e, ok := c.byID[id]
 	if !ok {
 		return
 	}
 
 	c.props.Remove(e)
-	c.byID.Delete(id)
-	c.byName.Delete(name)
+	delete(c.byID, id)
+	delete(c.byName, name)
 }
 
 func sortProps(props []QueueProps, listOptions QueuePropsListOptions) {

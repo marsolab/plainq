@@ -1,10 +1,11 @@
 ---
-import Layout from "../layouts/Layout.astro"
-import Navigation from '@/components/navigation.jsx';
+import Layout from "@/layouts/Layout.astro";
+import { AppShell } from "@/components/layout/app-shell";
+import { SettingsForm } from "@/components/settings/settings-form";
 ---
 
-<Layout title="Settings | Houston" description="Settings" ogimage="https://houston.seline.so/og.png">
-	<div class="container mx-auto pt-3">
-		<Navigation client:load activeTab="settings" />
-	</div>
-</Layout> 
+<Layout title="Settings — PlainQ">
+  <AppShell currentPath="/settings" title="Settings" client:load>
+    <SettingsForm client:load />
+  </AppShell>
+</Layout>

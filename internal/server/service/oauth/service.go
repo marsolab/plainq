@@ -2,7 +2,6 @@ package oauth
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -10,8 +9,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/plainq/plainq/internal/server/config"
-	"github.com/plainq/servekit/idkit"
+	"github.com/marsolab/plainq/internal/server/config"
 )
 
 // Provider represents an OAuth provider configuration
@@ -27,31 +25,31 @@ type Provider struct {
 
 // OAuthUser represents a user from an OAuth provider
 type OAuthUser struct {
-	Subject      string            `json:"sub"`           // OAuth subject identifier
-	Email        string            `json:"email"`
-	Name         string            `json:"name,omitempty"`
-	Picture      string            `json:"picture,omitempty"`
-	Roles        []string          `json:"roles,omitempty"`
-	Organization string            `json:"organization,omitempty"`
-	Teams        []string          `json:"teams,omitempty"`
+	Subject      string                 `json:"sub"` // OAuth subject identifier
+	Email        string                 `json:"email"`
+	Name         string                 `json:"name,omitempty"`
+	Picture      string                 `json:"picture,omitempty"`
+	Roles        []string               `json:"roles,omitempty"`
+	Organization string                 `json:"organization,omitempty"`
+	Teams        []string               `json:"teams,omitempty"`
 	Claims       map[string]interface{} `json:"claims,omitempty"`
 }
 
 // Storage encapsulates interaction with OAuth storage operations
 type Storage interface {
-	// OAuth provider management
+	// OAuth provider management.
 	CreateProvider(ctx context.Context, provider Provider) error
 	GetProvider(ctx context.Context, providerName, orgID string) (*Provider, error)
 	UpdateProvider(ctx context.Context, provider Provider) error
 	DeleteProvider(ctx context.Context, providerID string) error
 	ListProviders(ctx context.Context, orgID string) ([]Provider, error)
 
-	// User synchronization
+	// User synchronization.
 	SyncOAuthUser(ctx context.Context, user OAuthUser, providerName, orgID string) error
 	GetUserByOAuthSub(ctx context.Context, providerName, subject string) (*SyncedUser, error)
 	UpdateUserLastSync(ctx context.Context, userID string) error
 
-	// Organization and team management
+	// Organization and team management.
 	GetOrganizationByCode(ctx context.Context, orgCode string) (*Organization, error)
 	GetOrganizationByDomain(ctx context.Context, domain string) (*Organization, error)
 	GetTeamsByOrg(ctx context.Context, orgID string) ([]Team, error)
@@ -63,16 +61,16 @@ type Storage interface {
 
 // SyncedUser represents a synchronized OAuth user
 type SyncedUser struct {
-	UserID       string    `json:"user_id"`
-	Email        string    `json:"email"`
-	Name         string    `json:"name,omitempty"`
-	OrgID        string    `json:"org_id"`
-	Provider     string    `json:"oauth_provider"`
-	Subject      string    `json:"oauth_sub"`
-	IsOAuthUser  bool      `json:"is_oauth_user"`
-	LastSyncAt   time.Time `json:"last_sync_at"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	UserID      string    `json:"user_id"`
+	Email       string    `json:"email"`
+	Name        string    `json:"name,omitempty"`
+	OrgID       string    `json:"org_id"`
+	Provider    string    `json:"oauth_provider"`
+	Subject     string    `json:"oauth_sub"`
+	IsOAuthUser bool      `json:"is_oauth_user"`
+	LastSyncAt  time.Time `json:"last_sync_at"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // Organization represents an organization entity
@@ -175,7 +173,7 @@ func (s *Service) SyncUser(ctx context.Context, oauthUser OAuthUser, providerNam
 
 	// Sync teams
 	if err := s.syncUserTeams(ctx, syncedUser.UserID, oauthUser.Teams, orgID); err != nil {
-		s.logger.Warn("failed to sync user teams", 
+		s.logger.Warn("failed to sync user teams",
 			slog.String("user_id", syncedUser.UserID),
 			slog.String("error", err.Error()))
 	}
@@ -234,7 +232,7 @@ func (s *Service) syncUserTeams(ctx context.Context, userID string, teamCodes []
 		if _, exists := currentTeamCodes[teamCode]; !exists {
 			team, err := s.storage.GetTeamByCode(ctx, orgID, teamCode)
 			if err != nil {
-				s.logger.Warn("team not found for code", 
+				s.logger.Warn("team not found for code",
 					slog.String("team_code", teamCode),
 					slog.String("org_id", orgID))
 				continue

@@ -222,7 +222,7 @@ Response:
 Validates JWT tokens and extracts user information:
 
 ```go
-import "github.com/plainq/plainq/internal/server/middleware"
+import "github.com/marsolab/plainq/internal/server/middleware"
 
 // Apply to routes that require authentication
 router.Use(middleware.AuthenticateJWT(tokenManager))
@@ -264,8 +264,8 @@ package main
 
 import (
     "github.com/go-chi/chi/v5"
-    "github.com/plainq/plainq/internal/server/middleware"
-    "github.com/plainq/plainq/internal/server/service/rbac"
+    "github.com/marsolab/plainq/internal/server/middleware"
+    "github.com/marsolab/plainq/internal/server/service/rbac"
 )
 
 func setupRoutes(tokenManager jwtkit.TokenManager, rbacService *rbac.Service) chi.Router {

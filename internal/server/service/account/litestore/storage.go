@@ -5,8 +5,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/plainq/plainq/internal/server/service/account"
-	"github.com/plainq/servekit/dbkit/litekit"
+	"github.com/marsolab/plainq/internal/server/service/account"
+	"github.com/marsolab/servekit/dbkit/litekit"
 )
 
 // Storage is an account storage.

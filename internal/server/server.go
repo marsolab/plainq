@@ -2,6 +2,7 @@ package server
 
 import (
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -9,16 +10,16 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/cors"
 	"github.com/heartwilltell/hc"
-	"github.com/plainq/plainq/internal/houston"
-	"github.com/plainq/plainq/internal/server/config"
-	"github.com/plainq/plainq/internal/server/middleware"
-	"github.com/plainq/plainq/internal/server/service/account"
-	"github.com/plainq/plainq/internal/server/service/queue"
-	"github.com/plainq/plainq/internal/server/service/telemetry"
-	"github.com/plainq/servekit"
-	"github.com/plainq/servekit/authkit/hashkit"
-	"github.com/plainq/servekit/grpckit"
-	"github.com/plainq/servekit/httpkit"
+	"github.com/marsolab/plainq/internal/houston"
+	"github.com/marsolab/plainq/internal/server/config"
+	"github.com/marsolab/plainq/internal/server/middleware"
+	"github.com/marsolab/plainq/internal/server/service/account"
+	"github.com/marsolab/plainq/internal/server/service/queue"
+	"github.com/marsolab/plainq/internal/server/service/telemetry"
+	"github.com/marsolab/servekit"
+	"github.com/marsolab/servekit/authkit/hashkit"
+	"github.com/marsolab/servekit/grpckit"
+	"github.com/marsolab/servekit/httpkit"
 	_ "google.golang.org/grpc/encoding/proto"
 )
 
@@ -110,7 +111,32 @@ func (s *PlainQ) houstonStaticHandler(w http.ResponseWriter, r *http.Request) {
 		slog.String("path_prefix", pathPrefix),
 	)
 
-	http.StripPrefix(pathPrefix, http.FileServerFS(houston.Bundle())).
+	bundle := houston.Bundle()
+	cleanPath := strings.TrimPrefix(r.URL.Path, pathPrefix)
+	if cleanPath == "" || cleanPath == "/" {
+		cleanPath = "/"
+	}
+
+	// Try to serve the requested file. If it doesn't exist and has no
+	// file extension, attempt SPA-style fallback: first try serving the
+	// parent path's index.html (e.g., /queue/abc → queue/index.html),
+	// then fall back to the root index.html.
+	trimmed := strings.TrimPrefix(cleanPath, "/")
+	if _, err := fs.Stat(bundle, trimmed); err != nil && !strings.Contains(cleanPath, ".") {
+		// Try parent directory: /queue/abc123 → queue/index.html
+		parts := strings.SplitN(trimmed, "/", 2)
+		if len(parts) > 1 {
+			parent := parts[0] + "/index.html"
+			if _, parentErr := fs.Stat(bundle, parent); parentErr == nil {
+				r.URL.Path = pathPrefix + "/" + parent
+				http.StripPrefix(pathPrefix, http.FileServerFS(bundle)).ServeHTTP(w, r)
+				return
+			}
+		}
+		r.URL.Path = pathPrefix + "/index.html"
+	}
+
+	http.StripPrefix(pathPrefix, http.FileServerFS(bundle)).
 		ServeHTTP(w, r)
 }
 

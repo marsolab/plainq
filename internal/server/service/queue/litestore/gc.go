@@ -8,7 +8,7 @@ import (
 	"log/slog"
 	"time"
 
-	v1 "github.com/plainq/plainq/internal/server/schema/v1"
+	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 )
 
 type sweepResult struct {

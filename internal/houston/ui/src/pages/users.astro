@@ -1,10 +1,11 @@
 ---
-import Layout from "../layouts/Layout.astro"
-import Navigation from '@/components/navigation.jsx';
+import Layout from "@/layouts/Layout.astro";
+import { AppShell } from "@/components/layout/app-shell";
+import { UserList } from "@/components/users/user-list";
 ---
 
-<Layout title="Users & Access | Houston" description="Users & Access" ogimage="https://houston.seline.so/og.png">
-	<div class="container mx-auto pt-3">
-		<Navigation client:load activeTab="users&access" />
-	</div>
-</Layout> 
+<Layout title="Users — PlainQ">
+  <AppShell currentPath="/users" title="Users" client:load>
+    <UserList client:load />
+  </AppShell>
+</Layout>

@@ -6,9 +6,9 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/plainq/servekit/authkit/jwtkit"
-	"github.com/plainq/servekit/errkit"
-	"github.com/plainq/servekit/respond"
+	"github.com/marsolab/servekit/authkit/jwtkit"
+	"github.com/marsolab/servekit/errkit"
+	"github.com/marsolab/servekit/httpkit"
 )
 
 // UserInfo represents authenticated user information
@@ -32,35 +32,35 @@ func AuthenticateJWT(tokenManager jwtkit.TokenManager) func(next http.Handler) h
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			authHeader := r.Header.Get("Authorization")
 			if authHeader == "" {
-				respond.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
+				httpkit.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
 				return
 			}
 
 			// Remove "Bearer " prefix
 			tokenString := strings.TrimPrefix(authHeader, "Bearer ")
 			if tokenString == authHeader {
-				respond.ErrorHTTP(w, r, fmt.Errorf("%w: invalid authorization header format", errkit.ErrUnauthenticated))
+				httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: invalid authorization header format", errkit.ErrUnauthenticated))
 				return
 			}
 
 			// Parse and verify the token
 			token, err := tokenManager.ParseVerify(tokenString)
 			if err != nil {
-				respond.ErrorHTTP(w, r, fmt.Errorf("%w: invalid token: %s", errkit.ErrUnauthenticated, err.Error()))
+				httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: invalid token: %s", errkit.ErrUnauthenticated, err.Error()))
 				return
 			}
 
 			// Extract user ID from token
 			userID, ok := token.Meta["uid"].(string)
 			if !ok {
-				respond.ErrorHTTP(w, r, fmt.Errorf("%w: missing user ID in token", errkit.ErrUnauthenticated))
+				httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: missing user ID in token", errkit.ErrUnauthenticated))
 				return
 			}
 
 			// Extract email from token
 			email, ok := token.Meta["email"].(string)
 			if !ok {
-				respond.ErrorHTTP(w, r, fmt.Errorf("%w: missing email in token", errkit.ErrUnauthenticated))
+				httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: missing email in token", errkit.ErrUnauthenticated))
 				return
 			}
 
@@ -82,7 +82,7 @@ func AuthenticateJWT(tokenManager jwtkit.TokenManager) func(next http.Handler) h
 				Email:  email,
 				Roles:  roles,
 			}
-			
+
 			ctx := context.WithValue(r.Context(), UserContextKey, userInfo)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
@@ -95,7 +95,7 @@ func RequireRoles(requiredRoles ...string) func(next http.Handler) http.Handler 
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			userInfo, ok := GetUserFromContext(r.Context())
 			if !ok {
-				respond.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
+				httpkit.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
 				return
 			}
 
@@ -114,7 +114,7 @@ func RequireRoles(requiredRoles ...string) func(next http.Handler) http.Handler 
 			}
 
 			if !hasRole {
-				respond.ErrorHTTP(w, r, errkit.ErrUnauthorized)
+				httpkit.ErrorHTTP(w, r, errkit.ErrUnauthorized)
 				return
 			}
 

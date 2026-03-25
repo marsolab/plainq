@@ -6,8 +6,8 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/plainq/plainq/internal/server/config"
-	v1 "github.com/plainq/plainq/internal/server/schema/v1"
+	"github.com/marsolab/plainq/internal/server/config"
+	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	vtgrpc "github.com/planetscale/vtprotobuf/codec/grpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/encoding"

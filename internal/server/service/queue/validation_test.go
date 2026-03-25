@@ -4,9 +4,9 @@ import (
 	"testing"
 
 	"github.com/maxatome/go-testdeep/td"
-	v1 "github.com/plainq/plainq/internal/server/schema/v1"
-	"github.com/plainq/plainq/internal/shared/pqerr"
-	"github.com/plainq/servekit/idkit"
+	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
+	"github.com/marsolab/plainq/internal/shared/pqerr"
+	"github.com/marsolab/servekit/idkit"
 )
 
 func Test_validateIDFromRequest(t *testing.T) {
