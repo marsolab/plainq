@@ -211,6 +211,7 @@ func (s *Service) getQueuePermissionsHandler(w http.ResponseWriter, r *http.Requ
 	}
 
 	var permissions []rolePermission
+
 	for _, role := range roles {
 		perm, err := s.storage.GetQueuePermissions(r.Context(), queueID, role.RoleID)
 		if err != nil {
@@ -346,6 +347,7 @@ func (s *Service) checkQueuePermissionHandler(w http.ResponseWriter, r *http.Req
 
 	// Validate permission type
 	var permission PermissionType
+
 	switch permissionStr {
 	case "send":
 		permission = PermissionSend

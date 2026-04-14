@@ -3,10 +3,10 @@ package queue
 import (
 	"testing"
 
-	"github.com/maxatome/go-testdeep/td"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/marsolab/servekit/idkit"
+	"github.com/maxatome/go-testdeep/td"
 )
 
 func Test_validateIDFromRequest(t *testing.T) {

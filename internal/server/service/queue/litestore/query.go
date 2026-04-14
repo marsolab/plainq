@@ -2,74 +2,14 @@ package litestore
 
 import (
 	"fmt"
-	"strconv"
-	"time"
 
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
-	"github.com/valyala/fasttemplate"
 )
 
-const (
-	// sTag and eTag represents the fasttemplate start and end template tags.
-	sTag, eTag = "{{", "}}"
-
-	// queuePropsTable holds the name of the table with queue properties.
-	queuePropsTable = "queue_properties"
-
-	// querySelectQueueForGC returns queue_id from the queuePropsTable.
-	querySelectQueueForGC = `select queue_id from queue_properties where gc_at < datetime('now', '{{gcTimeout}}') order by gc_at limit {{limit}} offset {{offset}};`
-
-	// queryUpdateQueueAfterGC updates the gc_at in the queuePropsTable for given queue_id.
-	queryUpdateQueueAfterGC = `update queue_properties set gc_at = current_timestamp where queue_id = ?;`
-
-	// queryInsertQueuePropRecord creates a record in the queuePropsTable.
-	queryInsertQueuePropRecord = `insert into queue_properties 
-    (
-		queue_id, 
-    	queue_name, 
-        retention_period_seconds, 
-        visibility_timeout_seconds, 
-        max_receive_attempts, 
-        drop_policy, 
-        dead_letter_queue_id
-    ) 
-	values (?, ?, ?, ?, ?, ?, ?);
-	`
-
-	// queryDeleteQueuePropRecord deletes records from the queuePropsTable for given queue_id.
-	queryDeleteQueuePropRecord = `delete from queue_properties where queue_id = ?;`
-)
-
-type querier struct {
-	tSelectQueuesForGC *fasttemplate.Template
-}
-
-func newQuerier() querier {
-	q := querier{
-		tSelectQueuesForGC: fasttemplate.New(querySelectQueueForGC, sTag, eTag),
-	}
-
-	return q
-}
-
-func (q *querier) selectQueuesForGC(gcTimeout time.Duration, limit, offset uint64) string {
-	defer func() {
-		if err := q.tSelectQueuesForGC.Reset(querySelectQueueForGC, sTag, eTag); err != nil {
-			panic(fmt.Errorf("reset %q template: %w", querySelectQueueForGC, err))
-		}
-	}()
-
-	sec := strconv.FormatFloat(gcTimeout.Seconds(), 'f', 0, 64)
-
-	query := q.tSelectQueuesForGC.ExecuteString(map[string]any{
-		"gcTimeout": "-" + sec + " seconds",
-		"limit":     limit,
-		"offset":    offset,
-	})
-
-	return query
-}
-
+// queueCreateQueueTable returns SQLite DDL that creates the per-queue message
+// table along with its indexes and the updated_at trigger. Each queue lives
+// in its own table — DROP TABLE on purge/delete is O(metadata) which matters
+// for tail latency under SQLite's single-writer lock.
 func queryCreateQueueTable(queueID string) string {
 	q := `create table ` + queueID +
 		`(
@@ -78,17 +18,17 @@ func queryCreateQueueTable(queueID string) string {
 			created_at int 		 default current_timestamp not null,
 			visible_at int 		 default current_timestamp not null,
 			retries    int       default 0                 not null,
-		
+
 			constraint ` + queueID + `_queue_pk
 				primary key (msg_id)
 		);
 
 		create index if not exists ` + queueID + `_created_at_index
 			on ` + queueID + ` (created_at);
-		
+
 		create index if not exists ` + queueID + `_visible_at_index
 			on ` + queueID + `(visible_at);
-		
+
 		create trigger if not exists ` + queueID + `_update_msg_updated_at
 			after update on ` + queueID + `
 			for each row
@@ -101,66 +41,45 @@ func queryCreateQueueTable(queueID string) string {
 }
 
 func queryInsertMessages(queueID string) string {
-	q := `insert into ` + queueID + ` (msg_id, msg_body) values (?, ?);`
-
-	return q
+	return `insert into ` + queueID + ` (msg_id, msg_body) values (?, ?);`
 }
 
 func queryDeleteQueueTable(queueID string) string {
-	q := `drop table ` + queueID + `;`
-
-	return q
+	return `drop table ` + queueID + `;`
 }
 
 func querySelectMessages(queueID string) string {
-	q := `select msg_id, msg_body from ` + queueID +
+	return `select msg_id, msg_body from ` + queueID +
 		` where visible_at <= current_timestamp and retries <= ? order by created_at limit ?;`
-
-	return q
 }
 
 func queryUpdateMessages(queueID string) string {
-	q := `update ` + queueID + ` set visible_at = ?, retries = retries + 1 where msg_id = ?;`
-
-	return q
+	return `update ` + queueID + ` set visible_at = ?, retries = retries + 1 where msg_id = ?;`
 }
 
 func queryDeleteMessage(queueID string) string {
-	q := `delete from ` + queueID + ` where msg_id = ?;`
-
-	return q
+	return `delete from ` + queueID + ` where msg_id = ?;`
 }
 
 func queryPurgeQueue(queueID string) string {
-	q := `delete from ` + queueID + `;`
-
-	return q
+	return `delete from ` + queueID + `;`
 }
 
 func queryCountMessages(queueID string) string {
-	q := `select count(*) from ` + queueID + `;`
-
-	return q
+	return `select count(*) from ` + queueID + `;`
 }
 
 func queryDropMessages(queueID string) string {
-	q := `delete from ` + queueID + ` where retries >= ? or datetime(created_at, '+? seconds') <= current_timestamp;`
-
-	return q
+	return `delete from ` + queueID + ` where retries >= ? or datetime(created_at, '+? seconds') <= current_timestamp;`
 }
 
 func querySelectMoveToDLQ(queueID string) string {
-	q := `select * from ` + queueID + ` where retries >= ? or datetime(created_at, '+? seconds') <= current_timestamp;`
-
-	return q
+	return `select * from ` + queueID + ` where retries >= ? or datetime(created_at, '+? seconds') <= current_timestamp;`
 }
 
-func queueDescribeQueueProps(where string) string {
-	q := `select * from ` + queuePropsTable + ` where ` + where + `;`
-
-	return q
-}
-
+// queryListQueues builds a SQLite SELECT for the queue_properties table with
+// dynamic ORDER BY and cursor-based WHERE. sqlc cannot generate this shape
+// because the ORDER BY column and sort direction are chosen at runtime.
 func queryListQueues(pageSize int32, cursor string, orderBy v1.ListQueuesRequest_OrderBy, sortBy v1.ListQueuesRequest_SortBy) string {
 	var (
 		orderByStr = "queue_id"
@@ -195,7 +114,5 @@ func queryListQueues(pageSize int32, cursor string, orderBy v1.ListQueuesRequest
 		}
 	}
 
-	q := fmt.Sprintf(`select * from queue_properties %s order by %s %s limit %d;`, where, orderByStr, sortByStr, pageSize)
-
-	return q
+	return fmt.Sprintf(`select * from queue_properties %s order by %s %s limit %d;`, where, orderByStr, sortByStr, pageSize)
 }

@@ -21,6 +21,9 @@ type Config struct {
 	HTTPWriteTimeout      time.Duration
 	HTTPIdleTimeout       time.Duration
 
+	StorageDriver      string // "sqlite" (default) or "postgres"
+	StoragePostgresDSN string // Postgres DSN when StorageDriver == "postgres"
+
 	StorageLogEnable   bool
 	StorageDBPath      string
 	StorageGCTimeout   time.Duration
@@ -33,6 +36,7 @@ type Config struct {
 	AuthAccessTokenTTL          time.Duration
 	AuthRefreshTokenTTL         time.Duration
 	AuthEmailVerificationEnable bool
+	AuthJWTSecret               string // HMAC secret used to sign access/refresh tokens; required when AuthEnable
 
 	// OAuth configuration
 	OAuthEnable           bool

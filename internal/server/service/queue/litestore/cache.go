@@ -40,16 +40,6 @@ type QueuePropsListOptions struct {
 	sortBy  v1.ListQueuesRequest_SortBy
 }
 
-type QueuePropsListOption func(options *QueuePropsListOptions)
-
-func listCacheOrderBy(by v1.ListQueuesRequest_OrderBy) QueuePropsListOption {
-	return func(o *QueuePropsListOptions) { o.orderBy = by }
-}
-
-func listCacheSortBy(by v1.ListQueuesRequest_SortBy) QueuePropsListOption {
-	return func(o *QueuePropsListOptions) { o.sortBy = by }
-}
-
 // NewQueuePropsCache returns a pointer to a new instance of QueuePropsCache.
 func NewQueuePropsCache(size uint64) *QueuePropsCache {
 	if size == 0 {
@@ -104,16 +94,12 @@ func (c *QueuePropsCache) getByName(name string) (QueueProps, bool) {
 	return QueueProps{}, false
 }
 
-func (c *QueuePropsCache) list(options ...QueuePropsListOption) []QueueProps {
+func (c *QueuePropsCache) list() []QueueProps {
 	props := make([]QueueProps, len(c.byID))
 
 	listOptions := QueuePropsListOptions{
 		orderBy: v1.ListQueuesRequest_ORDER_BY_ID,
 		sortBy:  v1.ListQueuesRequest_SORT_BY_ASC,
-	}
-
-	for _, option := range options {
-		option(&listOptions)
 	}
 
 	c.mu.RLock()
@@ -139,7 +125,7 @@ func (c *QueuePropsCache) list(options ...QueuePropsListOption) []QueueProps {
 		return true
 	}
 
-	for k, v := range c.byName {
+	for k, v := range c.byID {
 		if !iter(k, v) {
 			break
 		}

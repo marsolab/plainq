@@ -3,8 +3,8 @@ package account
 import (
 	"testing"
 
-	"github.com/maxatome/go-testdeep/td"
 	"github.com/marsolab/servekit/errkit"
+	"github.com/maxatome/go-testdeep/td"
 )
 
 func TestValidateUserName(t *testing.T) {
@@ -55,7 +55,7 @@ func TestValidateUserName(t *testing.T) {
 	}
 
 	for name, tc := range tests {
-		t.Run(name, func(t *testing.T) { 
+		t.Run(name, func(t *testing.T) {
 			td.Cmp(t, validateUserName(tc.input), tc.wantErr)
 		})
 	}

@@ -3,7 +3,6 @@ package middleware
 import (
 	"context"
 	"crypto/rsa"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -27,33 +26,33 @@ type UserSyncer interface {
 	SyncUser(ctx context.Context, oauthUser OAuthUser, providerName string) (*SyncedUser, error)
 }
 
-// OAuthClaims represents claims from an OAuth JWT token
+// OAuthClaims represents claims from an OAuth JWT token.
 type OAuthClaims struct {
-	Subject      string                 `json:"sub"`
-	Email        string                 `json:"email"`
-	Name         string                 `json:"name,omitempty"`
-	Picture      string                 `json:"picture,omitempty"`
-	Issuer       string                 `json:"iss"`
-	Audience     []string               `json:"aud"`
-	ExpiresAt    int64                  `json:"exp"`
-	IssuedAt     int64                  `json:"iat"`
-	Organization string                 `json:"org_code,omitempty"`
-	Roles        []string               `json:"roles,omitempty"`
-	Teams        []string               `json:"teams,omitempty"`
-	Permissions  []string               `json:"permissions,omitempty"`
-	CustomClaims map[string]interface{} `json:"-"`
+	Subject      string         `json:"sub"`
+	Email        string         `json:"email"`
+	Name         string         `json:"name,omitempty"`
+	Picture      string         `json:"picture,omitempty"`
+	Issuer       string         `json:"iss"`
+	Audience     []string       `json:"aud"`
+	ExpiresAt    int64          `json:"exp"`
+	IssuedAt     int64          `json:"iat"`
+	Organization string         `json:"org_code,omitempty"`
+	Roles        []string       `json:"roles,omitempty"`
+	Teams        []string       `json:"teams,omitempty"`
+	Permissions  []string       `json:"permissions,omitempty"`
+	CustomClaims map[string]any `json:"-"`
 }
 
 // OAuthUser represents a user from OAuth claims
 type OAuthUser struct {
-	Subject      string                 `json:"sub"`
-	Email        string                 `json:"email"`
-	Name         string                 `json:"name,omitempty"`
-	Picture      string                 `json:"picture,omitempty"`
-	Roles        []string               `json:"roles,omitempty"`
-	Organization string                 `json:"organization,omitempty"`
-	Teams        []string               `json:"teams,omitempty"`
-	Claims       map[string]interface{} `json:"claims,omitempty"`
+	Subject      string         `json:"sub"`
+	Email        string         `json:"email"`
+	Name         string         `json:"name,omitempty"`
+	Picture      string         `json:"picture,omitempty"`
+	Roles        []string       `json:"roles,omitempty"`
+	Organization string         `json:"organization,omitempty"`
+	Teams        []string       `json:"teams,omitempty"`
+	Claims       map[string]any `json:"claims,omitempty"`
 }
 
 // SyncedUser represents a synchronized user
@@ -69,7 +68,12 @@ type SyncedUser struct {
 }
 
 // AuthenticateOAuth middleware validates OAuth JWT tokens and synchronizes users
-func AuthenticateOAuth(provider OAuthProvider, syncer UserSyncer, providerName string, roleClaimName, orgClaimName, teamClaimName string) func(next http.Handler) http.Handler {
+func AuthenticateOAuth(
+	provider OAuthProvider,
+	syncer UserSyncer,
+	providerName string,
+	roleClaimName, orgClaimName, teamClaimName string,
+) func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			authHeader := r.Header.Get("Authorization")
@@ -116,7 +120,9 @@ func AuthenticateOAuth(provider OAuthProvider, syncer UserSyncer, providerName s
 	}
 }
 
-// extractOAuthUser extracts user information from OAuth claims
+// extractOAuthUser extracts user information from OAuth claims.
+//
+//nolint:cyclop // Multiple role and team claim configurations.
 func extractOAuthUser(claims *OAuthClaims, roleClaimName, orgClaimName, teamClaimName string) OAuthUser {
 	user := OAuthUser{
 		Subject: claims.Subject,
@@ -159,12 +165,13 @@ func extractOAuthUser(claims *OAuthClaims, roleClaimName, orgClaimName, teamClai
 }
 
 // extractStringSlice safely extracts a string slice from an interface{}
-func extractStringSlice(value interface{}) []string {
+func extractStringSlice(value any) []string {
 	switch v := value.(type) {
 	case []string:
 		return v
-	case []interface{}:
+	case []any:
 		var result []string
+
 		for _, item := range v {
 			if str, ok := item.(string); ok {
 				result = append(result, str)
@@ -180,11 +187,10 @@ func extractStringSlice(value interface{}) []string {
 
 // GenericOAuthProvider provides a generic OAuth provider implementation
 type GenericOAuthProvider struct {
-	issuer    string
-	audience  string
-	jwksURL   string
-	keyCache  map[string]*rsa.PublicKey
-	cacheTime time.Time
+	issuer   string
+	audience string
+	jwksURL  string
+	keyCache map[string]*rsa.PublicKey
 }
 
 // NewGenericOAuthProvider creates a new generic OAuth provider
@@ -197,36 +203,30 @@ func NewGenericOAuthProvider(issuer, audience, jwksURL string) *GenericOAuthProv
 	}
 }
 
-// ValidateToken validates a JWT token
+// ValidateToken validates a JWT token.
+//
+//nolint:gocyclo // Complex token validation and claim extraction.
 func (p *GenericOAuthProvider) ValidateToken(ctx context.Context, tokenString string) (*OAuthClaims, error) {
-	// Parse the token without verification first to get the header
-	token, err := jwt.Parse([]byte(tokenString))
+	raw := []byte(tokenString)
+
+	// Parse without verification first so we can read the kid from the header
+	// and look up the right public key.
+	headerToken, err := jwt.ParseNoVerify(raw)
 	if err != nil {
-		return nil, fmt.Errorf("parse token: %w", err)
+		return nil, fmt.Errorf("parse token header: %w", err)
 	}
 
-	// Get the key ID from the header
-	var header struct {
-		Kid string `json:"kid"`
-	}
-	if err := json.Unmarshal(token.Header(), &header); err != nil {
-		return nil, fmt.Errorf("unmarshal header: %w", err)
-	}
-
-	// Get the public key for verification
-	publicKey, err := p.GetPublicKey(ctx, header.Kid)
+	publicKey, err := p.GetPublicKey(ctx, headerToken.Header().KeyID)
 	if err != nil {
 		return nil, fmt.Errorf("get public key: %w", err)
 	}
 
-	// Verify the token
 	verifier, err := jwt.NewVerifierRS(jwt.RS256, publicKey)
 	if err != nil {
 		return nil, fmt.Errorf("create verifier: %w", err)
 	}
 
-	// Parse and verify the token
-	token, err = jwt.ParseAndVerify([]byte(tokenString), verifier)
+	token, err := jwt.Parse(raw, verifier)
 	if err != nil {
 		return nil, fmt.Errorf("verify token: %w", err)
 	}
@@ -238,7 +238,7 @@ func (p *GenericOAuthProvider) ValidateToken(ctx context.Context, tokenString st
 	}
 
 	// Extract custom claims
-	var customClaims map[string]interface{}
+	var customClaims map[string]any
 	if err := token.DecodeClaims(&customClaims); err != nil {
 		return nil, fmt.Errorf("decode custom claims: %w", err)
 	}
@@ -249,12 +249,14 @@ func (p *GenericOAuthProvider) ValidateToken(ctx context.Context, tokenString st
 	}
 
 	validAudience := false
+
 	for _, aud := range stdClaims.Audience {
 		if aud == p.audience {
 			validAudience = true
 			break
 		}
 	}
+
 	if !validAudience {
 		return nil, fmt.Errorf("invalid audience")
 	}
@@ -276,12 +278,15 @@ func (p *GenericOAuthProvider) ValidateToken(ctx context.Context, tokenString st
 	if email, ok := customClaims["email"].(string); ok {
 		claims.Email = email
 	}
+
 	if name, ok := customClaims["name"].(string); ok {
 		claims.Name = name
 	}
+
 	if picture, ok := customClaims["picture"].(string); ok {
 		claims.Picture = picture
 	}
+
 	if org, ok := customClaims["org_code"].(string); ok {
 		claims.Organization = org
 	}
@@ -289,6 +294,7 @@ func (p *GenericOAuthProvider) ValidateToken(ctx context.Context, tokenString st
 	if stdClaims.ExpiresAt != nil {
 		claims.ExpiresAt = stdClaims.ExpiresAt.Unix()
 	}
+
 	if stdClaims.IssuedAt != nil {
 		claims.IssuedAt = stdClaims.IssuedAt.Unix()
 	}

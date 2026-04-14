@@ -70,11 +70,19 @@ func (c *Client) ListQueues(ctx context.Context, in *v1.ListQueuesRequest, opts 
 	return c.client.ListQueues(ctx, in, opts...)
 }
 
-func (c *Client) DescribeQueue(ctx context.Context, in *v1.DescribeQueueRequest, opts ...grpc.CallOption) (*v1.DescribeQueueResponse, error) {
+func (c *Client) DescribeQueue(
+	ctx context.Context,
+	in *v1.DescribeQueueRequest,
+	opts ...grpc.CallOption,
+) (*v1.DescribeQueueResponse, error) {
 	return c.client.DescribeQueue(ctx, in, opts...)
 }
 
-func (c *Client) CreateQueue(ctx context.Context, in *v1.CreateQueueRequest, opts ...grpc.CallOption) (*v1.CreateQueueResponse, error) {
+func (c *Client) CreateQueue(
+	ctx context.Context,
+	in *v1.CreateQueueRequest,
+	opts ...grpc.CallOption,
+) (*v1.CreateQueueResponse, error) {
 	return c.client.CreateQueue(ctx, in, opts...)
 }
 

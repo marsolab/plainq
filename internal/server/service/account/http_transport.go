@@ -219,6 +219,7 @@ func (s *Service) emailVerificationHandler(w http.ResponseWriter, r *http.Reques
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: decode request json: %s", errkit.ErrInvalidArgument, err.Error()))
 		return
 	}
+
 	defer r.Body.Close()
 
 	if err := validateEmail(req.Email); err != nil {

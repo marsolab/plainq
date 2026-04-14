@@ -270,7 +270,6 @@ func (c *observe) Upd(n float64)       { c.upd(n) }
 
 type obsPool[T observe] struct{ pool sync.Pool }
 
-func (p *obsPool[T]) put(v *T) { p.pool.Put(v) }
 func (p *obsPool[T]) get() *T {
 	v, ok := p.pool.Get().(*T)
 	if !ok {

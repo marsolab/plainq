@@ -19,6 +19,14 @@ const (
 	tokenIssuer = "plainq-server"
 )
 
+// onboardingRequest is the payload accepted by completeOnboardingHandler.
+// It is package-level so validateOnboardingRequest can reference the type.
+type onboardingRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+	Name     string `json:"name,omitempty"`
+}
+
 // getOnboardingStatusHandler returns the current onboarding status
 func (s *Service) getOnboardingStatusHandler(w http.ResponseWriter, r *http.Request) {
 	needsOnboarding, err := s.NeedsOnboarding(r.Context())
@@ -49,13 +57,7 @@ func (s *Service) completeOnboardingHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	type request struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
-		Name     string `json:"name,omitempty"`
-	}
-
-	var req request
+	var req onboardingRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: decode request json: %s", errkit.ErrInvalidArgument, err.Error()))
 		return
@@ -107,7 +109,7 @@ func (s *Service) completeOnboardingHandler(w http.ResponseWriter, r *http.Reque
 }
 
 // validateOnboardingRequest validates the onboarding request data
-func (s *Service) validateOnboardingRequest(req request) error {
+func (s *Service) validateOnboardingRequest(req onboardingRequest) error {
 	if req.Email == "" {
 		return fmt.Errorf("%w: email is required", errkit.ErrInvalidArgument)
 	}

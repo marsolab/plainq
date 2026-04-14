@@ -97,7 +97,12 @@ type Service struct {
 	storage Storage
 }
 
-func NewService(cfg *config.Config, logger *slog.Logger, hasher hashkit.Hasher, storage Storage) *Service {
+func NewService(
+	cfg *config.Config,
+	logger *slog.Logger,
+	hasher hashkit.Hasher,
+	storage Storage,
+) *Service {
 	s := Service{
 		cfg:     cfg,
 		router:  chi.NewRouter(),

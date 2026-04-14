@@ -14,10 +14,12 @@ import (
 	"github.com/marsolab/plainq/internal/server/config"
 	"github.com/marsolab/plainq/internal/server/middleware"
 	"github.com/marsolab/plainq/internal/server/service/account"
+	"github.com/marsolab/plainq/internal/server/service/oauth"
+	"github.com/marsolab/plainq/internal/server/service/onboarding"
 	"github.com/marsolab/plainq/internal/server/service/queue"
+	"github.com/marsolab/plainq/internal/server/service/rbac"
 	"github.com/marsolab/plainq/internal/server/service/telemetry"
 	"github.com/marsolab/servekit"
-	"github.com/marsolab/servekit/authkit/hashkit"
 	"github.com/marsolab/servekit/grpckit"
 	"github.com/marsolab/servekit/httpkit"
 	_ "google.golang.org/grpc/encoding/proto"
@@ -25,12 +27,14 @@ import (
 
 // PlainQ represents plainq logic.
 type PlainQ struct {
-	cfg      *config.Config
-	logger   *slog.Logger
-	queue    *queue.Service
-	account  *account.Service
-	hasher   hashkit.Hasher
-	observer telemetry.Observer
+	cfg        *config.Config
+	logger     *slog.Logger
+	queue      *queue.Service
+	account    *account.Service
+	onboarding *onboarding.Service
+	rbac       *rbac.Service
+	oauth      *oauth.Service
+	observer   telemetry.Observer
 }
 
 // NewServer returns a pointer to a new instance of the PlainQ.
@@ -40,16 +44,22 @@ func NewServer(
 	checker hc.HealthChecker,
 	queue *queue.Service,
 	account *account.Service,
+	onboarding *onboarding.Service,
+	rbac *rbac.Service,
+	oauth *oauth.Service,
 ) (*servekit.Server, error) {
 	// Create a server which holds and serve all listeners.
 	server := servekit.NewServer(logger)
 
 	pq := PlainQ{
-		cfg:      cfg,
-		logger:   logger,
-		queue:    queue,
-		account:  account,
-		observer: telemetry.NewObserver(),
+		cfg:        cfg,
+		logger:     logger,
+		queue:      queue,
+		account:    account,
+		onboarding: onboarding,
+		rbac:       rbac,
+		oauth:      oauth,
+		observer:   telemetry.NewObserver(),
 	}
 
 	// Create the HTTP listener.
@@ -73,6 +83,20 @@ func NewServer(
 			// Queue related routes.
 			v1.Route("/queue", func(queue chi.Router) {
 				queue.Mount("/", pq.queue)
+			})
+
+			// Onboarding is intentionally public — it only accepts
+			// requests before the first admin user exists.
+			v1.Route("/onboarding", func(r chi.Router) {
+				r.Mount("/", pq.onboarding)
+			})
+
+			v1.Route("/rbac", func(r chi.Router) {
+				r.Mount("/", pq.rbac)
+			})
+
+			v1.Route("/oauth", func(r chi.Router) {
+				r.Mount("/", pq.oauth)
 			})
 		})
 	})
@@ -133,6 +157,7 @@ func (s *PlainQ) houstonStaticHandler(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+
 		r.URL.Path = pathPrefix + "/index.html"
 	}
 

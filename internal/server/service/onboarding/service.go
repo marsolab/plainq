@@ -17,21 +17,21 @@ import (
 type Storage interface {
 	// HasAdminUsers checks if there are any users with admin role
 	HasAdminUsers(ctx context.Context) (bool, error)
-	
+
 	// CreateInitialAdmin creates the first admin user and assigns admin role
 	CreateInitialAdmin(ctx context.Context, admin InitialAdmin) error
-	
+
 	// GetAdminRoleID gets the admin role ID
 	GetAdminRoleID(ctx context.Context) (string, error)
 }
 
 // InitialAdmin represents the initial admin user to be created
 type InitialAdmin struct {
-	UserID   string    `json:"user_id"`
-	Email    string    `json:"email"`
-	Password string    `json:"password"`
-	Name     string    `json:"name,omitempty"`
-	Verified bool      `json:"verified"`
+	UserID    string    `json:"user_id"`
+	Email     string    `json:"email"`
+	Password  string    `json:"password"`
+	Name      string    `json:"name,omitempty"`
+	Verified  bool      `json:"verified"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -52,7 +52,13 @@ type Service struct {
 }
 
 // NewService creates a new onboarding service
-func NewService(cfg *config.Config, logger *slog.Logger, hasher hashkit.Hasher, tokenManager jwtkit.TokenManager, storage Storage) *Service {
+func NewService(
+	cfg *config.Config,
+	logger *slog.Logger,
+	hasher hashkit.Hasher,
+	tokenManager jwtkit.TokenManager,
+	storage Storage,
+) *Service {
 	s := Service{
 		cfg:     cfg,
 		logger:  logger,
@@ -93,7 +99,7 @@ func (s *Service) IsOnboardingComplete(ctx context.Context) (bool, error) {
 // CreateInitialAdmin creates the first admin user during onboarding
 func (s *Service) CreateInitialAdmin(ctx context.Context, email, password, name string) (*InitialAdmin, error) {
 	// Hash the password
-	hashedPassword, err := s.hasher.Hash(password)
+	hashedPassword, err := s.hasher.HashPassword(password)
 	if err != nil {
 		return nil, err
 	}

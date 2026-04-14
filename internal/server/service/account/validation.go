@@ -19,7 +19,7 @@ func validateUserName(name string) error {
 		return errkit.ErrValidation
 	}
 
-	if strings.ContainsAny(name, "/\"'?,:;<>!#$%^&*()={}[]|") {
+	if strings.ContainsAny(name, "@/\"'?,:;<>!#$%^&*()={}[]|") {
 		return errkit.ErrValidation
 	}
 

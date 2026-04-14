@@ -6,6 +6,10 @@ deps:
 schema:
 	cd internal/server/schema && buf generate buf.build/plainq/schema
 
+.PHONY: sqlc-generate
+sqlc-generate:
+	sqlc generate
+
 .PHONY: houston
 houston:
 	cd internal/houston/ui && npm install && npm run build

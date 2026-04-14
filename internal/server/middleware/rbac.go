@@ -50,6 +50,7 @@ func RequireQueuePermission(permissionChecker PermissionChecker, permission Perm
 				// Try alternative parameter names
 				queueID = chi.URLParam(r, "queue_id")
 			}
+
 			if queueID == "" {
 				httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: queue ID is required", errkit.ErrInvalidArgument))
 				return
@@ -116,6 +117,7 @@ func RequireAdminOrPermission(permissionChecker PermissionChecker, permission Pe
 			if queueID == "" {
 				queueID = chi.URLParam(r, "queue_id")
 			}
+
 			if queueID == "" {
 				httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: queue ID is required", errkit.ErrInvalidArgument))
 				return

@@ -25,14 +25,14 @@ type Provider struct {
 
 // OAuthUser represents a user from an OAuth provider
 type OAuthUser struct {
-	Subject      string                 `json:"sub"` // OAuth subject identifier
-	Email        string                 `json:"email"`
-	Name         string                 `json:"name,omitempty"`
-	Picture      string                 `json:"picture,omitempty"`
-	Roles        []string               `json:"roles,omitempty"`
-	Organization string                 `json:"organization,omitempty"`
-	Teams        []string               `json:"teams,omitempty"`
-	Claims       map[string]interface{} `json:"claims,omitempty"`
+	Subject      string         `json:"sub"` // OAuth subject identifier
+	Email        string         `json:"email"`
+	Name         string         `json:"name,omitempty"`
+	Picture      string         `json:"picture,omitempty"`
+	Roles        []string       `json:"roles,omitempty"`
+	Organization string         `json:"organization,omitempty"`
+	Teams        []string       `json:"teams,omitempty"`
+	Claims       map[string]any `json:"claims,omitempty"`
 }
 
 // Storage encapsulates interaction with OAuth storage operations

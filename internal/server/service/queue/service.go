@@ -41,20 +41,20 @@ type Storage interface {
 	Delete(ctx context.Context, input *v1.DeleteRequest) (*v1.DeleteResponse, error)
 }
 
-func init() { encoding.RegisterCodec(vtgrpc.Codec{}) }
-
 // Service holds logic of interacting with a queue.
 type Service struct {
 	v1.UnimplementedPlainQServiceServer
 
 	cfg     *config.Config
-	logger  *slog.Logger 
+	logger  *slog.Logger
 	router  chi.Router
 	storage Storage
 }
 
 // NewService creates a new queue service.
 func NewService(cfg *config.Config, logger *slog.Logger, storage Storage) *Service {
+	encoding.RegisterCodec(vtgrpc.Codec{})
+
 	s := Service{
 		cfg:     cfg,
 		logger:  logger,

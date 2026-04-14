@@ -40,7 +40,8 @@ func RequireOnboarding(checker OnboardingChecker) func(next http.Handler) http.H
 				// Return a specific error indicating onboarding is needed
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusPreconditionRequired) // 428 status code
-				response := map[string]interface{}{
+
+				response := map[string]any{
 					"error":            "System requires onboarding",
 					"needs_onboarding": true,
 					"onboarding_url":   "/onboarding",

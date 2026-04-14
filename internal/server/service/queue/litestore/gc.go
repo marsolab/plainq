@@ -9,6 +9,7 @@ import (
 	"time"
 
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
+	"github.com/marsolab/plainq/internal/server/service/queue/litestore/sqlcgen"
 )
 
 type sweepResult struct {
@@ -75,7 +76,7 @@ func (s *Storage) gc(ctx context.Context) {
 func (s *Storage) queuesForGC(ctx context.Context) (_ []string, sErr error) {
 	limit := s.observer.QueuesExist().Get()
 	offset := uint64(0)
-	query := s.querier.selectQueuesForGC(s.gcTimeout, limit, offset)
+	cutoff := time.Now().Add(-s.gcTimeout)
 	queues := make([]string, 0, limit)
 
 	tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
@@ -89,42 +90,25 @@ func (s *Storage) queuesForGC(ctx context.Context) (_ []string, sErr error) {
 		}
 	}()
 
-	getQueues := func(ctx context.Context, tx *sql.Tx) error {
-		rows, queryErr := tx.QueryContext(ctx, query)
-		if queryErr != nil {
-			return fmt.Errorf("select query: %w", queryErr)
-		}
-
-		defer func() {
-			if err := rows.Close(); err != nil {
-				sErr = errors.Join(sErr, fmt.Errorf("close rows: %w", err))
-			}
-		}()
-
-		for rows.Next() {
-			var queueID string
-
-			if err := rows.Scan(&queueID); err != nil {
-				return fmt.Errorf("scan row: %w", err)
-			}
-
-			queues = append(queues, queueID)
-		}
-
-		return nil
-	}
+	q := s.queries.WithTx(tx)
 
 	for {
-		if err := getQueues(ctx, tx); err != nil {
+		batch, err := q.SelectQueuesForGC(ctx, sqlcgen.SelectQueuesForGCParams{
+			GcAt:   cutoff,
+			Limit:  int64(limit),
+			Offset: int64(offset),
+		})
+		if err != nil {
 			return nil, fmt.Errorf("query queues: %w", err)
 		}
 
-		if len(queues) != int(limit) {
+		queues = append(queues, batch...)
+
+		if uint64(len(batch)) != limit {
 			break
 		}
 
 		offset += limit
-		query = s.querier.selectQueuesForGC(s.gcTimeout, limit, offset)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -134,6 +118,7 @@ func (s *Storage) queuesForGC(ctx context.Context) (_ []string, sErr error) {
 	return queues, nil
 }
 
+//nolint:cyclop // Complex message eviction logic with multiple policy checks.
 func (s *Storage) sweep(ctx context.Context, queueID string) (_ *sweepResult, sErr error) {
 	start := time.Now()
 
@@ -176,7 +161,7 @@ func (s *Storage) sweep(ctx context.Context, queueID string) (_ *sweepResult, sE
 		return nil, fmt.Errorf("queue props (id: %q) contains unsuppoted drop policy: %d", queueID, props.EvictionPolicy)
 	}
 
-	if err := updateQueuePropsAfterGC(ctx, queueID, tx); err != nil {
+	if err := s.updateQueuePropsAfterGC(ctx, queueID, tx); err != nil {
 		return nil, fmt.Errorf("update queue (id: %q) props record: %w", queueID, err)
 	}
 
@@ -254,15 +239,10 @@ func moveMessagesToDLQ(ctx context.Context, tx *sql.Tx, props QueueProps) (_ uin
 	return moved, nil
 }
 
-func updateQueuePropsAfterGC(ctx context.Context, queueID string, tx *sql.Tx) error {
-	r, execErr := tx.ExecContext(ctx, queryUpdateQueueAfterGC, queueID)
+func (s *Storage) updateQueuePropsAfterGC(ctx context.Context, queueID string, tx *sql.Tx) error {
+	rows, execErr := s.queries.WithTx(tx).UpdateQueuePropertiesGCAt(ctx, queueID)
 	if execErr != nil {
 		return fmt.Errorf("execute query: %w", execErr)
-	}
-
-	rows, rowsErr := r.RowsAffected()
-	if rowsErr != nil {
-		return fmt.Errorf("get affected rows: %w", rowsErr)
 	}
 
 	if rows == 0 {

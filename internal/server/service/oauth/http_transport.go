@@ -13,10 +13,10 @@ import (
 	"github.com/marsolab/servekit/idkit"
 )
 
-// OAuth Provider Management Handlers
+// OAuth Provider Management Handlers.
 
 func (s *Service) listProvidersHandler(w http.ResponseWriter, r *http.Request) {
-	// Get organization from context or query parameter
+	// Get organization from context or query parameter.
 	orgID := r.URL.Query().Get("org_id")
 
 	providers, err := s.storage.ListProviders(r.Context(), orgID)
@@ -75,8 +75,8 @@ func (s *Service) getProviderHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// This is a simplified version - in practice, you'd need to implement GetProviderByID
-	// For now, return an error indicating this needs implementation
+	// This is a simplified version - in practice, you'd need to implement GetProviderByID.
+	// For now, return an error indicating this needs implementation.
 	httpkit.ErrorHTTP(w, r, fmt.Errorf("get provider by ID not implemented yet"))
 }
 
@@ -185,15 +185,14 @@ func (s *Service) getUserSyncStatusHandler(w http.ResponseWriter, r *http.Reques
 // Organization and Team Handlers
 
 func (s *Service) listOrganizationsHandler(w http.ResponseWriter, r *http.Request) {
-	// Get user from context to determine accessible organizations
-	userInfo, ok := middleware.GetUserFromContext(r.Context())
-	if !ok {
+	// Get user from context to determine accessible organizations.
+	// TODO: query the database for organizations the user can access; for
+	// now we just verify the request is authenticated.
+	if _, ok := middleware.GetUserFromContext(r.Context()); !ok {
 		httpkit.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
 		return
 	}
 
-	// For now, return a simple response
-	// In practice, this would query the database for organizations the user can access
 	type response struct {
 		Organizations []Organization `json:"organizations"`
 		UserOrg       string         `json:"user_org"`

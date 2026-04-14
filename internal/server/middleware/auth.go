@@ -26,7 +26,9 @@ const (
 	UserContextKey ContextKey = "user"
 )
 
-// AuthenticateJWT middleware validates JWT tokens and extracts user information
+// AuthenticateJWT middleware validates JWT tokens and extracts user information.
+//
+//nolint:gocognit // Complex JWT validation and user extraction logic.
 func AuthenticateJWT(tokenManager jwtkit.TokenManager) func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -66,8 +68,9 @@ func AuthenticateJWT(tokenManager jwtkit.TokenManager) func(next http.Handler) h
 
 			// Extract roles from token (optional)
 			var roles []string
+
 			if rolesInterface, exists := token.Meta["roles"]; exists {
-				if rolesList, ok := rolesInterface.([]interface{}); ok {
+				if rolesList, ok := rolesInterface.([]any); ok {
 					for _, role := range rolesList {
 						if roleStr, ok := role.(string); ok {
 							roles = append(roles, roleStr)
@@ -101,6 +104,7 @@ func RequireRoles(requiredRoles ...string) func(next http.Handler) http.Handler 
 
 			// Check if user has any of the required roles
 			hasRole := false
+
 			for _, requiredRole := range requiredRoles {
 				for _, userRole := range userInfo.Roles {
 					if userRole == requiredRole {
@@ -108,6 +112,7 @@ func RequireRoles(requiredRoles ...string) func(next http.Handler) http.Handler 
 						break
 					}
 				}
+
 				if hasRole {
 					break
 				}

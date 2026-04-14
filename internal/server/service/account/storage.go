@@ -29,9 +29,11 @@ func (s *SQLiteStorage) CreateAccount(ctx context.Context, account Account) erro
 	query := `INSERT INTO users (user_id, email, password, verified, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`
 	now := time.Now()
 	_, err := s.db.ExecContext(ctx, query, account.ID, account.Email, account.Password, account.Verified, now, now)
+
 	if err != nil {
 		return fmt.Errorf("create account: %w", err)
 	}
+
 	return nil
 }
 
@@ -47,6 +49,7 @@ func (s *SQLiteStorage) GetAccountByID(ctx context.Context, id string) (*Account
 		}
 		return nil, fmt.Errorf("get account by ID: %w", err)
 	}
+
 	return &account, nil
 }
 
@@ -56,6 +59,7 @@ func (s *SQLiteStorage) GetAccountByEmail(ctx context.Context, email string) (*A
 	var account Account
 	err := s.db.QueryRowContext(ctx, query, email).Scan(
 		&account.ID, &account.Email, &account.Password, &account.Verified, &account.CreatedAt, &account.UpdatedAt)
+
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("account not found")
@@ -109,6 +113,7 @@ func (s *SQLiteStorage) SetAccountPassword(ctx context.Context, id, password str
 func (s *SQLiteStorage) DeleteAccount(ctx context.Context, id string) error {
 	query := `DELETE FROM users WHERE user_id = ?`
 	result, err := s.db.ExecContext(ctx, query, id)
+
 	if err != nil {
 		return fmt.Errorf("delete account: %w", err)
 	}
@@ -129,6 +134,7 @@ func (s *SQLiteStorage) DeleteAccount(ctx context.Context, id string) error {
 func (s *SQLiteStorage) CreateRefreshToken(ctx context.Context, token RefreshToken) error {
 	query := `INSERT INTO refresh_tokens (id, aid, token, created_at, expires_at) VALUES (?, ?, ?, ?, ?)`
 	_, err := s.db.ExecContext(ctx, query, token.ID, token.AID, token.Token, token.CreatedAt, token.ExpiresAt)
+
 	if err != nil {
 		return fmt.Errorf("create refresh token: %w", err)
 	}
@@ -204,7 +210,7 @@ func (s *SQLiteStorage) GetUserRoles(ctx context.Context, userID string) ([]stri
 		INNER JOIN user_roles ur ON r.role_id = ur.role_id 
 		WHERE ur.user_id = ?
 		ORDER BY r.role_name`
-	
+
 	rows, err := s.db.QueryContext(ctx, query, userID)
 	if err != nil {
 		return nil, fmt.Errorf("get user roles: %w", err)
@@ -212,11 +218,14 @@ func (s *SQLiteStorage) GetUserRoles(ctx context.Context, userID string) ([]stri
 	defer rows.Close()
 
 	var roles []string
+
 	for rows.Next() {
 		var roleName string
+
 		if err := rows.Scan(&roleName); err != nil {
 			return nil, fmt.Errorf("scan role name: %w", err)
 		}
+
 		roles = append(roles, roleName)
 	}
 
