@@ -1,0 +1,11 @@
+---
+import Layout from "@/layouts/Layout.astro";
+import { AppShell } from "@/components/layout/app-shell";
+import { UserList } from "@/components/users/user-list";
+---
+
+<Layout title="Users — PlainQ">
+  <AppShell currentPath="/users" title="Users" client:load>
+    <UserList client:load />
+  </AppShell>
+</Layout>

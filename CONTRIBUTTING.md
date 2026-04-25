@@ -22,6 +22,7 @@ By participating in this project, you agree to maintain a welcoming, respectful,
 ## Development Setup
 
 PlainQ requires:
+
 - Go 1.23 or later
 - Protocol Buffers compiler for gRPC development
 
@@ -66,6 +67,7 @@ PlainQ requires:
 ## Questions?
 
 Feel free to open an issue for:
+
 - Bug reports
 - Feature requests
 - Questions about the codebase

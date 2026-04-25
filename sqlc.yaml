@@ -1,0 +1,161 @@
+version: "2"
+sql:
+  - engine: "sqlite"
+    queries: "internal/server/service/account/litestore/queries"
+    schema: "internal/server/sqlc/sqlite/schema.sql"
+    gen:
+      go:
+        package: "sqlcgen"
+        out: "internal/server/service/account/litestore/sqlcgen"
+        sql_package: "database/sql"
+        emit_json_tags: false
+        emit_interface: false
+        emit_prepared_queries: false
+        emit_exact_table_names: false
+        emit_empty_slices: true
+        emit_methods_with_db_argument: false
+        emit_pointers_for_null_types: false
+
+  - engine: "postgresql"
+    queries: "internal/server/service/account/pgstore/queries"
+    schema: "internal/server/sqlc/postgres/schema.sql"
+    gen:
+      go:
+        package: "sqlcgen"
+        out: "internal/server/service/account/pgstore/sqlcgen"
+        sql_package: "pgx/v5"
+        emit_json_tags: false
+        emit_interface: false
+        emit_prepared_queries: false
+        emit_exact_table_names: false
+        emit_empty_slices: true
+        emit_methods_with_db_argument: false
+        emit_pointers_for_null_types: false
+
+  - engine: "sqlite"
+    queries: "internal/server/service/queue/litestore/queries"
+    schema: "internal/server/sqlc/sqlite/schema.sql"
+    gen:
+      go:
+        package: "sqlcgen"
+        out: "internal/server/service/queue/litestore/sqlcgen"
+        sql_package: "database/sql"
+        emit_json_tags: false
+        emit_interface: false
+        emit_prepared_queries: false
+        emit_exact_table_names: false
+        emit_empty_slices: true
+        emit_methods_with_db_argument: false
+        emit_pointers_for_null_types: false
+
+  - engine: "postgresql"
+    queries: "internal/server/service/queue/pgstore/queries"
+    schema: "internal/server/sqlc/postgres/schema.sql"
+    gen:
+      go:
+        package: "sqlcgen"
+        out: "internal/server/service/queue/pgstore/sqlcgen"
+        sql_package: "pgx/v5"
+        emit_json_tags: false
+        emit_interface: false
+        emit_prepared_queries: false
+        emit_exact_table_names: false
+        emit_empty_slices: true
+        emit_methods_with_db_argument: false
+        emit_pointers_for_null_types: false
+
+  - engine: "sqlite"
+    queries: "internal/server/service/rbac/litestore/queries"
+    schema: "internal/server/sqlc/sqlite/schema.sql"
+    gen:
+      go:
+        package: "sqlcgen"
+        out: "internal/server/service/rbac/litestore/sqlcgen"
+        sql_package: "database/sql"
+        emit_json_tags: false
+        emit_interface: false
+        emit_prepared_queries: false
+        emit_exact_table_names: false
+        emit_empty_slices: true
+        emit_methods_with_db_argument: false
+        emit_pointers_for_null_types: false
+
+  - engine: "postgresql"
+    queries: "internal/server/service/rbac/pgstore/queries"
+    schema: "internal/server/sqlc/postgres/schema.sql"
+    gen:
+      go:
+        package: "sqlcgen"
+        out: "internal/server/service/rbac/pgstore/sqlcgen"
+        sql_package: "pgx/v5"
+        emit_json_tags: false
+        emit_interface: false
+        emit_prepared_queries: false
+        emit_exact_table_names: false
+        emit_empty_slices: true
+        emit_methods_with_db_argument: false
+        emit_pointers_for_null_types: false
+
+  - engine: "sqlite"
+    queries: "internal/server/service/onboarding/litestore/queries"
+    schema: "internal/server/sqlc/sqlite/schema.sql"
+    gen:
+      go:
+        package: "sqlcgen"
+        out: "internal/server/service/onboarding/litestore/sqlcgen"
+        sql_package: "database/sql"
+        emit_json_tags: false
+        emit_interface: false
+        emit_prepared_queries: false
+        emit_exact_table_names: false
+        emit_empty_slices: true
+        emit_methods_with_db_argument: false
+        emit_pointers_for_null_types: false
+
+  - engine: "postgresql"
+    queries: "internal/server/service/onboarding/pgstore/queries"
+    schema: "internal/server/sqlc/postgres/schema.sql"
+    gen:
+      go:
+        package: "sqlcgen"
+        out: "internal/server/service/onboarding/pgstore/sqlcgen"
+        sql_package: "pgx/v5"
+        emit_json_tags: false
+        emit_interface: false
+        emit_prepared_queries: false
+        emit_exact_table_names: false
+        emit_empty_slices: true
+        emit_methods_with_db_argument: false
+        emit_pointers_for_null_types: false
+
+  - engine: "sqlite"
+    queries: "internal/server/service/oauth/litestore/queries"
+    schema: "internal/server/sqlc/sqlite/schema.sql"
+    gen:
+      go:
+        package: "sqlcgen"
+        out: "internal/server/service/oauth/litestore/sqlcgen"
+        sql_package: "database/sql"
+        emit_json_tags: false
+        emit_interface: false
+        emit_prepared_queries: false
+        emit_exact_table_names: false
+        emit_empty_slices: true
+        emit_methods_with_db_argument: false
+        emit_pointers_for_null_types: false
+
+  - engine: "postgresql"
+    queries: "internal/server/service/oauth/pgstore/queries"
+    schema: "internal/server/sqlc/postgres/schema.sql"
+    gen:
+      go:
+        package: "sqlcgen"
+        out: "internal/server/service/oauth/pgstore/sqlcgen"
+        sql_package: "pgx/v5"
+        emit_json_tags: false
+        emit_interface: false
+        emit_prepared_queries: false
+        emit_exact_table_names: false
+        emit_empty_slices: true
+        emit_methods_with_db_argument: false
+        emit_pointers_for_null_types: false

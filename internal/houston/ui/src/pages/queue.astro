@@ -1,0 +1,11 @@
+---
+import Layout from "@/layouts/Layout.astro";
+import { AppShell } from "@/components/layout/app-shell";
+import { QueueDetailPage } from "@/components/queue/queue-detail-page";
+---
+
+<Layout title="Queue — PlainQ">
+  <AppShell currentPath="/queue" title="Queue Details" client:load>
+    <QueueDetailPage client:load />
+  </AppShell>
+</Layout>

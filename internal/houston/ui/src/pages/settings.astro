@@ -1,0 +1,11 @@
+---
+import Layout from "@/layouts/Layout.astro";
+import { AppShell } from "@/components/layout/app-shell";
+import { SettingsForm } from "@/components/settings/settings-form";
+---
+
+<Layout title="Settings — PlainQ">
+  <AppShell currentPath="/settings" title="Settings" client:load>
+    <SettingsForm client:load />
+  </AppShell>
+</Layout>

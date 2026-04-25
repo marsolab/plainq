@@ -2,112 +2,124 @@ package middleware
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 
-	"github.com/plainq/plainq/internal/server/auth"
+	"github.com/marsolab/servekit/authkit/jwtkit"
+	"github.com/marsolab/servekit/errkit"
+	"github.com/marsolab/servekit/httpkit"
 )
 
-// contextKey is a custom type for context keys to avoid collisions.
-type contextKey string
+// UserInfo represents authenticated user information
+type UserInfo struct {
+	UserID string
+	Email  string
+	Roles  []string
+}
+
+// ContextKey is a type for context keys to avoid collisions
+type ContextKey string
 
 const (
-	// UserContextKey is the key for storing user claims in context.
-	UserContextKey contextKey = "user"
+	// UserContextKey is the key used to store user info in request context
+	UserContextKey ContextKey = "user"
 )
 
-// Auth creates a middleware that validates JWT tokens.
-func Auth(authService *auth.Service) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Extract token from Authorization header.
-			authHeader := r.Header.Get("Authorization")
-			if authHeader == "" {
-				http.Error(w, `{"error": "missing authorization header"}`, http.StatusUnauthorized)
-				return
-			}
-
-			// Check if it's a Bearer token.
-			parts := strings.Split(authHeader, " ")
-			if len(parts) != 2 || parts[0] != "Bearer" {
-				http.Error(w, `{"error": "invalid authorization header format"}`, http.StatusUnauthorized)
-				return
-			}
-
-			token := parts[1]
-
-			// Validate token.
-			claims, err := authService.ValidateToken(r.Context(), token)
-			if err != nil {
-				http.Error(w, `{"error": "invalid or expired token"}`, http.StatusUnauthorized)
-				return
-			}
-
-			// Add claims to request context.
-			ctx := context.WithValue(r.Context(), UserContextKey, claims)
-			next.ServeHTTP(w, r.WithContext(ctx))
-		})
-	}
-}
-
-// OptionalAuth creates a middleware that optionally validates JWT tokens.
-// If a valid token is provided, it adds claims to context.
-// If no token or invalid token, it continues without authentication.
-func OptionalAuth(authService *auth.Service) func(http.Handler) http.Handler {
+// AuthenticateJWT middleware validates JWT tokens and extracts user information.
+//
+//nolint:gocognit // Complex JWT validation and user extraction logic.
+func AuthenticateJWT(tokenManager jwtkit.TokenManager) func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			authHeader := r.Header.Get("Authorization")
 			if authHeader == "" {
-				next.ServeHTTP(w, r)
+				httpkit.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
 				return
 			}
 
-			parts := strings.Split(authHeader, " ")
-			if len(parts) != 2 || parts[0] != "Bearer" {
-				next.ServeHTTP(w, r)
+			// Remove "Bearer " prefix
+			tokenString := strings.TrimPrefix(authHeader, "Bearer ")
+			if tokenString == authHeader {
+				httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: invalid authorization header format", errkit.ErrUnauthenticated))
 				return
 			}
 
-			token := parts[1]
-			claims, err := authService.ValidateToken(r.Context(), token)
+			// Parse and verify the token
+			token, err := tokenManager.ParseVerify(tokenString)
 			if err != nil {
-				next.ServeHTTP(w, r)
+				httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: invalid token: %s", errkit.ErrUnauthenticated, err.Error()))
 				return
 			}
 
-			ctx := context.WithValue(r.Context(), UserContextKey, claims)
-			next.ServeHTTP(w, r.WithContext(ctx))
-		})
-	}
-}
-
-// RequireRole creates a middleware that requires a specific role.
-func RequireRole(roles ...string) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// Get claims from context.
-			claims, ok := r.Context().Value(UserContextKey).(*auth.Claims)
+			// Extract user ID from token
+			userID, ok := token.Meta["uid"].(string)
 			if !ok {
-				http.Error(w, `{"error": "unauthorized"}`, http.StatusUnauthorized)
+				httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: missing user ID in token", errkit.ErrUnauthenticated))
 				return
 			}
 
-			// Check if user has any of the required roles.
+			// Extract email from token
+			email, ok := token.Meta["email"].(string)
+			if !ok {
+				httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: missing email in token", errkit.ErrUnauthenticated))
+				return
+			}
+
+			// Extract roles from token (optional)
+			var roles []string
+
+			if rolesInterface, exists := token.Meta["roles"]; exists {
+				if rolesList, ok := rolesInterface.([]any); ok {
+					for _, role := range rolesList {
+						if roleStr, ok := role.(string); ok {
+							roles = append(roles, roleStr)
+						}
+					}
+				}
+			}
+
+			// Store user info in context
+			userInfo := UserInfo{
+				UserID: userID,
+				Email:  email,
+				Roles:  roles,
+			}
+
+			ctx := context.WithValue(r.Context(), UserContextKey, userInfo)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// RequireRoles middleware ensures the authenticated user has at least one of the required roles
+func RequireRoles(requiredRoles ...string) func(next http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			userInfo, ok := GetUserFromContext(r.Context())
+			if !ok {
+				httpkit.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
+				return
+			}
+
+			// Check if user has any of the required roles
 			hasRole := false
-			for _, requiredRole := range roles {
-				for _, userRole := range claims.Roles {
+
+			for _, requiredRole := range requiredRoles {
+				for _, userRole := range userInfo.Roles {
 					if userRole == requiredRole {
 						hasRole = true
 						break
 					}
 				}
+
 				if hasRole {
 					break
 				}
 			}
 
 			if !hasRole {
-				http.Error(w, `{"error": "insufficient permissions"}`, http.StatusForbidden)
+				httpkit.ErrorHTTP(w, r, errkit.ErrUnauthorized)
 				return
 			}
 
@@ -116,8 +128,22 @@ func RequireRole(roles ...string) func(http.Handler) http.Handler {
 	}
 }
 
-// GetClaimsFromContext extracts claims from the request context.
-func GetClaimsFromContext(ctx context.Context) (*auth.Claims, bool) {
-	claims, ok := ctx.Value(UserContextKey).(*auth.Claims)
-	return claims, ok
+// RequireAdmin middleware ensures the authenticated user has admin role
+func RequireAdmin() func(next http.Handler) http.Handler {
+	return RequireRoles("admin")
+}
+
+// GetUserFromContext extracts user information from the request context
+func GetUserFromContext(ctx context.Context) (UserInfo, bool) {
+	userInfo, ok := ctx.Value(UserContextKey).(UserInfo)
+	return userInfo, ok
+}
+
+// MustGetUserFromContext extracts user information from context, panics if not found
+func MustGetUserFromContext(ctx context.Context) UserInfo {
+	userInfo, ok := GetUserFromContext(ctx)
+	if !ok {
+		panic("user not found in context")
+	}
+	return userInfo
 }

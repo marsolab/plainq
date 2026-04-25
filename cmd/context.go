@@ -42,7 +42,6 @@ func contextInitCommand() *scotty.Command {
 		Run: func(_ *scotty.Command, _ []string) error {
 			// TODO: create context in default location.
 			// TODO: ~/.config/plainq/context.json.
-
 			f, createErr := createContextFile()
 			if createErr != nil {
 				if errors.Is(createErr, os.ErrExist) {

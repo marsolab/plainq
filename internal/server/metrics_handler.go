@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
-	"github.com/plainq/plainq/internal/server/telemetry/collector"
-	"github.com/plainq/servekit/respond"
+	"github.com/marsolab/plainq/internal/server/service/telemetry/collector"
+	"github.com/marsolab/servekit/httpkit"
 )
 
 const (
@@ -227,7 +227,7 @@ func (h *MetricsHandler) GetDashboardOverview(w http.ResponseWriter, r *http.Req
 		UpdatedAt:     time.Now().UnixMilli(),
 	}
 
-	respond.JSON(w, r, resp)
+	httpkit.JSON(w, r, resp)
 }
 
 // GetMetricsChart returns time-series data for a metric.
@@ -281,7 +281,7 @@ func (h *MetricsHandler) GetMetricsChart(w http.ResponseWriter, r *http.Request)
 		DataPoints: dataPoints,
 	}
 
-	respond.JSON(w, r, resp)
+	httpkit.JSON(w, r, resp)
 }
 
 // GetRatesChart returns rate history for a queue.
@@ -323,7 +323,7 @@ func (h *MetricsHandler) GetRatesChart(w http.ResponseWriter, r *http.Request) {
 		TimeRange: tr,
 	}
 
-	respond.JSON(w, r, resp)
+	httpkit.JSON(w, r, resp)
 }
 
 // GetQueueMetrics returns detailed metrics for a specific queue.
@@ -375,7 +375,7 @@ func (h *MetricsHandler) GetQueueMetrics(w http.ResponseWriter, r *http.Request)
 		TimeRange:          tr,
 	}
 
-	respond.JSON(w, r, resp)
+	httpkit.JSON(w, r, resp)
 }
 
 // GetInFlightMetrics returns in-flight message counts.
@@ -408,7 +408,7 @@ func (h *MetricsHandler) GetInFlightMetrics(w http.ResponseWriter, r *http.Reque
 		TimeRange: tr,
 	}
 
-	respond.JSON(w, r, resp)
+	httpkit.JSON(w, r, resp)
 }
 
 // GetAvailableMetrics returns list of available metrics.
@@ -438,7 +438,7 @@ func (*MetricsHandler) GetAvailableMetrics(w http.ResponseWriter, r *http.Reques
 		{collector.MetricMessageSizeBytes, "histogram", "Message body sizes"},
 	}
 
-	respond.JSON(w, r, metrics)
+	httpkit.JSON(w, r, metrics)
 }
 
 // GetTimeRangePresets returns available time range presets.
@@ -462,7 +462,7 @@ func (*MetricsHandler) GetTimeRangePresets(w http.ResponseWriter, r *http.Reques
 		{string(TimeRangeLast1y), "Last 1 year"},
 	}
 
-	respond.JSON(w, r, presets)
+	httpkit.JSON(w, r, presets)
 }
 
 // ExportMetrics exports metrics in a format suitable for Metabase.
