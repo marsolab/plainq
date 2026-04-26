@@ -236,9 +236,9 @@ func (s *Storage) GetRoleQueuePermissions(ctx context.Context, roleID string) ([
 		return nil, fmt.Errorf("list role queue permissions: %w", err)
 	}
 
-	out := make([]rbac.QueuePermission, len(rows))
-	for i, r := range rows {
-		out[i] = rbac.QueuePermission{
+	out := make([]rbac.QueuePermission, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, rbac.QueuePermission{
 			QueueID:    r.QueueID,
 			RoleID:     r.RoleID,
 			CanSend:    r.CanSend,
@@ -247,7 +247,7 @@ func (s *Storage) GetRoleQueuePermissions(ctx context.Context, roleID string) ([
 			CanDelete:  r.CanDelete,
 			CreatedAt:  r.CreatedAt,
 			UpdatedAt:  r.UpdatedAt,
-		}
+		})
 	}
 
 	return out, nil
