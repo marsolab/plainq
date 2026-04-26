@@ -176,13 +176,13 @@ func (s *Storage) GetUserRoles(ctx context.Context, userID string) ([]rbac.Role,
 		return nil, fmt.Errorf("get user roles: %w", err)
 	}
 
-	out := make([]rbac.Role, len(rows))
-	for i, r := range rows {
-		out[i] = rbac.Role{
+	out := make([]rbac.Role, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, rbac.Role{
 			RoleID:    r.RoleID,
 			RoleName:  r.RoleName,
 			CreatedAt: r.CreatedAt,
-		}
+		})
 	}
 
 	return out, nil
