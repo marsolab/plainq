@@ -2,6 +2,7 @@ package oauth
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -77,7 +78,7 @@ func (s *Service) getProviderHandler(w http.ResponseWriter, r *http.Request) {
 
 	// This is a simplified version - in practice, you'd need to implement GetProviderByID.
 	// For now, return an error indicating this needs implementation.
-	httpkit.ErrorHTTP(w, r, fmt.Errorf("get provider by ID not implemented yet"))
+	httpkit.ErrorHTTP(w, r, errors.New("get provider by ID not implemented yet"))
 }
 
 func (s *Service) updateProviderHandler(w http.ResponseWriter, r *http.Request) {
@@ -105,8 +106,8 @@ func (s *Service) updateProviderHandler(w http.ResponseWriter, r *http.Request) 
 		}
 	}()
 
-	// Implementation would go here - simplified for now
-	httpkit.ErrorHTTP(w, r, fmt.Errorf("update provider not implemented yet"))
+	// Implementation would go here - simplified for now.
+	httpkit.ErrorHTTP(w, r, errors.New("update provider not implemented yet"))
 }
 
 func (s *Service) deleteProviderHandler(w http.ResponseWriter, r *http.Request) {
@@ -186,6 +187,7 @@ func (s *Service) getUserSyncStatusHandler(w http.ResponseWriter, r *http.Reques
 
 func (s *Service) listOrganizationsHandler(w http.ResponseWriter, r *http.Request) {
 	// Get user from context to determine accessible organizations.
+	//nolint:godox // tracking item: query the database for organizations the user can access; for now we only verify auth.
 	// TODO: query the database for organizations the user can access; for
 	// now we just verify the request is authenticated.
 	if _, ok := middleware.GetUserFromContext(r.Context()); !ok {

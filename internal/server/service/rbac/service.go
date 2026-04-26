@@ -11,6 +11,8 @@ import (
 )
 
 // Storage encapsulates interaction with RBAC storage.
+//
+//nolint:interfacebloat // domain interface for the RBAC subsystem (roles, permissions, assignments).
 type Storage interface {
 	// Role management
 	CreateRole(ctx context.Context, role Role) error

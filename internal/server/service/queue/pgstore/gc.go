@@ -90,7 +90,7 @@ func (s *Storage) queuesForGC(ctx context.Context) (_ []string, sErr error) {
 	for {
 		batch, err := q.SelectQueuesForGC(ctx, sqlcgen.SelectQueuesForGCParams{
 			GcAt:   toTimestamptz(cutoff),
-			Limit:  int32(limit),
+			Limit:  int32(limit), //nolint:gosec // limit is clamped by configuration.
 			Offset: int32(offset),
 		})
 		if err != nil {
@@ -159,6 +159,7 @@ func (s *Storage) sweep(ctx context.Context, queueID string) (_ *sweepResult, sE
 		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
 
+	//nolint:gosec // EvictionPolicy enum is non-negative.
 	s.observer.MessageDropped(queueID, v1.EvictionPolicy(props.EvictionPolicy)).Add(messagesDropped)
 
 	return &sweepResult{
@@ -169,20 +170,26 @@ func (s *Storage) sweep(ctx context.Context, queueID string) (_ *sweepResult, sE
 
 func dropMessages(ctx context.Context, tx pgx.Tx, props QueueProps) (uint64, error) {
 	tag, err := tx.Exec(ctx, queryDropMessages(props.ID),
-		int32(props.MaxReceiveAttempts),
-		int32(props.RetentionPeriodSeconds),
+		int32(props.MaxReceiveAttempts),     //nolint:gosec // max receive attempts is bounded by validation.
+		int32(props.RetentionPeriodSeconds), //nolint:gosec // retention seconds is bounded by validation.
 	)
 	if err != nil {
 		return 0, fmt.Errorf("execute query: %w", err)
 	}
 
-	return uint64(tag.RowsAffected()), nil
+	rows := tag.RowsAffected()
+	if rows < 0 {
+		return 0, nil
+	}
+
+	return uint64(rows), nil
 }
 
+//nolint:nonamedreturns // sErr is set by deferred close to surface close errors.
 func moveMessagesToDLQ(ctx context.Context, tx pgx.Tx, props QueueProps) (_ uint64, sErr error) {
 	rows, execErr := tx.Query(ctx, querySelectMoveToDLQ(props.ID),
 		int32(props.MaxReceiveAttempts),
-		int32(props.RetentionPeriodSeconds),
+		int32(props.RetentionPeriodSeconds), //nolint:gosec // retention seconds is bounded by validation.
 	)
 	if execErr != nil {
 		return 0, fmt.Errorf("execute query: %w", execErr)

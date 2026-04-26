@@ -95,7 +95,7 @@ func (s *Storage) queuesForGC(ctx context.Context) (_ []string, sErr error) {
 	for {
 		batch, err := q.SelectQueuesForGC(ctx, sqlcgen.SelectQueuesForGCParams{
 			GcAt:   cutoff,
-			Limit:  int64(limit),
+			Limit:  int64(limit), //nolint:gosec // limit and offset come from a clamped CLI flag.
 			Offset: int64(offset),
 		})
 		if err != nil {
@@ -169,6 +169,7 @@ func (s *Storage) sweep(ctx context.Context, queueID string) (_ *sweepResult, sE
 		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
 
+	//nolint:gosec // EvictionPolicy enum is non-negative.
 	s.observer.MessageDropped(queueID, v1.EvictionPolicy(props.EvictionPolicy)).
 		Add(messagesDropped)
 
@@ -194,10 +195,14 @@ func dropMessages(ctx context.Context, tx *sql.Tx, props QueueProps) (uint64, er
 		return 0, fmt.Errorf("get affected rows: %w", rowsErr)
 	}
 
+	if rows < 0 {
+		return 0, nil
+	}
+
 	return uint64(rows), nil
 }
 
-func moveMessagesToDLQ(ctx context.Context, tx *sql.Tx, props QueueProps) (_ uint64, sErr error) {
+func moveMessagesToDLQ(ctx context.Context, tx *sql.Tx, props QueueProps) (uint64, error) {
 	rows, execErr := tx.QueryContext(ctx, querySelectMoveToDLQ(props.ID),
 		props.MaxReceiveAttempts,
 		props.RetentionPeriodSeconds,
@@ -206,16 +211,14 @@ func moveMessagesToDLQ(ctx context.Context, tx *sql.Tx, props QueueProps) (_ uin
 		return 0, fmt.Errorf("execute query: %w", execErr)
 	}
 
-	defer func() {
-		if err := rows.Close(); err != nil {
-			sErr = errors.Join(sErr, fmt.Errorf("close rows: %w", err))
-		}
-	}()
+	defer func() { _ = rows.Close() }()
 
 	stmt, prepareErr := tx.PrepareContext(ctx, queryInsertMessages(props.DeadLetterQueueID))
 	if prepareErr != nil {
 		return 0, fmt.Errorf("prepare statement: %w", prepareErr)
 	}
+
+	defer func() { _ = stmt.Close() }()
 
 	var moved uint64
 
@@ -234,6 +237,10 @@ func moveMessagesToDLQ(ctx context.Context, tx *sql.Tx, props QueueProps) (_ uin
 		}
 
 		moved++
+	}
+
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate rows: %w", err)
 	}
 
 	return moved, nil

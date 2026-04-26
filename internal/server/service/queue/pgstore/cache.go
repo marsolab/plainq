@@ -94,7 +94,7 @@ func (c *QueuePropsCache) put(props QueueProps) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.props.Len() == int(c.size) {
+	if uint64(c.props.Len()) == c.size { //nolint:gosec // list.Len returns a non-negative int.
 		c.props.Remove(c.props.Back())
 	}
 
@@ -119,6 +119,8 @@ func (c *QueuePropsCache) delete(id, name string) {
 
 // sortProps orders a QueueProps slice according to the list options. Kept
 // exported for future use but currently unused outside this package.
+//
+//nolint:cyclop // dispatch table over (orderBy x sortBy) is naturally branch-heavy.
 func sortProps(props []QueueProps, orderBy v1.ListQueuesRequest_OrderBy, sortBy v1.ListQueuesRequest_SortBy) {
 	slices.SortFunc(props, func(a, b QueueProps) int {
 		switch orderBy {
@@ -166,7 +168,7 @@ func propsToProto(p QueueProps) *v1.DescribeQueueResponse {
 		RetentionPeriodSeconds:   p.RetentionPeriodSeconds,
 		VisibilityTimeoutSeconds: p.VisibilityTimeoutSeconds,
 		MaxReceiveAttempts:       p.MaxReceiveAttempts,
-		EvictionPolicy:           v1.EvictionPolicy(p.EvictionPolicy),
+		EvictionPolicy:           v1.EvictionPolicy(p.EvictionPolicy), //nolint:gosec // EvictionPolicy enum is non-negative.
 		DeadLetterQueueId:        p.DeadLetterQueueID,
 	}
 }
@@ -179,7 +181,7 @@ func propsFromProto(p *v1.DescribeQueueResponse) QueueProps {
 		RetentionPeriodSeconds:   p.RetentionPeriodSeconds,
 		VisibilityTimeoutSeconds: p.VisibilityTimeoutSeconds,
 		MaxReceiveAttempts:       p.MaxReceiveAttempts,
-		EvictionPolicy:           uint32(p.EvictionPolicy),
+		EvictionPolicy:           uint32(p.EvictionPolicy), //nolint:gosec // EvictionPolicy enum is non-negative.
 		DeadLetterQueueID:        p.DeadLetterQueueId,
 	}
 }

@@ -73,7 +73,7 @@ const (
 	TimeRangeLast1y     TimeRangePreset = "1y"
 )
 
-//nolint:revive // cyclomatic: this function is a simple range selector
+//nolint:revive,gocyclo,cyclop // cyclomatic: this function is a simple range selector.
 func ParseTimeRange(preset string, customFrom, customTo int64) TimeRange {
 	now := time.Now().UnixMilli()
 
@@ -82,6 +82,7 @@ func ParseTimeRange(preset string, customFrom, customTo int64) TimeRange {
 	}
 
 	var duration time.Duration
+
 	switch TimeRangePreset(preset) {
 	case TimeRangeLast5m:
 		duration = 5 * time.Minute
@@ -243,20 +244,24 @@ func (h *MetricsHandler) GetMetricsChart(w http.ResponseWriter, r *http.Request)
 	resolution := r.URL.Query().Get("resolution")
 
 	var customFrom, customTo int64
+
 	if fromStr := r.URL.Query().Get("from"); fromStr != "" {
 		v, err := strconv.ParseInt(fromStr, 10, 64)
 		if err != nil {
 			http.Error(w, `{"error": "invalid 'from' parameter"}`, http.StatusBadRequest)
 			return
 		}
+
 		customFrom = v
 	}
+
 	if toStr := r.URL.Query().Get("to"); toStr != "" {
 		v, err := strconv.ParseInt(toStr, 10, 64)
 		if err != nil {
 			http.Error(w, `{"error": "invalid 'to' parameter"}`, http.StatusBadRequest)
 			return
 		}
+
 		customTo = v
 	}
 
@@ -290,29 +295,36 @@ func (h *MetricsHandler) GetRatesChart(w http.ResponseWriter, r *http.Request) {
 	preset := r.URL.Query().Get("range")
 
 	var customFrom, customTo int64
+
 	if fromStr := r.URL.Query().Get("from"); fromStr != "" {
 		v, err := strconv.ParseInt(fromStr, 10, 64)
 		if err != nil {
 			http.Error(w, `{"error": "invalid 'from' parameter"}`, http.StatusBadRequest)
 			return
 		}
+
 		customFrom = v
 	}
+
 	if toStr := r.URL.Query().Get("to"); toStr != "" {
 		v, err := strconv.ParseInt(toStr, 10, 64)
 		if err != nil {
 			http.Error(w, `{"error": "invalid 'to' parameter"}`, http.StatusBadRequest)
 			return
 		}
+
 		customTo = v
 	}
 
 	tr := ParseTimeRange(preset, customFrom, customTo)
 
 	// Get rate history for all rate types.
-	sendRates, _ := h.store.GetRateHistory(r.Context(), collector.MetricSendRate, queueID, tr.From, tr.To)       //nolint:errcheck // best-effort
-	receiveRates, _ := h.store.GetRateHistory(r.Context(), collector.MetricReceiveRate, queueID, tr.From, tr.To) //nolint:errcheck // best-effort
-	deleteRates, _ := h.store.GetRateHistory(r.Context(), collector.MetricDeleteRate, queueID, tr.From, tr.To)   //nolint:errcheck // best-effort
+	//nolint:errcheck // best-effort metrics retrieval; errors fall back to empty data points.
+	sendRates, _ := h.store.GetRateHistory(r.Context(), collector.MetricSendRate, queueID, tr.From, tr.To)
+	//nolint:errcheck // best-effort metrics retrieval; errors fall back to empty data points.
+	receiveRates, _ := h.store.GetRateHistory(r.Context(), collector.MetricReceiveRate, queueID, tr.From, tr.To)
+	//nolint:errcheck // best-effort metrics retrieval; errors fall back to empty data points.
+	deleteRates, _ := h.store.GetRateHistory(r.Context(), collector.MetricDeleteRate, queueID, tr.From, tr.To)
 
 	resp := MultiMetricsChartResponse{
 		Metrics: []MetricsChartResponse{
@@ -332,20 +344,24 @@ func (h *MetricsHandler) GetQueueMetrics(w http.ResponseWriter, r *http.Request)
 	preset := r.URL.Query().Get("range")
 
 	var customFrom, customTo int64
+
 	if fromStr := r.URL.Query().Get("from"); fromStr != "" {
 		v, err := strconv.ParseInt(fromStr, 10, 64)
 		if err != nil {
 			http.Error(w, `{"error": "invalid 'from' parameter"}`, http.StatusBadRequest)
 			return
 		}
+
 		customFrom = v
 	}
+
 	if toStr := r.URL.Query().Get("to"); toStr != "" {
 		v, err := strconv.ParseInt(toStr, 10, 64)
 		if err != nil {
 			http.Error(w, `{"error": "invalid 'to' parameter"}`, http.StatusBadRequest)
 			return
 		}
+
 		customTo = v
 	}
 
@@ -466,6 +482,8 @@ func (*MetricsHandler) GetTimeRangePresets(w http.ResponseWriter, r *http.Reques
 }
 
 // ExportMetrics exports metrics in a format suitable for Metabase.
+//
+//nolint:cyclop // export handler dispatches over format and time-window inputs.
 func (h *MetricsHandler) ExportMetrics(w http.ResponseWriter, r *http.Request) {
 	format := r.URL.Query().Get("format")
 	if format == "" {
@@ -477,20 +495,24 @@ func (h *MetricsHandler) ExportMetrics(w http.ResponseWriter, r *http.Request) {
 	preset := r.URL.Query().Get("range")
 
 	var customFrom, customTo int64
+
 	if fromStr := r.URL.Query().Get("from"); fromStr != "" {
 		v, err := strconv.ParseInt(fromStr, 10, 64)
 		if err != nil {
 			http.Error(w, `{"error": "invalid 'from' parameter"}`, http.StatusBadRequest)
 			return
 		}
+
 		customFrom = v
 	}
+
 	if toStr := r.URL.Query().Get("to"); toStr != "" {
 		v, err := strconv.ParseInt(toStr, 10, 64)
 		if err != nil {
 			http.Error(w, `{"error": "invalid 'to' parameter"}`, http.StatusBadRequest)
 			return
 		}
+
 		customTo = v
 	}
 
@@ -507,7 +529,9 @@ func (h *MetricsHandler) ExportMetrics(w http.ResponseWriter, r *http.Request) {
 	case "csv":
 		w.Header().Set("Content-Type", "text/csv")
 		w.Header().Set("Content-Disposition", "attachment; filename=metrics.csv")
-		_, _ = w.Write([]byte("timestamp,value,min,max,avg,sum,count\n")) //nolint:errcheck // HTTP write failure is not recoverable
+		//nolint:errcheck // HTTP write failure is not recoverable.
+		_, _ = w.Write([]byte("timestamp,value,min,max,avg,sum,count\n"))
+
 		for _, p := range dataPoints {
 			line := strconv.FormatInt(p.Timestamp, 10) + csvSeparator +
 				strconv.FormatFloat(p.Value, 'f', 6, 64) + csvSeparator +
@@ -516,7 +540,8 @@ func (h *MetricsHandler) ExportMetrics(w http.ResponseWriter, r *http.Request) {
 				strconv.FormatFloat(p.Avg, 'f', 6, 64) + csvSeparator +
 				strconv.FormatFloat(p.Sum, 'f', 6, 64) + csvSeparator +
 				strconv.FormatInt(p.Count, 10) + "\n"
-			_, _ = w.Write([]byte(line)) //nolint:errcheck // HTTP write failure is not recoverable
+			//nolint:errcheck // HTTP write failure is not recoverable.
+			_, _ = w.Write([]byte(line))
 		}
 	default:
 		// Metabase-friendly JSON format.
@@ -542,6 +567,7 @@ func (h *MetricsHandler) ExportMetrics(w http.ResponseWriter, r *http.Request) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(export) //nolint:errcheck // best-effort HTTP response encoding
+		//nolint:errcheck,errchkjson // best-effort HTTP response encoding.
+		_ = json.NewEncoder(w).Encode(export)
 	}
 }

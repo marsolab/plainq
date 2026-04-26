@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
 
@@ -56,7 +57,12 @@ func (s *Service) listQueuesHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		input.Limit = int32(limit)
+		if limit > math.MaxInt32 {
+			httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: limit too large", errkit.ErrInvalidArgument))
+			return
+		}
+
+		input.Limit = int32(limit) //nolint:gosec // limit was validated against math.MaxInt32 above.
 	}
 
 	output, listErr := s.storage.ListQueues(r.Context(), &input)

@@ -88,6 +88,7 @@ func (pm *PrometheusMetrics) SetSendRate(queueID string, rate float64) {
 		gauge = metrics.GetOrCreateGauge(`plainq_send_rate{queue="`+queueID+`"}`, nil)
 		pm.sendRates[queueID] = gauge
 	}
+
 	gauge.Set(rate)
 }
 
@@ -101,6 +102,7 @@ func (pm *PrometheusMetrics) SetReceiveRate(queueID string, rate float64) {
 		gauge = metrics.GetOrCreateGauge(`plainq_receive_rate{queue="`+queueID+`"}`, nil)
 		pm.receiveRates[queueID] = gauge
 	}
+
 	gauge.Set(rate)
 }
 
@@ -114,6 +116,7 @@ func (pm *PrometheusMetrics) SetDeleteRate(queueID string, rate float64) {
 		gauge = metrics.GetOrCreateGauge(`plainq_delete_rate{queue="`+queueID+`"}`, nil)
 		pm.deleteRates[queueID] = gauge
 	}
+
 	gauge.Set(rate)
 }
 
@@ -134,6 +137,7 @@ func (pm *PrometheusMetrics) SetMessagesInFlight(queueID string, count int64) {
 		gauge = metrics.GetOrCreateGauge(`plainq_messages_in_flight{queue="`+queueID+`"}`, nil)
 		pm.messagesInFlight[queueID] = gauge
 	}
+
 	gauge.Set(float64(count))
 }
 
@@ -230,6 +234,7 @@ func (pm *PrometheusMetrics) RecordProcessingDuration(queueID string, durationSe
 // RecordDwellTime records message dwell time (time from send to receive).
 func (pm *PrometheusMetrics) RecordDwellTime(queueID string, durationSeconds float64) {
 	pm.mu.Lock()
+
 	hist, ok := pm.dwellTime[queueID]
 	if !ok {
 		hist = metrics.GetOrCreateHistogram(`plainq_message_dwell_time_seconds{queue="` + queueID + `"}`)
@@ -257,6 +262,7 @@ func (pm *PrometheusMetrics) RecordBatchSize(queueID string, size int, operation
 // RecordMessageSize records a message body size.
 func (pm *PrometheusMetrics) RecordMessageSize(queueID string, sizeBytes int) {
 	pm.mu.Lock()
+
 	hist, ok := pm.messageSize[queueID]
 	if !ok {
 		hist = metrics.GetOrCreateHistogram(`plainq_message_size_bytes{queue="` + queueID + `"}`)
@@ -284,6 +290,7 @@ func (pm *PrometheusMetrics) IncrementRedelivered(queueID string) {
 func (pm *PrometheusMetrics) IncrementDLQ(queueID, sourceQueue string) {
 	pm.mu.Lock()
 	key := queueID + "_" + sourceQueue
+
 	counter, ok := pm.messagesToDLQ[key]
 	if !ok {
 		counter = metrics.GetOrCreateCounter(`plainq_messages_to_dlq_total{queue="` + queueID + `",source_queue="` + sourceQueue + `"}`)

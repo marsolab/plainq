@@ -136,9 +136,9 @@ func (s *Storage) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest)
 	if err := s.queries.WithTx(tx).InsertQueueProperties(ctx, sqlcgen.InsertQueuePropertiesParams{
 		QueueID:                  queueID,
 		QueueName:                input.QueueName,
-		RetentionPeriodSeconds:   int32(input.RetentionPeriodSeconds),
-		VisibilityTimeoutSeconds: int32(input.VisibilityTimeoutSeconds),
-		MaxReceiveAttempts:       int32(input.MaxReceiveAttempts),
+		RetentionPeriodSeconds:   int32(input.RetentionPeriodSeconds),   //nolint:gosec // retention seconds is bounded by validation.
+		VisibilityTimeoutSeconds: int32(input.VisibilityTimeoutSeconds), //nolint:gosec // visibility timeout is bounded by validation.
+		MaxReceiveAttempts:       int32(input.MaxReceiveAttempts),       //nolint:gosec // max receive attempts is bounded by validation.
 		DropPolicy:               int32(input.EvictionPolicy),
 		DeadLetterQueueID:        toPgText(input.DeadLetterQueueId),
 	}); err != nil {
@@ -159,7 +159,7 @@ func (s *Storage) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest)
 		RetentionPeriodSeconds:   input.RetentionPeriodSeconds,
 		VisibilityTimeoutSeconds: input.VisibilityTimeoutSeconds,
 		MaxReceiveAttempts:       input.MaxReceiveAttempts,
-		EvictionPolicy:           uint32(input.EvictionPolicy),
+		EvictionPolicy:           uint32(input.EvictionPolicy), //nolint:gosec // EvictionPolicy enum is non-negative.
 		DeadLetterQueueID:        input.DeadLetterQueueId,
 	})
 
@@ -396,6 +396,7 @@ func (s *Storage) Receive(ctx context.Context, input *v1.ReceiveRequest) (_ *v1.
 		return nil, fmt.Errorf("iterate messages: %w", err)
 	}
 
+	//nolint:gosec // VisibilityTimeoutSeconds is bounded by validation; conversion to int64 is safe.
 	visibleAt := time.Now().UTC().Add(time.Duration(info.VisibilityTimeoutSeconds) * time.Second)
 
 	updateSQL := queryUpdateMessages(queueID)
@@ -546,7 +547,7 @@ func (s *Storage) fillCache(ctx context.Context, cursor string) error {
 			RetentionPeriodSeconds:   q.RetentionPeriodSeconds,
 			VisibilityTimeoutSeconds: q.VisibilityTimeoutSeconds,
 			MaxReceiveAttempts:       q.MaxReceiveAttempts,
-			EvictionPolicy:           uint32(q.EvictionPolicy),
+			EvictionPolicy:           uint32(q.EvictionPolicy), //nolint:gosec // EvictionPolicy enum is non-negative.
 			DeadLetterQueueID:        q.DeadLetterQueueId,
 		})
 	}
@@ -564,6 +565,10 @@ func (s *Storage) countQueues(ctx context.Context) (uint64, error) {
 		return 0, err
 	}
 
+	if count < 0 {
+		return 0, nil
+	}
+
 	return uint64(count), nil
 }
 
@@ -572,9 +577,9 @@ func queuePropertyToProto(row sqlcgen.QueueProperty) *v1.DescribeQueueResponse {
 	resp := v1.DescribeQueueResponse{
 		QueueId:                  row.QueueID,
 		QueueName:                row.QueueName,
-		RetentionPeriodSeconds:   uint64(row.RetentionPeriodSeconds),
-		VisibilityTimeoutSeconds: uint64(row.VisibilityTimeoutSeconds),
-		MaxReceiveAttempts:       uint32(row.MaxReceiveAttempts),
+		RetentionPeriodSeconds:   uint64(row.RetentionPeriodSeconds),   //nolint:gosec // retention seconds is non-negative.
+		VisibilityTimeoutSeconds: uint64(row.VisibilityTimeoutSeconds), //nolint:gosec // visibility timeout is non-negative.
+		MaxReceiveAttempts:       uint32(row.MaxReceiveAttempts),       //nolint:gosec // max receive attempts is non-negative.
 		EvictionPolicy:           v1.EvictionPolicy(row.DropPolicy),
 		DeadLetterQueueId:        row.DeadLetterQueueID.String,
 	}

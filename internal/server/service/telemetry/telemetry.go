@@ -40,17 +40,19 @@ func (l Labels) Map() map[string]string {
 }
 
 func (l Labels) String() string {
-	var concatString string
+	var sb strings.Builder
 
 	for i, label := range l {
-		concatString += label.Key + "=" + label.Value
+		sb.WriteString(label.Key)
+		_ = sb.WriteByte('=') //nolint:errcheck // strings.Builder.WriteByte never returns an error.
+		sb.WriteString(label.Value)
 
 		if i+1 != len(l) {
-			concatString += ","
+			_ = sb.WriteByte(',') //nolint:errcheck // strings.Builder.WriteByte never returns an error.
 		}
 	}
 
-	return strings.TrimSpace(concatString)
+	return strings.TrimSpace(sb.String())
 }
 
 func LabelsFromString(s string) (Labels, error) {
@@ -63,18 +65,18 @@ func LabelsFromString(s string) (Labels, error) {
 		return nil, errors.New("invalid labels format")
 	}
 
-	labels := make([]Label, len(kvs))
-	for i, kv := range kvs {
+	labels := make([]Label, 0, len(kvs))
+	for _, kv := range kvs {
 		parts := strings.Split(kv, "=")
 
 		if len(parts) != 2 {
 			return nil, errors.New("invalid labels format")
 		}
 
-		labels[i] = Label{
+		labels = append(labels, Label{
 			Key:   parts[0],
 			Value: parts[1],
-		}
+		})
 	}
 
 	return labels, nil

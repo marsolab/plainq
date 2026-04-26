@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -66,7 +67,7 @@ func (b *storageBackend) Close() error {
 	return nil
 }
 
-//nolint:cyclop // CLI server setup involves many configuration branches.
+//nolint:cyclop,gocognit,funlen // CLI server setup wires the full dependency graph in one place.
 func serverCommand() *scotty.Command {
 	var cfg config.Config
 
@@ -332,6 +333,7 @@ func serverCommand() *scotty.Command {
 
 			// Initialize telemetry database if enabled.
 			var serverOpts []server.Option
+
 			if cfg.TelemetryEnabled {
 				telemetryDB, telemetryErr := initTelemetryDB(&cfg, logger)
 				if telemetryErr != nil {
@@ -340,6 +342,7 @@ func serverCommand() *scotty.Command {
 					)
 				} else {
 					serverOpts = append(serverOpts, server.WithMetricsStore(telemetryDB))
+
 					logger.Info("Telemetry metrics database initialized")
 				}
 			}
@@ -481,7 +484,7 @@ func initSQLiteBackend(cfg *config.Config, logger *slog.Logger) (*litekit.Conn, 
 
 func initPostgresBackend(cfg *config.Config, logger *slog.Logger) (*pgxpool.Pool, error) {
 	if cfg.StoragePostgresDSN == "" {
-		return nil, fmt.Errorf("storage.postgres.dsn must be set when storage.driver=postgres")
+		return nil, errors.New("storage.postgres.dsn must be set when storage.driver=postgres")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -701,12 +704,13 @@ func printAddrHTTP(addr string) string {
 	}
 
 	if strings.HasPrefix(addr, ":") {
-		return fmt.Sprintf("http://localhost%s", addr)
+		return "http://localhost" + addr
 	}
 
 	return addr
 }
 
+//nolint:nestif // path resolution for the telemetry DB has a few legitimate fallbacks.
 func initTelemetryDB(cfg *config.Config, logger *slog.Logger) (*litekit.Conn, error) {
 	// Use same path as storage but with _telemetry suffix, or use configured path.
 	dbPath := cfg.TelemetryLiteDBPath

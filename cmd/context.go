@@ -40,8 +40,8 @@ func contextInitCommand() *scotty.Command {
 		Name:  "init",
 		Short: "Create context configuration file",
 		Run: func(_ *scotty.Command, _ []string) error {
-			// TODO: create context in default location.
-			// TODO: ~/.config/plainq/context.json.
+			//nolint:godox // tracking item: default-location context creation under ~/.config/plainq/context.json.
+			// TODO: create context in default location at ~/.config/plainq/context.json.
 			f, createErr := createContextFile()
 			if createErr != nil {
 				if errors.Is(createErr, os.ErrExist) {
@@ -137,7 +137,12 @@ func readContextFile() (io.ReadCloser, error) {
 	return f, nil
 }
 
-func createContextFile() (f *os.File, err error) {
+func createContextFile() (*os.File, error) {
+	var (
+		f   *os.File
+		err error
+	)
+
 	switch runtime.GOOS {
 	case "darwin":
 		f, err = os.Create("~/.config/plainq/context.json")

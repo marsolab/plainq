@@ -21,8 +21,8 @@ type Config struct {
 	HTTPWriteTimeout      time.Duration
 	HTTPIdleTimeout       time.Duration
 
-	StorageDriver      string // "sqlite" (default) or "postgres"
-	StoragePostgresDSN string // Postgres DSN when StorageDriver == "postgres"
+	StorageDriver      string // "sqlite" (default) or "postgres".
+	StoragePostgresDSN string // Postgres DSN when StorageDriver == "postgres".
 
 	StorageLogEnable   bool
 	StorageDBPath      string

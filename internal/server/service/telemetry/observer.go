@@ -41,6 +41,8 @@ func ObservableCount() uint32 {
 
 // Observer interface abstracts the logic of observing events and
 // measuring metrics of those events.
+//
+//nolint:interfacebloat // domain interface for queue-related telemetry observations.
 type Observer interface {
 	// Observable tels whether the metric is observed by collector.
 	// Method is case-insensitive and will lowercase metric name.

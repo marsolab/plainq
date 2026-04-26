@@ -69,6 +69,7 @@ func (s *Storage) GetAdminRoleID(ctx context.Context) (string, error) {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", fmt.Errorf("admin role not found: %w", pqerr.ErrNotFound)
 		}
+
 		return "", fmt.Errorf("get admin role id: %w", err)
 	}
 
@@ -122,6 +123,7 @@ func (s *Storage) CreateInitialAdmin(ctx context.Context, admin onboarding.Initi
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("admin role not found: %w", pqerr.ErrNotFound)
 		}
+
 		return fmt.Errorf("get admin role id: %w", err)
 	}
 

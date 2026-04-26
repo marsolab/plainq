@@ -3,6 +3,7 @@ package middleware
 import (
 	"context"
 	"crypto/rsa"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -205,7 +206,7 @@ func NewGenericOAuthProvider(issuer, audience, jwksURL string) *GenericOAuthProv
 
 // ValidateToken validates a JWT token.
 //
-//nolint:gocyclo // Complex token validation and claim extraction.
+//nolint:gocyclo,cyclop // Complex token validation and claim extraction.
 func (p *GenericOAuthProvider) ValidateToken(ctx context.Context, tokenString string) (*OAuthClaims, error) {
 	raw := []byte(tokenString)
 
@@ -253,17 +254,18 @@ func (p *GenericOAuthProvider) ValidateToken(ctx context.Context, tokenString st
 	for _, aud := range stdClaims.Audience {
 		if aud == p.audience {
 			validAudience = true
+
 			break
 		}
 	}
 
 	if !validAudience {
-		return nil, fmt.Errorf("invalid audience")
+		return nil, errors.New("invalid audience")
 	}
 
-	// Check expiration
+	// Check expiration.
 	if stdClaims.ExpiresAt != nil && stdClaims.ExpiresAt.Before(time.Now()) {
-		return nil, fmt.Errorf("token expired")
+		return nil, errors.New("token expired")
 	}
 
 	// Build OAuth claims
@@ -306,7 +308,7 @@ func (p *GenericOAuthProvider) ValidateToken(ctx context.Context, tokenString st
 func (p *GenericOAuthProvider) GetPublicKey(ctx context.Context, keyID string) (*rsa.PublicKey, error) {
 	// This is a simplified implementation
 	// In practice, you would fetch from JWKS endpoint and cache the keys
-	return nil, fmt.Errorf("JWKS key fetching not implemented - use a proper JWKS library")
+	return nil, errors.New("JWKS key fetching not implemented - use a proper JWKS library")
 }
 
 // GetIssuer returns the OAuth provider issuer

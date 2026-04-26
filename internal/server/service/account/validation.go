@@ -60,13 +60,13 @@ func validateEmail(email string) error {
 }
 
 // charLenMinMax returns non nil error if given password is too short or to long.
-func charLenMinMax(value string, min, max int) error {
+func charLenMinMax(value string, minLen, maxLen int) error {
 	valueLen := utf8.RuneCountInString(value)
-	if valueLen < min {
+	if valueLen < minLen {
 		return fmt.Errorf("%w: value is to short", errkit.ErrValidation)
 	}
 
-	if valueLen > max {
+	if valueLen > maxLen {
 		return fmt.Errorf("%w: value is to long", errkit.ErrValidation)
 	}
 

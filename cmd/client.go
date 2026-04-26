@@ -78,6 +78,7 @@ func listQueueCommand() *scotty.Command {
 			if limit > math.MaxInt32 {
 				return fmt.Errorf("limit value too large: %d", limit)
 			}
+
 			in := &v1.ListQueuesRequest{
 				Limit: int32(limit),
 			}
@@ -99,8 +100,8 @@ func listQueueCommand() *scotty.Command {
 				fmt.Println(q.GetQueueId(), "|", q.GetQueueName())
 			}
 
+			//nolint:godox // pagination is intentionally deferred until the CLI gains a paginated UX.
 			// TODO: ask for pagination.
-
 			return nil
 		},
 	}
@@ -508,6 +509,7 @@ func receiveCommand() *scotty.Command {
 			if batch > math.MaxUint32 {
 				return fmt.Errorf("batch size value too large: %d", batch)
 			}
+
 			in := &v1.ReceiveRequest{
 				QueueId:   id,
 				BatchSize: uint32(batch),

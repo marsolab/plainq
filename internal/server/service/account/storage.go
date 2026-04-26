@@ -3,6 +3,7 @@ package account
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -25,12 +26,10 @@ func NewSQLiteStorage(db *sql.DB, hasher hashkit.Hasher) *SQLiteStorage {
 
 // CreateAccount creates record with account information in database.
 func (s *SQLiteStorage) CreateAccount(ctx context.Context, account Account) error {
-	// Use the users table instead of accounts for consistency
+	// Use the users table instead of accounts for consistency.
 	query := `INSERT INTO users (user_id, email, password, verified, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`
 	now := time.Now()
-	_, err := s.db.ExecContext(ctx, query, account.ID, account.Email, account.Password, account.Verified, now, now)
-
-	if err != nil {
+	if _, err := s.db.ExecContext(ctx, query, account.ID, account.Email, account.Password, account.Verified, now, now); err != nil {
 		return fmt.Errorf("create account: %w", err)
 	}
 
@@ -40,13 +39,16 @@ func (s *SQLiteStorage) CreateAccount(ctx context.Context, account Account) erro
 // GetAccountByID fetches account record from database by given id.
 func (s *SQLiteStorage) GetAccountByID(ctx context.Context, id string) (*Account, error) {
 	query := `SELECT user_id, email, password, verified, created_at, updated_at FROM users WHERE user_id = ?`
+
 	var account Account
+
 	err := s.db.QueryRowContext(ctx, query, id).Scan(
 		&account.ID, &account.Email, &account.Password, &account.Verified, &account.CreatedAt, &account.UpdatedAt)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("account not found")
+			return nil, errors.New("account not found")
 		}
+
 		return nil, fmt.Errorf("get account by ID: %w", err)
 	}
 
@@ -56,16 +58,19 @@ func (s *SQLiteStorage) GetAccountByID(ctx context.Context, id string) (*Account
 // GetAccountByEmail fetches account record from database by given email.
 func (s *SQLiteStorage) GetAccountByEmail(ctx context.Context, email string) (*Account, error) {
 	query := `SELECT user_id, email, password, verified, created_at, updated_at FROM users WHERE email = ?`
+
 	var account Account
+
 	err := s.db.QueryRowContext(ctx, query, email).Scan(
 		&account.ID, &account.Email, &account.Password, &account.Verified, &account.CreatedAt, &account.UpdatedAt)
-
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("account not found")
+			return nil, errors.New("account not found")
 		}
+
 		return nil, fmt.Errorf("get account by email: %w", err)
 	}
+
 	return &account, nil
 }
 
@@ -83,7 +88,7 @@ func (s *SQLiteStorage) SetAccountVerified(ctx context.Context, email string, ve
 	}
 
 	if affected == 0 {
-		return fmt.Errorf("account not found")
+		return errors.New("account not found")
 	}
 
 	return nil
@@ -103,7 +108,7 @@ func (s *SQLiteStorage) SetAccountPassword(ctx context.Context, id, password str
 	}
 
 	if affected == 0 {
-		return fmt.Errorf("account not found")
+		return errors.New("account not found")
 	}
 
 	return nil
@@ -113,7 +118,6 @@ func (s *SQLiteStorage) SetAccountPassword(ctx context.Context, id, password str
 func (s *SQLiteStorage) DeleteAccount(ctx context.Context, id string) error {
 	query := `DELETE FROM users WHERE user_id = ?`
 	result, err := s.db.ExecContext(ctx, query, id)
-
 	if err != nil {
 		return fmt.Errorf("delete account: %w", err)
 	}
@@ -124,7 +128,7 @@ func (s *SQLiteStorage) DeleteAccount(ctx context.Context, id string) error {
 	}
 
 	if affected == 0 {
-		return fmt.Errorf("account not found")
+		return errors.New("account not found")
 	}
 
 	return nil
@@ -133,11 +137,10 @@ func (s *SQLiteStorage) DeleteAccount(ctx context.Context, id string) error {
 // CreateRefreshToken creates refresh token record in database.
 func (s *SQLiteStorage) CreateRefreshToken(ctx context.Context, token RefreshToken) error {
 	query := `INSERT INTO refresh_tokens (id, aid, token, created_at, expires_at) VALUES (?, ?, ?, ?, ?)`
-	_, err := s.db.ExecContext(ctx, query, token.ID, token.AID, token.Token, token.CreatedAt, token.ExpiresAt)
-
-	if err != nil {
+	if _, err := s.db.ExecContext(ctx, query, token.ID, token.AID, token.Token, token.CreatedAt, token.ExpiresAt); err != nil {
 		return fmt.Errorf("create refresh token: %w", err)
 	}
+
 	return nil
 }
 
@@ -155,7 +158,7 @@ func (s *SQLiteStorage) DeleteRefreshToken(ctx context.Context, token string) er
 	}
 
 	if affected == 0 {
-		return fmt.Errorf("refresh token not found")
+		return errors.New("refresh token not found")
 	}
 
 	return nil
@@ -175,7 +178,7 @@ func (s *SQLiteStorage) DeleteRefreshTokenByTokenID(ctx context.Context, tid str
 	}
 
 	if affected == 0 {
-		return fmt.Errorf("refresh token not found")
+		return errors.New("refresh token not found")
 	}
 
 	return nil

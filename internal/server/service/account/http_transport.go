@@ -67,11 +67,7 @@ func (s *Service) signUpHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	verified := true
-
-	if s.cfg.AuthRegistrationEnable {
-		verified = false
-	}
+	verified := !s.cfg.AuthRegistrationEnable
 
 	userAccount := Account{
 		ID:        idkit.ULID(),
@@ -234,7 +230,7 @@ func (s *Service) emailVerificationHandler(w http.ResponseWriter, r *http.Reques
 		To:      []string{req.Email},
 		Subject: "Verify your email",
 		HTML:    fmt.Sprintf("<p>Click <a href='https://plainq.com/verify?code=%s'>here</a> to verify your email.</p>", code),
-		Text:    fmt.Sprintf("Click here to verify your email: https://plainq.com/verify?code=%s", code),
+		Text:    "Click here to verify your email: https://plainq.com/verify?code=" + code,
 	}); err != nil {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("send email: %w", err))
 		return

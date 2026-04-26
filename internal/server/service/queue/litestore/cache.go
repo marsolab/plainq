@@ -36,8 +36,8 @@ type QueuePropsCache struct {
 }
 
 type QueuePropsListOptions struct {
-	orderBy v1.ListQueuesRequest_OrderBy
-	sortBy  v1.ListQueuesRequest_SortBy
+	orderBy v1.ListQueuesRequest_OrderBy //nolint:unused // read by sortProps via listOptions.orderBy.
+	sortBy  v1.ListQueuesRequest_SortBy  //nolint:unused // read by sortProps via listOptions.sortBy.
 }
 
 // NewQueuePropsCache returns a pointer to a new instance of QueuePropsCache.
@@ -94,41 +94,33 @@ func (c *QueuePropsCache) getByName(name string) (QueueProps, bool) {
 	return QueueProps{}, false
 }
 
+//nolint:unused // exercised by cache_test.go; the linter excludes test files from analysis.
 func (c *QueuePropsCache) list() []QueueProps {
-	props := make([]QueueProps, len(c.byID))
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	props := make([]QueueProps, 0, len(c.byID))
 
 	listOptions := QueuePropsListOptions{
 		orderBy: v1.ListQueuesRequest_ORDER_BY_ID,
 		sortBy:  v1.ListQueuesRequest_SORT_BY_ASC,
 	}
 
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	i := 0
-
-	iter := func(k string, e *list.Element) bool {
+	for _, e := range c.byID {
 		v, ok := e.Value.(QueueProps)
 		if !ok {
 			panic(fmt.Errorf("invalid type in queue props cache: %#v", e.Value))
 		}
 
-		props[i].ID = v.ID
-		props[i].Name = v.Name
-		props[i].VisibilityTimeoutSeconds = v.VisibilityTimeoutSeconds
-		props[i].RetentionPeriodSeconds = v.RetentionPeriodSeconds
-		props[i].MaxReceiveAttempts = v.MaxReceiveAttempts
-		props[i].EvictionPolicy = v.EvictionPolicy
-		props[i].DeadLetterQueueID = v.DeadLetterQueueID
-		i++
-
-		return true
-	}
-
-	for k, v := range c.byID {
-		if !iter(k, v) {
-			break
-		}
+		props = append(props, QueueProps{
+			ID:                       v.ID,
+			Name:                     v.Name,
+			VisibilityTimeoutSeconds: v.VisibilityTimeoutSeconds,
+			RetentionPeriodSeconds:   v.RetentionPeriodSeconds,
+			MaxReceiveAttempts:       v.MaxReceiveAttempts,
+			EvictionPolicy:           v.EvictionPolicy,
+			DeadLetterQueueID:        v.DeadLetterQueueID,
+		})
 	}
 
 	sortProps(props, listOptions)
@@ -140,7 +132,7 @@ func (c *QueuePropsCache) put(props QueueProps) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.props.Len() == int(c.size) {
+	if uint64(c.props.Len()) == c.size { //nolint:gosec // list.Len returns a non-negative int.
 		c.props.Remove(c.props.Back())
 	}
 
@@ -163,6 +155,7 @@ func (c *QueuePropsCache) delete(id, name string) {
 	delete(c.byName, name)
 }
 
+//nolint:gocyclo,unused // dispatch table over (orderBy x sortBy) is naturally branch-heavy; called by list (test-only).
 func sortProps(props []QueueProps, listOptions QueuePropsListOptions) {
 	slices.SortFunc[[]QueueProps](props, func(a, b QueueProps) int {
 		switch listOptions.orderBy {
@@ -241,7 +234,7 @@ func propsToProto(p QueueProps) *v1.DescribeQueueResponse {
 		RetentionPeriodSeconds:   p.RetentionPeriodSeconds,
 		VisibilityTimeoutSeconds: p.VisibilityTimeoutSeconds,
 		MaxReceiveAttempts:       p.MaxReceiveAttempts,
-		EvictionPolicy:           v1.EvictionPolicy(p.EvictionPolicy),
+		EvictionPolicy:           v1.EvictionPolicy(p.EvictionPolicy), //nolint:gosec // EvictionPolicy values fit in int32.
 		DeadLetterQueueId:        p.DeadLetterQueueID,
 	}
 
@@ -256,7 +249,7 @@ func propsFromProto(p *v1.DescribeQueueResponse) QueueProps {
 		RetentionPeriodSeconds:   p.RetentionPeriodSeconds,
 		VisibilityTimeoutSeconds: p.VisibilityTimeoutSeconds,
 		MaxReceiveAttempts:       p.MaxReceiveAttempts,
-		EvictionPolicy:           uint32(p.EvictionPolicy),
+		EvictionPolicy:           uint32(p.EvictionPolicy), //nolint:gosec // EvictionPolicy enum is non-negative.
 		DeadLetterQueueID:        p.DeadLetterQueueId,
 	}
 

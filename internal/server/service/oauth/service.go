@@ -35,7 +35,9 @@ type OAuthUser struct {
 	Claims       map[string]any `json:"claims,omitempty"`
 }
 
-// Storage encapsulates interaction with OAuth storage operations
+// Storage encapsulates interaction with OAuth storage operations.
+//
+//nolint:interfacebloat // domain interface covering OAuth providers, users, organizations, and teams.
 type Storage interface {
 	// OAuth provider management.
 	CreateProvider(ctx context.Context, provider Provider) error
@@ -235,6 +237,7 @@ func (s *Service) syncUserTeams(ctx context.Context, userID string, teamCodes []
 				s.logger.Warn("team not found for code",
 					slog.String("team_code", teamCode),
 					slog.String("org_id", orgID))
+
 				continue
 			}
 

@@ -46,15 +46,17 @@ type PlainQ struct {
 }
 
 // NewServer returns a pointer to a new instance of the PlainQ.
+//
+//nolint:funlen // server wiring assembles the full HTTP/gRPC stack in one place.
 func NewServer(
 	cfg *config.Config,
 	logger *slog.Logger,
 	checker hc.HealthChecker,
-	queue *queue.Service,
-	account *account.Service,
-	onboarding *onboarding.Service,
-	rbac *rbac.Service,
-	oauth *oauth.Service,
+	queueSvc *queue.Service,
+	accountSvc *account.Service,
+	onboardingSvc *onboarding.Service,
+	rbacSvc *rbac.Service,
+	oauthSvc *oauth.Service,
 	opts ...Option,
 ) (*servekit.Server, error) {
 	// Create a server which holds and serve all listeners.
@@ -63,11 +65,11 @@ func NewServer(
 	pq := PlainQ{
 		cfg:        cfg,
 		logger:     logger,
-		queue:      queue,
-		account:    account,
-		onboarding: onboarding,
-		rbac:       rbac,
-		oauth:      oauth,
+		queue:      queueSvc,
+		account:    accountSvc,
+		onboarding: onboardingSvc,
+		rbac:       rbacSvc,
+		oauth:      oauthSvc,
 		observer:   telemetry.NewObserver(),
 	}
 

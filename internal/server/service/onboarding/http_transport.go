@@ -27,11 +27,12 @@ type onboardingRequest struct {
 	Name     string `json:"name,omitempty"`
 }
 
-// getOnboardingStatusHandler returns the current onboarding status
+// getOnboardingStatusHandler returns the current onboarding status.
 func (s *Service) getOnboardingStatusHandler(w http.ResponseWriter, r *http.Request) {
 	needsOnboarding, err := s.NeedsOnboarding(r.Context())
 	if err != nil {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("check onboarding status: %w", err))
+
 		return
 	}
 
@@ -43,23 +44,26 @@ func (s *Service) getOnboardingStatusHandler(w http.ResponseWriter, r *http.Requ
 	httpkit.JSON(w, r, status)
 }
 
-// completeOnboardingHandler handles the creation of the initial admin user
+// completeOnboardingHandler handles the creation of the initial admin user.
 func (s *Service) completeOnboardingHandler(w http.ResponseWriter, r *http.Request) {
-	// First, verify that onboarding is actually needed
+	// First, verify that onboarding is actually needed.
 	needsOnboarding, err := s.NeedsOnboarding(r.Context())
 	if err != nil {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("check onboarding status: %w", err))
+
 		return
 	}
 
 	if !needsOnboarding {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: onboarding has already been completed", errkit.ErrInvalidArgument))
+
 		return
 	}
 
 	var req onboardingRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: decode request json: %s", errkit.ErrInvalidArgument, err.Error()))
+
 		return
 	}
 
@@ -144,9 +148,9 @@ type Session struct {
 	ExpiresAt    time.Time `json:"expires_at"`
 }
 
-// createAdminSession creates a session for the newly created admin user
-func (s *Service) createAdminSession(ctx context.Context, userID, email string, t time.Time) (*Session, error) {
-	// Admin users get the admin role
+// createAdminSession creates a session for the newly created admin user.
+func (s *Service) createAdminSession(_ context.Context, userID, email string, t time.Time) (*Session, error) {
+	// Admin users get the admin role.
 	roles := []string{"admin"}
 
 	tokenID := generateUserID() // Generate a unique token ID

@@ -11,18 +11,18 @@ import (
 	"github.com/marsolab/servekit/httpkit"
 )
 
-// UserInfo represents authenticated user information
+// UserInfo represents authenticated user information.
 type UserInfo struct {
 	UserID string
 	Email  string
 	Roles  []string
 }
 
-// ContextKey is a type for context keys to avoid collisions
+// ContextKey is a type for context keys to avoid collisions.
 type ContextKey string
 
 const (
-	// UserContextKey is the key used to store user info in request context
+	// UserContextKey is the key used to store user info in request context.
 	UserContextKey ContextKey = "user"
 )
 
@@ -35,20 +35,23 @@ func AuthenticateJWT(tokenManager jwtkit.TokenManager) func(next http.Handler) h
 			authHeader := r.Header.Get("Authorization")
 			if authHeader == "" {
 				httpkit.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
+
 				return
 			}
 
-			// Remove "Bearer " prefix
+			// Remove "Bearer " prefix.
 			tokenString := strings.TrimPrefix(authHeader, "Bearer ")
 			if tokenString == authHeader {
 				httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: invalid authorization header format", errkit.ErrUnauthenticated))
+
 				return
 			}
 
-			// Parse and verify the token
+			// Parse and verify the token.
 			token, err := tokenManager.ParseVerify(tokenString)
 			if err != nil {
 				httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: invalid token: %s", errkit.ErrUnauthenticated, err.Error()))
+
 				return
 			}
 
@@ -109,6 +112,7 @@ func RequireRoles(requiredRoles ...string) func(next http.Handler) http.Handler 
 				for _, userRole := range userInfo.Roles {
 					if userRole == requiredRole {
 						hasRole = true
+
 						break
 					}
 				}

@@ -75,7 +75,7 @@ func queryCountMessages(queueID string) string {
 }
 
 func queryDropMessages(queueID string) string {
-	// $1 = max_receive_attempts, $2 = retention_period_seconds (int)
+	// $1 = max_receive_attempts, $2 = retention_period_seconds (int).
 	return fmt.Sprintf(
 		`DELETE FROM %s WHERE retries >= $1 OR created_at + make_interval(secs => $2) <= now();`,
 		quoteIdent(queueID),

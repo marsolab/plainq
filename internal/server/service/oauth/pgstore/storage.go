@@ -139,6 +139,7 @@ func (s *Storage) ListProviders(ctx context.Context, orgID string) ([]oauth.Prov
 		if err != nil {
 			return nil, err
 		}
+
 		out = append(out, *p)
 	}
 
@@ -267,9 +268,9 @@ func (s *Storage) GetTeamsByOrg(ctx context.Context, orgID string) ([]oauth.Team
 		return nil, fmt.Errorf("list teams by org: %w", err)
 	}
 
-	out := make([]oauth.Team, len(rows))
-	for i, r := range rows {
-		out[i] = rowToTeam(r)
+	out := make([]oauth.Team, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, rowToTeam(r))
 	}
 
 	return out, nil
@@ -312,9 +313,9 @@ func (s *Storage) GetUserTeams(ctx context.Context, userID string) ([]oauth.Team
 		return nil, fmt.Errorf("list user teams: %w", err)
 	}
 
-	out := make([]oauth.Team, len(rows))
-	for i, r := range rows {
-		out[i] = rowToTeam(r)
+	out := make([]oauth.Team, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, rowToTeam(r))
 	}
 
 	return out, nil
