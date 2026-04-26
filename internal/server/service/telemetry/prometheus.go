@@ -182,6 +182,7 @@ func (pm *PrometheusMetrics) SetMessagesInvisible(queueID string, count int64) {
 		gauge = metrics.GetOrCreateGauge(`plainq_messages_invisible{queue="`+queueID+`"}`, nil)
 		pm.messagesInvisible[queueID] = gauge
 	}
+
 	gauge.Set(float64(count))
 }
 
@@ -195,6 +196,7 @@ func (pm *PrometheusMetrics) SetOldestMessageAge(queueID string, ageSeconds floa
 		gauge = metrics.GetOrCreateGauge(`plainq_oldest_message_age_seconds{queue="`+queueID+`"}`, nil)
 		pm.oldestMessageAge[queueID] = gauge
 	}
+
 	gauge.Set(ageSeconds)
 }
 
