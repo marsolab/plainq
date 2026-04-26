@@ -167,6 +167,7 @@ func (s *SQLiteStorage) DeleteRefreshToken(ctx context.Context, token string) er
 // DeleteRefreshTokenByTokenID deletes given token from database by its id.
 func (s *SQLiteStorage) DeleteRefreshTokenByTokenID(ctx context.Context, tid string) error {
 	query := `DELETE FROM refresh_tokens WHERE id = ?`
+
 	result, err := s.db.ExecContext(ctx, query, tid)
 	if err != nil {
 		return fmt.Errorf("delete refresh token by ID: %w", err)
@@ -187,10 +188,11 @@ func (s *SQLiteStorage) DeleteRefreshTokenByTokenID(ctx context.Context, tid str
 // PurgeRefreshTokens deletes all refresh token records related to given account.
 func (s *SQLiteStorage) PurgeRefreshTokens(ctx context.Context, aid string) error {
 	query := `DELETE FROM refresh_tokens WHERE aid = ?`
-	_, err := s.db.ExecContext(ctx, query, aid)
-	if err != nil {
+
+	if _, err := s.db.ExecContext(ctx, query, aid); err != nil {
 		return fmt.Errorf("purge refresh tokens: %w", err)
 	}
+
 	return nil
 }
 
@@ -198,10 +200,11 @@ func (s *SQLiteStorage) PurgeRefreshTokens(ctx context.Context, aid string) erro
 func (s *SQLiteStorage) DenyAccessToken(ctx context.Context, token string, ttl time.Duration) error {
 	query := `INSERT INTO denylist (token, denied_until) VALUES (?, ?)`
 	deniedUntil := time.Now().Add(ttl).Unix()
-	_, err := s.db.ExecContext(ctx, query, token, deniedUntil)
-	if err != nil {
+
+	if _, err := s.db.ExecContext(ctx, query, token, deniedUntil); err != nil {
 		return fmt.Errorf("deny access token: %w", err)
 	}
+
 	return nil
 }
 
