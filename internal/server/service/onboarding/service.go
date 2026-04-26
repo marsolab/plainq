@@ -82,12 +82,13 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.router.ServeHTTP(w, r)
 }
 
-// NeedsOnboarding checks if the system needs onboarding (no admin users exist)
+// NeedsOnboarding checks if the system needs onboarding (no admin users exist).
 func (s *Service) NeedsOnboarding(ctx context.Context) (bool, error) {
 	hasAdmins, err := s.storage.HasAdminUsers(ctx)
 	if err != nil {
 		return false, err
 	}
+
 	return !hasAdmins, nil
 }
 

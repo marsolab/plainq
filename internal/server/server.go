@@ -196,6 +196,7 @@ func (s *PlainQ) houstonStaticHandler(w http.ResponseWriter, r *http.Request) {
 	)
 
 	bundle := houston.Bundle()
+
 	cleanPath := strings.TrimPrefix(r.URL.Path, pathPrefix)
 	if cleanPath == "" || cleanPath == "/" {
 		cleanPath = "/"

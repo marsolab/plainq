@@ -29,6 +29,7 @@ func (s *SQLiteStorage) CreateAccount(ctx context.Context, account Account) erro
 	// Use the users table instead of accounts for consistency.
 	query := `INSERT INTO users (user_id, email, password, verified, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`
 	now := time.Now()
+
 	if _, err := s.db.ExecContext(ctx, query, account.ID, account.Email, account.Password, account.Verified, now, now); err != nil {
 		return fmt.Errorf("create account: %w", err)
 	}
@@ -77,6 +78,7 @@ func (s *SQLiteStorage) GetAccountByEmail(ctx context.Context, email string) (*A
 // SetAccountVerified update 'verified' field of account record in database.
 func (s *SQLiteStorage) SetAccountVerified(ctx context.Context, email string, verified bool) error {
 	query := `UPDATE users SET verified = ?, updated_at = ? WHERE email = ?`
+
 	result, err := s.db.ExecContext(ctx, query, verified, time.Now(), email)
 	if err != nil {
 		return fmt.Errorf("set account verified: %w", err)
@@ -97,6 +99,7 @@ func (s *SQLiteStorage) SetAccountVerified(ctx context.Context, email string, ve
 // SetAccountPassword update account 'password' field of account record in database.
 func (s *SQLiteStorage) SetAccountPassword(ctx context.Context, id, password string) error {
 	query := `UPDATE users SET password = ?, updated_at = ? WHERE user_id = ?`
+
 	result, err := s.db.ExecContext(ctx, query, password, time.Now(), id)
 	if err != nil {
 		return fmt.Errorf("set account password: %w", err)
@@ -117,6 +120,7 @@ func (s *SQLiteStorage) SetAccountPassword(ctx context.Context, id, password str
 // DeleteAccount deletes account record from database by given id.
 func (s *SQLiteStorage) DeleteAccount(ctx context.Context, id string) error {
 	query := `DELETE FROM users WHERE user_id = ?`
+
 	result, err := s.db.ExecContext(ctx, query, id)
 	if err != nil {
 		return fmt.Errorf("delete account: %w", err)
@@ -147,6 +151,7 @@ func (s *SQLiteStorage) CreateRefreshToken(ctx context.Context, token RefreshTok
 // DeleteRefreshToken deletes given token from database.
 func (s *SQLiteStorage) DeleteRefreshToken(ctx context.Context, token string) error {
 	query := `DELETE FROM refresh_tokens WHERE token = ?`
+
 	result, err := s.db.ExecContext(ctx, query, token)
 	if err != nil {
 		return fmt.Errorf("delete refresh token: %w", err)

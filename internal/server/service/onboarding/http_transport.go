@@ -73,23 +73,26 @@ func (s *Service) completeOnboardingHandler(w http.ResponseWriter, r *http.Reque
 		}
 	}()
 
-	// Validate input
+	// Validate input.
 	if err := s.validateOnboardingRequest(req); err != nil {
 		httpkit.ErrorHTTP(w, r, err)
+
 		return
 	}
 
-	// Create the initial admin user
+	// Create the initial admin user.
 	admin, err := s.CreateInitialAdmin(r.Context(), req.Email, req.Password, req.Name)
 	if err != nil {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("create initial admin: %w", err))
+
 		return
 	}
 
-	// Generate session tokens for the new admin
+	// Generate session tokens for the new admin.
 	session, err := s.createAdminSession(r.Context(), admin.UserID, admin.Email, time.Now())
 	if err != nil {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("create admin session: %w", err))
+
 		return
 	}
 
@@ -112,7 +115,7 @@ func (s *Service) completeOnboardingHandler(w http.ResponseWriter, r *http.Reque
 	httpkit.JSON(w, r, resp)
 }
 
-// validateOnboardingRequest validates the onboarding request data
+// validateOnboardingRequest validates the onboarding request data.
 func (s *Service) validateOnboardingRequest(req onboardingRequest) error {
 	if req.Email == "" {
 		return fmt.Errorf("%w: email is required", errkit.ErrInvalidArgument)
@@ -122,17 +125,17 @@ func (s *Service) validateOnboardingRequest(req onboardingRequest) error {
 		return fmt.Errorf("%w: password is required", errkit.ErrInvalidArgument)
 	}
 
-	// Basic email validation
+	// Basic email validation.
 	if !strings.Contains(req.Email, "@") || !strings.Contains(req.Email, ".") {
 		return fmt.Errorf("%w: invalid email format", errkit.ErrInvalidArgument)
 	}
 
-	// Password strength validation
+	// Password strength validation.
 	if len(req.Password) < 8 {
 		return fmt.Errorf("%w: password must be at least 8 characters long", errkit.ErrInvalidArgument)
 	}
 
-	// Optional name validation
+	// Optional name validation.
 	if req.Name != "" && len(req.Name) > 100 {
 		return fmt.Errorf("%w: name must be less than 100 characters", errkit.ErrInvalidArgument)
 	}

@@ -156,6 +156,7 @@ func (pm *PrometheusMetrics) SetQueueDepth(queueID string, depth int64) {
 		gauge = metrics.GetOrCreateGauge(`plainq_queue_depth{queue="`+queueID+`"}`, nil)
 		pm.queueDepth[queueID] = gauge
 	}
+
 	gauge.Set(float64(depth))
 }
 
@@ -169,6 +170,7 @@ func (pm *PrometheusMetrics) SetMessagesVisible(queueID string, count int64) {
 		gauge = metrics.GetOrCreateGauge(`plainq_messages_visible{queue="`+queueID+`"}`, nil)
 		pm.messagesVisible[queueID] = gauge
 	}
+
 	gauge.Set(float64(count))
 }
 
@@ -210,6 +212,7 @@ func (pm *PrometheusMetrics) SetThroughput(queueID string, bytesIn, bytesOut flo
 		gaugeIn = metrics.GetOrCreateGauge(`plainq_throughput_bytes_per_second{queue="`+queueID+`",direction="in"}`, nil)
 		pm.throughputIn[queueID] = gaugeIn
 	}
+
 	gaugeIn.Set(bytesIn)
 
 	gaugeOut, ok := pm.throughputOut[queueID]
@@ -217,6 +220,7 @@ func (pm *PrometheusMetrics) SetThroughput(queueID string, bytesIn, bytesOut flo
 		gaugeOut = metrics.GetOrCreateGauge(`plainq_throughput_bytes_per_second{queue="`+queueID+`",direction="out"}`, nil)
 		pm.throughputOut[queueID] = gaugeOut
 	}
+
 	gaugeOut.Set(bytesOut)
 }
 
@@ -251,6 +255,7 @@ func (pm *PrometheusMetrics) RecordDwellTime(queueID string, durationSeconds flo
 func (pm *PrometheusMetrics) RecordBatchSize(queueID string, size int, operation string) {
 	pm.mu.Lock()
 	key := queueID + "_" + operation
+
 	hist, ok := pm.batchSize[key]
 	if !ok {
 		hist = metrics.GetOrCreateHistogram(`plainq_batch_size{queue="` + queueID + `",operation="` + operation + `"}`)

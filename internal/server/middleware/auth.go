@@ -55,21 +55,22 @@ func AuthenticateJWT(tokenManager jwtkit.TokenManager) func(next http.Handler) h
 				return
 			}
 
-			// Extract user ID from token
+			// Extract user ID from token.
 			userID, ok := token.Meta["uid"].(string)
 			if !ok {
 				httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: missing user ID in token", errkit.ErrUnauthenticated))
+
 				return
 			}
 
-			// Extract email from token
+			// Extract email from token.
 			email, ok := token.Meta["email"].(string)
 			if !ok {
 				httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: missing email in token", errkit.ErrUnauthenticated))
 				return
 			}
 
-			// Extract roles from token (optional)
+			// Extract roles from token (optional).
 			var roles []string
 
 			if rolesInterface, exists := token.Meta["roles"]; exists {
