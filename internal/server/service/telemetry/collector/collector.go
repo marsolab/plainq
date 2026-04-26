@@ -52,14 +52,15 @@ const (
 	MetricTypeHistogram MetricType = "histogram"
 )
 
-// Metric names constants.
+// Metric names for rate metrics (calculated per second).
 const (
-	// Rate metrics (calculated per second).
 	MetricSendRate    = "plainq_send_rate"
 	MetricReceiveRate = "plainq_receive_rate"
 	MetricDeleteRate  = "plainq_delete_rate"
+)
 
-	// Counter metrics (cumulative).
+// Metric names for counter metrics (cumulative).
+const (
 	MetricMessagesSentTotal     = "plainq_messages_sent_total"
 	MetricMessagesReceivedTotal = "plainq_messages_received_total"
 	MetricMessagesDeletedTotal  = "plainq_messages_deleted_total"
@@ -69,8 +70,10 @@ const (
 	MetricMessagesToDLQ         = "plainq_messages_to_dlq_total"
 	MetricBytesSentTotal        = "plainq_bytes_sent_total"
 	MetricBytesReceivedTotal    = "plainq_bytes_received_total"
+)
 
-	// Gauge metrics (current value).
+// Metric names for gauge metrics (current value).
+const (
 	MetricMessagesInFlight      = "plainq_messages_in_flight"
 	MetricQueueDepth            = "plainq_queue_depth"
 	MetricMessagesVisible       = "plainq_messages_visible"
@@ -78,8 +81,10 @@ const (
 	MetricOldestMessageAge      = "plainq_oldest_message_age_seconds"
 	MetricQueuesExist           = "plainq_queues_exist"
 	MetricThroughputBytesPerSec = "plainq_throughput_bytes_per_second"
+)
 
-	// Histogram metrics (distribution).
+// Metric names for histogram metrics (distribution).
+const (
 	MetricMessageProcessingDuration = "plainq_message_processing_duration_seconds"
 	MetricMessageDwellTime          = "plainq_message_dwell_time_seconds"
 	MetricMessageInQueueDuration    = "plainq_message_in_queue_duration_seconds"
@@ -162,6 +167,8 @@ type Collector struct {
 }
 
 // Store interface for persisting metrics.
+//
+//nolint:interfacebloat // domain interface for metrics persistence; methods cohere around the same data store.
 type Store interface {
 	// SaveRawMetric saves a raw metric data point.
 	SaveRawMetric(ctx context.Context, timestamp int64, queueID, metricName string, value float64, labels string) error
@@ -303,6 +310,7 @@ func (c *Collector) getOrCreateQueueMetrics(queueID string) *QueueMetrics {
 		messageSizes:        make([]int, 0, defaultSliceCapLarge),
 	}
 	c.queueMetrics[queueID] = m
+
 	return m
 }
 
@@ -315,7 +323,9 @@ func (c *Collector) RecordSend(queueID string, count, totalBytes uint64) {
 }
 
 // RecordReceive records a receive operation.
-func (c *Collector) RecordReceive(queueID string, count uint64, isEmpty bool) { //nolint:revive // isEmpty is a reasonable flag parameter for this API
+//
+//nolint:revive // isEmpty is a reasonable flag parameter for this API.
+func (c *Collector) RecordReceive(queueID string, count uint64, isEmpty bool) {
 	m := c.getOrCreateQueueMetrics(queueID)
 	m.messagesReceived.Add(count)
 	m.messagesInFlight.Add(int64(count)) //nolint:gosec // count is a message count that will never approach int64 max
@@ -411,6 +421,7 @@ func (c *Collector) DecrementQueues() {
 // GetInFlightCount returns the current in-flight count for a queue.
 func (c *Collector) GetInFlightCount(queueID string) int64 {
 	m := c.getOrCreateQueueMetrics(queueID)
+
 	return m.messagesInFlight.Load()
 }
 
@@ -423,6 +434,7 @@ func (c *Collector) GetSystemInFlightCount() int64 {
 	for _, m := range c.queueMetrics {
 		total += m.messagesInFlight.Load()
 	}
+
 	return total
 }
 
@@ -436,6 +448,7 @@ type Rates struct {
 // GetRates returns current rates for a queue.
 func (c *Collector) GetRates(queueID string) Rates {
 	m := c.getOrCreateQueueMetrics(queueID)
+
 	return Rates{
 		SendRate:    float64FromBits(m.sendRate.Load()),
 		ReceiveRate: float64FromBits(m.receiveRate.Load()),
@@ -455,6 +468,7 @@ func (c *Collector) GetSystemRates() Rates {
 // GetCounters returns current counter values for a queue.
 func (c *Collector) GetCounters(queueID string) map[string]uint64 {
 	m := c.getOrCreateQueueMetrics(queueID)
+
 	return map[string]uint64{
 		MetricMessagesSentTotal:     m.messagesSent.Load(),
 		MetricMessagesReceivedTotal: m.messagesReceived.Load(),
@@ -476,6 +490,7 @@ func (c *Collector) GetAllQueueIDs() []string {
 	for id := range c.queueMetrics {
 		ids = append(ids, id)
 	}
+
 	return ids
 }
 
@@ -488,16 +503,18 @@ func (c *Collector) rateCalculationWorker(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+
 		case <-c.stop:
 			return
+
 		case <-ticker.C:
-			c.calculateRates()
+			c.calculateRates(ctx)
 		}
 	}
 }
 
 // calculateRates calculates rates for all queues.
-func (c *Collector) calculateRates() {
+func (c *Collector) calculateRates(ctx context.Context) {
 	now := time.Now().UnixMilli()
 
 	c.queueMu.RLock()
@@ -526,19 +543,19 @@ func (c *Collector) calculateRates() {
 		// Persist rates to store (best-effort, errors are non-fatal).
 		if c.store != nil {
 			//nolint:errcheck // best-effort metrics persistence
-			_ = c.store.SaveRateSnapshot(context.Background(), now, queueID, MetricSendRate, sendRate, 1)
+			_ = c.store.SaveRateSnapshot(ctx, now, queueID, MetricSendRate, sendRate, 1)
 			//nolint:errcheck // best-effort metrics persistence
-			_ = c.store.SaveRateSnapshot(context.Background(), now, queueID, MetricReceiveRate, receiveRate, 1)
+			_ = c.store.SaveRateSnapshot(ctx, now, queueID, MetricReceiveRate, receiveRate, 1)
 			//nolint:errcheck // best-effort metrics persistence
-			_ = c.store.SaveRateSnapshot(context.Background(), now, queueID, MetricDeleteRate, deleteRate, 1)
+			_ = c.store.SaveRateSnapshot(ctx, now, queueID, MetricDeleteRate, deleteRate, 1)
 			//nolint:errcheck // best-effort metrics persistence
-			_ = c.store.SaveRawMetric(context.Background(), now, queueID, MetricMessagesSentTotal, float64(currentSent), "")
+			_ = c.store.SaveRawMetric(ctx, now, queueID, MetricMessagesSentTotal, float64(currentSent), "")
 			//nolint:errcheck // best-effort metrics persistence
-			_ = c.store.SaveRawMetric(context.Background(), now, queueID, MetricMessagesReceivedTotal, float64(currentReceived), "")
+			_ = c.store.SaveRawMetric(ctx, now, queueID, MetricMessagesReceivedTotal, float64(currentReceived), "")
 			//nolint:errcheck // best-effort metrics persistence
-			_ = c.store.SaveRawMetric(context.Background(), now, queueID, MetricMessagesDeletedTotal, float64(currentDeleted), "")
+			_ = c.store.SaveRawMetric(ctx, now, queueID, MetricMessagesDeletedTotal, float64(currentDeleted), "")
 			//nolint:errcheck // best-effort metrics persistence
-			_ = c.store.SaveRawMetric(context.Background(), now, queueID, MetricMessagesInFlight, float64(m.messagesInFlight.Load()), "")
+			_ = c.store.SaveRawMetric(ctx, now, queueID, MetricMessagesInFlight, float64(m.messagesInFlight.Load()), "")
 		}
 	}
 
@@ -562,13 +579,13 @@ func (c *Collector) calculateRates() {
 	// Persist system-wide metrics (best-effort, errors are non-fatal).
 	if c.store != nil {
 		//nolint:errcheck // best-effort metrics persistence
-		_ = c.store.SaveRateSnapshot(context.Background(), now, "", MetricSendRate, systemSendRate, 1)
+		_ = c.store.SaveRateSnapshot(ctx, now, "", MetricSendRate, systemSendRate, 1)
 		//nolint:errcheck // best-effort metrics persistence
-		_ = c.store.SaveRateSnapshot(context.Background(), now, "", MetricReceiveRate, systemReceiveRate, 1)
+		_ = c.store.SaveRateSnapshot(ctx, now, "", MetricReceiveRate, systemReceiveRate, 1)
 		//nolint:errcheck // best-effort metrics persistence
-		_ = c.store.SaveRateSnapshot(context.Background(), now, "", MetricDeleteRate, systemDeleteRate, 1)
+		_ = c.store.SaveRateSnapshot(ctx, now, "", MetricDeleteRate, systemDeleteRate, 1)
 		//nolint:errcheck // best-effort metrics persistence
-		_ = c.store.SaveRawMetric(context.Background(), now, "", MetricQueuesExist, float64(c.system.queuesExist.Load()), "")
+		_ = c.store.SaveRawMetric(ctx, now, "", MetricQueuesExist, float64(c.system.queuesExist.Load()), "")
 	}
 }
 
@@ -603,8 +620,10 @@ func (c *Collector) aggregate1m(ctx context.Context) error {
 	if c.store == nil {
 		return nil
 	}
+
 	now := time.Now().UnixMilli()
 	from := now - aggregationInterval1m.Milliseconds() - time.Second.Milliseconds() // 1 extra second buffer.
+
 	return c.store.Aggregate1m(ctx, from, now)
 }
 
@@ -612,8 +631,10 @@ func (c *Collector) aggregate1h(ctx context.Context) error {
 	if c.store == nil {
 		return nil
 	}
+
 	now := time.Now().UnixMilli()
 	from := now - aggregationInterval1h.Milliseconds() - bucketSize1m // 1 extra minute buffer.
+
 	return c.store.Aggregate1h(ctx, from, now)
 }
 
@@ -621,8 +642,10 @@ func (c *Collector) aggregate1d(ctx context.Context) error {
 	if c.store == nil {
 		return nil
 	}
+
 	now := time.Now().UnixMilli()
 	from := now - aggregationInterval1d.Milliseconds() - bucketSize1h // 1 extra hour buffer.
+
 	return c.store.Aggregate1d(ctx, from, now)
 }
 
@@ -640,6 +663,7 @@ func (c *Collector) cleanupWorker(ctx context.Context) {
 		case <-ticker.C:
 			if c.store != nil {
 				now := time.Now().UnixMilli()
+
 				err := c.store.CleanupOldMetrics(ctx,
 					now-retentionRaw.Milliseconds(),
 					now-retention1m.Milliseconds(),

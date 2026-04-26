@@ -25,18 +25,26 @@ func NewSQLiteStore(db *litekit.Conn) *SQLiteStore {
 // SaveRawMetric saves a raw metric data point.
 //
 //nolint:revive // argument-limit: signature matches Store interface
-func (s *SQLiteStore) SaveRawMetric(ctx context.Context, timestamp int64, queueID, metricName string, value float64, labels string) error {
+func (s *SQLiteStore) SaveRawMetric(
+	ctx context.Context, timestamp int64, queueID, metricName string, value float64, labels string,
+) error {
 	query := `INSERT INTO metrics_raw (timestamp, queue_id, metric_name, metric_value, labels) VALUES (?, ?, ?, ?, ?)`
-	_, err := s.db.ExecContext(ctx, query, timestamp, queueID, metricName, value, labels)
-	return err
+	if _, err := s.db.ExecContext(ctx, query, timestamp, queueID, metricName, value, labels); err != nil {
+		return fmt.Errorf("save raw metric: %w", err)
+	}
+
+	return nil
 }
 
 // SaveRateSnapshot saves rate calculation results.
 //
 //nolint:revive // argument-limit: signature matches Store interface
-func (s *SQLiteStore) SaveRateSnapshot(ctx context.Context, timestamp int64, queueID, metricName string, ratePerSecond float64, windowSeconds int) error {
+func (s *SQLiteStore) SaveRateSnapshot(
+	ctx context.Context, timestamp int64, queueID, metricName string, ratePerSecond float64, windowSeconds int,
+) error {
 	query := `INSERT INTO rate_snapshots (timestamp, queue_id, metric_name, rate_per_second, window_seconds) VALUES (?, ?, ?, ?, ?)`
 	_, err := s.db.ExecContext(ctx, query, timestamp, queueID, metricName, ratePerSecond, windowSeconds)
+
 	return err
 }
 
@@ -50,6 +58,7 @@ func (s *SQLiteStore) SaveQueueStats( //nolint:revive // argument-limit: signatu
 		oldest_message_age_seconds, avg_message_age_seconds)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`
 	_, err := s.db.ExecContext(ctx, query, timestamp, queueID, depth, visible, invisible, oldestAge, avgAge)
+
 	return err
 }
 
@@ -58,6 +67,7 @@ func (s *SQLiteStore) UpdateInFlightCount(ctx context.Context, queueID string, c
 	query := `INSERT INTO messages_in_flight (queue_id, count, updated_at) VALUES (?, ?, ?)
 		ON CONFLICT(queue_id) DO UPDATE SET count = excluded.count, updated_at = excluded.updated_at`
 	_, err := s.db.ExecContext(ctx, query, queueID, count, time.Now().UnixMilli())
+
 	return err
 }
 
@@ -83,6 +93,7 @@ func (s *SQLiteStore) Aggregate1m(ctx context.Context, fromTimestamp, toTimestam
 		GROUP BY bucket_start, queue_id, metric_name, labels
 	`
 	_, err := s.db.ExecContext(ctx, query, bucketSize, bucketSize, fromTimestamp, toTimestamp)
+
 	return err
 }
 
@@ -111,6 +122,7 @@ func (s *SQLiteStore) Aggregate1h(ctx context.Context, fromTimestamp, toTimestam
 		bucketSize, bucketSize,
 		fromTimestamp, minuteBucketSize, minuteBucketSize,
 		toTimestamp, minuteBucketSize, minuteBucketSize)
+
 	return err
 }
 
@@ -139,6 +151,7 @@ func (s *SQLiteStore) Aggregate1d(ctx context.Context, fromTimestamp, toTimestam
 		bucketSize, bucketSize,
 		fromTimestamp, hourBucketSize, hourBucketSize,
 		toTimestamp, hourBucketSize, hourBucketSize)
+
 	return err
 }
 
@@ -173,12 +186,15 @@ func (s *SQLiteStore) CleanupOldMetrics(ctx context.Context, rawBefore, m1Before
 //
 //nolint:revive // argument-limit: query parameters naturally form this signature
 func (s *SQLiteStore) GetMetrics(ctx context.Context, metricName, queueID string, from, to int64, resolution string) ([]DataPoint, error) {
-	var query string
-	var args []any
+	var (
+		query string
+		args  []any
+	)
 
 	// Always filter by queue_id - empty string means system-wide metrics.
 	switch resolution {
 	case "raw":
+		//nolint:dupword // intentional column reuse to fill the unified DataPoint shape.
 		query = `SELECT timestamp, metric_value, metric_value, metric_value, metric_value, metric_value, 1
 			FROM metrics_raw WHERE metric_name = ? AND queue_id = ? AND timestamp >= ? AND timestamp <= ?
 			ORDER BY timestamp ASC`
@@ -191,6 +207,7 @@ func (s *SQLiteStore) GetMetrics(ctx context.Context, metricName, queueID string
 		args = []any{metricName, queueID, from, to}
 
 	case "5m":
+		//nolint:dupword // intentional column reuse to fill the unified DataPoint shape.
 		query = `SELECT timestamp, metric_value_avg, metric_value_min, metric_value_max, metric_value_avg, metric_value_avg, 1
 			FROM metrics_5m WHERE metric_name = ? AND queue_id = ? AND timestamp >= ? AND timestamp <= ?
 			ORDER BY timestamp ASC`
@@ -219,11 +236,13 @@ func (s *SQLiteStore) GetMetrics(ctx context.Context, metricName, queueID string
 	defer rows.Close()
 
 	var points []DataPoint
+
 	for rows.Next() {
 		var p DataPoint
 		if err := rows.Scan(&p.Timestamp, &p.Value, &p.Min, &p.Max, &p.Avg, &p.Sum, &p.Count); err != nil {
 			return nil, fmt.Errorf(errScanRow, err)
 		}
+
 		points = append(points, p)
 	}
 
@@ -247,12 +266,17 @@ func (s *SQLiteStore) GetLatestRates(ctx context.Context, queueID string) (map[s
 	defer rows.Close()
 
 	rates := make(map[string]float64)
+
 	for rows.Next() {
-		var name string
-		var rate float64
+		var (
+			name string
+			rate float64
+		)
+
 		if err := rows.Scan(&name, &rate); err != nil {
 			return nil, fmt.Errorf(errScanRow, err)
 		}
+
 		rates[name] = rate
 	}
 
@@ -276,11 +300,16 @@ func (s *SQLiteStore) GetQueueStats(ctx context.Context, queueID string, from, t
 	defer rows.Close()
 
 	var points []QueueStatsPoint
+
 	for rows.Next() {
 		var p QueueStatsPoint
-		if err := rows.Scan(&p.Timestamp, &p.QueueDepth, &p.MessagesVisible, &p.MessagesInvisible, &p.OldestMessageAge, &p.AvgMessageAge); err != nil {
+		if err := rows.Scan(
+			&p.Timestamp, &p.QueueDepth, &p.MessagesVisible, &p.MessagesInvisible,
+			&p.OldestMessageAge, &p.AvgMessageAge,
+		); err != nil {
 			return nil, fmt.Errorf(errScanRow, err)
 		}
+
 		points = append(points, p)
 	}
 
@@ -298,12 +327,17 @@ func (s *SQLiteStore) GetInFlightCounts(ctx context.Context) (map[string]int64, 
 	defer rows.Close()
 
 	counts := make(map[string]int64)
+
 	for rows.Next() {
-		var queueID string
-		var count int64
+		var (
+			queueID string
+			count   int64
+		)
+
 		if err := rows.Scan(&queueID, &count); err != nil {
 			return nil, fmt.Errorf(errScanRow, err)
 		}
+
 		counts[queueID] = count
 	}
 
@@ -316,6 +350,7 @@ func (s *SQLiteStore) GetInFlightCounts(ctx context.Context) (map[string]int64, 
 //nolint:revive // argument-limit: all params are needed for query filtering
 func (s *SQLiteStore) GetRateHistory(ctx context.Context, metricName, queueID string, from, to int64) ([]DataPoint, error) {
 	// Always filter by queue_id - empty string means system-wide metrics.
+	//nolint:dupword // intentional column reuse to fill the unified DataPoint shape.
 	query := `
 		SELECT timestamp, rate_per_second, rate_per_second, rate_per_second, rate_per_second, rate_per_second, 1
 		FROM rate_snapshots
@@ -331,11 +366,13 @@ func (s *SQLiteStore) GetRateHistory(ctx context.Context, metricName, queueID st
 	defer rows.Close()
 
 	var points []DataPoint
+
 	for rows.Next() {
 		var p DataPoint
 		if err := rows.Scan(&p.Timestamp, &p.Value, &p.Min, &p.Max, &p.Avg, &p.Sum, &p.Count); err != nil {
 			return nil, fmt.Errorf(errScanRow, err)
 		}
+
 		points = append(points, p)
 	}
 
@@ -366,11 +403,13 @@ func (s *SQLiteStore) GetAllQueuesMetrics(ctx context.Context, metricName string
 	defer rows.Close()
 
 	var points []DataPoint
+
 	for rows.Next() {
 		var p DataPoint
 		if err := rows.Scan(&p.Timestamp, &p.Value); err != nil {
 			return nil, fmt.Errorf(errScanRow, err)
 		}
+
 		points = append(points, p)
 	}
 
@@ -394,10 +433,12 @@ func (s *SQLiteStore) GetLatestMetricValue(ctx context.Context, metricName, queu
 	`
 
 	var m LatestMetric
+
 	err := s.db.QueryRowContext(ctx, query, metricName, queueID).Scan(&m.Value, &m.Timestamp)
 	if err == sql.ErrNoRows {
 		return LatestMetric{}, nil
 	}
+
 	if err != nil {
 		return LatestMetric{}, fmt.Errorf("query latest metric: %w", err)
 	}
