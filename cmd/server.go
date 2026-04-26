@@ -725,6 +725,7 @@ func initTelemetryDB(cfg *config.Config, logger *slog.Logger) (*litekit.Conn, er
 			}
 
 			var absErr error
+
 			dbPath, absErr = filepath.Abs(filepath.Join(pwd, "plainq_telemetry.db"))
 			if absErr != nil {
 				return nil, fmt.Errorf("resolve telemetry database path: %w", absErr)
