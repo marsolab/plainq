@@ -680,7 +680,7 @@ func initOAuthStorage(cfg *config.Config, logger *slog.Logger, backend *storageB
 // account sessions depend on it to issue/verify tokens.
 func initTokenManager(cfg *config.Config) (jwtkit.TokenManager, error) {
 	if cfg.AuthJWTSecret == "" {
-		return nil, fmt.Errorf("auth.jwt.secret is required for session issuance")
+		return nil, errors.New("auth.jwt.secret is required for session issuance")
 	}
 
 	secret := []byte(cfg.AuthJWTSecret)
