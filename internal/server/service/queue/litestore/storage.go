@@ -424,7 +424,7 @@ func (s *Storage) Send(ctx context.Context, input *v1.SendRequest) (_ *v1.SendRe
 	return &output, nil
 }
 
-//nolint:cyclop // Complex message receiving with visibility timeout and polling.
+//nolint:cyclop,gocyclo,nonamedreturns // sErr is set by deferred rollback; complex message receiving logic.
 func (s *Storage) Receive(ctx context.Context, input *v1.ReceiveRequest) (_ *v1.ReceiveResponse, sErr error) {
 	queueID := input.GetQueueId()
 
@@ -596,6 +596,7 @@ func (s *Storage) Close() error {
 	return nil
 }
 
+//nolint:cyclop,nonamedreturns // sErr is set by deferred rollback; covers the full SQL fetch path.
 func (s *Storage) listQueues(ctx context.Context, query string, pageSize uint32) (_ []*v1.DescribeQueueResponse, sErr error) {
 	tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if txErr != nil {

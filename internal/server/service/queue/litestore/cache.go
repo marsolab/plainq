@@ -155,7 +155,7 @@ func (c *QueuePropsCache) delete(id, name string) {
 	delete(c.byName, name)
 }
 
-//nolint:gocyclo,unused // dispatch table over (orderBy x sortBy) is naturally branch-heavy; called by list (test-only).
+//nolint:gocyclo,cyclop,unused // dispatch table over (orderBy x sortBy) is naturally branch-heavy; called by list (test-only).
 func sortProps(props []QueueProps, listOptions QueuePropsListOptions) {
 	slices.SortFunc[[]QueueProps](props, func(a, b QueueProps) int {
 		switch listOptions.orderBy {
