@@ -30,15 +30,15 @@ type Config struct {
 	StorageAccessMode  string
 	StorageJournalMode string
 
-	// Authentication configuration
+	// Authentication configuration.
 	AuthEnable                  bool
 	AuthRegistrationEnable      bool
 	AuthAccessTokenTTL          time.Duration
 	AuthRefreshTokenTTL         time.Duration
 	AuthEmailVerificationEnable bool
-	AuthJWTSecret               string // HMAC secret used to sign access/refresh tokens; required when AuthEnable
+	AuthJWTSecret               string // HMAC secret used to sign access/refresh tokens; required when AuthEnable.
 
-	// OAuth configuration
+	// OAuth configuration.
 	OAuthEnable           bool
 	OAuthProvider         string // "kinde", "auth0", "okta", "google", etc.
 	OAuthClientID         string
