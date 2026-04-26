@@ -10,13 +10,13 @@ import (
 	"github.com/marsolab/servekit/authkit/hashkit"
 )
 
-// SQLiteStorage implements the account Storage interface using SQLite
+// SQLiteStorage implements the account Storage interface using SQLite.
 type SQLiteStorage struct {
 	db     *sql.DB
 	hasher hashkit.Hasher
 }
 
-// NewSQLiteStorage creates a new SQLite storage instance for accounts
+// NewSQLiteStorage creates a new SQLite storage instance for accounts.
 func NewSQLiteStorage(db *sql.DB, hasher hashkit.Hasher) *SQLiteStorage {
 	return &SQLiteStorage{
 		db:     db,

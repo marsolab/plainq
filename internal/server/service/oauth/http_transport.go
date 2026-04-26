@@ -23,6 +23,7 @@ func (s *Service) listProvidersHandler(w http.ResponseWriter, r *http.Request) {
 	providers, err := s.storage.ListProviders(r.Context(), orgID)
 	if err != nil {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("list providers: %w", err))
+
 		return
 	}
 
@@ -39,6 +40,7 @@ func (s *Service) createProviderHandler(w http.ResponseWriter, r *http.Request) 
 	var req request
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: decode request json: %s", errkit.ErrInvalidArgument, err.Error()))
+
 		return
 	}
 
@@ -50,6 +52,7 @@ func (s *Service) createProviderHandler(w http.ResponseWriter, r *http.Request) 
 
 	if req.ProviderName == "" {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: provider name is required", errkit.ErrInvalidArgument))
+
 		return
 	}
 
@@ -63,6 +66,7 @@ func (s *Service) createProviderHandler(w http.ResponseWriter, r *http.Request) 
 
 	if err := s.storage.CreateProvider(r.Context(), provider); err != nil {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("create provider: %w", err))
+
 		return
 	}
 
@@ -73,6 +77,7 @@ func (s *Service) getProviderHandler(w http.ResponseWriter, r *http.Request) {
 	providerID := chi.URLParam(r, "providerID")
 	if providerID == "" {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: provider ID is required", errkit.ErrInvalidArgument))
+
 		return
 	}
 
@@ -85,6 +90,7 @@ func (s *Service) updateProviderHandler(w http.ResponseWriter, r *http.Request) 
 	providerID := chi.URLParam(r, "providerID")
 	if providerID == "" {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: provider ID is required", errkit.ErrInvalidArgument))
+
 		return
 	}
 
@@ -97,6 +103,7 @@ func (s *Service) updateProviderHandler(w http.ResponseWriter, r *http.Request) 
 	var req request
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: decode request json: %s", errkit.ErrInvalidArgument, err.Error()))
+
 		return
 	}
 
@@ -114,18 +121,20 @@ func (s *Service) deleteProviderHandler(w http.ResponseWriter, r *http.Request) 
 	providerID := chi.URLParam(r, "providerID")
 	if providerID == "" {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: provider ID is required", errkit.ErrInvalidArgument))
+
 		return
 	}
 
 	if err := s.storage.DeleteProvider(r.Context(), providerID); err != nil {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("delete provider: %w", err))
+
 		return
 	}
 
 	httpkit.Status(w, r, http.StatusNoContent)
 }
 
-// User Synchronization Handlers
+// User Synchronization Handlers.
 
 func (s *Service) syncUserHandler(w http.ResponseWriter, r *http.Request) {
 	type request struct {
@@ -136,6 +145,7 @@ func (s *Service) syncUserHandler(w http.ResponseWriter, r *http.Request) {
 	var req request
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: decode request json: %s", errkit.ErrInvalidArgument, err.Error()))
+
 		return
 	}
 
@@ -147,12 +157,14 @@ func (s *Service) syncUserHandler(w http.ResponseWriter, r *http.Request) {
 
 	if req.Provider == "" || req.User.Subject == "" {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: provider and user subject are required", errkit.ErrInvalidArgument))
+
 		return
 	}
 
 	syncedUser, err := s.SyncUser(r.Context(), req.User, req.Provider)
 	if err != nil {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("sync user: %w", err))
+
 		return
 	}
 
@@ -163,11 +175,12 @@ func (s *Service) getUserSyncStatusHandler(w http.ResponseWriter, r *http.Reques
 	userID := chi.URLParam(r, "userID")
 	if userID == "" {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: user ID is required", errkit.ErrInvalidArgument))
+
 		return
 	}
 
 	// Implementation would get sync status from storage
-	// For now, return a placeholder
+	// For now, return a placeholder.
 	type response struct {
 		UserID   string `json:"user_id"`
 		IsSynced bool   `json:"is_synced"`
@@ -183,7 +196,7 @@ func (s *Service) getUserSyncStatusHandler(w http.ResponseWriter, r *http.Reques
 	httpkit.JSON(w, r, resp)
 }
 
-// Organization and Team Handlers
+// Organization and Team Handlers.
 
 func (s *Service) listOrganizationsHandler(w http.ResponseWriter, r *http.Request) {
 	// Get user from context to determine accessible organizations.
@@ -192,6 +205,7 @@ func (s *Service) listOrganizationsHandler(w http.ResponseWriter, r *http.Reques
 	// now we just verify the request is authenticated.
 	if _, ok := middleware.GetUserFromContext(r.Context()); !ok {
 		httpkit.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
+
 		return
 	}
 
@@ -202,7 +216,7 @@ func (s *Service) listOrganizationsHandler(w http.ResponseWriter, r *http.Reques
 
 	resp := response{
 		Organizations: []Organization{},
-		UserOrg:       "", // Would be derived from user info
+		UserOrg:       "", // Would be derived from user info.
 	}
 
 	httpkit.JSON(w, r, resp)
@@ -212,30 +226,34 @@ func (s *Service) listTeamsHandler(w http.ResponseWriter, r *http.Request) {
 	orgID := chi.URLParam(r, "orgID")
 	if orgID == "" {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: organization ID is required", errkit.ErrInvalidArgument))
+
 		return
 	}
 
 	teams, err := s.storage.GetTeamsByOrg(r.Context(), orgID)
 	if err != nil {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("get teams: %w", err))
+
 		return
 	}
 
 	httpkit.JSON(w, r, teams)
 }
 
-// User Team Management Handlers
+// User Team Management Handlers.
 
 func (s *Service) getUserTeamsHandler(w http.ResponseWriter, r *http.Request) {
 	userID := chi.URLParam(r, "userID")
 	if userID == "" {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: user ID is required", errkit.ErrInvalidArgument))
+
 		return
 	}
 
 	teams, err := s.storage.GetUserTeams(r.Context(), userID)
 	if err != nil {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("get user teams: %w", err))
+
 		return
 	}
 
@@ -248,11 +266,13 @@ func (s *Service) assignUserToTeamHandler(w http.ResponseWriter, r *http.Request
 
 	if userID == "" || teamID == "" {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: user ID and team ID are required", errkit.ErrInvalidArgument))
+
 		return
 	}
 
 	if err := s.storage.AssignUserToTeam(r.Context(), userID, teamID); err != nil {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("assign user to team: %w", err))
+
 		return
 	}
 
@@ -265,11 +285,13 @@ func (s *Service) removeUserFromTeamHandler(w http.ResponseWriter, r *http.Reque
 
 	if userID == "" || teamID == "" {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: user ID and team ID are required", errkit.ErrInvalidArgument))
+
 		return
 	}
 
 	if err := s.storage.RemoveUserFromTeam(r.Context(), userID, teamID); err != nil {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("remove user from team: %w", err))
+
 		return
 	}
 

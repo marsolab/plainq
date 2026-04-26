@@ -103,6 +103,7 @@ func (s *Storage) SetAccountVerified(ctx context.Context, email string, verified
 		Verified: verified,
 		Email:    email,
 	})
+
 	return err
 }
 
@@ -111,11 +112,13 @@ func (s *Storage) SetAccountPassword(ctx context.Context, id, password string) e
 		Password: password,
 		UserID:   id,
 	})
+
 	return err
 }
 
 func (s *Storage) DeleteAccount(ctx context.Context, id string) error {
 	_, err := s.queries.DeleteAccount(ctx, id)
+
 	return err
 }
 

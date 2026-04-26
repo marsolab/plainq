@@ -384,6 +384,7 @@ func (s *Storage) Receive(ctx context.Context, input *v1.ReceiveRequest) (_ *v1.
 
 		if err := rows.Scan(&m.Id, &m.Body); err != nil {
 			rows.Close()
+
 			return nil, fmt.Errorf("scan message record: %w", err)
 		}
 

@@ -85,6 +85,7 @@ func (s *Storage) GetProvider(ctx context.Context, providerName, orgID string) (
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("oauth provider not found: %w", pqerr.ErrNotFound)
 		}
+
 		return nil, fmt.Errorf("get oauth provider: %w", err)
 	}
 
@@ -216,6 +217,7 @@ func (s *Storage) GetUserByOAuthSub(ctx context.Context, providerName, subject s
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("oauth user not found: %w", pqerr.ErrNotFound)
 		}
+
 		return nil, fmt.Errorf("get user by oauth sub: %w", err)
 	}
 
@@ -234,6 +236,7 @@ func (s *Storage) GetUserByOAuthSub(ctx context.Context, providerName, subject s
 
 func (s *Storage) UpdateUserLastSync(ctx context.Context, userID string) error {
 	now := time.Now()
+
 	return s.queries.UpdateUserLastSync(ctx, sqlcgen.UpdateUserLastSyncParams{
 		LastSyncAt: sql.NullTime{Time: now, Valid: true},
 		UpdatedAt:  now,
@@ -247,6 +250,7 @@ func (s *Storage) GetOrganizationByCode(ctx context.Context, orgCode string) (*o
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("organization not found: %w", pqerr.ErrNotFound)
 		}
+
 		return nil, fmt.Errorf("get organization by code: %w", err)
 	}
 
@@ -259,6 +263,7 @@ func (s *Storage) GetOrganizationByDomain(ctx context.Context, domain string) (*
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("organization not found: %w", pqerr.ErrNotFound)
 		}
+
 		return nil, fmt.Errorf("get organization by domain: %w", err)
 	}
 
@@ -288,10 +293,12 @@ func (s *Storage) GetTeamByCode(ctx context.Context, orgID, teamCode string) (*o
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("team not found: %w", pqerr.ErrNotFound)
 		}
+
 		return nil, fmt.Errorf("get team by code: %w", err)
 	}
 
 	t := rowToTeam(row)
+
 	return &t, nil
 }
 

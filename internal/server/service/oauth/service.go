@@ -12,7 +12,7 @@ import (
 	"github.com/marsolab/plainq/internal/server/config"
 )
 
-// Provider represents an OAuth provider configuration
+// Provider represents an OAuth provider configuration.
 type Provider struct {
 	ProviderID   string            `json:"provider_id"`
 	ProviderName string            `json:"provider_name"` // "kinde", "auth0", "okta", etc.
@@ -23,9 +23,9 @@ type Provider struct {
 	UpdatedAt    time.Time         `json:"updated_at"`
 }
 
-// OAuthUser represents a user from an OAuth provider
+// OAuthUser represents a user from an OAuth provider.
 type OAuthUser struct {
-	Subject      string         `json:"sub"` // OAuth subject identifier
+	Subject      string         `json:"sub"` // OAuth subject identifier.
 	Email        string         `json:"email"`
 	Name         string         `json:"name,omitempty"`
 	Picture      string         `json:"picture,omitempty"`
@@ -61,7 +61,7 @@ type Storage interface {
 	GetUserTeams(ctx context.Context, userID string) ([]Team, error)
 }
 
-// SyncedUser represents a synchronized OAuth user
+// SyncedUser represents a synchronized OAuth user.
 type SyncedUser struct {
 	UserID      string    `json:"user_id"`
 	Email       string    `json:"email"`
@@ -75,7 +75,7 @@ type SyncedUser struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
-// Organization represents an organization entity
+// Organization represents an organization entity.
 type Organization struct {
 	OrgID     string    `json:"org_id"`
 	OrgCode   string    `json:"org_code"`
@@ -86,7 +86,7 @@ type Organization struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// Team represents a team within an organization
+// Team represents a team within an organization.
 type Team struct {
 	TeamID      string    `json:"team_id"`
 	OrgID       string    `json:"org_id"`
@@ -98,7 +98,7 @@ type Team struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
-// Service handles OAuth operations
+// Service handles OAuth operations.
 type Service struct {
 	cfg     *config.Config
 	logger  *slog.Logger
@@ -106,7 +106,7 @@ type Service struct {
 	storage Storage
 }
 
-// NewService creates a new OAuth service
+// NewService creates a new OAuth service.
 func NewService(cfg *config.Config, logger *slog.Logger, storage Storage) *Service {
 	s := Service{
 		cfg:     cfg,
@@ -115,9 +115,9 @@ func NewService(cfg *config.Config, logger *slog.Logger, storage Storage) *Servi
 		storage: storage,
 	}
 
-	// Setup routes
+	// Setup routes.
 	s.router.Route("/", func(r chi.Router) {
-		// OAuth provider management
+		// OAuth provider management.
 		r.Route("/providers", func(r chi.Router) {
 			r.Get("/", s.listProvidersHandler)
 			r.Post("/", s.createProviderHandler)
@@ -126,19 +126,19 @@ func NewService(cfg *config.Config, logger *slog.Logger, storage Storage) *Servi
 			r.Delete("/{providerID}", s.deleteProviderHandler)
 		})
 
-		// User synchronization endpoints
+		// User synchronization endpoints.
 		r.Route("/sync", func(r chi.Router) {
 			r.Post("/user", s.syncUserHandler)
 			r.Get("/user/{userID}", s.getUserSyncStatusHandler)
 		})
 
-		// Organization and team management
+		// Organization and team management.
 		r.Route("/organizations", func(r chi.Router) {
 			r.Get("/", s.listOrganizationsHandler)
 			r.Get("/{orgID}/teams", s.listTeamsHandler)
 		})
 
-		// Team management for users
+		// Team management for users.
 		r.Route("/users/{userID}/teams", func(r chi.Router) {
 			r.Get("/", s.getUserTeamsHandler)
 			r.Post("/{teamID}", s.assignUserToTeamHandler)
@@ -149,31 +149,31 @@ func NewService(cfg *config.Config, logger *slog.Logger, storage Storage) *Servi
 	return &s
 }
 
-// ServeHTTP implements the http.Handler interface
+// ServeHTTP implements the http.Handler interface.
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.router.ServeHTTP(w, r)
 }
 
-// SyncUser synchronizes a user from OAuth provider
+// SyncUser synchronizes a user from OAuth provider.
 func (s *Service) SyncUser(ctx context.Context, oauthUser OAuthUser, providerName string) (*SyncedUser, error) {
-	// Determine organization
+	// Determine organization.
 	orgID, err := s.determineOrganization(ctx, oauthUser)
 	if err != nil {
 		return nil, fmt.Errorf("determine organization: %w", err)
 	}
 
-	// Sync the user
+	// Sync the user.
 	if err := s.storage.SyncOAuthUser(ctx, oauthUser, providerName, orgID); err != nil {
 		return nil, fmt.Errorf("sync oauth user: %w", err)
 	}
 
-	// Get the synced user
+	// Get the synced user.
 	syncedUser, err := s.storage.GetUserByOAuthSub(ctx, providerName, oauthUser.Subject)
 	if err != nil {
 		return nil, fmt.Errorf("get synced user: %w", err)
 	}
 
-	// Sync teams
+	// Sync teams.
 	if err := s.syncUserTeams(ctx, syncedUser.UserID, oauthUser.Teams, orgID); err != nil {
 		s.logger.Warn("failed to sync user teams",
 			slog.String("user_id", syncedUser.UserID),
@@ -183,9 +183,9 @@ func (s *Service) SyncUser(ctx context.Context, oauthUser OAuthUser, providerNam
 	return syncedUser, nil
 }
 
-// determineOrganization determines which organization a user belongs to
+// determineOrganization determines which organization a user belongs to.
 func (s *Service) determineOrganization(ctx context.Context, user OAuthUser) (string, error) {
-	// If organization is specified in the OAuth claims
+	// If organization is specified in the OAuth claims.
 	if user.Organization != "" {
 		org, err := s.storage.GetOrganizationByCode(ctx, user.Organization)
 		if err == nil {
@@ -193,7 +193,7 @@ func (s *Service) determineOrganization(ctx context.Context, user OAuthUser) (st
 		}
 	}
 
-	// Try to determine by email domain
+	// Try to determine by email domain.
 	if user.Email != "" {
 		domain := extractDomain(user.Email)
 		if domain != "" {
@@ -204,7 +204,7 @@ func (s *Service) determineOrganization(ctx context.Context, user OAuthUser) (st
 		}
 	}
 
-	// Fall back to default organization if multi-tenancy is disabled
+	// Fall back to default organization if multi-tenancy is disabled.
 	if !s.cfg.MultiTenancyEnable && s.cfg.DefaultOrganization != "" {
 		org, err := s.storage.GetOrganizationByCode(ctx, s.cfg.DefaultOrganization)
 		if err == nil {
@@ -215,21 +215,21 @@ func (s *Service) determineOrganization(ctx context.Context, user OAuthUser) (st
 	return "", fmt.Errorf("could not determine organization for user %s", user.Email)
 }
 
-// syncUserTeams synchronizes user team memberships
+// syncUserTeams synchronizes user team memberships.
 func (s *Service) syncUserTeams(ctx context.Context, userID string, teamCodes []string, orgID string) error {
-	// Get current teams
+	// Get current teams.
 	currentTeams, err := s.storage.GetUserTeams(ctx, userID)
 	if err != nil {
 		return fmt.Errorf("get current user teams: %w", err)
 	}
 
-	// Build map of current team codes
+	// Build map of current team codes.
 	currentTeamCodes := make(map[string]string)
 	for _, team := range currentTeams {
 		currentTeamCodes[team.TeamCode] = team.TeamID
 	}
 
-	// Add user to new teams
+	// Add user to new teams.
 	for _, teamCode := range teamCodes {
 		if _, exists := currentTeamCodes[teamCode]; !exists {
 			team, err := s.storage.GetTeamByCode(ctx, orgID, teamCode)
@@ -261,21 +261,22 @@ func (s *Service) syncUserTeams(ctx context.Context, userID string, teamCodes []
 	return nil
 }
 
-// extractDomain extracts domain from email address
+// extractDomain extracts domain from email address.
 func extractDomain(email string) string {
 	parts := strings.Split(email, "@")
 	if len(parts) != 2 {
 		return ""
 	}
+
 	return parts[1]
 }
 
-// IsOAuthEnabled returns true if OAuth is enabled
+// IsOAuthEnabled returns true if OAuth is enabled.
 func (s *Service) IsOAuthEnabled() bool {
 	return s.cfg.OAuthEnable
 }
 
-// GetProviderConfig returns the OAuth provider configuration
+// GetProviderConfig returns the OAuth provider configuration.
 func (s *Service) GetProviderConfig() map[string]string {
 	return map[string]string{
 		"provider":     s.cfg.OAuthProvider,

@@ -67,6 +67,7 @@ func AuthenticateJWT(tokenManager jwtkit.TokenManager) func(next http.Handler) h
 			email, ok := token.Meta["email"].(string)
 			if !ok {
 				httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: missing email in token", errkit.ErrUnauthenticated))
+
 				return
 			}
 
@@ -83,7 +84,7 @@ func AuthenticateJWT(tokenManager jwtkit.TokenManager) func(next http.Handler) h
 				}
 			}
 
-			// Store user info in context
+			// Store user info in context.
 			userInfo := UserInfo{
 				UserID: userID,
 				Email:  email,
@@ -96,17 +97,18 @@ func AuthenticateJWT(tokenManager jwtkit.TokenManager) func(next http.Handler) h
 	}
 }
 
-// RequireRoles middleware ensures the authenticated user has at least one of the required roles
+// RequireRoles middleware ensures the authenticated user has at least one of the required roles.
 func RequireRoles(requiredRoles ...string) func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			userInfo, ok := GetUserFromContext(r.Context())
 			if !ok {
 				httpkit.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
+
 				return
 			}
 
-			// Check if user has any of the required roles
+			// Check if user has any of the required roles.
 			hasRole := false
 
 			for _, requiredRole := range requiredRoles {
@@ -125,6 +127,7 @@ func RequireRoles(requiredRoles ...string) func(next http.Handler) http.Handler 
 
 			if !hasRole {
 				httpkit.ErrorHTTP(w, r, errkit.ErrUnauthorized)
+
 				return
 			}
 
@@ -133,22 +136,24 @@ func RequireRoles(requiredRoles ...string) func(next http.Handler) http.Handler 
 	}
 }
 
-// RequireAdmin middleware ensures the authenticated user has admin role
+// RequireAdmin middleware ensures the authenticated user has admin role.
 func RequireAdmin() func(next http.Handler) http.Handler {
 	return RequireRoles("admin")
 }
 
-// GetUserFromContext extracts user information from the request context
+// GetUserFromContext extracts user information from the request context.
 func GetUserFromContext(ctx context.Context) (UserInfo, bool) {
 	userInfo, ok := ctx.Value(UserContextKey).(UserInfo)
+
 	return userInfo, ok
 }
 
-// MustGetUserFromContext extracts user information from context, panics if not found
+// MustGetUserFromContext extracts user information from context, panics if not found.
 func MustGetUserFromContext(ctx context.Context) UserInfo {
 	userInfo, ok := GetUserFromContext(ctx)
 	if !ok {
 		panic("user not found in context")
 	}
+
 	return userInfo
 }

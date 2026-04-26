@@ -33,6 +33,7 @@ func Logging(logger *slog.Logger) func(next http.Handler) http.Handler {
 						slog.String("duration", time.Since(start).String()),
 						slog.String("error", reqErr.Error()),
 					)
+
 					return
 				}
 

@@ -48,16 +48,16 @@ type Config struct {
 	OAuthCallbackURL      string
 	OAuthScope            string
 	OAuthJWKSURL          string
-	OAuthUserSyncEnable   bool // Whether to sync users from OAuth to local DB
+	OAuthUserSyncEnable   bool // Whether to sync users from OAuth to local DB.
 	OAuthUserSyncInterval time.Duration
-	OAuthRoleClaimName    string // JWT claim name for roles (e.g., "roles", "permissions")
-	OAuthOrgClaimName     string // JWT claim name for organization (e.g., "org_code", "organization")
-	OAuthTeamClaimName    string // JWT claim name for teams (e.g., "teams", "groups")
+	OAuthRoleClaimName    string // JWT claim name for roles (e.g., "roles", "permissions").
+	OAuthOrgClaimName     string // JWT claim name for organization (e.g., "org_code", "organization").
+	OAuthTeamClaimName    string // JWT claim name for teams (e.g., "teams", "groups").
 
-	// Organization and team features
-	MultiTenancyEnable   bool   // Enable organization-based multi-tenancy
-	DefaultOrganization  string // Default organization for single-tenant mode
-	TeamBasedPermissions bool   // Enable team-based permissions
+	// Organization and team features.
+	MultiTenancyEnable   bool   // Enable organization-based multi-tenancy.
+	DefaultOrganization  string // Default organization for single-tenant mode.
+	TeamBasedPermissions bool   // Enable team-based permissions.
 
 	TelemetryEnabled   bool
 	TelemetryLogEnable bool

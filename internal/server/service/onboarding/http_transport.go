@@ -143,7 +143,7 @@ func (s *Service) validateOnboardingRequest(req onboardingRequest) error {
 	return nil
 }
 
-// Session represents an authentication session (same as account service)
+// Session represents an authentication session (same as account service).
 type Session struct {
 	AccessToken  string    `json:"access_token"`
 	RefreshToken string    `json:"refresh_token"`
@@ -156,7 +156,7 @@ func (s *Service) createAdminSession(_ context.Context, userID, email string, t 
 	// Admin users get the admin role.
 	roles := []string{"admin"}
 
-	tokenID := generateUserID() // Generate a unique token ID
+	tokenID := generateUserID() // Generate a unique token ID.
 
 	accessToken, aErr := s.tokman.Sign(&jwtkit.Token{
 		Claims: jwtkit.Claims{
@@ -189,7 +189,7 @@ func (s *Service) createAdminSession(_ context.Context, userID, email string, t 
 			NotBefore: jwt.NewNumericDate(t),
 		},
 		Meta: map[string]any{
-			"aid": userID, // For compatibility with refresh token parsing
+			"aid": userID, // For compatibility with refresh token parsing.
 		},
 	})
 	if rErr != nil {

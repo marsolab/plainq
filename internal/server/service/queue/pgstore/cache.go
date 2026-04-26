@@ -132,6 +132,7 @@ func sortProps(props []QueueProps, orderBy v1.ListQueuesRequest_OrderBy, sortBy 
 			if sortBy == v1.ListQueuesRequest_SORT_BY_ASC {
 				return tern.OP(a.ID > b.ID, 1, -1)
 			}
+
 			return tern.OP(a.ID > b.ID, -1, 1)
 
 		case v1.ListQueuesRequest_ORDER_BY_NAME:
@@ -142,6 +143,7 @@ func sortProps(props []QueueProps, orderBy v1.ListQueuesRequest_OrderBy, sortBy 
 			if sortBy == v1.ListQueuesRequest_SORT_BY_ASC {
 				return tern.OP(a.Name > b.Name, 1, -1)
 			}
+
 			return tern.OP(a.Name > b.Name, -1, 1)
 
 		case v1.ListQueuesRequest_ORDER_BY_CREATED_AT:
@@ -152,6 +154,7 @@ func sortProps(props []QueueProps, orderBy v1.ListQueuesRequest_OrderBy, sortBy 
 			if sortBy == v1.ListQueuesRequest_SORT_BY_ASC {
 				return tern.OP(a.CreatedAt.After(b.CreatedAt), 1, -1)
 			}
+
 			return tern.OP(a.CreatedAt.After(b.CreatedAt), -1, 1)
 
 		default:

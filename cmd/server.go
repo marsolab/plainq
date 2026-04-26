@@ -61,6 +61,7 @@ func (b *storageBackend) Close() error {
 		return b.sqlite.Close()
 	case b.pgpool != nil:
 		b.pgpool.Close()
+
 		return nil
 	}
 
@@ -497,6 +498,7 @@ func initPostgresBackend(cfg *config.Config, logger *slog.Logger) (*pgxpool.Pool
 
 	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
+
 		return nil, fmt.Errorf("ping postgres: %w", err)
 	}
 
@@ -504,6 +506,7 @@ func initPostgresBackend(cfg *config.Config, logger *slog.Logger) (*pgxpool.Pool
 
 	if err := newPgEvolver(pool, mutations.PostgresStorageMutations()).MutateSchema(); err != nil {
 		pool.Close()
+
 		return nil, fmt.Errorf("postgres schema mutation: %w", err)
 	}
 

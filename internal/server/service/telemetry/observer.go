@@ -28,6 +28,7 @@ var observedMetrics = map[string]struct{}{
 // Observable checks if a given metric is being observed.
 func Observable(_ context.Context, metric string) (bool, error) {
 	_, ok := observedMetrics[metric]
+
 	return ok, nil
 }
 
@@ -36,6 +37,7 @@ func ObservableCount() uint32 {
 	if len(observedMetrics) > math.MaxUint32 {
 		return math.MaxUint32
 	}
+
 	return uint32(len(observedMetrics)) //nolint:gosec // G115: observedMetrics is a small fixed-size map, checked above against MaxUint32
 }
 

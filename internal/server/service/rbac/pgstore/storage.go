@@ -74,6 +74,7 @@ func (s *Storage) GetRoleByID(ctx context.Context, roleID string) (*rbac.Role, e
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("role not found: %w", pqerr.ErrNotFound)
 		}
+
 		return nil, fmt.Errorf("get role by id: %w", err)
 	}
 
@@ -90,6 +91,7 @@ func (s *Storage) GetRoleByName(ctx context.Context, roleName string) (*rbac.Rol
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("role not found: %w", pqerr.ErrNotFound)
 		}
+
 		return nil, fmt.Errorf("get role by name: %w", err)
 	}
 
@@ -195,6 +197,7 @@ func (s *Storage) GetUsersWithRole(ctx context.Context, roleID string) ([]string
 
 func (s *Storage) CreateQueuePermission(ctx context.Context, p rbac.QueuePermission) error {
 	now := toTimestamptz(time.Now())
+
 	return s.queries.CreateQueuePermission(ctx, sqlcgen.CreateQueuePermissionParams{
 		QueueID:    p.QueueID,
 		RoleID:     p.RoleID,
@@ -216,6 +219,7 @@ func (s *Storage) GetQueuePermissions(ctx context.Context, queueID, roleID strin
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("queue permission not found: %w", pqerr.ErrNotFound)
 		}
+
 		return nil, fmt.Errorf("get queue permission: %w", err)
 	}
 

@@ -19,6 +19,7 @@ func (s *Service) createQueueHandler(w http.ResponseWriter, r *http.Request) {
 
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		httpkit.ErrorHTTP(w, r, err)
+		
 		return
 	}
 
@@ -33,6 +34,7 @@ func (s *Service) createQueueHandler(w http.ResponseWriter, r *http.Request) {
 	output, createErr := s.storage.CreateQueue(r.Context(), &input)
 	if createErr != nil {
 		httpkit.ErrorHTTP(w, r, createErr)
+		
 		return
 	}
 
@@ -49,6 +51,7 @@ func (s *Service) listQueuesHandler(w http.ResponseWriter, r *http.Request) {
 		limit, parseErr := strconv.Atoi(l)
 		if parseErr != nil {
 			httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: invalid limit", errkit.ErrInvalidArgument))
+
 			return
 		}
 

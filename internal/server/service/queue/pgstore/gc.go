@@ -206,6 +206,7 @@ func moveMessagesToDLQ(ctx context.Context, tx pgx.Tx, props QueueProps) (uint64
 
 		if err := rows.Scan(&m.ID, &m.Body); err != nil {
 			rows.Close()
+
 			return 0, fmt.Errorf("scan message record: %w", err)
 		}
 

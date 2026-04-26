@@ -227,6 +227,7 @@ func (pm *PrometheusMetrics) SetThroughput(queueID string, bytesIn, bytesOut flo
 // RecordProcessingDuration records a message processing duration.
 func (pm *PrometheusMetrics) RecordProcessingDuration(queueID string, durationSeconds float64) {
 	pm.mu.Lock()
+
 	hist, ok := pm.processingDuration[queueID]
 	if !ok {
 		hist = metrics.GetOrCreateHistogram(`plainq_message_processing_duration_seconds{queue="` + queueID + `"}`)
@@ -283,6 +284,7 @@ func (pm *PrometheusMetrics) RecordMessageSize(queueID string, sizeBytes int) {
 // IncrementRedelivered increments the redelivery counter.
 func (pm *PrometheusMetrics) IncrementRedelivered(queueID string) {
 	pm.mu.Lock()
+
 	counter, ok := pm.messagesRedelivered[queueID]
 	if !ok {
 		counter = metrics.GetOrCreateCounter(`plainq_messages_redelivered_total{queue="` + queueID + `"}`)
@@ -372,6 +374,7 @@ var observedMetricsEnhanced = map[string]struct{}{
 // IsObservableEnhanced checks if a metric is observed (including new metrics).
 func IsObservableEnhanced(metric string) bool {
 	_, ok := observedMetricsEnhanced[metric]
+
 	return ok
 }
 
@@ -416,6 +419,7 @@ func (ec *EnhancedCounter) CalculateRate() float64 {
 func (ec *EnhancedCounter) GetRate() float64 {
 	ec.rateMu.Lock()
 	defer ec.rateMu.Unlock()
+
 	return ec.currentRate
 }
 

@@ -236,6 +236,7 @@ func (h *MetricsHandler) GetMetricsChart(w http.ResponseWriter, r *http.Request)
 	metricName := r.URL.Query().Get("metric")
 	if metricName == "" {
 		http.Error(w, `{"error": "metric parameter required"}`, http.StatusBadRequest)
+
 		return
 	}
 
@@ -249,6 +250,7 @@ func (h *MetricsHandler) GetMetricsChart(w http.ResponseWriter, r *http.Request)
 		v, err := strconv.ParseInt(fromStr, 10, 64)
 		if err != nil {
 			http.Error(w, `{"error": "invalid 'from' parameter"}`, http.StatusBadRequest)
+
 			return
 		}
 
@@ -259,6 +261,7 @@ func (h *MetricsHandler) GetMetricsChart(w http.ResponseWriter, r *http.Request)
 		v, err := strconv.ParseInt(toStr, 10, 64)
 		if err != nil {
 			http.Error(w, `{"error": "invalid 'to' parameter"}`, http.StatusBadRequest)
+
 			return
 		}
 
@@ -275,6 +278,7 @@ func (h *MetricsHandler) GetMetricsChart(w http.ResponseWriter, r *http.Request)
 	dataPoints, err := h.store.GetMetrics(r.Context(), metricName, queueID, tr.From, tr.To, resolution)
 	if err != nil {
 		http.Error(w, `{"error": "`+err.Error()+`"}`, http.StatusInternalServerError)
+
 		return
 	}
 
@@ -300,6 +304,7 @@ func (h *MetricsHandler) GetRatesChart(w http.ResponseWriter, r *http.Request) {
 		v, err := strconv.ParseInt(fromStr, 10, 64)
 		if err != nil {
 			http.Error(w, `{"error": "invalid 'from' parameter"}`, http.StatusBadRequest)
+
 			return
 		}
 
@@ -310,6 +315,7 @@ func (h *MetricsHandler) GetRatesChart(w http.ResponseWriter, r *http.Request) {
 		v, err := strconv.ParseInt(toStr, 10, 64)
 		if err != nil {
 			http.Error(w, `{"error": "invalid 'to' parameter"}`, http.StatusBadRequest)
+
 			return
 		}
 
@@ -349,6 +355,7 @@ func (h *MetricsHandler) GetQueueMetrics(w http.ResponseWriter, r *http.Request)
 		v, err := strconv.ParseInt(fromStr, 10, 64)
 		if err != nil {
 			http.Error(w, `{"error": "invalid 'from' parameter"}`, http.StatusBadRequest)
+
 			return
 		}
 
@@ -359,6 +366,7 @@ func (h *MetricsHandler) GetQueueMetrics(w http.ResponseWriter, r *http.Request)
 		v, err := strconv.ParseInt(toStr, 10, 64)
 		if err != nil {
 			http.Error(w, `{"error": "invalid 'to' parameter"}`, http.StatusBadRequest)
+
 			return
 		}
 
@@ -371,6 +379,7 @@ func (h *MetricsHandler) GetQueueMetrics(w http.ResponseWriter, r *http.Request)
 	summary, err := h.store.GetMetricsSummary(r.Context(), queueID, tr.From, tr.To)
 	if err != nil {
 		http.Error(w, `{"error": "`+err.Error()+`"}`, http.StatusInternalServerError)
+
 		return
 	}
 
@@ -500,6 +509,7 @@ func (h *MetricsHandler) ExportMetrics(w http.ResponseWriter, r *http.Request) {
 		v, err := strconv.ParseInt(fromStr, 10, 64)
 		if err != nil {
 			http.Error(w, `{"error": "invalid 'from' parameter"}`, http.StatusBadRequest)
+
 			return
 		}
 
@@ -510,6 +520,7 @@ func (h *MetricsHandler) ExportMetrics(w http.ResponseWriter, r *http.Request) {
 		v, err := strconv.ParseInt(toStr, 10, 64)
 		if err != nil {
 			http.Error(w, `{"error": "invalid 'to' parameter"}`, http.StatusBadRequest)
+
 			return
 		}
 
@@ -522,6 +533,7 @@ func (h *MetricsHandler) ExportMetrics(w http.ResponseWriter, r *http.Request) {
 	dataPoints, err := h.store.GetMetrics(r.Context(), metricName, queueID, tr.From, tr.To, resolution)
 	if err != nil {
 		http.Error(w, `{"error": "`+err.Error()+`"}`, http.StatusInternalServerError)
+
 		return
 	}
 

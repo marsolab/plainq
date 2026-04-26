@@ -14,7 +14,7 @@ import (
 	"github.com/marsolab/servekit/httpkit"
 )
 
-// OAuthProvider interface for OAuth provider validation
+// OAuthProvider interface for OAuth provider validation.
 type OAuthProvider interface {
 	ValidateToken(ctx context.Context, tokenString string) (*OAuthClaims, error)
 	GetPublicKey(ctx context.Context, keyID string) (*rsa.PublicKey, error)
@@ -22,7 +22,7 @@ type OAuthProvider interface {
 	GetAudience() string
 }
 
-// UserSyncer interface for user synchronization
+// UserSyncer interface for user synchronization.
 type UserSyncer interface {
 	SyncUser(ctx context.Context, oauthUser OAuthUser, providerName string) (*SyncedUser, error)
 }
@@ -44,7 +44,7 @@ type OAuthClaims struct {
 	CustomClaims map[string]any `json:"-"`
 }
 
-// OAuthUser represents a user from OAuth claims
+// OAuthUser represents a user from OAuth claims.
 type OAuthUser struct {
 	Subject      string         `json:"sub"`
 	Email        string         `json:"email"`
@@ -56,7 +56,7 @@ type OAuthUser struct {
 	Claims       map[string]any `json:"claims,omitempty"`
 }
 
-// SyncedUser represents a synchronized user
+// SyncedUser represents a synchronized user.
 type SyncedUser struct {
 	UserID      string    `json:"user_id"`
 	Email       string    `json:"email"`
@@ -68,7 +68,7 @@ type SyncedUser struct {
 	LastSyncAt  time.Time `json:"last_sync_at"`
 }
 
-// AuthenticateOAuth middleware validates OAuth JWT tokens and synchronizes users
+// AuthenticateOAuth middleware validates OAuth JWT tokens and synchronizes users.
 func AuthenticateOAuth(
 	provider OAuthProvider,
 	syncer UserSyncer,
@@ -80,41 +80,45 @@ func AuthenticateOAuth(
 			authHeader := r.Header.Get("Authorization")
 			if authHeader == "" {
 				httpkit.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
+
 				return
 			}
 
-			// Remove "Bearer " prefix
+			// Remove "Bearer " prefix.
 			tokenString := strings.TrimPrefix(authHeader, "Bearer ")
 			if tokenString == authHeader {
 				httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: invalid authorization header format", errkit.ErrUnauthenticated))
+
 				return
 			}
 
-			// Validate the OAuth token
+			// Validate the OAuth token.
 			claims, err := provider.ValidateToken(r.Context(), tokenString)
 			if err != nil {
 				httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: invalid oauth token: %s", errkit.ErrUnauthenticated, err.Error()))
+
 				return
 			}
 
-			// Extract user information from claims
+			// Extract user information from claims.
 			oauthUser := extractOAuthUser(claims, roleClaimName, orgClaimName, teamClaimName)
 
-			// Sync user with local database
+			// Sync user with local database.
 			syncedUser, err := syncer.SyncUser(r.Context(), oauthUser, providerName)
 			if err != nil {
 				httpkit.ErrorHTTP(w, r, fmt.Errorf("sync oauth user: %w", err))
+
 				return
 			}
 
-			// Create user info for context
+			// Create user info for context.
 			userInfo := UserInfo{
 				UserID: syncedUser.UserID,
 				Email:  syncedUser.Email,
 				Roles:  oauthUser.Roles,
 			}
 
-			// Store user info in context
+			// Store user info in context.
 			ctx := context.WithValue(r.Context(), UserContextKey, userInfo)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
@@ -133,7 +137,7 @@ func extractOAuthUser(claims *OAuthClaims, roleClaimName, orgClaimName, teamClai
 		Claims:  claims.CustomClaims,
 	}
 
-	// Extract roles from custom claim name or default
+	// Extract roles from custom claim name or default.
 	if roleClaimName != "" {
 		if roles, ok := claims.CustomClaims[roleClaimName]; ok {
 			user.Roles = extractStringSlice(roles)
@@ -142,7 +146,7 @@ func extractOAuthUser(claims *OAuthClaims, roleClaimName, orgClaimName, teamClai
 		user.Roles = claims.Roles
 	}
 
-	// Extract organization from custom claim name or default
+	// Extract organization from custom claim name or default.
 	if orgClaimName != "" {
 		if org, ok := claims.CustomClaims[orgClaimName]; ok {
 			if orgStr, ok := org.(string); ok {
@@ -153,7 +157,7 @@ func extractOAuthUser(claims *OAuthClaims, roleClaimName, orgClaimName, teamClai
 		user.Organization = claims.Organization
 	}
 
-	// Extract teams from custom claim name or default
+	// Extract teams from custom claim name or default.
 	if teamClaimName != "" {
 		if teams, ok := claims.CustomClaims[teamClaimName]; ok {
 			user.Teams = extractStringSlice(teams)
@@ -178,6 +182,7 @@ func extractStringSlice(value any) []string {
 				result = append(result, str)
 			}
 		}
+
 		return result
 	case string:
 		return []string{v}
@@ -186,7 +191,7 @@ func extractStringSlice(value any) []string {
 	}
 }
 
-// GenericOAuthProvider provides a generic OAuth provider implementation
+// GenericOAuthProvider provides a generic OAuth provider implementation.
 type GenericOAuthProvider struct {
 	issuer   string
 	audience string
@@ -194,7 +199,7 @@ type GenericOAuthProvider struct {
 	keyCache map[string]*rsa.PublicKey
 }
 
-// NewGenericOAuthProvider creates a new generic OAuth provider
+// NewGenericOAuthProvider creates a new generic OAuth provider.
 func NewGenericOAuthProvider(issuer, audience, jwksURL string) *GenericOAuthProvider {
 	return &GenericOAuthProvider{
 		issuer:   issuer,
@@ -232,19 +237,19 @@ func (p *GenericOAuthProvider) ValidateToken(ctx context.Context, tokenString st
 		return nil, fmt.Errorf("verify token: %w", err)
 	}
 
-	// Extract claims
+	// Extract claims.
 	var stdClaims jwt.RegisteredClaims
 	if err := token.DecodeClaims(&stdClaims); err != nil {
 		return nil, fmt.Errorf("decode standard claims: %w", err)
 	}
 
-	// Extract custom claims
+	// Extract custom claims.
 	var customClaims map[string]any
 	if err := token.DecodeClaims(&customClaims); err != nil {
 		return nil, fmt.Errorf("decode custom claims: %w", err)
 	}
 
-	// Validate issuer and audience
+	// Validate issuer and audience.
 	if stdClaims.Issuer != p.issuer {
 		return nil, fmt.Errorf("invalid issuer: %s", stdClaims.Issuer)
 	}
@@ -268,7 +273,7 @@ func (p *GenericOAuthProvider) ValidateToken(ctx context.Context, tokenString st
 		return nil, errors.New("token expired")
 	}
 
-	// Build OAuth claims
+	// Build OAuth claims.
 	claims := &OAuthClaims{
 		Subject:      stdClaims.Subject,
 		Issuer:       stdClaims.Issuer,
@@ -276,7 +281,7 @@ func (p *GenericOAuthProvider) ValidateToken(ctx context.Context, tokenString st
 		CustomClaims: customClaims,
 	}
 
-	// Extract standard fields from custom claims
+	// Extract standard fields from custom claims.
 	if email, ok := customClaims["email"].(string); ok {
 		claims.Email = email
 	}
@@ -304,19 +309,19 @@ func (p *GenericOAuthProvider) ValidateToken(ctx context.Context, tokenString st
 	return claims, nil
 }
 
-// GetPublicKey retrieves a public key for token verification
+// GetPublicKey retrieves a public key for token verification.
 func (p *GenericOAuthProvider) GetPublicKey(ctx context.Context, keyID string) (*rsa.PublicKey, error) {
 	// This is a simplified implementation
-	// In practice, you would fetch from JWKS endpoint and cache the keys
+	// In practice, you would fetch from JWKS endpoint and cache the keys.
 	return nil, errors.New("JWKS key fetching not implemented - use a proper JWKS library")
 }
 
-// GetIssuer returns the OAuth provider issuer
+// GetIssuer returns the OAuth provider issuer.
 func (p *GenericOAuthProvider) GetIssuer() string {
 	return p.issuer
 }
 
-// GetAudience returns the OAuth provider audience
+// GetAudience returns the OAuth provider audience.
 func (p *GenericOAuthProvider) GetAudience() string {
 	return p.audience
 }

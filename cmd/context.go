@@ -46,6 +46,7 @@ func contextInitCommand() *scotty.Command {
 			if createErr != nil {
 				if errors.Is(createErr, os.ErrExist) {
 					fmt.Println("Context file already exists")
+
 					return nil
 				}
 
@@ -66,6 +67,7 @@ func contextInitCommand() *scotty.Command {
 			}
 
 			fmt.Println("Context file created")
+
 			return nil
 		},
 	}
