@@ -185,10 +185,9 @@ func dropMessages(ctx context.Context, tx pgx.Tx, props QueueProps) (uint64, err
 	return uint64(rows), nil
 }
 
-//nolint:nonamedreturns // sErr is set by deferred close to surface close errors.
-func moveMessagesToDLQ(ctx context.Context, tx pgx.Tx, props QueueProps) (_ uint64, sErr error) {
+func moveMessagesToDLQ(ctx context.Context, tx pgx.Tx, props QueueProps) (uint64, error) {
 	rows, execErr := tx.Query(ctx, querySelectMoveToDLQ(props.ID),
-		int32(props.MaxReceiveAttempts),
+		int32(props.MaxReceiveAttempts),     //nolint:gosec // max receive attempts is bounded by validation.
 		int32(props.RetentionPeriodSeconds), //nolint:gosec // retention seconds is bounded by validation.
 	)
 	if execErr != nil {
