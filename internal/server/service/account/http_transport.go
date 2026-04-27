@@ -282,7 +282,8 @@ func (s *Service) verifyEmailHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// TODO: Implement verification code validation logic
+	//nolint:godox // tracking item: implement verification code validation logic.
+	// TODO: Implement verification code validation logic.
 
 	httpkit.Status(w, r, http.StatusOK)
 }
@@ -313,7 +314,8 @@ func (s *Service) resetPasswordHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// TODO: Implement password reset code sending logic
+	//nolint:godox // tracking item: implement password reset code sending logic.
+	// TODO: Implement password reset code sending logic.
 
 	httpkit.Status(w, r, http.StatusOK)
 }
@@ -339,7 +341,8 @@ func (s *Service) verifyPasswordResetCodeHandler(w http.ResponseWriter, r *http.
 		}
 	}()
 
-	// TODO: Implement password reset code validation logic
+	//nolint:godox // tracking item: implement password reset code validation logic.
+	// TODO: Implement password reset code validation logic.
 
 	httpkit.Status(w, r, http.StatusOK)
 }

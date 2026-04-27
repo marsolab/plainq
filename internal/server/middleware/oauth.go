@@ -169,7 +169,7 @@ func extractOAuthUser(claims *OAuthClaims, roleClaimName, orgClaimName, teamClai
 	return user
 }
 
-// extractStringSlice safely extracts a string slice from an interface{}
+// extractStringSlice safely extracts a string slice from an interface{}.
 func extractStringSlice(value any) []string {
 	switch v := value.(type) {
 	case []string:

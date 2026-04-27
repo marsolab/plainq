@@ -250,13 +250,14 @@ func (s *Service) syncUserTeams(ctx context.Context, userID string, teamCodes []
 		}
 	}
 
-	// Remove user from teams not in the new list (optional - depends on sync strategy)
-	// This is commented out as it might be too aggressive
-	// for _, teamCode := range currentTeamCodes {
-	//     if !contains(teamCodes, teamCode) {
-	//         // Remove from team
-	//     }
-	// }
+	// Remove user from teams not in the new list (optional, depends on sync strategy):
+	// this is commented out as it might be too aggressive.
+	//
+	//	for _, teamCode := range currentTeamCodes {
+	//	    if !contains(teamCodes, teamCode) {
+	//	        // Remove from team.
+	//	    }
+	//	}
 
 	return nil
 }
