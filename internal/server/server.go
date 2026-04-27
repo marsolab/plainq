@@ -196,35 +196,40 @@ func (s *PlainQ) houstonStaticHandler(w http.ResponseWriter, r *http.Request) {
 	)
 
 	bundle := houston.Bundle()
+	fileServer := http.StripPrefix(pathPrefix, http.FileServerFS(bundle))
 
 	cleanPath := strings.TrimPrefix(r.URL.Path, pathPrefix)
-	if cleanPath == "" || cleanPath == "/" {
-		cleanPath = "/"
+	trimmed := strings.TrimPrefix(cleanPath, "/")
+
+	// Real file or root → let FileServer handle it (it serves a directory's
+	// index.html when the URL ends in '/').
+	if trimmed == "" {
+		fileServer.ServeHTTP(w, r)
+		return
+	}
+	if _, err := fs.Stat(bundle, trimmed); err == nil {
+		fileServer.ServeHTTP(w, r)
+		return
 	}
 
-	// Try to serve the requested file. If it doesn't exist and has no
-	// file extension, attempt SPA-style fallback: first try serving the
-	// parent path's index.html (e.g., /queue/abc → queue/index.html),
-	// then fall back to the root index.html.
-	trimmed := strings.TrimPrefix(cleanPath, "/")
-	if _, err := fs.Stat(bundle, trimmed); err != nil && !strings.Contains(cleanPath, ".") {
-		// Try parent directory: /queue/abc123 → queue/index.html.
-		parts := strings.SplitN(trimmed, "/", 2)
-		if len(parts) > 1 {
-			parent := parts[0] + "/index.html"
-			if _, parentErr := fs.Stat(bundle, parent); parentErr == nil {
-				r.URL.Path = pathPrefix + "/" + parent
-				http.StripPrefix(pathPrefix, http.FileServerFS(bundle)).ServeHTTP(w, r)
-
+	// SPA fallback for extensionless paths. Rewrite to a directory URL
+	// (trailing slash) rather than to <dir>/index.html — FileServer
+	// 301-redirects requests ending in '/index.html' to './', which
+	// would loop forever.
+	if !strings.Contains(cleanPath, ".") {
+		if parts := strings.SplitN(trimmed, "/", 2); len(parts) > 1 {
+			if _, err := fs.Stat(bundle, parts[0]+"/index.html"); err == nil {
+				r.URL.Path = pathPrefix + "/" + parts[0] + "/"
+				fileServer.ServeHTTP(w, r)
 				return
 			}
 		}
-
-		r.URL.Path = pathPrefix + "/index.html"
+		r.URL.Path = pathPrefix + "/"
+		fileServer.ServeHTTP(w, r)
+		return
 	}
 
-	http.StripPrefix(pathPrefix, http.FileServerFS(bundle)).
-		ServeHTTP(w, r)
+	fileServer.ServeHTTP(w, r)
 }
 
 func listenerHTTP(cfg *config.Config, logger *slog.Logger, checker hc.HealthChecker) (*httpkit.ListenerHTTP, error) {

@@ -1,16 +1,18 @@
 package houston
 
 import (
-	"errors"
+	"embed"
 	"io/fs"
-	"os"
 )
 
+//go:embed all:ui/dist
+var bundle embed.FS
+
 func Bundle() fs.FS {
-	// Use local filesystem for UI files.
-	if _, err := os.Stat("ui/dist"); err == nil {
-		return os.DirFS("ui/dist")
+	sub, err := fs.Sub(bundle, "ui/dist")
+	if err != nil {
+		panic(err)
 	}
 
-	panic(errors.New("unable to find ui/dist folder"))
+	return sub
 }

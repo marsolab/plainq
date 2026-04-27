@@ -59,6 +59,7 @@ func (b *storageBackend) Close() error {
 	switch {
 	case b.sqlite != nil:
 		return b.sqlite.Close()
+
 	case b.pgpool != nil:
 		b.pgpool.Close()
 
@@ -73,7 +74,7 @@ func serverCommand() *scotty.Command {
 	var cfg config.Config
 
 	cmd := scotty.Command{
-		Name:  "server",
+		Name:  "serve",
 		Short: "Runs the PlainQ server",
 		SetFlags: func(f *scotty.FlagSet) {
 			// Storage.
