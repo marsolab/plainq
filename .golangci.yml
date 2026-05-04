@@ -83,7 +83,8 @@ linters:
     - sqlclosecheck # Checks for SQL close errors.
     - staticcheck # It's a set of rules from staticcheck.
     - tagalign # Checks for tag alignment.
-# DISABLED:     - tagliatelle # Checks for tag naming.
+    # DISABLED:
+    - tagliatelle # Checks for tag naming.
     - testableexamples # Checks for testable examples.
     - testifylint # Checks for testify usage.
     - testpackage # Checks for test package usage.
@@ -96,7 +97,7 @@ linters:
     - wastedassign # Checks for wasted assignments.
     - whitespace # Checks for whitespace issues.
     - wsl_v5 # Checks for whitespace and empty line issues.
-# DISABLED:     - wrapcheck # Checks that errors returned from external packages are wrapped.
+    - wrapcheck # Checks that errors returned from external packages are wrapped.
 
   settings:
     dogsled:

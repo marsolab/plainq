@@ -221,11 +221,13 @@ func (s *PlainQ) houstonStaticHandler(w http.ResponseWriter, r *http.Request) {
 			if _, err := fs.Stat(bundle, parts[0]+"/index.html"); err == nil {
 				r.URL.Path = pathPrefix + "/" + parts[0] + "/"
 				fileServer.ServeHTTP(w, r)
+
 				return
 			}
 		}
 		r.URL.Path = pathPrefix + "/"
 		fileServer.ServeHTTP(w, r)
+
 		return
 	}
 
@@ -233,7 +235,7 @@ func (s *PlainQ) houstonStaticHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func listenerHTTP(cfg *config.Config, logger *slog.Logger, checker hc.HealthChecker) (*httpkit.ListenerHTTP, error) {
-	httpListenerOpts := httpkit.NewListenerOption[httpkit.ListenerConfig](
+	httpListenerOpts := httpkit.NewListenerOption(
 		httpkit.WithLogger(logger),
 		httpkit.WithHTTPServerTimeouts(
 			httpkit.HTTPServerReadHeaderTimeout(cfg.HTTPReadHeaderTimeout),
