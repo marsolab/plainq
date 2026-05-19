@@ -78,6 +78,7 @@ type Config struct {
 	HealthRouteLogs    bool
 	HealthRouteMetrics bool
 	HealthRoute        string
+	HealthReporter     string
 
 	MetricsEnable       bool
 	MetricsRouteLogs    bool

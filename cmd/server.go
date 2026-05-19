@@ -223,19 +223,23 @@ func serverCommand() *scotty.Command {
 			// Health.
 
 			f.BoolVar(&cfg.HealthEnable, "health", true,
-				"enable the metrics endpoint",
+				"enable the health endpoint",
 			)
 
 			f.BoolVar(&cfg.HealthRouteLogs, "health.route.logs", false,
-				"turn on access logs for metrics endpoint",
+				"turn on access logs for health endpoint",
 			)
 
 			f.BoolVar(&cfg.HealthRouteMetrics, "health.route.metrics", false,
-				"turn on metrics for metrics endpoint",
+				"turn on metrics for health endpoint",
 			)
 
 			f.StringVar(&cfg.HealthRoute, "health.route", "/health",
-				"set given route as metrics endpoint route",
+				"set given route as health endpoint route",
+			)
+
+			f.StringVar(&cfg.HealthReporter, "health.reporter", "",
+				"set health endpoint reporter",
 			)
 
 			// CORS.
@@ -265,7 +269,8 @@ func serverCommand() *scotty.Command {
 			var checker hc.HealthChecker = hc.NewNopChecker()
 
 			if cfg.HealthEnable {
-				checker = hc.NewMultiChecker()
+				reporter := hc.NewServiceReport()
+				checker = hc.NewMultiServiceChecker(reporter)
 			}
 
 			// Storage initialization.

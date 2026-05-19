@@ -1,7 +1,7 @@
 version: "2"
 
 run:
-  go: "1.25"
+  go: "1.24"
   tests: false # include test files or not, default is true.
   timeout: 5m
   modules-download-mode: readonly
@@ -819,9 +819,7 @@ linters:
       multi-if: false
       multi-func: false
 
-    wrapcheck:
-      ignore-package-globs:
-        - code.dev-aws.infingame.com/axis/axis-go/axis/xaxis*
+    wrapcheck: {}
 
     wsl_v5:
       allow-first-in-block: true

@@ -246,10 +246,21 @@ func listenerHTTP(cfg *config.Config, logger *slog.Logger, checker hc.HealthChec
 	)
 
 	if cfg.HealthEnable {
-		httpListenerOpts = append(httpListenerOpts, httpkit.WithHealthCheck(
+		healthOptions := []httpkit.ListenerOption[httpkit.HealthConfig]{
 			httpkit.HealthCheckRoute(cfg.HealthRoute),
+			httpkit.HealthCheckAccessLog(cfg.HealthRouteLogs),
 			httpkit.HealthChecker(checker),
-		))
+		}
+
+		switch cfg.HealthReporter {
+		case "json":
+			healthOptions = append(healthOptions, httpkit.HealthCheckReportJSON())
+
+		case "html":
+			healthOptions = append(healthOptions, httpkit.HealthCheckReportHTML())
+		}
+
+		httpListenerOpts = append(httpListenerOpts, httpkit.WithHealthCheck(healthOptions...))
 	}
 
 	if cfg.MetricsEnable {
