@@ -205,10 +205,13 @@ func (s *PlainQ) houstonStaticHandler(w http.ResponseWriter, r *http.Request) {
 	// index.html when the URL ends in '/').
 	if trimmed == "" {
 		fileServer.ServeHTTP(w, r)
+
 		return
 	}
+
 	if _, err := fs.Stat(bundle, trimmed); err == nil {
 		fileServer.ServeHTTP(w, r)
+
 		return
 	}
 
@@ -225,6 +228,7 @@ func (s *PlainQ) houstonStaticHandler(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+
 		r.URL.Path = pathPrefix + "/"
 		fileServer.ServeHTTP(w, r)
 

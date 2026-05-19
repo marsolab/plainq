@@ -68,7 +68,12 @@ func (c *Client) ListQueues(
 	in *v1.ListQueuesRequest,
 	opts ...grpc.CallOption,
 ) (*v1.ListQueuesResponse, error) {
-	return c.client.ListQueues(ctx, in, opts...)
+	resp, err := c.client.ListQueues(ctx, in, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("list queues: %w", err)
+	}
+
+	return resp, nil
 }
 
 func (c *Client) DescribeQueue(
@@ -76,7 +81,12 @@ func (c *Client) DescribeQueue(
 	in *v1.DescribeQueueRequest,
 	opts ...grpc.CallOption,
 ) (*v1.DescribeQueueResponse, error) {
-	return c.client.DescribeQueue(ctx, in, opts...)
+	resp, err := c.client.DescribeQueue(ctx, in, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("describe queue: %w", err)
+	}
+
+	return resp, nil
 }
 
 func (c *Client) CreateQueue(
@@ -84,25 +94,55 @@ func (c *Client) CreateQueue(
 	in *v1.CreateQueueRequest,
 	opts ...grpc.CallOption,
 ) (*v1.CreateQueueResponse, error) {
-	return c.client.CreateQueue(ctx, in, opts...)
+	resp, err := c.client.CreateQueue(ctx, in, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("create queue: %w", err)
+	}
+
+	return resp, nil
 }
 
 func (c *Client) DeleteQueue(ctx context.Context, in *v1.DeleteQueueRequest, opts ...grpc.CallOption) (*v1.DeleteQueueResponse, error) {
-	return c.client.DeleteQueue(ctx, in, opts...)
+	resp, err := c.client.DeleteQueue(ctx, in, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("delete queue: %w", err)
+	}
+
+	return resp, nil
 }
 
 func (c *Client) PurgeQueue(ctx context.Context, in *v1.PurgeQueueRequest, opts ...grpc.CallOption) (*v1.PurgeQueueResponse, error) {
-	return c.client.PurgeQueue(ctx, in, opts...)
+	resp, err := c.client.PurgeQueue(ctx, in, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("purge queue: %w", err)
+	}
+
+	return resp, nil
 }
 
 func (c *Client) Send(ctx context.Context, in *v1.SendRequest, opts ...grpc.CallOption) (*v1.SendResponse, error) {
-	return c.client.Send(ctx, in, opts...)
+	resp, err := c.client.Send(ctx, in, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("send messages: %w", err)
+	}
+
+	return resp, nil
 }
 
 func (c *Client) Receive(ctx context.Context, in *v1.ReceiveRequest, opts ...grpc.CallOption) (*v1.ReceiveResponse, error) {
-	return c.client.Receive(ctx, in, opts...)
+	resp, err := c.client.Receive(ctx, in, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("receive messages: %w", err)
+	}
+
+	return resp, nil
 }
 
 func (c *Client) Delete(ctx context.Context, in *v1.DeleteRequest, opts ...grpc.CallOption) (*v1.DeleteResponse, error) {
-	return c.client.Delete(ctx, in, opts...)
+	resp, err := c.client.Delete(ctx, in, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("delete messages: %w", err)
+	}
+
+	return resp, nil
 }

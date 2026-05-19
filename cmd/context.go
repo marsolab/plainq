@@ -129,10 +129,6 @@ func readContextFile() (io.ReadCloser, error) {
 	}
 
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, err
-		}
-
 		return nil, fmt.Errorf("open context file: %w", err)
 	}
 
@@ -154,10 +150,6 @@ func createContextFile() (*os.File, error) {
 	}
 
 	if err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return nil, err
-		}
-
 		return nil, fmt.Errorf("create context file: %w", err)
 	}
 

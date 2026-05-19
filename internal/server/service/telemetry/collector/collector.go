@@ -5,6 +5,7 @@ package collector
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"math"
 	"sync"
@@ -624,7 +625,11 @@ func (c *Collector) aggregate1m(ctx context.Context) error {
 	now := time.Now().UnixMilli()
 	from := now - aggregationInterval1m.Milliseconds() - time.Second.Milliseconds() // 1 extra second buffer.
 
-	return c.store.Aggregate1m(ctx, from, now)
+	if err := c.store.Aggregate1m(ctx, from, now); err != nil {
+		return fmt.Errorf("aggregate 1m: %w", err)
+	}
+
+	return nil
 }
 
 func (c *Collector) aggregate1h(ctx context.Context) error {
@@ -635,7 +640,11 @@ func (c *Collector) aggregate1h(ctx context.Context) error {
 	now := time.Now().UnixMilli()
 	from := now - aggregationInterval1h.Milliseconds() - bucketSize1m // 1 extra minute buffer.
 
-	return c.store.Aggregate1h(ctx, from, now)
+	if err := c.store.Aggregate1h(ctx, from, now); err != nil {
+		return fmt.Errorf("aggregate 1h: %w", err)
+	}
+
+	return nil
 }
 
 func (c *Collector) aggregate1d(ctx context.Context) error {
@@ -646,7 +655,11 @@ func (c *Collector) aggregate1d(ctx context.Context) error {
 	now := time.Now().UnixMilli()
 	from := now - aggregationInterval1d.Milliseconds() - bucketSize1h // 1 extra hour buffer.
 
-	return c.store.Aggregate1d(ctx, from, now)
+	if err := c.store.Aggregate1d(ctx, from, now); err != nil {
+		return fmt.Errorf("aggregate 1d: %w", err)
+	}
+
+	return nil
 }
 
 // cleanupWorker runs periodic cleanup of old metrics.

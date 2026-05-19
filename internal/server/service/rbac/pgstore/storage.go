@@ -61,11 +61,15 @@ func (s *Storage) CreateRole(ctx context.Context, role rbac.Role) error {
 		createdAt = time.Now()
 	}
 
-	return s.queries.CreateRole(ctx, sqlcgen.CreateRoleParams{
+	if err := s.queries.CreateRole(ctx, sqlcgen.CreateRoleParams{
 		RoleID:    role.RoleID,
 		RoleName:  role.RoleName,
 		CreatedAt: toTimestamptz(createdAt),
-	})
+	}); err != nil {
+		return fmt.Errorf("create role: %w", err)
+	}
+
+	return nil
 }
 
 func (s *Storage) GetRoleByID(ctx context.Context, roleID string) (*rbac.Role, error) {
@@ -150,11 +154,15 @@ func (s *Storage) DeleteRole(ctx context.Context, roleID string) error {
 }
 
 func (s *Storage) AssignRoleToUser(ctx context.Context, userID, roleID string) error {
-	return s.queries.AssignRoleToUser(ctx, sqlcgen.AssignRoleToUserParams{
+	if err := s.queries.AssignRoleToUser(ctx, sqlcgen.AssignRoleToUserParams{
 		UserID:    userID,
 		RoleID:    roleID,
 		CreatedAt: toTimestamptz(time.Now()),
-	})
+	}); err != nil {
+		return fmt.Errorf("assign role to user: %w", err)
+	}
+
+	return nil
 }
 
 func (s *Storage) RemoveRoleFromUser(ctx context.Context, userID, roleID string) error {
@@ -192,13 +200,18 @@ func (s *Storage) GetUserRoles(ctx context.Context, userID string) ([]rbac.Role,
 }
 
 func (s *Storage) GetUsersWithRole(ctx context.Context, roleID string) ([]string, error) {
-	return s.queries.ListUsersWithRole(ctx, roleID)
+	users, err := s.queries.ListUsersWithRole(ctx, roleID)
+	if err != nil {
+		return nil, fmt.Errorf("list users with role: %w", err)
+	}
+
+	return users, nil
 }
 
 func (s *Storage) CreateQueuePermission(ctx context.Context, p rbac.QueuePermission) error {
 	now := toTimestamptz(time.Now())
 
-	return s.queries.CreateQueuePermission(ctx, sqlcgen.CreateQueuePermissionParams{
+	if err := s.queries.CreateQueuePermission(ctx, sqlcgen.CreateQueuePermissionParams{
 		QueueID:    p.QueueID,
 		RoleID:     p.RoleID,
 		CanSend:    p.CanSend,
@@ -207,7 +220,11 @@ func (s *Storage) CreateQueuePermission(ctx context.Context, p rbac.QueuePermiss
 		CanDelete:  p.CanDelete,
 		CreatedAt:  now,
 		UpdatedAt:  now,
-	})
+	}); err != nil {
+		return fmt.Errorf("create queue permission: %w", err)
+	}
+
+	return nil
 }
 
 func (s *Storage) GetQueuePermissions(ctx context.Context, queueID, roleID string) (*rbac.QueuePermission, error) {

@@ -239,7 +239,7 @@ func describeQueueCommand() *scotty.Command {
 			id := args[0]
 
 			if err := idkit.ValidateXID(id); err != nil {
-				return err
+				return fmt.Errorf("validate queue id: %w", err)
 			}
 
 			cli, cliErr := client.New(addr)
@@ -299,7 +299,7 @@ func purgeQueueCommand() *scotty.Command {
 			id := args[0]
 
 			if err := idkit.ValidateXID(id); err != nil {
-				return err
+				return fmt.Errorf("validate queue id: %w", err)
 			}
 
 			cli, cliErr := client.New(addr)
@@ -364,7 +364,7 @@ func deleteQueueCommand() *scotty.Command {
 			id := args[0]
 
 			if err := idkit.ValidateXID(id); err != nil {
-				return err
+				return fmt.Errorf("validate queue id: %w", err)
 			}
 
 			cli, cliErr := client.New(addr)
@@ -429,7 +429,7 @@ func sendCommand() *scotty.Command {
 			id := args[0]
 
 			if err := idkit.ValidateXID(id); err != nil {
-				return err
+				return fmt.Errorf("validate queue id: %w", err)
 			}
 
 			cli, cliErr := client.New(addr)
@@ -498,7 +498,7 @@ func receiveCommand() *scotty.Command {
 			id := args[0]
 
 			if err := idkit.ValidateXID(id); err != nil {
-				return err
+				return fmt.Errorf("validate queue id: %w", err)
 			}
 
 			cli, cliErr := client.New(addr)

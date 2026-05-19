@@ -83,8 +83,6 @@ linters:
     - sqlclosecheck # Checks for SQL close errors.
     - staticcheck # It's a set of rules from staticcheck.
     - tagalign # Checks for tag alignment.
-    # DISABLED:
-    - tagliatelle # Checks for tag naming.
     - testableexamples # Checks for testable examples.
     - testifylint # Checks for testify usage.
     - testpackage # Checks for test package usage.

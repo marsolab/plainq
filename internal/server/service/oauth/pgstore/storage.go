@@ -65,7 +65,7 @@ func (s *Storage) CreateProvider(ctx context.Context, p oauth.Provider) error {
 
 	now := toTimestamptz(time.Now())
 
-	return s.queries.CreateOAuthProvider(ctx, sqlcgen.CreateOAuthProviderParams{
+	if err := s.queries.CreateOAuthProvider(ctx, sqlcgen.CreateOAuthProviderParams{
 		ProviderID:   p.ProviderID,
 		ProviderName: p.ProviderName,
 		OrgID:        toPgText(p.OrgID),
@@ -73,7 +73,11 @@ func (s *Storage) CreateProvider(ctx context.Context, p oauth.Provider) error {
 		IsActive:     p.IsActive,
 		CreatedAt:    now,
 		UpdatedAt:    now,
-	})
+	}); err != nil {
+		return fmt.Errorf("create oauth provider: %w", err)
+	}
+
+	return nil
 }
 
 func (s *Storage) GetProvider(ctx context.Context, providerName, orgID string) (*oauth.Provider, error) {
@@ -234,11 +238,15 @@ func (s *Storage) GetUserByOAuthSub(ctx context.Context, providerName, subject s
 func (s *Storage) UpdateUserLastSync(ctx context.Context, userID string) error {
 	now := toTimestamptz(time.Now())
 
-	return s.queries.UpdateUserLastSync(ctx, sqlcgen.UpdateUserLastSyncParams{
+	if err := s.queries.UpdateUserLastSync(ctx, sqlcgen.UpdateUserLastSyncParams{
 		LastSyncAt: now,
 		UpdatedAt:  now,
 		UserID:     userID,
-	})
+	}); err != nil {
+		return fmt.Errorf("update user last sync: %w", err)
+	}
+
+	return nil
 }
 
 func (s *Storage) GetOrganizationByCode(ctx context.Context, orgCode string) (*oauth.Organization, error) {
@@ -300,18 +308,26 @@ func (s *Storage) GetTeamByCode(ctx context.Context, orgID, teamCode string) (*o
 }
 
 func (s *Storage) AssignUserToTeam(ctx context.Context, userID, teamID string) error {
-	return s.queries.AssignUserToTeam(ctx, sqlcgen.AssignUserToTeamParams{
+	if err := s.queries.AssignUserToTeam(ctx, sqlcgen.AssignUserToTeamParams{
 		UserID:    userID,
 		TeamID:    teamID,
 		CreatedAt: toTimestamptz(time.Now()),
-	})
+	}); err != nil {
+		return fmt.Errorf("assign user to team: %w", err)
+	}
+
+	return nil
 }
 
 func (s *Storage) RemoveUserFromTeam(ctx context.Context, userID, teamID string) error {
-	return s.queries.RemoveUserFromTeam(ctx, sqlcgen.RemoveUserFromTeamParams{
+	if err := s.queries.RemoveUserFromTeam(ctx, sqlcgen.RemoveUserFromTeamParams{
 		UserID: userID,
 		TeamID: teamID,
-	})
+	}); err != nil {
+		return fmt.Errorf("remove user from team: %w", err)
+	}
+
+	return nil
 }
 
 func (s *Storage) GetUserTeams(ctx context.Context, userID string) ([]oauth.Team, error) {

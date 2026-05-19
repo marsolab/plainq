@@ -700,7 +700,7 @@ func (s *Storage) fillCache(ctx context.Context, cursor string) error {
 func (s *Storage) countQueues(ctx context.Context) (uint64, error) {
 	count, err := s.queries.CountQueueProperties(ctx)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("count queue properties: %w", err)
 	}
 
 	if count < 0 {

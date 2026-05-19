@@ -2,6 +2,7 @@ package onboarding
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -86,7 +87,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Service) NeedsOnboarding(ctx context.Context) (bool, error) {
 	hasAdmins, err := s.storage.HasAdminUsers(ctx)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("check admin users: %w", err)
 	}
 
 	return !hasAdmins, nil
@@ -94,7 +95,12 @@ func (s *Service) NeedsOnboarding(ctx context.Context) (bool, error) {
 
 // IsOnboardingComplete checks if onboarding has been completed (admin users exist).
 func (s *Service) IsOnboardingComplete(ctx context.Context) (bool, error) {
-	return s.storage.HasAdminUsers(ctx)
+	hasAdmins, err := s.storage.HasAdminUsers(ctx)
+	if err != nil {
+		return false, fmt.Errorf("check admin users: %w", err)
+	}
+
+	return hasAdmins, nil
 }
 
 // CreateInitialAdmin creates the first admin user during onboarding.
@@ -102,7 +108,7 @@ func (s *Service) CreateInitialAdmin(ctx context.Context, email, password, name 
 	// Hash the password.
 	hashedPassword, err := s.hasher.HashPassword(password)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("hash password: %w", err)
 	}
 
 	admin := InitialAdmin{
@@ -115,7 +121,7 @@ func (s *Service) CreateInitialAdmin(ctx context.Context, email, password, name 
 	}
 
 	if err := s.storage.CreateInitialAdmin(ctx, admin); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create initial admin: %w", err)
 	}
 
 	// Don't return the hashed password.

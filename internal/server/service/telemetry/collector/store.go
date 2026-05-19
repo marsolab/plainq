@@ -43,9 +43,11 @@ func (s *SQLiteStore) SaveRateSnapshot(
 	ctx context.Context, timestamp int64, queueID, metricName string, ratePerSecond float64, windowSeconds int,
 ) error {
 	query := `INSERT INTO rate_snapshots (timestamp, queue_id, metric_name, rate_per_second, window_seconds) VALUES (?, ?, ?, ?, ?)`
-	_, err := s.db.ExecContext(ctx, query, timestamp, queueID, metricName, ratePerSecond, windowSeconds)
+	if _, err := s.db.ExecContext(ctx, query, timestamp, queueID, metricName, ratePerSecond, windowSeconds); err != nil {
+		return fmt.Errorf("save rate snapshot: %w", err)
+	}
 
-	return err
+	return nil
 }
 
 // SaveQueueStats saves queue statistics snapshot.
@@ -57,18 +59,22 @@ func (s *SQLiteStore) SaveQueueStats( //nolint:revive // argument-limit: signatu
 		(timestamp, queue_id, queue_depth, messages_visible, messages_invisible,
 		oldest_message_age_seconds, avg_message_age_seconds)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`
-	_, err := s.db.ExecContext(ctx, query, timestamp, queueID, depth, visible, invisible, oldestAge, avgAge)
+	if _, err := s.db.ExecContext(ctx, query, timestamp, queueID, depth, visible, invisible, oldestAge, avgAge); err != nil {
+		return fmt.Errorf("save queue stats: %w", err)
+	}
 
-	return err
+	return nil
 }
 
 // UpdateInFlightCount updates the in-flight message count for a queue.
 func (s *SQLiteStore) UpdateInFlightCount(ctx context.Context, queueID string, count int64) error {
 	query := `INSERT INTO messages_in_flight (queue_id, count, updated_at) VALUES (?, ?, ?)
 		ON CONFLICT(queue_id) DO UPDATE SET count = excluded.count, updated_at = excluded.updated_at`
-	_, err := s.db.ExecContext(ctx, query, queueID, count, time.Now().UnixMilli())
+	if _, err := s.db.ExecContext(ctx, query, queueID, count, time.Now().UnixMilli()); err != nil {
+		return fmt.Errorf("update in-flight count: %w", err)
+	}
 
-	return err
+	return nil
 }
 
 // Aggregate1m aggregates raw metrics into 1-minute buckets.
@@ -92,9 +98,11 @@ func (s *SQLiteStore) Aggregate1m(ctx context.Context, fromTimestamp, toTimestam
 		WHERE timestamp >= ? AND timestamp < ?
 		GROUP BY bucket_start, queue_id, metric_name, labels
 	`
-	_, err := s.db.ExecContext(ctx, query, bucketSize, bucketSize, fromTimestamp, toTimestamp)
+	if _, err := s.db.ExecContext(ctx, query, bucketSize, bucketSize, fromTimestamp, toTimestamp); err != nil {
+		return fmt.Errorf("aggregate 1m: %w", err)
+	}
 
-	return err
+	return nil
 }
 
 // Aggregate1h aggregates 1-minute metrics into 1-hour buckets.
@@ -118,12 +126,14 @@ func (s *SQLiteStore) Aggregate1h(ctx context.Context, fromTimestamp, toTimestam
 		WHERE bucket_start >= (? / ?) * ? AND bucket_start < (? / ?) * ?
 		GROUP BY hour_bucket, queue_id, metric_name, labels
 	`
-	_, err := s.db.ExecContext(ctx, query,
+	if _, err := s.db.ExecContext(ctx, query,
 		bucketSize, bucketSize,
 		fromTimestamp, minuteBucketSize, minuteBucketSize,
-		toTimestamp, minuteBucketSize, minuteBucketSize)
+		toTimestamp, minuteBucketSize, minuteBucketSize); err != nil {
+		return fmt.Errorf("aggregate 1h: %w", err)
+	}
 
-	return err
+	return nil
 }
 
 // Aggregate1d aggregates 1-hour metrics into 1-day buckets.
@@ -147,12 +157,14 @@ func (s *SQLiteStore) Aggregate1d(ctx context.Context, fromTimestamp, toTimestam
 		WHERE bucket_start >= (? / ?) * ? AND bucket_start < (? / ?) * ?
 		GROUP BY day_bucket, queue_id, metric_name, labels
 	`
-	_, err := s.db.ExecContext(ctx, query,
+	if _, err := s.db.ExecContext(ctx, query,
 		bucketSize, bucketSize,
 		fromTimestamp, hourBucketSize, hourBucketSize,
-		toTimestamp, hourBucketSize, hourBucketSize)
+		toTimestamp, hourBucketSize, hourBucketSize); err != nil {
+		return fmt.Errorf("aggregate 1d: %w", err)
+	}
 
-	return err
+	return nil
 }
 
 // CleanupOldMetrics removes metrics older than retention period.
@@ -184,7 +196,7 @@ func (s *SQLiteStore) CleanupOldMetrics(ctx context.Context, rawBefore, m1Before
 // resolution: "raw", "1m", "5m", "1h", "1d".
 // When queueID is empty, returns system-wide metrics (queue_id = ”).
 //
-//nolint:revive // argument-limit: query parameters naturally form this signature
+//nolint:revive,cyclop // argument-limit and cyclomatic complexity stem from the per-resolution query lookup.
 func (s *SQLiteStore) GetMetrics(ctx context.Context, metricName, queueID string, from, to int64, resolution string) ([]DataPoint, error) {
 	var (
 		query string
@@ -246,7 +258,11 @@ func (s *SQLiteStore) GetMetrics(ctx context.Context, metricName, queueID string
 		points = append(points, p)
 	}
 
-	return points, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate metrics: %w", err)
+	}
+
+	return points, nil
 }
 
 // GetLatestRates retrieves the latest rate values.
@@ -280,7 +296,11 @@ func (s *SQLiteStore) GetLatestRates(ctx context.Context, queueID string) (map[s
 		rates[name] = rate
 	}
 
-	return rates, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rates: %w", err)
+	}
+
+	return rates, nil
 }
 
 // GetQueueStats retrieves queue statistics.
@@ -313,7 +333,11 @@ func (s *SQLiteStore) GetQueueStats(ctx context.Context, queueID string, from, t
 		points = append(points, p)
 	}
 
-	return points, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate queue stats: %w", err)
+	}
+
+	return points, nil
 }
 
 // GetInFlightCounts retrieves in-flight counts for all queues.
@@ -341,7 +365,11 @@ func (s *SQLiteStore) GetInFlightCounts(ctx context.Context) (map[string]int64, 
 		counts[queueID] = count
 	}
 
-	return counts, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate in-flight counts: %w", err)
+	}
+
+	return counts, nil
 }
 
 // GetRateHistory retrieves rate history for a metric.
@@ -376,7 +404,11 @@ func (s *SQLiteStore) GetRateHistory(ctx context.Context, metricName, queueID st
 		points = append(points, p)
 	}
 
-	return points, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rate history: %w", err)
+	}
+
+	return points, nil
 }
 
 // GetSystemMetrics retrieves system-wide metrics (queue_id = ”).
@@ -413,7 +445,11 @@ func (s *SQLiteStore) GetAllQueuesMetrics(ctx context.Context, metricName string
 		points = append(points, p)
 	}
 
-	return points, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate all queues metrics: %w", err)
+	}
+
+	return points, nil
 }
 
 // LatestMetric holds the most recent value and timestamp for a metric.

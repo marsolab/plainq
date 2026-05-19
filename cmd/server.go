@@ -58,7 +58,11 @@ type storageBackend struct {
 func (b *storageBackend) Close() error {
 	switch {
 	case b.sqlite != nil:
-		return b.sqlite.Close()
+		if err := b.sqlite.Close(); err != nil {
+			return fmt.Errorf("close sqlite: %w", err)
+		}
+
+		return nil
 
 	case b.pgpool != nil:
 		b.pgpool.Close()
@@ -378,7 +382,7 @@ func initLogger(cfg *config.Config) (*slog.Logger, error) {
 	if cfg.LogEnable {
 		level, levelErr := logkit.ParseLevel(cfg.LogLevel)
 		if levelErr != nil {
-			return nil, levelErr
+			return nil, fmt.Errorf("parse log level: %w", levelErr)
 		}
 
 		options := []logkit.Option{
@@ -449,7 +453,7 @@ func initSQLiteBackend(cfg *config.Config, logger *slog.Logger) (*litekit.Conn, 
 	if cfg.StorageAccessMode != "" {
 		mode, err := litekit.AccessModeFromString(cfg.StorageAccessMode)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("parse storage access mode: %w", err)
 		}
 
 		connOption = append(connOption, litekit.WithAccessMode(mode))
@@ -458,7 +462,7 @@ func initSQLiteBackend(cfg *config.Config, logger *slog.Logger) (*litekit.Conn, 
 	if cfg.StorageJournalMode != "" {
 		mode, err := litekit.JournalModeFromString(cfg.StorageJournalMode)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("parse storage journal mode: %w", err)
 		}
 
 		connOption = append(connOption, litekit.WithJournalMode(mode))

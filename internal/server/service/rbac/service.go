@@ -2,6 +2,7 @@ package rbac
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -138,20 +139,38 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // HasPermission checks if a user has a specific permission for a queue.
 func (s *Service) HasPermission(ctx context.Context, userID, queueID string, permission PermissionType) (bool, error) {
-	return s.storage.HasQueuePermission(ctx, userID, queueID, permission)
+	ok, err := s.storage.HasQueuePermission(ctx, userID, queueID, permission)
+	if err != nil {
+		return false, fmt.Errorf("check queue permission: %w", err)
+	}
+
+	return ok, nil
 }
 
 // GetUserRoles returns all roles assigned to a user.
 func (s *Service) GetUserRoles(ctx context.Context, userID string) ([]Role, error) {
-	return s.storage.GetUserRoles(ctx, userID)
+	roles, err := s.storage.GetUserRoles(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("get user roles: %w", err)
+	}
+
+	return roles, nil
 }
 
 // AssignRole assigns a role to a user.
 func (s *Service) AssignRole(ctx context.Context, userID, roleID string) error {
-	return s.storage.AssignRoleToUser(ctx, userID, roleID)
+	if err := s.storage.AssignRoleToUser(ctx, userID, roleID); err != nil {
+		return fmt.Errorf("assign role to user: %w", err)
+	}
+
+	return nil
 }
 
 // RemoveRole removes a role from a user.
 func (s *Service) RemoveRole(ctx context.Context, userID, roleID string) error {
-	return s.storage.RemoveRoleFromUser(ctx, userID, roleID)
+	if err := s.storage.RemoveRoleFromUser(ctx, userID, roleID); err != nil {
+		return fmt.Errorf("remove role from user: %w", err)
+	}
+
+	return nil
 }
