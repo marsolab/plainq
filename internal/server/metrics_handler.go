@@ -30,6 +30,9 @@ const (
 	// metricTypeCounter is the metric type label for counter metrics.
 	metricTypeCounter = "counter"
 
+	// metricTypeHistogram is the metric type label for histogram metrics.
+	metricTypeHistogram = "histogram"
+
 	// csvSeparator is the comma separator used in CSV export.
 	csvSeparator = ","
 )
@@ -457,10 +460,10 @@ func (*MetricsHandler) GetAvailableMetrics(w http.ResponseWriter, r *http.Reques
 		{collector.MetricEmptyReceivesTotal, metricTypeCounter, "Total empty receive attempts"},
 		{collector.MetricMessagesRedelivered, metricTypeCounter, "Total messages redelivered"},
 		{collector.MetricMessagesToDLQ, metricTypeCounter, "Total messages moved to DLQ"},
-		{collector.MetricMessageProcessingDuration, "histogram", "Message processing duration"},
-		{collector.MetricMessageDwellTime, "histogram", "Time from send to receive"},
-		{collector.MetricBatchSize, "histogram", "Batch operation sizes"},
-		{collector.MetricMessageSizeBytes, "histogram", "Message body sizes"},
+		{collector.MetricMessageProcessingDuration, metricTypeHistogram, "Message processing duration"},
+		{collector.MetricMessageDwellTime, metricTypeHistogram, "Time from send to receive"},
+		{collector.MetricBatchSize, metricTypeHistogram, "Batch operation sizes"},
+		{collector.MetricMessageSizeBytes, metricTypeHistogram, "Message body sizes"},
 	}
 
 	httpkit.JSON(w, r, metrics)
