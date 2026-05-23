@@ -44,8 +44,9 @@ need to scale out.
 From a fresh clone to a message round-trip in under a minute:
 
 ```shell
-# Build the binary (requires Go 1.26+ and Node/npm for Houston).
-make build
+# Build Houston (embedded into the server binary), then build plainq itself.
+# Requires Go 1.26+ and Node/npm.
+make houston build
 
 # Start the server (SQLite at ./plainq.db, gRPC on :8080, Houston on :8081).
 ./plainq serve --auth.jwt.secret="$(openssl rand -hex 32)"
@@ -68,10 +69,12 @@ Requirements:
 - Node and npm (for building Houston)
 
 ```shell
-make build
+make houston build
 ```
 
-This produces a `./plainq` binary at the repo root.
+`make houston` builds the admin UI into `internal/houston/ui/dist`, which the
+server embeds at compile time. `make build` then produces a `./plainq` binary
+at the repo root.
 
 Prebuilt binaries and a Docker image aren't published yet — building from
 source is the supported path today.
@@ -88,7 +91,7 @@ for machine-readable output.
 | ----------------------------- | ---------------------------------------------------- |
 | `plainq serve`                | Run the PlainQ server (gRPC + HTTP + Houston UI).    |
 | `plainq version`              | Print the build version, commit, and build time.    |
-| `plainq context`              | Manage local client contexts.                        |
+| `plainq ctx`                  | Manage local client contexts.                        |
 | `plainq list`                 | List queues.                                         |
 | `plainq create <queue-name>`  | Create a queue. Supports `--retention-period`, `--visibility-timeout`, `--max-receive-attempts`, `--drop-policy` (`drop` or `dead-letter`), `--dead-letter-queue-id`. |
 | `plainq describe <queue-id>`  | Describe a queue.                                    |
