@@ -48,3 +48,25 @@ func (m *mockStorage) Receive(ctx context.Context, input *v1.ReceiveRequest) (*v
 func (m *mockStorage) Delete(ctx context.Context, input *v1.DeleteRequest) (*v1.DeleteResponse, error) {
 	return m.deleteFunc(ctx, input)
 }
+
+func (m *mockStorage) ListTopics(ctx context.Context) (*ListTopicsResponse, error) {
+	return &ListTopicsResponse{}, nil
+}
+
+func (m *mockStorage) CreateTopic(ctx context.Context, input *CreateTopicRequest) (*CreateTopicResponse, error) {
+	return &CreateTopicResponse{}, nil
+}
+
+func (m *mockStorage) DeleteTopic(ctx context.Context, topicID string) error { return nil }
+
+func (m *mockStorage) Subscribe(ctx context.Context, topicID string, input *SubscribeRequest) (*SubscribeResponse, error) {
+	return &SubscribeResponse{}, nil
+}
+
+func (m *mockStorage) Unsubscribe(ctx context.Context, topicID, subscriptionID string) error {
+	return nil
+}
+
+func (m *mockStorage) Publish(ctx context.Context, topicID string, input *PublishRequest) (*PublishResponse, error) {
+	return &PublishResponse{}, nil
+}

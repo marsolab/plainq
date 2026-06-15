@@ -38,3 +38,30 @@ export interface ApiError {
   message: string;
   code?: string;
 }
+
+
+export interface Subscription {
+  subscriptionId: string;
+  topicId: string;
+  queueId: string;
+  queueName?: string;
+  createdAt: string;
+}
+
+export interface Topic {
+  topicId: string;
+  topicName: string;
+  createdAt: string;
+  subscriptions?: Subscription[];
+}
+
+export interface TopicListResponse {
+  topics: Topic[];
+}
+
+export interface PublishResponse {
+  topicId: string;
+  queueIds: string[];
+  messageIds: string[];
+  deliveredCount: number;
+}

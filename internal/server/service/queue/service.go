@@ -39,6 +39,13 @@ type Storage interface {
 
 	// Delete delete messages from the queue.
 	Delete(ctx context.Context, input *v1.DeleteRequest) (*v1.DeleteResponse, error)
+
+	ListTopics(ctx context.Context) (*ListTopicsResponse, error)
+	CreateTopic(ctx context.Context, input *CreateTopicRequest) (*CreateTopicResponse, error)
+	DeleteTopic(ctx context.Context, topicID string) error
+	Subscribe(ctx context.Context, topicID string, input *SubscribeRequest) (*SubscribeResponse, error)
+	Unsubscribe(ctx context.Context, topicID, subscriptionID string) error
+	Publish(ctx context.Context, topicID string, input *PublishRequest) (*PublishResponse, error)
 }
 
 func init() { encoding.RegisterCodec(vtgrpc.Codec{}) }
@@ -48,7 +55,7 @@ type Service struct {
 	v1.UnimplementedPlainQServiceServer
 
 	cfg     *config.Config
-	logger  *slog.Logger 
+	logger  *slog.Logger
 	router  chi.Router
 	storage Storage
 }
@@ -68,6 +75,15 @@ func NewService(cfg *config.Config, logger *slog.Logger, storage Storage) *Servi
 		r.Get("/{id}", s.describeQueueHandler)
 		r.Post("/{id}/purge", s.purgeQueueHandler)
 		r.Delete("/{id}", s.deleteQueueHandler)
+	})
+
+	s.router.Route("/topics", func(r chi.Router) {
+		r.Get("/", s.listTopicsHandler)
+		r.Post("/", s.createTopicHandler)
+		r.Delete("/{topicID}", s.deleteTopicHandler)
+		r.Post("/{topicID}/publish", s.publishTopicHandler)
+		r.Post("/{topicID}/subscriptions", s.subscribeTopicHandler)
+		r.Delete("/{topicID}/subscriptions/{subscriptionID}", s.unsubscribeTopicHandler)
 	})
 
 	return &s
