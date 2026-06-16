@@ -89,6 +89,9 @@ func (s *Storage) Publish(ctx context.Context, topicID string, input *queue.Publ
 	if len(input.Messages) == 0 {
 		return nil, fmt.Errorf("%w: messages are empty", errkit.ErrInvalidArgument)
 	}
+	if err := s.ensureTopicExists(ctx, topicID); err != nil {
+		return nil, err
+	}
 	subs, err := s.listSubscriptions(ctx, topicID)
 	if err != nil {
 		return nil, err
@@ -108,6 +111,17 @@ func (s *Storage) Publish(ctx context.Context, topicID string, input *queue.Publ
 		out.DeliveredCount += len(sent.MessageIds)
 	}
 	return out, nil
+}
+
+func (s *Storage) ensureTopicExists(ctx context.Context, topicID string) error {
+	var exists bool
+	if err := s.db.QueryRowContext(ctx, `select exists(select 1 from topic_properties where topic_id = ?);`, topicID).Scan(&exists); err != nil {
+		return fmt.Errorf("check topic exists: %w", err)
+	}
+	if !exists {
+		return fmt.Errorf("check topic exists: %w", errkit.ErrNotFound)
+	}
+	return nil
 }
 
 func (s *Storage) listSubscriptions(ctx context.Context, topicID string) ([]queue.Subscription, error) {

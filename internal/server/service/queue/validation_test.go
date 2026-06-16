@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
-	"github.com/marsolab/plainq/internal/shared/pqerr"
+	"github.com/marsolab/servekit/errkit"
 	"github.com/marsolab/servekit/idkit"
 	"github.com/maxatome/go-testdeep/td"
 )
@@ -18,7 +18,7 @@ func Test_validateIDFromRequest(t *testing.T) {
 	tests := map[string]tcase{
 		"NilInterface": {
 			input:   nil,
-			wantErr: pqerr.ErrInvalidID,
+			wantErr: errkit.ErrInvalidID,
 		},
 
 		"SendRequest": {
@@ -28,7 +28,7 @@ func Test_validateIDFromRequest(t *testing.T) {
 
 		"SendRequest_err": {
 			input:   &v1.SendRequest{QueueId: "invalid-id"},
-			wantErr: pqerr.ErrInvalidID,
+			wantErr: errkit.ErrInvalidID,
 		},
 
 		"ReceiveRequest": {
@@ -38,7 +38,7 @@ func Test_validateIDFromRequest(t *testing.T) {
 
 		"ReceiveRequest_err": {
 			input:   &v1.ReceiveRequest{QueueId: "invalid-id"},
-			wantErr: pqerr.ErrInvalidID,
+			wantErr: errkit.ErrInvalidID,
 		},
 
 		"DeleteRequest": {
@@ -48,7 +48,7 @@ func Test_validateIDFromRequest(t *testing.T) {
 
 		"DeleteRequest_err": {
 			input:   &v1.DeleteRequest{QueueId: "invalid-id"},
-			wantErr: pqerr.ErrInvalidID,
+			wantErr: errkit.ErrInvalidID,
 		},
 
 		"DescribeQueueRequest": {
@@ -58,7 +58,7 @@ func Test_validateIDFromRequest(t *testing.T) {
 
 		"DescribeQueueRequest_err": {
 			input:   &v1.DescribeQueueRequest{QueueId: "invalid-id"},
-			wantErr: pqerr.ErrInvalidID,
+			wantErr: errkit.ErrInvalidID,
 		},
 
 		"DeleteQueueRequest": {
@@ -68,7 +68,7 @@ func Test_validateIDFromRequest(t *testing.T) {
 
 		"DeleteQueueRequest_err": {
 			input:   &v1.DeleteQueueRequest{QueueId: "invalid-id"},
-			wantErr: pqerr.ErrInvalidID,
+			wantErr: errkit.ErrInvalidID,
 		},
 
 		"PurgeQueueRequest": {
@@ -78,7 +78,7 @@ func Test_validateIDFromRequest(t *testing.T) {
 
 		"PurgeQueueRequest_err": {
 			input:   &v1.PurgeQueueRequest{QueueId: "invalid-id"},
-			wantErr: pqerr.ErrInvalidID,
+			wantErr: errkit.ErrInvalidID,
 		},
 	}
 
@@ -98,11 +98,11 @@ func Test_validateQueueID(t *testing.T) {
 
 	t.Run("Error", func(t *testing.T) {
 		err := validateQueueID("invalid-id")
-		td.CmpErrorIs(t, err, pqerr.ErrInvalidID)
+		td.CmpErrorIs(t, err, errkit.ErrInvalidID)
 	})
 
 	t.Run("Empty", func(t *testing.T) {
 		err := validateQueueID("")
-		td.CmpErrorIs(t, err, pqerr.ErrInvalidID)
+		td.CmpErrorIs(t, err, errkit.ErrInvalidID)
 	})
 }

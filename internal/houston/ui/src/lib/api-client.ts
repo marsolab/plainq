@@ -35,6 +35,15 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   return response.json();
 }
 
+function utf8ToBase64(input: string): string {
+  const bytes = new TextEncoder().encode(input);
+  let binary = "";
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+  return btoa(binary);
+}
+
 export interface CreateQueueInput {
   queueName: string;
   retentionPeriodSeconds?: number;
@@ -78,7 +87,7 @@ export const api = {
     publish: (topicId: string, body: string) =>
       apiFetch<PublishResponse>(`/queue/topics/${topicId}/publish`, {
         method: "POST",
-        body: JSON.stringify({ messages: [{ body: btoa(body) }] }),
+        body: JSON.stringify({ messages: [{ body: utf8ToBase64(body) }] }),
       }),
   },
   auth: {
