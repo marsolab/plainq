@@ -139,7 +139,7 @@ func (c *QueuePropsCache) list(options ...QueuePropsListOption) []QueueProps {
 		return true
 	}
 
-	for k, v := range c.byName {
+	for k, v := range c.byID {
 		if !iter(k, v) {
 			break
 		}

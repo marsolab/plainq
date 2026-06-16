@@ -3,6 +3,7 @@ package litestore
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"path/filepath"
 	"testing"
 
@@ -18,14 +19,12 @@ func TestStoragePublishMissingTopic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open litekit connection: %v", err)
 	}
-
-	evolver, err := litekit.NewEvolver(conn, mutations.StorageMutations())
-	if err != nil {
-		t.Fatalf("create schema evolver: %v", err)
-	}
-	if err := evolver.MutateSchema(); err != nil {
-		t.Fatalf("mutate schema: %v", err)
-	}
+	t.Cleanup(func() {
+		if err := conn.Close(); err != nil {
+			t.Fatalf("close connection: %v", err)
+		}
+	})
+	applyStorageMutations(t, ctx, conn, "1_schema.sql", "4_pubsub.sql")
 
 	storage, err := New(conn)
 	if err != nil {
@@ -42,5 +41,20 @@ func TestStoragePublishMissingTopic(t *testing.T) {
 	})
 	if !errors.Is(err, errkit.ErrNotFound) {
 		t.Fatalf("publish missing topic error = %v, want %v", err, errkit.ErrNotFound)
+	}
+}
+
+func applyStorageMutations(t *testing.T, ctx context.Context, conn *litekit.Conn, names ...string) {
+	t.Helper()
+
+	storageMutations := mutations.StorageMutations()
+	for _, name := range names {
+		changes, err := fs.ReadFile(storageMutations, name)
+		if err != nil {
+			t.Fatalf("read storage mutation %s: %v", name, err)
+		}
+		if _, err := conn.ExecContext(ctx, string(changes)); err != nil {
+			t.Fatalf("apply storage mutation %s: %v", name, err)
+		}
 	}
 }
