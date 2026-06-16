@@ -3,11 +3,9 @@ package litestore
 import (
 	"context"
 	"errors"
-	"io/fs"
 	"path/filepath"
 	"testing"
 
-	"github.com/marsolab/plainq/internal/server/mutations"
 	"github.com/marsolab/plainq/internal/server/service/queue"
 	"github.com/marsolab/servekit/dbkit/litekit"
 	"github.com/marsolab/servekit/errkit"
@@ -24,7 +22,7 @@ func TestStoragePublishMissingTopic(t *testing.T) {
 			t.Fatalf("close connection: %v", err)
 		}
 	})
-	applyStorageMutations(t, ctx, conn, "1_schema.sql", "4_pubsub.sql")
+	setupPubSubTables(t, ctx, conn)
 
 	storage, err := New(conn)
 	if err != nil {
@@ -44,17 +42,46 @@ func TestStoragePublishMissingTopic(t *testing.T) {
 	}
 }
 
-func applyStorageMutations(t *testing.T, ctx context.Context, conn *litekit.Conn, names ...string) {
+func setupPubSubTables(t *testing.T, ctx context.Context, conn *litekit.Conn) {
 	t.Helper()
 
-	storageMutations := mutations.StorageMutations()
-	for _, name := range names {
-		changes, err := fs.ReadFile(storageMutations, name)
-		if err != nil {
-			t.Fatalf("read storage mutation %s: %v", name, err)
-		}
-		if _, err := conn.ExecContext(ctx, string(changes)); err != nil {
-			t.Fatalf("apply storage mutation %s: %v", name, err)
-		}
+	const schema = `
+create table if not exists "queue_properties"
+(
+    queue_id                   varchar(26)                         not null,
+    queue_name                 text                                not null,
+    created_at                 timestamp default current_timestamp not null,
+    gc_at                      timestamp default current_timestamp not null,
+    retention_period_seconds   integer                             not null,
+    visibility_timeout_seconds integer                             not null,
+    max_receive_attempts       integer                             not null,
+    drop_policy                integer   default 0                 not null,
+    dead_letter_queue_id       varchar(26),
+
+    constraint queue_pk primary key (queue_id)
+);
+
+create table if not exists "topic_properties"
+(
+    topic_id   varchar(26)                         not null,
+    topic_name text                                not null,
+    created_at timestamp default current_timestamp not null,
+
+    constraint topic_pk primary key (topic_id)
+);
+
+create table if not exists "topic_subscriptions"
+(
+    subscription_id varchar(26)                         not null,
+    topic_id        varchar(26)                         not null,
+    queue_id        varchar(26)                         not null,
+    created_at      timestamp default current_timestamp not null,
+
+    constraint topic_subscription_pk primary key (subscription_id)
+);
+`
+
+	if _, err := conn.ExecContext(ctx, schema); err != nil {
+		t.Fatalf("setup pubsub tables: %v", err)
 	}
 }
