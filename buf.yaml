@@ -1,7 +1,4 @@
 version: v2
-modules:
-  - path: schema
-    name: buf.build/plainq/schema
 lint:
   use:
     - DEFAULT
@@ -9,6 +6,7 @@ lint:
     - ENUM_ZERO_VALUE_SUFFIX
     - FIELD_NOT_REQUIRED
     - PACKAGE_NO_IMPORT_CYCLE
+    - PACKAGE_DIRECTORY_MATCH
     - PACKAGE_VERSION_SUFFIX
   disallow_comment_ignores: true
 breaking:
