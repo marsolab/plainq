@@ -3,14 +3,14 @@ package queue
 import (
 	"strings"
 
-	"github.com/marsolab/servekit/errkit"
+	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/marsolab/servekit/idkit"
 )
 
 // validateQueueIDFromRequest performs validation of the queue identifier.
 func validateQueueIDFromRequest(r interface{ GetQueueId() string }) error {
 	if r == nil {
-		return errkit.ErrInvalidID
+		return pqerr.ErrInvalidID
 	}
 
 	return validateQueueID(r.GetQueueId())
@@ -19,11 +19,11 @@ func validateQueueIDFromRequest(r interface{ GetQueueId() string }) error {
 // validateQueueID validates given queue identifier.
 func validateQueueID(queueID string) error {
 	if queueID == "" {
-		return errkit.ErrInvalidID
+		return pqerr.ErrInvalidID
 	}
 
 	if err := idkit.ValidateXID(strings.ToLower(queueID)); err != nil {
-		return errkit.ErrInvalidID
+		return pqerr.ErrInvalidID
 	}
 
 	return nil

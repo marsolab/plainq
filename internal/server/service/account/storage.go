@@ -204,7 +204,7 @@ func (s *SQLiteStorage) GetUserRoles(ctx context.Context, userID string) ([]stri
 		INNER JOIN user_roles ur ON r.role_id = ur.role_id 
 		WHERE ur.user_id = ?
 		ORDER BY r.role_name`
-	
+
 	rows, err := s.db.QueryContext(ctx, query, userID)
 	if err != nil {
 		return nil, fmt.Errorf("get user roles: %w", err)

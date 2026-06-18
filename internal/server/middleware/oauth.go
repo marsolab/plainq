@@ -3,7 +3,6 @@ package middleware
 import (
 	"context"
 	"crypto/rsa"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -199,22 +198,14 @@ func NewGenericOAuthProvider(issuer, audience, jwksURL string) *GenericOAuthProv
 
 // ValidateToken validates a JWT token
 func (p *GenericOAuthProvider) ValidateToken(ctx context.Context, tokenString string) (*OAuthClaims, error) {
-	// Parse the token without verification first to get the header
-	token, err := jwt.Parse([]byte(tokenString))
+	// Parse the token without verification first to get the header.
+	token, err := jwt.ParseNoVerify([]byte(tokenString))
 	if err != nil {
 		return nil, fmt.Errorf("parse token: %w", err)
 	}
 
-	// Get the key ID from the header
-	var header struct {
-		Kid string `json:"kid"`
-	}
-	if err := json.Unmarshal(token.Header(), &header); err != nil {
-		return nil, fmt.Errorf("unmarshal header: %w", err)
-	}
-
-	// Get the public key for verification
-	publicKey, err := p.GetPublicKey(ctx, header.Kid)
+	// Get the public key for verification.
+	publicKey, err := p.GetPublicKey(ctx, token.Header().KeyID)
 	if err != nil {
 		return nil, fmt.Errorf("get public key: %w", err)
 	}
@@ -225,8 +216,8 @@ func (p *GenericOAuthProvider) ValidateToken(ctx context.Context, tokenString st
 		return nil, fmt.Errorf("create verifier: %w", err)
 	}
 
-	// Parse and verify the token
-	token, err = jwt.ParseAndVerify([]byte(tokenString), verifier)
+	// Parse and verify the token.
+	token, err = jwt.Parse([]byte(tokenString), verifier)
 	if err != nil {
 		return nil, fmt.Errorf("verify token: %w", err)
 	}

@@ -1,0 +1,11 @@
+---
+import Layout from "@/layouts/Layout.astro";
+import { AppShell } from "@/components/layout/app-shell";
+import { TopicList } from "@/components/pubsub/topic-list";
+---
+
+<Layout title="Pub/Sub — PlainQ">
+  <AppShell currentPath="/pubsub" title="Pub/Sub" client:load>
+    <TopicList client:load />
+  </AppShell>
+</Layout>

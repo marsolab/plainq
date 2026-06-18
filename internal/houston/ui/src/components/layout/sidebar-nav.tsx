@@ -1,5 +1,6 @@
 import {
   LayoutDashboard,
+  RadioTower,
   Users,
   Settings,
   type LucideIcon,
@@ -14,6 +15,7 @@ interface NavItem {
 
 const navItems: NavItem[] = [
   { label: "Queues", href: "/", icon: LayoutDashboard },
+  { label: "Pub/Sub", href: "/pubsub", icon: RadioTower },
   { label: "Users", href: "/users", icon: Users },
   { label: "Settings", href: "/settings", icon: Settings },
 ];

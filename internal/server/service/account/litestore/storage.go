@@ -165,3 +165,35 @@ func (s *Storage) GetAccountByEmail(ctx context.Context, email string) (*account
 	}
 	return &acc, nil
 }
+
+// GetUserRoles gets all roles for a user by user ID.
+func (s *Storage) GetUserRoles(ctx context.Context, userID string) ([]string, error) {
+	query := `
+		SELECT r.role_name
+		FROM roles r
+		INNER JOIN user_roles ur ON r.role_id = ur.role_id
+		WHERE ur.user_id = ?
+		ORDER BY r.role_name
+	`
+
+	rows, err := s.db.QueryContext(ctx, query, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err := rows.Close(); err != nil {
+			s.logger.Error("close user roles rows", "error", err.Error())
+		}
+	}()
+
+	roles := []string{}
+	for rows.Next() {
+		var roleName string
+		if err := rows.Scan(&roleName); err != nil {
+			return nil, err
+		}
+		roles = append(roles, roleName)
+	}
+
+	return roles, rows.Err()
+}

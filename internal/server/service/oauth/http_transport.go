@@ -186,7 +186,7 @@ func (s *Service) getUserSyncStatusHandler(w http.ResponseWriter, r *http.Reques
 
 func (s *Service) listOrganizationsHandler(w http.ResponseWriter, r *http.Request) {
 	// Get user from context to determine accessible organizations
-	userInfo, ok := middleware.GetUserFromContext(r.Context())
+	_, ok := middleware.GetUserFromContext(r.Context())
 	if !ok {
 		httpkit.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
 		return

@@ -5,8 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
-
-	"github.com/marsolab/servekit/idkit"
 )
 
 // SQLiteStorage implements the RBAC Storage interface using SQLite
@@ -155,7 +153,7 @@ func (s *SQLiteStorage) GetUserRoles(ctx context.Context, userID string) ([]Role
 		INNER JOIN user_roles ur ON r.role_id = ur.role_id 
 		WHERE ur.user_id = ?
 		ORDER BY r.role_name`
-	
+
 	rows, err := s.db.QueryContext(ctx, query, userID)
 	if err != nil {
 		return nil, fmt.Errorf("get user roles: %w", err)
@@ -208,10 +206,10 @@ func (s *SQLiteStorage) CreateQueuePermission(ctx context.Context, permission Qu
 	query := `
 		INSERT INTO queue_permissions (queue_id, role_id, can_send, can_receive, can_purge, can_delete, created_at, updated_at) 
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-	
+
 	now := time.Now()
-	_, err := s.db.ExecContext(ctx, query, 
-		permission.QueueID, permission.RoleID, 
+	_, err := s.db.ExecContext(ctx, query,
+		permission.QueueID, permission.RoleID,
 		permission.CanSend, permission.CanReceive, permission.CanPurge, permission.CanDelete,
 		now, now)
 	if err != nil {
@@ -225,20 +223,20 @@ func (s *SQLiteStorage) GetQueuePermissions(ctx context.Context, queueID, roleID
 		SELECT queue_id, role_id, can_send, can_receive, can_purge, can_delete, created_at, updated_at 
 		FROM queue_permissions 
 		WHERE queue_id = ? AND role_id = ?`
-	
+
 	var perm QueuePermission
 	err := s.db.QueryRowContext(ctx, query, queueID, roleID).Scan(
-		&perm.QueueID, &perm.RoleID, 
+		&perm.QueueID, &perm.RoleID,
 		&perm.CanSend, &perm.CanReceive, &perm.CanPurge, &perm.CanDelete,
 		&perm.CreatedAt, &perm.UpdatedAt)
-	
+
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("queue permission not found")
 		}
 		return nil, fmt.Errorf("get queue permissions: %w", err)
 	}
-	
+
 	return &perm, nil
 }
 
@@ -247,7 +245,7 @@ func (s *SQLiteStorage) GetRoleQueuePermissions(ctx context.Context, roleID stri
 		SELECT queue_id, role_id, can_send, can_receive, can_purge, can_delete, created_at, updated_at 
 		FROM queue_permissions 
 		WHERE role_id = ?`
-	
+
 	rows, err := s.db.QueryContext(ctx, query, roleID)
 	if err != nil {
 		return nil, fmt.Errorf("get role queue permissions: %w", err)
@@ -258,7 +256,7 @@ func (s *SQLiteStorage) GetRoleQueuePermissions(ctx context.Context, roleID stri
 	for rows.Next() {
 		var perm QueuePermission
 		if err := rows.Scan(
-			&perm.QueueID, &perm.RoleID, 
+			&perm.QueueID, &perm.RoleID,
 			&perm.CanSend, &perm.CanReceive, &perm.CanPurge, &perm.CanDelete,
 			&perm.CreatedAt, &perm.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan permission: %w", err)
@@ -278,8 +276,8 @@ func (s *SQLiteStorage) UpdateQueuePermission(ctx context.Context, permission Qu
 		UPDATE queue_permissions 
 		SET can_send = ?, can_receive = ?, can_purge = ?, can_delete = ?, updated_at = ?
 		WHERE queue_id = ? AND role_id = ?`
-	
-	result, err := s.db.ExecContext(ctx, query, 
+
+	result, err := s.db.ExecContext(ctx, query,
 		permission.CanSend, permission.CanReceive, permission.CanPurge, permission.CanDelete,
 		time.Now(), permission.QueueID, permission.RoleID)
 	if err != nil {
@@ -339,7 +337,7 @@ func (s *SQLiteStorage) HasQueuePermission(ctx context.Context, userID, queueID 
 		FROM queue_permissions qp
 		INNER JOIN user_roles ur ON qp.role_id = ur.role_id
 		WHERE ur.user_id = ? AND qp.queue_id = ? AND qp.%s = 1`, permissionColumn)
-	
+
 	var count int
 	err := s.db.QueryRowContext(ctx, query, userID, queueID).Scan(&count)
 	if err != nil {

@@ -2,7 +2,6 @@ package rbac
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
