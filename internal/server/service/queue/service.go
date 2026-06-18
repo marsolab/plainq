@@ -14,6 +14,8 @@ import (
 )
 
 // Storage encapsulates interaction with queue storage.
+//
+//nolint:interfacebloat // Queue and pub/sub transports share one backend contract.
 type Storage interface {
 	// CreateQueue creates new queue.
 	CreateQueue(ctx context.Context, input *v1.CreateQueueRequest) (*v1.CreateQueueResponse, error)

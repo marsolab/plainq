@@ -12,20 +12,17 @@ create table if not exists "schema_version"
 create unique index if not exists id_uindex
     on schema_version (id);
 
-insert into schema_version default
-values;
+insert or ignore into schema_version (id, version)
+values (0, 0);
 
 ---
 
 create table if not exists "settings"
 (
-    id         int       default 1                 not null,
+    id         integer primary key autoincrement,
     settings   json      default '{}'              not null,
     created_at timestamp default current_timestamp not null,
-    updated_at timestamp default current_timestamp not null,
-
-    constraint settings_pk
-        primary key (id autoincrement)
+    updated_at timestamp default current_timestamp not null
 );
 
 ---

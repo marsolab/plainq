@@ -45,8 +45,8 @@ From a fresh clone to a message round-trip in under a minute:
 
 ```shell
 # Build Houston (embedded into the server binary), then build plainq itself.
-# Requires Go 1.26+ and Node/npm.
-make houston build
+# Requires Go 1.26+ and Bun.
+make build
 
 # Start the server (SQLite at ./plainq.db, gRPC on :8080, Houston on :8081).
 ./plainq serve --auth.jwt.secret="$(openssl rand -hex 32)"
@@ -66,10 +66,10 @@ Open <http://localhost:8081> for the Houston admin UI.
 Requirements:
 
 - Go **1.26.1** or later
-- Node and npm (for building Houston)
+- Bun (for building Houston)
 
 ```shell
-make houston build
+make build
 ```
 
 `make houston` builds the admin UI into `internal/houston/ui/dist`, which the
@@ -203,8 +203,8 @@ make test-cover     # with coverage profile
 ```
 
 You'll need Go 1.26.1, [`buf`](https://buf.build/docs/installation),
-[`sqlc`](https://docs.sqlc.dev/en/latest/overview/install.html), and Node/npm
-on your `PATH`.
+[`sqlc`](https://docs.sqlc.dev/en/latest/overview/install.html), and Bun on
+your `PATH`.
 
 ## Community & contributing
 
