@@ -692,3 +692,6 @@ plainq
 /plainq.telemetry.db
 /plainq.telemetry.db-shm
 /plainq.telemetry.db-wal
+/plainq_telemetry.db
+/plainq_telemetry.db-shm
+/plainq_telemetry.db-wal

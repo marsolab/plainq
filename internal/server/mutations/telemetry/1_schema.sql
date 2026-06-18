@@ -12,8 +12,8 @@ create table if not exists "schema_version"
 create unique index if not exists id_uindex
     on schema_version (id);
 
-insert into schema_version default
-values;
+insert or ignore into schema_version (id, version)
+values (0, 0);
 
 ---
 
