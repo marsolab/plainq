@@ -1,5 +1,5 @@
 import { API_BASE } from "./constants";
-import type { Queue, QueueListResponse, AuthTokens, ApiError } from "./types";
+import type { Queue, QueueListResponse, TopicListResponse, PublishResponse, AuthTokens, ApiError } from "./types";
 
 async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
@@ -35,6 +35,15 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   return response.json();
 }
 
+function utf8ToBase64(input: string): string {
+  const bytes = new TextEncoder().encode(input);
+  let binary = "";
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+  return btoa(binary);
+}
+
 export interface CreateQueueInput {
   queueName: string;
   retentionPeriodSeconds?: number;
@@ -60,6 +69,26 @@ export const api = {
       apiFetch<void>(`/queue/${id}`, { method: "DELETE" }),
     purge: (id: string) =>
       apiFetch<void>(`/queue/${id}/purge`, { method: "POST" }),
+  },
+  topics: {
+    list: () => apiFetch<TopicListResponse>("/queue/topics"),
+    create: (data: { topicName: string }) =>
+      apiFetch<{ topicId: string }>("/queue/topics", {
+        method: "POST",
+        body: JSON.stringify(data),
+      }),
+    subscribe: (topicId: string, queueId: string) =>
+      apiFetch<{ subscriptionId: string }>(`/queue/topics/${topicId}/subscriptions`, {
+        method: "POST",
+        body: JSON.stringify({ queueId }),
+      }),
+    unsubscribe: (topicId: string, subscriptionId: string) =>
+      apiFetch<void>(`/queue/topics/${topicId}/subscriptions/${subscriptionId}`, { method: "DELETE" }),
+    publish: (topicId: string, body: string) =>
+      apiFetch<PublishResponse>(`/queue/topics/${topicId}/publish`, {
+        method: "POST",
+        body: JSON.stringify({ messages: [{ body: utf8ToBase64(body) }] }),
+      }),
   },
   auth: {
     signin: (data: { email: string; password: string }) =>

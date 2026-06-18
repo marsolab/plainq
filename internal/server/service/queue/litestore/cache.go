@@ -115,6 +115,7 @@ func (c *QueuePropsCache) list() []QueueProps {
 		props = append(props, QueueProps{
 			ID:                       v.ID,
 			Name:                     v.Name,
+			CreatedAt:                v.CreatedAt,
 			VisibilityTimeoutSeconds: v.VisibilityTimeoutSeconds,
 			RetentionPeriodSeconds:   v.RetentionPeriodSeconds,
 			MaxReceiveAttempts:       v.MaxReceiveAttempts,
