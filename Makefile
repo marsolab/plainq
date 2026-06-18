@@ -12,7 +12,7 @@ sqlc-generate:
 
 .PHONY: houston
 houston:
-	cd internal/houston/ui && npm install && npm run build
+	cd internal/houston/ui && bun install --frozen-lockfile && bun run build
 
 .PHONY: build
 build: deps houston schema

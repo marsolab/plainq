@@ -12,18 +12,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: oven-sh/setup-bun@v2
         with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: internal/houston/ui/package-lock.json
+          bun-version: 1.3.13
       - uses: actions/setup-go@v5
         with:
           go-version: '^1.26'
 
       - name: build houston ui
-        working-directory: internal/houston/ui
-        run: npm ci && npm run build
+        run: make houston
 
       - name: go tests
         run: go test -cover ./...
@@ -32,18 +29,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: oven-sh/setup-bun@v2
         with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: internal/houston/ui/package-lock.json
+          bun-version: 1.3.13
       - uses: actions/setup-go@v5
         with:
           go-version: '^1.26'
 
       - name: build houston ui
-        working-directory: internal/houston/ui
-        run: npm ci && npm run build
+        run: make houston
 
       - uses: golangci/golangci-lint-action@v7
         with:
