@@ -15,7 +15,7 @@ houston:
 	cd internal/houston/ui && npm install && npm run build
 
 .PHONY: build
-build: deps schema
+build: deps houston schema
 	go build -o plainq ./cmd
 
 .PHONY: test

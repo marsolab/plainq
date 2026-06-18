@@ -1,4 +1,4 @@
-package litestore
+package pgstore
 
 import (
 	"context"
@@ -11,8 +11,10 @@ import (
 	"github.com/marsolab/servekit/idkit"
 )
 
+var _ queue.Storage = (*Storage)(nil)
+
 func (s *Storage) ListTopics(ctx context.Context) (*queue.ListTopicsResponse, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.pool.Query(ctx, `
 		SELECT topic_id, topic_name, created_at
 		FROM topic_properties
 		ORDER BY created_at DESC;
@@ -52,12 +54,7 @@ func (s *Storage) CreateTopic(ctx context.Context, input *queue.CreateTopicReque
 	}
 
 	id := idkit.XID()
-	if _, err := s.db.ExecContext(
-		ctx,
-		`INSERT INTO topic_properties (topic_id, topic_name) VALUES (?, ?);`,
-		id,
-		input.TopicName,
-	); err != nil {
+	if _, err := s.pool.Exec(ctx, `INSERT INTO topic_properties (topic_id, topic_name) VALUES ($1, $2);`, id, input.TopicName); err != nil {
 		return nil, fmt.Errorf("create topic: %w", err)
 	}
 
@@ -65,17 +62,12 @@ func (s *Storage) CreateTopic(ctx context.Context, input *queue.CreateTopicReque
 }
 
 func (s *Storage) DeleteTopic(ctx context.Context, topicID string) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM topic_properties WHERE topic_id = ?;`, topicID)
+	tag, err := s.pool.Exec(ctx, `DELETE FROM topic_properties WHERE topic_id = $1;`, topicID)
 	if err != nil {
 		return fmt.Errorf("delete topic: %w", err)
 	}
 
-	rows, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("delete topic rows affected: %w", err)
-	}
-
-	if rows == 0 {
+	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("delete topic: %w", errkit.ErrNotFound)
 	}
 
@@ -88,9 +80,9 @@ func (s *Storage) Subscribe(ctx context.Context, topicID string, input *queue.Su
 	}
 
 	id := idkit.XID()
-	if _, err := s.db.ExecContext(
+	if _, err := s.pool.Exec(
 		ctx,
-		`INSERT INTO topic_subscriptions (subscription_id, topic_id, queue_id) VALUES (?, ?, ?);`,
+		`INSERT INTO topic_subscriptions (subscription_id, topic_id, queue_id) VALUES ($1, $2, $3);`,
 		id,
 		topicID,
 		input.QueueID,
@@ -102,9 +94,9 @@ func (s *Storage) Subscribe(ctx context.Context, topicID string, input *queue.Su
 }
 
 func (s *Storage) Unsubscribe(ctx context.Context, topicID, subscriptionID string) error {
-	res, err := s.db.ExecContext(
+	tag, err := s.pool.Exec(
 		ctx,
-		`DELETE FROM topic_subscriptions WHERE topic_id = ? AND subscription_id = ?;`,
+		`DELETE FROM topic_subscriptions WHERE topic_id = $1 AND subscription_id = $2;`,
 		topicID,
 		subscriptionID,
 	)
@@ -112,12 +104,7 @@ func (s *Storage) Unsubscribe(ctx context.Context, topicID, subscriptionID strin
 		return fmt.Errorf("unsubscribe queue: %w", err)
 	}
 
-	rows, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("unsubscribe queue rows affected: %w", err)
-	}
-
-	if rows == 0 {
+	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("unsubscribe queue: %w", errkit.ErrNotFound)
 	}
 
@@ -166,9 +153,9 @@ func (s *Storage) Publish(ctx context.Context, topicID string, input *queue.Publ
 func (s *Storage) ensureTopicExists(ctx context.Context, topicID string) error {
 	var exists bool
 
-	if err := s.db.QueryRowContext(
+	if err := s.pool.QueryRow(
 		ctx,
-		`SELECT EXISTS(SELECT 1 FROM topic_properties WHERE topic_id = ?);`,
+		`SELECT EXISTS(SELECT 1 FROM topic_properties WHERE topic_id = $1);`,
 		topicID,
 	).Scan(&exists); err != nil {
 		return fmt.Errorf("check topic exists: %w", err)
@@ -182,7 +169,7 @@ func (s *Storage) ensureTopicExists(ctx context.Context, topicID string) error {
 }
 
 func (s *Storage) listSubscriptions(ctx context.Context, topicID string) ([]queue.Subscription, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.pool.Query(ctx, `
 		SELECT s.subscription_id,
 		       s.topic_id,
 		       s.queue_id,
@@ -190,7 +177,7 @@ func (s *Storage) listSubscriptions(ctx context.Context, topicID string) ([]queu
 		       s.created_at
 		FROM topic_subscriptions s
 		LEFT JOIN queue_properties q ON q.queue_id = s.queue_id
-		WHERE s.topic_id = ?
+		WHERE s.topic_id = $1
 		ORDER BY s.created_at DESC;
 	`, topicID)
 	if err != nil {
