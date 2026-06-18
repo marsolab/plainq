@@ -16,7 +16,8 @@ import (
 )
 
 const (
-	tokenIssuer = "plainq-server"
+	tokenIssuer             = "plainq-server"
+	maxOnboardingNameLength = 100
 )
 
 // getOnboardingStatusHandler returns the current onboarding status
@@ -49,13 +50,7 @@ func (s *Service) completeOnboardingHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	type request struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
-		Name     string `json:"name,omitempty"`
-	}
-
-	var req request
+	var req completeOnboardingRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: decode request json: %s", errkit.ErrInvalidArgument, err.Error()))
 		return
@@ -107,7 +102,7 @@ func (s *Service) completeOnboardingHandler(w http.ResponseWriter, r *http.Reque
 }
 
 // validateOnboardingRequest validates the onboarding request data
-func (s *Service) validateOnboardingRequest(req request) error {
+func (s *Service) validateOnboardingRequest(req completeOnboardingRequest) error {
 	if req.Email == "" {
 		return fmt.Errorf("%w: email is required", errkit.ErrInvalidArgument)
 	}
@@ -127,7 +122,7 @@ func (s *Service) validateOnboardingRequest(req request) error {
 	}
 
 	// Optional name validation
-	if req.Name != "" && len(req.Name) > 100 {
+	if req.Name != "" && len(req.Name) > maxOnboardingNameLength {
 		return fmt.Errorf("%w: name must be less than 100 characters", errkit.ErrInvalidArgument)
 	}
 

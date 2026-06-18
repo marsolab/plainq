@@ -3,6 +3,7 @@ package onboarding
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -24,20 +25,20 @@ func (s *SQLiteStorage) HasAdminUsers(ctx context.Context) (bool, error) {
 		FROM user_roles ur
 		INNER JOIN roles r ON ur.role_id = r.role_id
 		WHERE r.role_name = 'admin'`
-	
+
 	var count int
 	err := s.db.QueryRowContext(ctx, query).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("check admin users: %w", err)
 	}
-	
+
 	return count > 0, nil
 }
 
 // GetAdminRoleID gets the admin role ID
 func (s *SQLiteStorage) GetAdminRoleID(ctx context.Context) (string, error) {
 	query := `SELECT role_id FROM roles WHERE role_name = 'admin'`
-	
+
 	var roleID string
 	err := s.db.QueryRowContext(ctx, query).Scan(&roleID)
 	if err != nil {
@@ -46,7 +47,7 @@ func (s *SQLiteStorage) GetAdminRoleID(ctx context.Context) (string, error) {
 		}
 		return "", fmt.Errorf("get admin role ID: %w", err)
 	}
-	
+
 	return roleID, nil
 }
 
@@ -57,14 +58,18 @@ func (s *SQLiteStorage) CreateInitialAdmin(ctx context.Context, admin InitialAdm
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() {
+		if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+			return
+		}
+	}()
 
 	// Double-check that no admin users exist (race condition protection)
 	hasAdmins, err := s.hasAdminUsersInTx(ctx, tx)
 	if err != nil {
 		return fmt.Errorf("check admin users in transaction: %w", err)
 	}
-	
+
 	if hasAdmins {
 		return fmt.Errorf("admin users already exist, onboarding not allowed")
 	}
@@ -73,9 +78,9 @@ func (s *SQLiteStorage) CreateInitialAdmin(ctx context.Context, admin InitialAdm
 	userQuery := `
 		INSERT INTO users (user_id, email, password, verified, created_at, updated_at) 
 		VALUES (?, ?, ?, ?, ?, ?)`
-	
+
 	now := time.Now()
-	_, err = tx.ExecContext(ctx, userQuery, 
+	_, err = tx.ExecContext(ctx, userQuery,
 		admin.UserID, admin.Email, admin.Password, admin.Verified, now, now)
 	if err != nil {
 		return fmt.Errorf("create admin user: %w", err)
@@ -109,20 +114,20 @@ func (s *SQLiteStorage) hasAdminUsersInTx(ctx context.Context, tx *sql.Tx) (bool
 		FROM user_roles ur
 		INNER JOIN roles r ON ur.role_id = r.role_id
 		WHERE r.role_name = 'admin'`
-	
+
 	var count int
 	err := tx.QueryRowContext(ctx, query).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("check admin users in tx: %w", err)
 	}
-	
+
 	return count > 0, nil
 }
 
 // getAdminRoleIDInTx gets the admin role ID within a transaction
 func (s *SQLiteStorage) getAdminRoleIDInTx(ctx context.Context, tx *sql.Tx) (string, error) {
 	query := `SELECT role_id FROM roles WHERE role_name = 'admin'`
-	
+
 	var roleID string
 	err := tx.QueryRowContext(ctx, query).Scan(&roleID)
 	if err != nil {
@@ -131,6 +136,6 @@ func (s *SQLiteStorage) getAdminRoleIDInTx(ctx context.Context, tx *sql.Tx) (str
 		}
 		return "", fmt.Errorf("get admin role ID in tx: %w", err)
 	}
-	
+
 	return roleID, nil
 }

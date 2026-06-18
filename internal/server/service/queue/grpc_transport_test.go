@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/maxatome/go-testdeep/td"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
+	"github.com/maxatome/go-testdeep/td"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -19,7 +20,7 @@ func NewSQLiteStorage(db *sql.DB) *SQLiteStorage {
 	return &SQLiteStorage{db: db}
 }
 
-const ()
+const notImplementedError = "not implemented"
 
 // SyncOAuthUser synchronizes a user from OAuth provider
 func (s *SQLiteStorage) SyncOAuthUser(ctx context.Context, user oauth.OAuthUser, providerName, orgID string) error {
@@ -27,7 +28,11 @@ func (s *SQLiteStorage) SyncOAuthUser(ctx context.Context, user oauth.OAuthUser,
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() {
+		if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+			return
+		}
+	}()
 
 	// Check if user already exists
 	var userID string
@@ -36,11 +41,14 @@ func (s *SQLiteStorage) SyncOAuthUser(ctx context.Context, user oauth.OAuthUser,
 
 	err = tx.QueryRowContext(ctx, checkQuery, providerName, user.Subject).Scan(&userID)
 
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		// Create new user
 		userID = idkit.ULID()
 		insertQuery := `
-			INSERT INTO users (user_id, email, password, verified, org_id, oauth_provider, oauth_sub, is_oauth_user, last_sync_at, created_at, updated_at)
+			INSERT INTO users (
+				user_id, email, password, verified, org_id, oauth_provider, oauth_sub,
+				is_oauth_user, last_sync_at, created_at, updated_at
+			)
 			VALUES (?, ?, '', true, ?, ?, ?, true, ?, ?, ?)`
 
 		now := time.Now()
@@ -69,19 +77,19 @@ func (s *SQLiteStorage) SyncOAuthUser(ctx context.Context, user oauth.OAuthUser,
 }
 
 // GetUserByOAuthSub gets a user by OAuth subject
-func (s *SQLiteStorage) GetUserByOAuthSub(ctx context.Context, providerName, subject string) (*SyncedUser, error) {
+func (s *SQLiteStorage) GetUserByOAuthSub(ctx context.Context, providerName, subject string) (*oauth.SyncedUser, error) {
 	query := `
 		SELECT user_id, email, org_id, oauth_provider, oauth_sub, is_oauth_user, last_sync_at, created_at, updated_at
 		FROM users
 		WHERE oauth_provider = ? AND oauth_sub = ?`
 
-	var user SyncedUser
+	var user oauth.SyncedUser
 	err := s.db.QueryRowContext(ctx, query, providerName, subject).Scan(
 		&user.UserID, &user.Email, &user.OrgID, &user.Provider, &user.Subject,
 		&user.IsOAuthUser, &user.LastSyncAt, &user.CreatedAt, &user.UpdatedAt)
 
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("user not found")
 		}
 		return nil, fmt.Errorf("get user by oauth sub: %w", err)
@@ -91,13 +99,13 @@ func (s *SQLiteStorage) GetUserByOAuthSub(ctx context.Context, providerName, sub
 }
 
 // GetOrganizationByCode gets organization by code
-func (s *SQLiteStorage) GetOrganizationByCode(ctx context.Context, orgCode string) (*Organization, error) {
+func (s *SQLiteStorage) GetOrganizationByCode(ctx context.Context, orgCode string) (*oauth.Organization, error) {
 	query := `
 		SELECT org_id, org_code, org_name, org_domain, is_active, created_at, updated_at
 		FROM organizations
 		WHERE org_code = ? AND is_active = true`
 
-	var org Organization
+	var org oauth.Organization
 	var orgDomainPtr *string
 
 	err := s.db.QueryRowContext(ctx, query, orgCode).Scan(
@@ -105,7 +113,7 @@ func (s *SQLiteStorage) GetOrganizationByCode(ctx context.Context, orgCode strin
 		&org.IsActive, &org.CreatedAt, &org.UpdatedAt)
 
 	if err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("organization not found")
 		}
 		return nil, fmt.Errorf("get organization by code: %w", err)
@@ -122,7 +130,7 @@ func (s *SQLiteStorage) GetOrganizationByCode(ctx context.Context, orgCode strin
 // (For brevity, I'm showing key methods. The full implementation would include all interface methods)
 
 // CreateProvider creates a new OAuth provider
-func (s *SQLiteStorage) CreateProvider(ctx context.Context, provider Provider) error {
+func (s *SQLiteStorage) CreateProvider(ctx context.Context, provider oauth.Provider) error {
 	configJSON, err := json.Marshal(provider.Config)
 	if err != nil {
 		return fmt.Errorf("marshal config: %w", err)
@@ -144,15 +152,15 @@ func (s *SQLiteStorage) CreateProvider(ctx context.Context, provider Provider) e
 }
 
 // GetProvider gets an OAuth provider
-func (s *SQLiteStorage) GetProvider(ctx context.Context, providerName, orgID string) (*Provider, error) {
+func (s *SQLiteStorage) GetProvider(ctx context.Context, providerName, orgID string) (*oauth.Provider, error) {
 	// Implementation here
-	return nil, fmt.Errorf("not implemented")
+	return nil, errors.New(notImplementedError)
 }
 
 // UpdateProvider updates an OAuth provider
-func (s *SQLiteStorage) UpdateProvider(ctx context.Context, provider Provider) error {
+func (s *SQLiteStorage) UpdateProvider(ctx context.Context, provider oauth.Provider) error {
 	// Implementation here
-	return fmt.Errorf("not implemented")
+	return errors.New(notImplementedError)
 }
 
 // DeleteProvider deletes an OAuth provider
@@ -163,9 +171,9 @@ func (s *SQLiteStorage) DeleteProvider(ctx context.Context, providerID string) e
 }
 
 // ListProviders lists OAuth providers
-func (s *SQLiteStorage) ListProviders(ctx context.Context, orgID string) ([]Provider, error) {
+func (s *SQLiteStorage) ListProviders(ctx context.Context, orgID string) ([]oauth.Provider, error) {
 	// Implementation here
-	return nil, fmt.Errorf("not implemented")
+	return nil, errors.New(notImplementedError)
 }
 
 // UpdateUserLastSync updates user's last sync time
@@ -177,21 +185,21 @@ func (s *SQLiteStorage) UpdateUserLastSync(ctx context.Context, userID string) e
 }
 
 // GetOrganizationByDomain gets organization by domain
-func (s *SQLiteStorage) GetOrganizationByDomain(ctx context.Context, domain string) (*Organization, error) {
+func (s *SQLiteStorage) GetOrganizationByDomain(ctx context.Context, domain string) (*oauth.Organization, error) {
 	// Implementation here
-	return nil, fmt.Errorf("not implemented")
+	return nil, errors.New(notImplementedError)
 }
 
 // GetTeamsByOrg gets teams by organization
-func (s *SQLiteStorage) GetTeamsByOrg(ctx context.Context, orgID string) ([]Team, error) {
+func (s *SQLiteStorage) GetTeamsByOrg(ctx context.Context, orgID string) ([]oauth.Team, error) {
 	// Implementation here
-	return nil, fmt.Errorf("not implemented")
+	return nil, errors.New(notImplementedError)
 }
 
 // GetTeamByCode gets team by code
-func (s *SQLiteStorage) GetTeamByCode(ctx context.Context, orgID, teamCode string) (*Team, error) {
+func (s *SQLiteStorage) GetTeamByCode(ctx context.Context, orgID, teamCode string) (*oauth.Team, error) {
 	// Implementation here
-	return nil, fmt.Errorf("not implemented")
+	return nil, errors.New(notImplementedError)
 }
 
 // AssignUserToTeam assigns user to team
@@ -209,7 +217,7 @@ func (s *SQLiteStorage) RemoveUserFromTeam(ctx context.Context, userID, teamID s
 }
 
 // GetUserTeams gets user's teams
-func (s *SQLiteStorage) GetUserTeams(ctx context.Context, userID string) ([]Team, error) {
+func (s *SQLiteStorage) GetUserTeams(ctx context.Context, userID string) ([]oauth.Team, error) {
 	// Implementation here
-	return nil, fmt.Errorf("not implemented")
+	return nil, errors.New(notImplementedError)
 }

@@ -121,7 +121,7 @@ func (c *QueuePropsCache) list(options ...QueuePropsListOption) []QueueProps {
 
 	i := 0
 
-	iter := func(k string, e *list.Element) bool {
+	iter := func(_ string, e *list.Element) bool {
 		v, ok := e.Value.(QueueProps)
 		if !ok {
 			panic(fmt.Errorf("invalid type in queue props cache: %#v", e.Value))
@@ -139,7 +139,7 @@ func (c *QueuePropsCache) list(options ...QueuePropsListOption) []QueueProps {
 		return true
 	}
 
-	for k, v := range c.byName {
+	for k, v := range c.byID {
 		if !iter(k, v) {
 			break
 		}
@@ -154,13 +154,45 @@ func (c *QueuePropsCache) put(props QueueProps) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if existing, ok := c.byID[props.ID]; ok {
+		oldProps, ok := existing.Value.(QueueProps)
+		if !ok {
+			panic(fmt.Errorf("invalid type in queue props cache: %#v", existing.Value))
+		}
+		c.props.Remove(existing)
+		delete(c.byID, oldProps.ID)
+		delete(c.byName, oldProps.Name)
+	}
+	if props.Name != "" {
+		if existing, ok := c.byName[props.Name]; ok {
+			oldProps, ok := existing.Value.(QueueProps)
+			if !ok {
+				panic(fmt.Errorf("invalid type in queue props cache: %#v", existing.Value))
+			}
+			c.props.Remove(existing)
+			delete(c.byID, oldProps.ID)
+			delete(c.byName, oldProps.Name)
+		}
+	}
+
 	if c.props.Len() == int(c.size) {
-		c.props.Remove(c.props.Back())
+		oldest := c.props.Back()
+		if oldest != nil {
+			oldProps, ok := oldest.Value.(QueueProps)
+			if !ok {
+				panic(fmt.Errorf("invalid type in queue props cache: %#v", oldest.Value))
+			}
+			c.props.Remove(oldest)
+			delete(c.byID, oldProps.ID)
+			delete(c.byName, oldProps.Name)
+		}
 	}
 
 	entry := c.props.PushBack(props)
 	c.byID[props.ID] = entry
-	c.byName[props.Name] = entry
+	if props.Name != "" {
+		c.byName[props.Name] = entry
+	}
 }
 
 func (c *QueuePropsCache) delete(id, name string) {
