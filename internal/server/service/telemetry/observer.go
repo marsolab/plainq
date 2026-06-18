@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
@@ -27,14 +28,23 @@ var observedMetrics = map[string]struct{}{
 // Observable checks if a given metric is being observed.
 func Observable(_ context.Context, metric string) (bool, error) {
 	_, ok := observedMetrics[metric]
+
 	return ok, nil
 }
 
 // ObservableCount returns the number of observed metrics as an uint32 value.
-func ObservableCount() uint32 { return uint32(len(observedMetrics)) }
+func ObservableCount() uint32 {
+	if len(observedMetrics) > math.MaxUint32 {
+		return math.MaxUint32
+	}
+
+	return uint32(len(observedMetrics)) //nolint:gosec // G115: observedMetrics is a small fixed-size map, checked above against MaxUint32
+}
 
 // Observer interface abstracts the logic of observing events and
 // measuring metrics of those events.
+//
+//nolint:interfacebloat // domain interface for queue-related telemetry observations.
 type Observer interface {
 	// Observable tels whether the metric is observed by collector.
 	// Method is case-insensitive and will lowercase metric name.
@@ -68,10 +78,10 @@ type Observer interface {
 	// of time each message stay in a queue.
 	TimeInQueue(queueID string) Histogram
 
-	// GCSchedules
+	// GCSchedules.
 	GCSchedules() Counter
 
-	// GCDuration
+	// GCDuration.
 	GCDuration() Histogram
 
 	// QueuesExist returns a Gauge to measure the amount of
@@ -111,7 +121,7 @@ type Gauge interface {
 // MetricsObserver implements the Observer interface.
 type MetricsObserver struct{ observers obsPool[observe] }
 
-func (o *MetricsObserver) Observable(ctx context.Context, metric string) (bool, error) {
+func (*MetricsObserver) Observable(ctx context.Context, metric string) (bool, error) {
 	return Observable(ctx, metric)
 }
 
@@ -132,7 +142,13 @@ func (o *MetricsObserver) MessagesReceived(queueID string) Counter {
 	obs := o.observers.get()
 	obs.inc = func() { vmCounter.Inc() }
 	obs.get = func() uint64 { return vmCounter.Get() }
-	obs.add = func(n uint64) { vmCounter.Add(int(n)) }
+	obs.add = func(n uint64) {
+		if n > math.MaxInt {
+			vmCounter.Add(math.MaxInt)
+		} else {
+			vmCounter.Add(int(n))
+		}
+	}
 
 	return obs
 }
@@ -145,7 +161,13 @@ func (o *MetricsObserver) MessagesDeleted(queueID string) Counter {
 	obs := o.observers.get()
 	obs.inc = func() { vmCounter.Inc() }
 	obs.get = func() uint64 { return vmCounter.Get() }
-	obs.add = func(n uint64) { vmCounter.Add(int(n)) }
+	obs.add = func(n uint64) {
+		if n > math.MaxInt {
+			vmCounter.Add(math.MaxInt)
+		} else {
+			vmCounter.Add(int(n))
+		}
+	}
 
 	return obs
 }
@@ -158,7 +180,13 @@ func (o *MetricsObserver) MessageDropped(queueID string, policy v1.EvictionPolic
 	obs := o.observers.get()
 	obs.inc = func() { vmCounter.Inc() }
 	obs.get = func() uint64 { return vmCounter.Get() }
-	obs.add = func(n uint64) { vmCounter.Add(int(n)) }
+	obs.add = func(n uint64) {
+		if n > math.MaxInt {
+			vmCounter.Add(math.MaxInt)
+		} else {
+			vmCounter.Add(int(n))
+		}
+	}
 
 	return obs
 }
@@ -171,7 +199,13 @@ func (o *MetricsObserver) EmptyReceives(queueID string) Counter {
 	obs := o.observers.get()
 	obs.inc = func() { vmCounter.Inc() }
 	obs.get = func() uint64 { return vmCounter.Get() }
-	obs.add = func(n uint64) { vmCounter.Add(int(n)) }
+	obs.add = func(n uint64) {
+		if n > math.MaxInt {
+			vmCounter.Add(math.MaxInt)
+		} else {
+			vmCounter.Add(int(n))
+		}
+	}
 
 	return obs
 }
@@ -184,7 +218,13 @@ func (o *MetricsObserver) MessagesSent(queueID string) Counter {
 	obs := o.observers.get()
 	obs.inc = func() { vmCounter.Inc() }
 	obs.get = func() uint64 { return vmCounter.Get() }
-	obs.add = func(n uint64) { vmCounter.Add(int(n)) }
+	obs.add = func(n uint64) {
+		if n > math.MaxInt {
+			vmCounter.Add(math.MaxInt)
+		} else {
+			vmCounter.Add(int(n))
+		}
+	}
 
 	return obs
 }
@@ -197,7 +237,13 @@ func (o *MetricsObserver) MessagesSentBytes(queueID string) Counter {
 	obs := o.observers.get()
 	obs.inc = func() { vmCounter.Inc() }
 	obs.get = func() uint64 { return vmCounter.Get() }
-	obs.add = func(n uint64) { vmCounter.Add(int(n)) }
+	obs.add = func(n uint64) {
+		if n > math.MaxInt {
+			vmCounter.Add(math.MaxInt)
+		} else {
+			vmCounter.Add(int(n))
+		}
+	}
 
 	return obs
 }
@@ -221,8 +267,20 @@ func (o *MetricsObserver) QueuesExist() Gauge {
 	obs.inc = func() { vmGauge.Inc() }
 	obs.dec = func() { vmGauge.Dec() }
 	obs.get = func() uint64 { return vmGauge.Get() }
-	obs.add = func(n uint64) { vmGauge.Add(int(n)) }
-	obs.sub = func(n uint64) { vmGauge.Add(-int(n)) }
+	obs.add = func(n uint64) {
+		if n > math.MaxInt {
+			vmGauge.Add(math.MaxInt)
+		} else {
+			vmGauge.Add(int(n))
+		}
+	}
+	obs.sub = func(n uint64) {
+		if n > math.MaxInt {
+			vmGauge.Add(-math.MaxInt)
+		} else {
+			vmGauge.Add(-int(n))
+		}
+	}
 
 	return obs
 }
@@ -233,7 +291,13 @@ func (o *MetricsObserver) GCSchedules() Counter {
 	obs := o.observers.get()
 	obs.inc = func() { vmCounter.Inc() }
 	obs.get = func() uint64 { return vmCounter.Get() }
-	obs.add = func(n uint64) { vmCounter.Add(int(n)) }
+	obs.add = func(n uint64) {
+		if n > math.MaxInt {
+			vmCounter.Add(math.MaxInt)
+		} else {
+			vmCounter.Add(int(n))
+		}
+	}
 
 	return obs
 }
@@ -270,7 +334,6 @@ func (c *observe) Upd(n float64)       { c.upd(n) }
 
 type obsPool[T observe] struct{ pool sync.Pool }
 
-func (p *obsPool[T]) put(v *T) { p.pool.Put(v) }
 func (p *obsPool[T]) get() *T {
 	v, ok := p.pool.Get().(*T)
 	if !ok {

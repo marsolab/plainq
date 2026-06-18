@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"strconv"
 
@@ -18,6 +19,7 @@ func (s *Service) createQueueHandler(w http.ResponseWriter, r *http.Request) {
 
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		httpkit.ErrorHTTP(w, r, err)
+
 		return
 	}
 
@@ -32,6 +34,7 @@ func (s *Service) createQueueHandler(w http.ResponseWriter, r *http.Request) {
 	output, createErr := s.storage.CreateQueue(r.Context(), &input)
 	if createErr != nil {
 		httpkit.ErrorHTTP(w, r, createErr)
+
 		return
 	}
 
@@ -48,20 +51,29 @@ func (s *Service) listQueuesHandler(w http.ResponseWriter, r *http.Request) {
 		limit, parseErr := strconv.Atoi(l)
 		if parseErr != nil {
 			httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: invalid limit", errkit.ErrInvalidArgument))
+
 			return
 		}
 
 		if limit < 1 {
 			httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: invalid limit", errkit.ErrInvalidArgument))
+
 			return
 		}
 
-		input.Limit = int32(limit)
+		if limit > math.MaxInt32 {
+			httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: limit too large", errkit.ErrInvalidArgument))
+
+			return
+		}
+
+		input.Limit = int32(limit) //nolint:gosec // limit was validated against math.MaxInt32 above.
 	}
 
 	output, listErr := s.storage.ListQueues(r.Context(), &input)
 	if listErr != nil {
 		httpkit.ErrorHTTP(w, r, listErr)
+
 		return
 	}
 
@@ -73,6 +85,7 @@ func (s *Service) describeQueueHandler(w http.ResponseWriter, r *http.Request) {
 
 	if err := validateQueueID(id); err != nil {
 		httpkit.ErrorHTTP(w, r, err)
+
 		return
 	}
 
@@ -81,6 +94,7 @@ func (s *Service) describeQueueHandler(w http.ResponseWriter, r *http.Request) {
 	output, describeErr := s.storage.DescribeQueue(r.Context(), &input)
 	if describeErr != nil {
 		httpkit.ErrorHTTP(w, r, describeErr)
+
 		return
 	}
 
@@ -92,6 +106,7 @@ func (s *Service) deleteQueueHandler(w http.ResponseWriter, r *http.Request) {
 
 	if err := validateQueueID(id); err != nil {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("validation error: %w", err))
+
 		return
 	}
 
@@ -108,6 +123,7 @@ func (s *Service) deleteQueueHandler(w http.ResponseWriter, r *http.Request) {
 	output, deleteErr := s.storage.DeleteQueue(r.Context(), &input)
 	if deleteErr != nil {
 		httpkit.ErrorHTTP(w, r, deleteErr)
+
 		return
 	}
 
@@ -119,6 +135,7 @@ func (s *Service) purgeQueueHandler(w http.ResponseWriter, r *http.Request) {
 
 	if err := validateQueueID(id); err != nil {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("validation error: %w", err))
+
 		return
 	}
 
@@ -127,6 +144,7 @@ func (s *Service) purgeQueueHandler(w http.ResponseWriter, r *http.Request) {
 	})
 	if purgeErr != nil {
 		httpkit.ErrorHTTP(w, r, purgeErr)
+
 		return
 	}
 

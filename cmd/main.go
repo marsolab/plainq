@@ -57,7 +57,7 @@ func versionCommand() *scotty.Command {
 	cmd := scotty.Command{
 		Name:  "version",
 		Short: "Prints the version of the program.",
-		Run: func(cmd *scotty.Command, args []string) error {
+		Run: func(_ *scotty.Command, _ []string) error {
 			fmt.Printf("Built from: %s [%s]\n", Branch, Commit)
 			fmt.Printf("Built on: %s\n", BuildTime)
 			fmt.Printf("Built time: %v\n", time.Now().UTC())

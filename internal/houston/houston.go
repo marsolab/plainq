@@ -2,18 +2,17 @@ package houston
 
 import (
 	"embed"
-	"fmt"
 	"io/fs"
 )
 
-//go:embed ui/dist/*
+//go:embed all:ui/dist
 var bundle embed.FS
 
 func Bundle() fs.FS {
-	build, subErr := fs.Sub(bundle, "ui/dist")
-	if subErr != nil {
-		panic(fmt.Errorf("unable to find build folder in the bundle: %w", subErr))
+	sub, err := fs.Sub(bundle, "ui/dist")
+	if err != nil {
+		panic(err)
 	}
 
-	return build
+	return sub
 }

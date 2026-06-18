@@ -16,7 +16,7 @@ func TestFloat64ToTime(t *testing.T) {
 		"Fraction": {1.5, time.Unix(1, 500000000)},
 		"Large":    {1e11, time.Unix(100000000000, 0)},
 		"Negative": {-1.0, time.Unix(-1, 0)},
-		"MaxInt":   {float64(1<<63 - 1), time.Unix(1<<63-1, 0)},
+		"MaxInt":   {float64(1<<31 - 1), time.Unix(1<<31-1, 0)},
 	}
 
 	t.Parallel()

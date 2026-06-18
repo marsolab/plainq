@@ -10,6 +10,7 @@ import (
 
 	"github.com/heartwilltell/hc"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
+	"github.com/marsolab/plainq/internal/server/service/queue/litestore/sqlcgen"
 	"github.com/marsolab/plainq/internal/server/service/telemetry"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/marsolab/servekit/dbkit/litekit"
@@ -34,7 +35,7 @@ const (
 	// which is set to 7 days.
 	msgRetentionPeriod = 7 * 24 * time.Hour
 
-	// maxReceiveAttempts represents the maximum number of receive attempts for a message
+	// maxReceiveAttempts represents the maximum number of receive attempts for a message.
 	maxReceiveAttempts = 5
 
 	// queuePropsCacheSize represents the size of the queue properties cache.
@@ -64,10 +65,9 @@ func WithLogger(logger *slog.Logger) Option {
 // Storage represents a storage system.
 // This struct holds the necessary configurations and dependencies for the storage.
 type Storage struct {
-	db     *litekit.Conn
-	logger *slog.Logger
-
-	querier querier
+	db      *litekit.Conn
+	queries *sqlcgen.Queries
+	logger  *slog.Logger
 
 	// cache holds information about queues properties.
 	cache *QueuePropsCache
@@ -89,10 +89,9 @@ type Storage struct {
 // New returns a pointer to a new instance of Storage with a pointer to sql.DB struct.
 func New(db *litekit.Conn, options ...Option) (*Storage, error) {
 	s := Storage{
-		db:     db,
-		logger: logkit.NewNop(),
-
-		querier: newQuerier(),
+		db:      db,
+		queries: sqlcgen.New(db),
+		logger:  logkit.NewNop(),
 
 		cache:               NewQueuePropsCache(queuePropsCacheSize),
 		cacheFillingTimeout: queuePropsCacheFillingTimeout,
@@ -132,6 +131,7 @@ func New(db *litekit.Conn, options ...Option) (*Storage, error) {
 	return &s, nil
 }
 
+//nolint:cyclop // Complex queue creation with validation and initialization.
 func (s *Storage) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest) (_ *v1.CreateQueueResponse, sErr error) {
 	queueID := idkit.XID()
 
@@ -162,15 +162,15 @@ func (s *Storage) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest)
 		}
 	}()
 
-	if _, err := tx.ExecContext(ctx, queryInsertQueuePropRecord,
-		queueID,
-		input.QueueName,
-		input.RetentionPeriodSeconds,
-		input.VisibilityTimeoutSeconds,
-		input.MaxReceiveAttempts,
-		input.EvictionPolicy,
-		input.DeadLetterQueueId,
-	); err != nil {
+	if err := s.queries.WithTx(tx).InsertQueueProperties(ctx, sqlcgen.InsertQueuePropertiesParams{
+		QueueID:                  queueID,
+		QueueName:                input.QueueName,
+		RetentionPeriodSeconds:   int64(input.RetentionPeriodSeconds),   //nolint:gosec // retention seconds is bounded by validation.
+		VisibilityTimeoutSeconds: int64(input.VisibilityTimeoutSeconds), //nolint:gosec // visibility timeout is bounded by validation.
+		MaxReceiveAttempts:       int64(input.MaxReceiveAttempts),
+		DropPolicy:               int64(input.EvictionPolicy),
+		DeadLetterQueueID:        toNullString(input.DeadLetterQueueId),
+	}); err != nil {
 		return nil, fmt.Errorf("create queue properties record: execute query: %w", err)
 	}
 
@@ -188,7 +188,7 @@ func (s *Storage) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest)
 		RetentionPeriodSeconds:   input.RetentionPeriodSeconds,
 		VisibilityTimeoutSeconds: input.VisibilityTimeoutSeconds,
 		MaxReceiveAttempts:       input.MaxReceiveAttempts,
-		EvictionPolicy:           uint32(input.EvictionPolicy),
+		EvictionPolicy:           uint32(input.EvictionPolicy), //nolint:gosec // EvictionPolicy enum is non-negative.
 		DeadLetterQueueID:        input.DeadLetterQueueId,
 	}
 
@@ -203,6 +203,7 @@ func (s *Storage) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest)
 	return &output, nil
 }
 
+//nolint:nonamedreturns // sErr is set by the deferred rollback to surface rollback errors.
 func (s *Storage) ListQueues(ctx context.Context, input *v1.ListQueuesRequest) (_ *v1.ListQueuesResponse, sErr error) {
 	// Set default page size if not specified.
 	pageSize := input.Limit
@@ -244,80 +245,44 @@ func (s *Storage) ListQueues(ctx context.Context, input *v1.ListQueuesRequest) (
 	return &output, nil
 }
 
-func (s *Storage) DescribeQueue(ctx context.Context, input *v1.DescribeQueueRequest) (_ *v1.DescribeQueueResponse, sErr error) {
+func (s *Storage) DescribeQueue(ctx context.Context, input *v1.DescribeQueueRequest) (*v1.DescribeQueueResponse, error) {
 	switch {
 	case input.QueueId != "":
-		p, ok := s.cache.getByID(input.QueueId)
-		if !ok {
-			break
+		if p, ok := s.cache.getByID(input.QueueId); ok {
+			return propsToProto(p), nil
 		}
-
-		return propsToProto(p), nil
 
 	case input.QueueName != "":
-		p, ok := s.cache.getByName(input.QueueName)
-		if !ok {
-			break
+		if p, ok := s.cache.getByName(input.QueueName); ok {
+			return propsToProto(p), nil
 		}
-
-		return propsToProto(p), nil
 	}
 
-	tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
-	if txErr != nil {
-		return nil, fmt.Errorf("begin transaction: %w", txErr)
-	}
-
-	defer func() {
-		if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
-			sErr = errors.Join(sErr, fmt.Errorf("rollback transaction: %w", err))
-		}
-	}()
-
-	var where string
+	var (
+		row sqlcgen.QueueProperty
+		err error
+	)
 
 	switch {
 	case input.QueueId != "":
-		where = "queue_id = '" + input.QueueId + "'"
+		row, err = s.queries.GetQueuePropertiesByID(ctx, input.QueueId)
 
 	case input.QueueName != "":
-		where = "queue_name = '" + input.QueueName + "'"
+		row, err = s.queries.GetQueuePropertiesByName(ctx, input.QueueName)
 
 	default:
 		return nil, fmt.Errorf("%w: queue_id or queue_name should be specified", pqerr.ErrInvalidInput)
 	}
 
-	var (
-		output    v1.DescribeQueueResponse
-		createdAt time.Time
-		gcAt      time.Time
-	)
-
-	query := queueDescribeQueueProps(where)
-
-	if err := s.db.QueryRowContext(ctx, query).Scan(
-		&output.QueueId,
-		&output.QueueName,
-		&createdAt,
-		&gcAt,
-		&output.RetentionPeriodSeconds,
-		&output.VisibilityTimeoutSeconds,
-		&output.MaxReceiveAttempts,
-		&output.EvictionPolicy,
-		&output.DeadLetterQueueId,
-	); err != nil {
-		return nil, fmt.Errorf("execute query (SQL: %s): %w", query, err)
+	if err != nil {
+		return nil, fmt.Errorf("get queue properties: %w", err)
 	}
 
-	output.CreatedAt = timestamppb.New(createdAt)
+	output := queuePropertyToProto(row)
 
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit transaction: %w", err)
-	}
+	s.cache.put(propsFromProto(output))
 
-	s.cache.put(propsFromProto(&output))
-
-	return &output, nil
+	return output, nil
 }
 
 func (s *Storage) PurgeQueue(ctx context.Context, input *v1.PurgeQueueRequest) (_ *v1.PurgeQueueResponse, sErr error) {
@@ -381,14 +346,9 @@ func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest)
 		}
 	}()
 
-	queueInfoRes, queueHeaderErr := tx.ExecContext(ctx, queryDeleteQueuePropRecord, queueID)
+	rows, queueHeaderErr := s.queries.WithTx(tx).DeleteQueueProperties(ctx, queueID)
 	if queueHeaderErr != nil {
 		return nil, fmt.Errorf("delete queue %q info record: %w", queueID, queueHeaderErr)
-	}
-
-	rows, rowsErr := queueInfoRes.RowsAffected()
-	if rowsErr != nil {
-		return nil, fmt.Errorf("delete queue %q info record: %w", queueID, rowsErr)
 	}
 
 	if rows < 1 {
@@ -464,6 +424,7 @@ func (s *Storage) Send(ctx context.Context, input *v1.SendRequest) (_ *v1.SendRe
 	return &output, nil
 }
 
+//nolint:cyclop,gocyclo // sErr is set by deferred rollback; complex message receiving logic.
 func (s *Storage) Receive(ctx context.Context, input *v1.ReceiveRequest) (_ *v1.ReceiveResponse, sErr error) {
 	queueID := input.GetQueueId()
 
@@ -519,6 +480,7 @@ func (s *Storage) Receive(ctx context.Context, input *v1.ReceiveRequest) (_ *v1.
 		Messages: make([]*v1.ReceiveMessage, 0, input.BatchSize),
 	}
 
+	//nolint:gosec // VisibilityTimeoutSeconds is bounded by validation; conversion to int64 is safe.
 	visibleAt := time.Now().UTC().Add(time.Duration(info.VisibilityTimeoutSeconds) * time.Second)
 
 	for rows.Next() {
@@ -533,6 +495,10 @@ func (s *Storage) Receive(ctx context.Context, input *v1.ReceiveRequest) (_ *v1.
 		}
 
 		output.Messages = append(output.Messages, &m)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate message rows: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -626,9 +592,11 @@ func (s *Storage) Health(ctx context.Context) error {
 
 func (s *Storage) Close() error {
 	s.stop()
+
 	return nil
 }
 
+//nolint:cyclop // sErr is set by deferred rollback; covers the full SQL fetch path.
 func (s *Storage) listQueues(ctx context.Context, query string, pageSize uint32) (_ []*v1.DescribeQueueResponse, sErr error) {
 	tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if txErr != nil {
@@ -686,6 +654,10 @@ func (s *Storage) listQueues(ctx context.Context, query string, pageSize uint32)
 		queues = append(queues, &info)
 	}
 
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate queue rows: %w", err)
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
@@ -711,7 +683,7 @@ func (s *Storage) fillCache(ctx context.Context, cursor string) error {
 			RetentionPeriodSeconds:   q.RetentionPeriodSeconds,
 			VisibilityTimeoutSeconds: q.VisibilityTimeoutSeconds,
 			MaxReceiveAttempts:       q.MaxReceiveAttempts,
-			EvictionPolicy:           uint32(q.EvictionPolicy),
+			EvictionPolicy:           uint32(q.EvictionPolicy), //nolint:gosec // EvictionPolicy enum is non-negative.
 			DeadLetterQueueID:        q.DeadLetterQueueId,
 		}
 
@@ -726,13 +698,42 @@ func (s *Storage) fillCache(ctx context.Context, cursor string) error {
 }
 
 func (s *Storage) countQueues(ctx context.Context) (uint64, error) {
-	q := `select count(*) from queue_properties`
-
-	var count uint64
-
-	if err := s.db.QueryRowContext(ctx, q).Scan(&count); err != nil {
-		return 0, err
+	count, err := s.queries.CountQueueProperties(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("count queue properties: %w", err)
 	}
 
-	return count, nil
+	if count < 0 {
+		return 0, nil
+	}
+
+	return uint64(count), nil
+}
+
+// toNullString converts a Go string to sql.NullString. Empty strings
+// become NULL, which matches the existing on-disk convention for
+// "no dead-letter queue configured".
+func toNullString(s string) sql.NullString {
+	if s == "" {
+		return sql.NullString{}
+	}
+
+	return sql.NullString{String: s, Valid: true}
+}
+
+// queuePropertyToProto converts a sqlc-generated QueueProperty row into
+// the protobuf DescribeQueueResponse used throughout the service layer.
+func queuePropertyToProto(row sqlcgen.QueueProperty) *v1.DescribeQueueResponse {
+	resp := v1.DescribeQueueResponse{
+		QueueId:                  row.QueueID,
+		QueueName:                row.QueueName,
+		CreatedAt:                timestamppb.New(row.CreatedAt),
+		RetentionPeriodSeconds:   uint64(row.RetentionPeriodSeconds),   //nolint:gosec // retention seconds is non-negative.
+		VisibilityTimeoutSeconds: uint64(row.VisibilityTimeoutSeconds), //nolint:gosec // visibility timeout is non-negative.
+		MaxReceiveAttempts:       uint32(row.MaxReceiveAttempts),       //nolint:gosec // max receive attempts is non-negative.
+		EvictionPolicy:           v1.EvictionPolicy(row.DropPolicy),    //nolint:gosec // drop policy is bounded by the EvictionPolicy enum.
+		DeadLetterQueueId:        row.DeadLetterQueueID.String,
+	}
+
+	return &resp
 }

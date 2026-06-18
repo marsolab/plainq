@@ -19,11 +19,20 @@ const (
 	tokenIssuer = "plainq-server"
 )
 
-// getOnboardingStatusHandler returns the current onboarding status
+// onboardingRequest is the payload accepted by completeOnboardingHandler.
+// It is package-level so validateOnboardingRequest can reference the type.
+type onboardingRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+	Name     string `json:"name,omitempty"`
+}
+
+// getOnboardingStatusHandler returns the current onboarding status.
 func (s *Service) getOnboardingStatusHandler(w http.ResponseWriter, r *http.Request) {
 	needsOnboarding, err := s.NeedsOnboarding(r.Context())
 	if err != nil {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("check onboarding status: %w", err))
+
 		return
 	}
 
@@ -35,29 +44,26 @@ func (s *Service) getOnboardingStatusHandler(w http.ResponseWriter, r *http.Requ
 	httpkit.JSON(w, r, status)
 }
 
-// completeOnboardingHandler handles the creation of the initial admin user
+// completeOnboardingHandler handles the creation of the initial admin user.
 func (s *Service) completeOnboardingHandler(w http.ResponseWriter, r *http.Request) {
-	// First, verify that onboarding is actually needed
+	// First, verify that onboarding is actually needed.
 	needsOnboarding, err := s.NeedsOnboarding(r.Context())
 	if err != nil {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("check onboarding status: %w", err))
+
 		return
 	}
 
 	if !needsOnboarding {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: onboarding has already been completed", errkit.ErrInvalidArgument))
+
 		return
 	}
 
-	type request struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
-		Name     string `json:"name,omitempty"`
-	}
-
-	var req request
+	var req onboardingRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: decode request json: %s", errkit.ErrInvalidArgument, err.Error()))
+
 		return
 	}
 
@@ -67,23 +73,26 @@ func (s *Service) completeOnboardingHandler(w http.ResponseWriter, r *http.Reque
 		}
 	}()
 
-	// Validate input
+	// Validate input.
 	if err := s.validateOnboardingRequest(req); err != nil {
 		httpkit.ErrorHTTP(w, r, err)
+
 		return
 	}
 
-	// Create the initial admin user
+	// Create the initial admin user.
 	admin, err := s.CreateInitialAdmin(r.Context(), req.Email, req.Password, req.Name)
 	if err != nil {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("create initial admin: %w", err))
+
 		return
 	}
 
-	// Generate session tokens for the new admin
+	// Generate session tokens for the new admin.
 	session, err := s.createAdminSession(r.Context(), admin.UserID, admin.Email, time.Now())
 	if err != nil {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("create admin session: %w", err))
+
 		return
 	}
 
@@ -106,8 +115,8 @@ func (s *Service) completeOnboardingHandler(w http.ResponseWriter, r *http.Reque
 	httpkit.JSON(w, r, resp)
 }
 
-// validateOnboardingRequest validates the onboarding request data
-func (s *Service) validateOnboardingRequest(req request) error {
+// validateOnboardingRequest validates the onboarding request data.
+func (s *Service) validateOnboardingRequest(req onboardingRequest) error {
 	if req.Email == "" {
 		return fmt.Errorf("%w: email is required", errkit.ErrInvalidArgument)
 	}
@@ -116,17 +125,17 @@ func (s *Service) validateOnboardingRequest(req request) error {
 		return fmt.Errorf("%w: password is required", errkit.ErrInvalidArgument)
 	}
 
-	// Basic email validation
+	// Basic email validation.
 	if !strings.Contains(req.Email, "@") || !strings.Contains(req.Email, ".") {
 		return fmt.Errorf("%w: invalid email format", errkit.ErrInvalidArgument)
 	}
 
-	// Password strength validation
+	// Password strength validation.
 	if len(req.Password) < 8 {
 		return fmt.Errorf("%w: password must be at least 8 characters long", errkit.ErrInvalidArgument)
 	}
 
-	// Optional name validation
+	// Optional name validation.
 	if req.Name != "" && len(req.Name) > 100 {
 		return fmt.Errorf("%w: name must be less than 100 characters", errkit.ErrInvalidArgument)
 	}
@@ -134,7 +143,7 @@ func (s *Service) validateOnboardingRequest(req request) error {
 	return nil
 }
 
-// Session represents an authentication session (same as account service)
+// Session represents an authentication session (same as account service).
 type Session struct {
 	AccessToken  string    `json:"access_token"`
 	RefreshToken string    `json:"refresh_token"`
@@ -142,12 +151,12 @@ type Session struct {
 	ExpiresAt    time.Time `json:"expires_at"`
 }
 
-// createAdminSession creates a session for the newly created admin user
-func (s *Service) createAdminSession(ctx context.Context, userID, email string, t time.Time) (*Session, error) {
-	// Admin users get the admin role
+// createAdminSession creates a session for the newly created admin user.
+func (s *Service) createAdminSession(_ context.Context, userID, email string, t time.Time) (*Session, error) {
+	// Admin users get the admin role.
 	roles := []string{"admin"}
 
-	tokenID := generateUserID() // Generate a unique token ID
+	tokenID := generateUserID() // Generate a unique token ID.
 
 	accessToken, aErr := s.tokman.Sign(&jwtkit.Token{
 		Claims: jwtkit.Claims{
@@ -180,7 +189,7 @@ func (s *Service) createAdminSession(ctx context.Context, userID, email string, 
 			NotBefore: jwt.NewNumericDate(t),
 		},
 		Meta: map[string]any{
-			"aid": userID, // For compatibility with refresh token parsing
+			"aid": userID, // For compatibility with refresh token parsing.
 		},
 	})
 	if rErr != nil {

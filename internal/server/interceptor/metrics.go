@@ -11,11 +11,11 @@ import (
 )
 
 func Metrics() grpc.UnaryServerInterceptor {
-	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp any, err error) {
+	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		start := time.Now()
 		code := 0
 
-		resp, err = handler(ctx, req)
+		resp, err := handler(ctx, req)
 		if err != nil {
 			if s, ok := status.FromError(err); ok {
 				code = int(s.Code())

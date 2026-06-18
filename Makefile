@@ -6,6 +6,10 @@ deps:
 schema:
 	cd internal/server/schema && buf generate buf.build/plainq/schema
 
+.PHONY: sqlc-generate
+sqlc-generate:
+	sqlc generate
+
 .PHONY: houston
 houston:
 	cd internal/houston/ui && npm install && npm run build
@@ -16,7 +20,7 @@ build: deps schema
 
 .PHONY: test
 test:
-	go test -v -race - ./...
+	go test -v -race ./...
 
 .PHONY: test-cover
 test-cover:

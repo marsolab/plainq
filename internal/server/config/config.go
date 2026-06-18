@@ -21,20 +21,24 @@ type Config struct {
 	HTTPWriteTimeout      time.Duration
 	HTTPIdleTimeout       time.Duration
 
+	StorageDriver      string // "sqlite" (default) or "postgres".
+	StoragePostgresDSN string // Postgres DSN when StorageDriver == "postgres".
+
 	StorageLogEnable   bool
 	StorageDBPath      string
 	StorageGCTimeout   time.Duration
 	StorageAccessMode  string
 	StorageJournalMode string
 
-	// Authentication configuration
+	// Authentication configuration.
 	AuthEnable                  bool
 	AuthRegistrationEnable      bool
 	AuthAccessTokenTTL          time.Duration
 	AuthRefreshTokenTTL         time.Duration
 	AuthEmailVerificationEnable bool
+	AuthJWTSecret               string // HMAC secret used to sign access/refresh tokens; required when AuthEnable.
 
-	// OAuth configuration
+	// OAuth configuration.
 	OAuthEnable           bool
 	OAuthProvider         string // "kinde", "auth0", "okta", "google", etc.
 	OAuthClientID         string
@@ -44,16 +48,16 @@ type Config struct {
 	OAuthCallbackURL      string
 	OAuthScope            string
 	OAuthJWKSURL          string
-	OAuthUserSyncEnable   bool // Whether to sync users from OAuth to local DB
+	OAuthUserSyncEnable   bool // Whether to sync users from OAuth to local DB.
 	OAuthUserSyncInterval time.Duration
-	OAuthRoleClaimName    string // JWT claim name for roles (e.g., "roles", "permissions")
-	OAuthOrgClaimName     string // JWT claim name for organization (e.g., "org_code", "organization")
-	OAuthTeamClaimName    string // JWT claim name for teams (e.g., "teams", "groups")
+	OAuthRoleClaimName    string // JWT claim name for roles (e.g., "roles", "permissions").
+	OAuthOrgClaimName     string // JWT claim name for organization (e.g., "org_code", "organization").
+	OAuthTeamClaimName    string // JWT claim name for teams (e.g., "teams", "groups").
 
-	// Organization and team features
-	MultiTenancyEnable   bool   // Enable organization-based multi-tenancy
-	DefaultOrganization  string // Default organization for single-tenant mode
-	TeamBasedPermissions bool   // Enable team-based permissions
+	// Organization and team features.
+	MultiTenancyEnable   bool   // Enable organization-based multi-tenancy.
+	DefaultOrganization  string // Default organization for single-tenant mode.
+	TeamBasedPermissions bool   // Enable team-based permissions.
 
 	TelemetryEnabled   bool
 	TelemetryLogEnable bool
@@ -74,6 +78,7 @@ type Config struct {
 	HealthRouteLogs    bool
 	HealthRouteMetrics bool
 	HealthRoute        string
+	HealthReporter     string
 
 	MetricsEnable       bool
 	MetricsRouteLogs    bool

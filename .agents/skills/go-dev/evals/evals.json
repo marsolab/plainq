@@ -1,0 +1,48 @@
+{
+  "skill_name": "go-dev",
+  "evals": [
+    {
+      "id": 0,
+      "prompt": "Build me a REST API in Go that stores users in PostgreSQL. I need endpoints to create a user, get a user by ID, and list all users. Use best practices for project structure.",
+      "expected_output": "A Go project with cmd/server/main.go, internal packages, sqlc for database access, Chi router, goose migrations, proper error handling, and graceful shutdown.",
+      "files": [],
+      "assertions": [
+        {"text": "Project includes a sqlc.yaml configuration file"},
+        {"text": "Code imports github.com/go-chi/chi for HTTP routing"},
+        {"text": "Contains SQL migration files with CREATE TABLE statements"},
+        {"text": "SQL query files use sqlc annotations (:one, :many, :exec)"},
+        {"text": "main.go handles OS signals for graceful shutdown"},
+        {"text": "Project has cmd/ and internal/ directory structure"},
+        {"text": "Handler/service functions accept context.Context as first parameter"},
+        {"text": "Uses fmt.Errorf with %w for error wrapping"}
+      ]
+    },
+    {
+      "id": 1,
+      "prompt": "Write a CLI tool in Go that reads a CSV file and outputs a summary with row count, column names, and the top 5 most common values in a specified column.",
+      "expected_output": "A Go CLI with flag parsing, CSV reading, summary logic, error handling to stderr, and table-driven tests.",
+      "files": [],
+      "assertions": [
+        {"text": "Uses flag package for CLI argument parsing"},
+        {"text": "Writes errors to os.Stderr"},
+        {"text": "Contains _test.go files with table-driven tests"},
+        {"text": "Uses os.Exit(1) on failure"},
+        {"text": "Minimal external dependencies (primarily stdlib)"}
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "I need a generic cache with TTL in Go. It should be safe for concurrent use, support Get/Set/Delete, and automatically evict expired entries.",
+      "expected_output": "A generic Cache[K, V] struct using type parameters, sync.RWMutex for concurrency, background cleanup goroutine with context cancellation, and comprehensive tests.",
+      "files": [],
+      "assertions": [
+        {"text": "Cache type uses type parameters [K comparable, V any]"},
+        {"text": "Uses sync.RWMutex or sync.Mutex for concurrent safety"},
+        {"text": "Has background goroutine for expired entry eviction"},
+        {"text": "Cleanup goroutine respects context cancellation"},
+        {"text": "Contains _test.go files with tests"},
+        {"text": "Implements Get, Set, and Delete methods"}
+      ]
+    }
+  ]
+}

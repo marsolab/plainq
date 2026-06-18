@@ -19,7 +19,10 @@ type Storage interface {
 	CreateQueue(ctx context.Context, input *v1.CreateQueueRequest) (*v1.CreateQueueResponse, error)
 
 	// DescribeQueue returns information about specified queue.
-	DescribeQueue(ctx context.Context, input *v1.DescribeQueueRequest) (*v1.DescribeQueueResponse, error)
+	DescribeQueue(
+		ctx context.Context,
+		input *v1.DescribeQueueRequest,
+	) (*v1.DescribeQueueResponse, error)
 
 	// ListQueues returns a list of existing queues.
 	ListQueues(ctx context.Context, input *v1.ListQueuesRequest) (*v1.ListQueuesResponse, error)
@@ -48,8 +51,6 @@ type Storage interface {
 	Publish(ctx context.Context, topicID string, input *PublishRequest) (*PublishResponse, error)
 }
 
-func init() { encoding.RegisterCodec(vtgrpc.Codec{}) }
-
 // Service holds logic of interacting with a queue.
 type Service struct {
 	v1.UnimplementedPlainQServiceServer
@@ -62,6 +63,8 @@ type Service struct {
 
 // NewService creates a new queue service.
 func NewService(cfg *config.Config, logger *slog.Logger, storage Storage) *Service {
+	encoding.RegisterCodec(vtgrpc.Codec{})
+
 	s := Service{
 		cfg:     cfg,
 		logger:  logger,

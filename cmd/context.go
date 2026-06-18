@@ -39,14 +39,14 @@ func contextInitCommand() *scotty.Command {
 	cmd := scotty.Command{
 		Name:  "init",
 		Short: "Create context configuration file",
-		Run: func(cmd *scotty.Command, args []string) error {
-			// TODO: create context in default location.
-			// TODO: ~/.config/plainq/context.json.
-
+		Run: func(_ *scotty.Command, _ []string) error {
+			//nolint:godox // tracking item: default-location context creation under ~/.config/plainq/context.json.
+			// TODO: create context in default location at ~/.config/plainq/context.json.
 			f, createErr := createContextFile()
 			if createErr != nil {
 				if errors.Is(createErr, os.ErrExist) {
 					fmt.Println("Context file already exists")
+
 					return nil
 				}
 
@@ -67,6 +67,7 @@ func contextInitCommand() *scotty.Command {
 			}
 
 			fmt.Println("Context file created")
+
 			return nil
 		},
 	}
@@ -78,7 +79,7 @@ func contextListCommand() *scotty.Command {
 	cmd := scotty.Command{
 		Name:  "list",
 		Short: "show list of available contexts",
-		Run: func(cmd *scotty.Command, args []string) error {
+		Run: func(_ *scotty.Command, _ []string) error {
 			f, readErr := readContextFile()
 			if readErr != nil {
 				if errors.Is(readErr, os.ErrNotExist) {
@@ -128,17 +129,18 @@ func readContextFile() (io.ReadCloser, error) {
 	}
 
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, err
-		}
-
 		return nil, fmt.Errorf("open context file: %w", err)
 	}
 
 	return f, nil
 }
 
-func createContextFile() (f *os.File, err error) {
+func createContextFile() (*os.File, error) {
+	var (
+		f   *os.File
+		err error
+	)
+
 	switch runtime.GOOS {
 	case "darwin":
 		f, err = os.Create("~/.config/plainq/context.json")
@@ -148,10 +150,6 @@ func createContextFile() (f *os.File, err error) {
 	}
 
 	if err != nil {
-		if errors.Is(err, os.ErrExist) {
-			return nil, err
-		}
-
 		return nil, fmt.Errorf("create context file: %w", err)
 	}
 

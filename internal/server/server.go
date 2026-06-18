@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -14,10 +15,14 @@ import (
 	"github.com/marsolab/plainq/internal/server/config"
 	"github.com/marsolab/plainq/internal/server/middleware"
 	"github.com/marsolab/plainq/internal/server/service/account"
+	"github.com/marsolab/plainq/internal/server/service/oauth"
+	"github.com/marsolab/plainq/internal/server/service/onboarding"
 	"github.com/marsolab/plainq/internal/server/service/queue"
+	"github.com/marsolab/plainq/internal/server/service/rbac"
 	"github.com/marsolab/plainq/internal/server/service/telemetry"
+	"github.com/marsolab/plainq/internal/server/service/telemetry/collector"
 	"github.com/marsolab/servekit"
-	"github.com/marsolab/servekit/authkit/hashkit"
+	"github.com/marsolab/servekit/dbkit/litekit"
 	"github.com/marsolab/servekit/grpckit"
 	"github.com/marsolab/servekit/httpkit"
 	_ "google.golang.org/grpc/encoding/proto"
@@ -25,31 +30,63 @@ import (
 
 // PlainQ represents plainq logic.
 type PlainQ struct {
-	cfg      *config.Config
-	logger   *slog.Logger
-	queue    *queue.Service
-	account  *account.Service
-	hasher   hashkit.Hasher
-	observer telemetry.Observer
+	cfg        *config.Config
+	logger     *slog.Logger
+	queue      *queue.Service
+	account    *account.Service
+	onboarding *onboarding.Service
+	rbac       *rbac.Service
+	oauth      *oauth.Service
+	observer   telemetry.Observer
+
+	// Telemetry components.
+	metricsCollector *collector.Collector
+	metricsStore     *collector.SQLiteStore
+	metricsHandler   *MetricsHandler
 }
 
 // NewServer returns a pointer to a new instance of the PlainQ.
+//
+//nolint:funlen // server wiring assembles the full HTTP/gRPC stack in one place.
 func NewServer(
 	cfg *config.Config,
 	logger *slog.Logger,
 	checker hc.HealthChecker,
-	queue *queue.Service,
-	account *account.Service,
+	queueSvc *queue.Service,
+	accountSvc *account.Service,
+	onboardingSvc *onboarding.Service,
+	rbacSvc *rbac.Service,
+	oauthSvc *oauth.Service,
+	opts ...Option,
 ) (*servekit.Server, error) {
 	// Create a server which holds and serve all listeners.
 	server := servekit.NewServer(logger)
 
 	pq := PlainQ{
-		cfg:      cfg,
-		logger:   logger,
-		queue:    queue,
-		account:  account,
-		observer: telemetry.NewObserver(),
+		cfg:        cfg,
+		logger:     logger,
+		queue:      queueSvc,
+		account:    accountSvc,
+		onboarding: onboardingSvc,
+		rbac:       rbacSvc,
+		oauth:      oauthSvc,
+		observer:   telemetry.NewObserver(),
+	}
+
+	// Apply server options.
+	for _, opt := range opts {
+		opt(&pq)
+	}
+
+	// Initialize metrics collector if telemetry database is provided.
+	if pq.metricsStore != nil {
+		pq.metricsCollector = collector.New(pq.metricsStore, collector.WithLogger(logger))
+		pq.metricsHandler = NewMetricsHandler(pq.metricsCollector, pq.metricsStore)
+
+		// Start the collector in background.
+		go pq.metricsCollector.Start(context.Background())
+
+		logger.Info("Telemetry metrics collector started")
 	}
 
 	// Create the HTTP listener.
@@ -74,6 +111,53 @@ func NewServer(
 			v1.Route("/queue", func(queue chi.Router) {
 				queue.Mount("/", pq.queue)
 			})
+
+			// Onboarding is intentionally public — it only accepts
+			// requests before the first admin user exists.
+			v1.Route("/onboarding", func(r chi.Router) {
+				r.Mount("/", pq.onboarding)
+			})
+
+			v1.Route("/rbac", func(r chi.Router) {
+				r.Mount("/", pq.rbac)
+			})
+
+			v1.Route("/oauth", func(r chi.Router) {
+				r.Mount("/", pq.oauth)
+			})
+
+			// Metrics API routes for dashboard.
+			if pq.metricsHandler != nil {
+				v1.Route("/metrics", func(metrics chi.Router) {
+					// Overview dashboard data.
+					metrics.Get("/overview", pq.metricsHandler.GetDashboardOverview)
+
+					// Time-series chart data.
+					metrics.Get("/chart", pq.metricsHandler.GetMetricsChart)
+
+					// System-wide rates.
+					metrics.Get("/rates", pq.metricsHandler.GetRatesChart)
+
+					// In-flight metrics.
+					metrics.Get("/inflight", pq.metricsHandler.GetInFlightMetrics)
+
+					// Available metrics list.
+					metrics.Get("/available", pq.metricsHandler.GetAvailableMetrics)
+
+					// Time range presets.
+					metrics.Get("/time-ranges", pq.metricsHandler.GetTimeRangePresets)
+
+					// Export metrics (for Metabase/custom charts).
+					metrics.Get("/export", pq.metricsHandler.ExportMetrics)
+
+					// Queue-specific metrics.
+					metrics.Route("/queue/{id}", func(queueMetrics chi.Router) {
+						queueMetrics.Get("/", pq.metricsHandler.GetQueueMetrics)
+						queueMetrics.Get("/rates", pq.metricsHandler.GetRatesChart)
+						queueMetrics.Get("/inflight", pq.metricsHandler.GetInFlightMetrics)
+					})
+				})
+			}
 		})
 	})
 
@@ -112,36 +196,50 @@ func (s *PlainQ) houstonStaticHandler(w http.ResponseWriter, r *http.Request) {
 	)
 
 	bundle := houston.Bundle()
+	fileServer := http.StripPrefix(pathPrefix, http.FileServerFS(bundle))
+
 	cleanPath := strings.TrimPrefix(r.URL.Path, pathPrefix)
-	if cleanPath == "" || cleanPath == "/" {
-		cleanPath = "/"
+	trimmed := strings.TrimPrefix(cleanPath, "/")
+
+	// Real file or root → let FileServer handle it (it serves a directory's
+	// index.html when the URL ends in '/').
+	if trimmed == "" {
+		fileServer.ServeHTTP(w, r)
+
+		return
 	}
 
-	// Try to serve the requested file. If it doesn't exist and has no
-	// file extension, attempt SPA-style fallback: first try serving the
-	// parent path's index.html (e.g., /queue/abc → queue/index.html),
-	// then fall back to the root index.html.
-	trimmed := strings.TrimPrefix(cleanPath, "/")
-	if _, err := fs.Stat(bundle, trimmed); err != nil && !strings.Contains(cleanPath, ".") {
-		// Try parent directory: /queue/abc123 → queue/index.html
-		parts := strings.SplitN(trimmed, "/", 2)
-		if len(parts) > 1 {
-			parent := parts[0] + "/index.html"
-			if _, parentErr := fs.Stat(bundle, parent); parentErr == nil {
-				r.URL.Path = pathPrefix + "/" + parent
-				http.StripPrefix(pathPrefix, http.FileServerFS(bundle)).ServeHTTP(w, r)
+	if _, err := fs.Stat(bundle, trimmed); err == nil {
+		fileServer.ServeHTTP(w, r)
+
+		return
+	}
+
+	// SPA fallback for extensionless paths. Rewrite to a directory URL
+	// (trailing slash) rather than to <dir>/index.html — FileServer
+	// 301-redirects requests ending in '/index.html' to './', which
+	// would loop forever.
+	if !strings.Contains(cleanPath, ".") {
+		if parts := strings.SplitN(trimmed, "/", 2); len(parts) > 1 {
+			if _, err := fs.Stat(bundle, parts[0]+"/index.html"); err == nil {
+				r.URL.Path = pathPrefix + "/" + parts[0] + "/"
+				fileServer.ServeHTTP(w, r)
+
 				return
 			}
 		}
-		r.URL.Path = pathPrefix + "/index.html"
+
+		r.URL.Path = pathPrefix + "/"
+		fileServer.ServeHTTP(w, r)
+
+		return
 	}
 
-	http.StripPrefix(pathPrefix, http.FileServerFS(bundle)).
-		ServeHTTP(w, r)
+	fileServer.ServeHTTP(w, r)
 }
 
 func listenerHTTP(cfg *config.Config, logger *slog.Logger, checker hc.HealthChecker) (*httpkit.ListenerHTTP, error) {
-	httpListenerOpts := httpkit.NewListenerOption[httpkit.ListenerConfig](
+	httpListenerOpts := httpkit.NewListenerOption(
 		httpkit.WithLogger(logger),
 		httpkit.WithHTTPServerTimeouts(
 			httpkit.HTTPServerReadHeaderTimeout(cfg.HTTPReadHeaderTimeout),
@@ -152,10 +250,21 @@ func listenerHTTP(cfg *config.Config, logger *slog.Logger, checker hc.HealthChec
 	)
 
 	if cfg.HealthEnable {
-		httpListenerOpts = append(httpListenerOpts, httpkit.WithHealthCheck(
+		healthOptions := []httpkit.ListenerOption[httpkit.HealthConfig]{
 			httpkit.HealthCheckRoute(cfg.HealthRoute),
+			httpkit.HealthCheckAccessLog(cfg.HealthRouteLogs),
 			httpkit.HealthChecker(checker),
-		))
+		}
+
+		switch cfg.HealthReporter {
+		case "json":
+			healthOptions = append(healthOptions, httpkit.HealthCheckReportJSON())
+
+		case "html":
+			healthOptions = append(healthOptions, httpkit.HealthCheckReportHTML())
+		}
+
+		httpListenerOpts = append(httpListenerOpts, httpkit.WithHealthCheck(healthOptions...))
 	}
 
 	if cfg.MetricsEnable {
@@ -172,4 +281,19 @@ func listenerHTTP(cfg *config.Config, logger *slog.Logger, checker hc.HealthChec
 	}
 
 	return httpListener, nil
+}
+
+// Option configures the PlainQ server.
+type Option func(*PlainQ)
+
+// WithMetricsStore sets the metrics store for telemetry collection.
+func WithMetricsStore(db *litekit.Conn) Option {
+	return func(pq *PlainQ) {
+		pq.metricsStore = collector.NewSQLiteStore(db)
+	}
+}
+
+// GetMetricsCollector returns the metrics collector for external use.
+func (s *PlainQ) GetMetricsCollector() *collector.Collector {
+	return s.metricsCollector
 }

@@ -14,6 +14,8 @@ import (
 )
 
 // Storage encapsulates interaction with account storage.
+//
+//nolint:interfacebloat // domain interface for the account service; methods cohere around the account aggregate.
 type Storage interface {
 	// CreateAccount creates record with account information in database.
 	CreateAccount(ctx context.Context, account Account) error
@@ -97,7 +99,12 @@ type Service struct {
 	storage Storage
 }
 
-func NewService(cfg *config.Config, logger *slog.Logger, hasher hashkit.Hasher, storage Storage) *Service {
+func NewService(
+	cfg *config.Config,
+	logger *slog.Logger,
+	hasher hashkit.Hasher,
+	storage Storage,
+) *Service {
 	s := Service{
 		cfg:     cfg,
 		router:  chi.NewRouter(),

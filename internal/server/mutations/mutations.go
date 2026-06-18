@@ -6,16 +6,19 @@ import (
 )
 
 var (
-	//go:embed storage/*.sql
-	storage embed.FS
+	//go:embed storage/sqlite/*.sql
+	sqliteStorage embed.FS
+
+	//go:embed storage/postgres/*.sql
+	postgresStorage embed.FS
 
 	//go:embed telemetry/*.sql
 	telemetry embed.FS
 )
 
-// StorageMutations returns all embedded storage files as embed.FS.
-func StorageMutations() fs.FS {
-	d, err := fs.Sub(storage, "storage")
+// SqliteStorageMutations returns the embedded SQLite storage migrations.
+func SqliteStorageMutations() fs.FS {
+	d, err := fs.Sub(sqliteStorage, "storage/sqlite")
 	if err != nil {
 		panic(err)
 	}
@@ -23,7 +26,17 @@ func StorageMutations() fs.FS {
 	return d
 }
 
-// TelemetryMutation returns all embedded storage files as embed.FS.
+// PostgresStorageMutations returns the embedded PostgreSQL storage migrations.
+func PostgresStorageMutations() fs.FS {
+	d, err := fs.Sub(postgresStorage, "storage/postgres")
+	if err != nil {
+		panic(err)
+	}
+
+	return d
+}
+
+// TelemetryMutation returns all embedded telemetry migration files.
 func TelemetryMutation() fs.FS {
 	d, err := fs.Sub(telemetry, "telemetry")
 	if err != nil {

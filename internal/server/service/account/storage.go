@@ -3,19 +3,20 @@ package account
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/marsolab/servekit/authkit/hashkit"
 )
 
-// SQLiteStorage implements the account Storage interface using SQLite
+// SQLiteStorage implements the account Storage interface using SQLite.
 type SQLiteStorage struct {
 	db     *sql.DB
 	hasher hashkit.Hasher
 }
 
-// NewSQLiteStorage creates a new SQLite storage instance for accounts
+// NewSQLiteStorage creates a new SQLite storage instance for accounts.
 func NewSQLiteStorage(db *sql.DB, hasher hashkit.Hasher) *SQLiteStorage {
 	return &SQLiteStorage{
 		db:     db,
@@ -25,49 +26,59 @@ func NewSQLiteStorage(db *sql.DB, hasher hashkit.Hasher) *SQLiteStorage {
 
 // CreateAccount creates record with account information in database.
 func (s *SQLiteStorage) CreateAccount(ctx context.Context, account Account) error {
-	// Use the users table instead of accounts for consistency
+	// Use the users table instead of accounts for consistency.
 	query := `INSERT INTO users (user_id, email, password, verified, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`
 	now := time.Now()
-	_, err := s.db.ExecContext(ctx, query, account.ID, account.Email, account.Password, account.Verified, now, now)
-	if err != nil {
+
+	if _, err := s.db.ExecContext(ctx, query, account.ID, account.Email, account.Password, account.Verified, now, now); err != nil {
 		return fmt.Errorf("create account: %w", err)
 	}
+
 	return nil
 }
 
 // GetAccountByID fetches account record from database by given id.
 func (s *SQLiteStorage) GetAccountByID(ctx context.Context, id string) (*Account, error) {
 	query := `SELECT user_id, email, password, verified, created_at, updated_at FROM users WHERE user_id = ?`
+
 	var account Account
+
 	err := s.db.QueryRowContext(ctx, query, id).Scan(
 		&account.ID, &account.Email, &account.Password, &account.Verified, &account.CreatedAt, &account.UpdatedAt)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("account not found")
+			return nil, errors.New("account not found")
 		}
+
 		return nil, fmt.Errorf("get account by ID: %w", err)
 	}
+
 	return &account, nil
 }
 
 // GetAccountByEmail fetches account record from database by given email.
 func (s *SQLiteStorage) GetAccountByEmail(ctx context.Context, email string) (*Account, error) {
 	query := `SELECT user_id, email, password, verified, created_at, updated_at FROM users WHERE email = ?`
+
 	var account Account
+
 	err := s.db.QueryRowContext(ctx, query, email).Scan(
 		&account.ID, &account.Email, &account.Password, &account.Verified, &account.CreatedAt, &account.UpdatedAt)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, fmt.Errorf("account not found")
+			return nil, errors.New("account not found")
 		}
+
 		return nil, fmt.Errorf("get account by email: %w", err)
 	}
+
 	return &account, nil
 }
 
 // SetAccountVerified update 'verified' field of account record in database.
 func (s *SQLiteStorage) SetAccountVerified(ctx context.Context, email string, verified bool) error {
 	query := `UPDATE users SET verified = ?, updated_at = ? WHERE email = ?`
+
 	result, err := s.db.ExecContext(ctx, query, verified, time.Now(), email)
 	if err != nil {
 		return fmt.Errorf("set account verified: %w", err)
@@ -79,7 +90,7 @@ func (s *SQLiteStorage) SetAccountVerified(ctx context.Context, email string, ve
 	}
 
 	if affected == 0 {
-		return fmt.Errorf("account not found")
+		return errors.New("account not found")
 	}
 
 	return nil
@@ -88,6 +99,7 @@ func (s *SQLiteStorage) SetAccountVerified(ctx context.Context, email string, ve
 // SetAccountPassword update account 'password' field of account record in database.
 func (s *SQLiteStorage) SetAccountPassword(ctx context.Context, id, password string) error {
 	query := `UPDATE users SET password = ?, updated_at = ? WHERE user_id = ?`
+
 	result, err := s.db.ExecContext(ctx, query, password, time.Now(), id)
 	if err != nil {
 		return fmt.Errorf("set account password: %w", err)
@@ -99,7 +111,7 @@ func (s *SQLiteStorage) SetAccountPassword(ctx context.Context, id, password str
 	}
 
 	if affected == 0 {
-		return fmt.Errorf("account not found")
+		return errors.New("account not found")
 	}
 
 	return nil
@@ -108,6 +120,7 @@ func (s *SQLiteStorage) SetAccountPassword(ctx context.Context, id, password str
 // DeleteAccount deletes account record from database by given id.
 func (s *SQLiteStorage) DeleteAccount(ctx context.Context, id string) error {
 	query := `DELETE FROM users WHERE user_id = ?`
+
 	result, err := s.db.ExecContext(ctx, query, id)
 	if err != nil {
 		return fmt.Errorf("delete account: %w", err)
@@ -119,7 +132,7 @@ func (s *SQLiteStorage) DeleteAccount(ctx context.Context, id string) error {
 	}
 
 	if affected == 0 {
-		return fmt.Errorf("account not found")
+		return errors.New("account not found")
 	}
 
 	return nil
@@ -128,16 +141,17 @@ func (s *SQLiteStorage) DeleteAccount(ctx context.Context, id string) error {
 // CreateRefreshToken creates refresh token record in database.
 func (s *SQLiteStorage) CreateRefreshToken(ctx context.Context, token RefreshToken) error {
 	query := `INSERT INTO refresh_tokens (id, aid, token, created_at, expires_at) VALUES (?, ?, ?, ?, ?)`
-	_, err := s.db.ExecContext(ctx, query, token.ID, token.AID, token.Token, token.CreatedAt, token.ExpiresAt)
-	if err != nil {
+	if _, err := s.db.ExecContext(ctx, query, token.ID, token.AID, token.Token, token.CreatedAt, token.ExpiresAt); err != nil {
 		return fmt.Errorf("create refresh token: %w", err)
 	}
+
 	return nil
 }
 
 // DeleteRefreshToken deletes given token from database.
 func (s *SQLiteStorage) DeleteRefreshToken(ctx context.Context, token string) error {
 	query := `DELETE FROM refresh_tokens WHERE token = ?`
+
 	result, err := s.db.ExecContext(ctx, query, token)
 	if err != nil {
 		return fmt.Errorf("delete refresh token: %w", err)
@@ -149,7 +163,7 @@ func (s *SQLiteStorage) DeleteRefreshToken(ctx context.Context, token string) er
 	}
 
 	if affected == 0 {
-		return fmt.Errorf("refresh token not found")
+		return errors.New("refresh token not found")
 	}
 
 	return nil
@@ -158,6 +172,7 @@ func (s *SQLiteStorage) DeleteRefreshToken(ctx context.Context, token string) er
 // DeleteRefreshTokenByTokenID deletes given token from database by its id.
 func (s *SQLiteStorage) DeleteRefreshTokenByTokenID(ctx context.Context, tid string) error {
 	query := `DELETE FROM refresh_tokens WHERE id = ?`
+
 	result, err := s.db.ExecContext(ctx, query, tid)
 	if err != nil {
 		return fmt.Errorf("delete refresh token by ID: %w", err)
@@ -169,7 +184,7 @@ func (s *SQLiteStorage) DeleteRefreshTokenByTokenID(ctx context.Context, tid str
 	}
 
 	if affected == 0 {
-		return fmt.Errorf("refresh token not found")
+		return errors.New("refresh token not found")
 	}
 
 	return nil
@@ -178,10 +193,11 @@ func (s *SQLiteStorage) DeleteRefreshTokenByTokenID(ctx context.Context, tid str
 // PurgeRefreshTokens deletes all refresh token records related to given account.
 func (s *SQLiteStorage) PurgeRefreshTokens(ctx context.Context, aid string) error {
 	query := `DELETE FROM refresh_tokens WHERE aid = ?`
-	_, err := s.db.ExecContext(ctx, query, aid)
-	if err != nil {
+
+	if _, err := s.db.ExecContext(ctx, query, aid); err != nil {
 		return fmt.Errorf("purge refresh tokens: %w", err)
 	}
+
 	return nil
 }
 
@@ -189,10 +205,11 @@ func (s *SQLiteStorage) PurgeRefreshTokens(ctx context.Context, aid string) erro
 func (s *SQLiteStorage) DenyAccessToken(ctx context.Context, token string, ttl time.Duration) error {
 	query := `INSERT INTO denylist (token, denied_until) VALUES (?, ?)`
 	deniedUntil := time.Now().Add(ttl).Unix()
-	_, err := s.db.ExecContext(ctx, query, token, deniedUntil)
-	if err != nil {
+
+	if _, err := s.db.ExecContext(ctx, query, token, deniedUntil); err != nil {
 		return fmt.Errorf("deny access token: %w", err)
 	}
+
 	return nil
 }
 
@@ -204,7 +221,7 @@ func (s *SQLiteStorage) GetUserRoles(ctx context.Context, userID string) ([]stri
 		INNER JOIN user_roles ur ON r.role_id = ur.role_id 
 		WHERE ur.user_id = ?
 		ORDER BY r.role_name`
-	
+
 	rows, err := s.db.QueryContext(ctx, query, userID)
 	if err != nil {
 		return nil, fmt.Errorf("get user roles: %w", err)
@@ -212,11 +229,14 @@ func (s *SQLiteStorage) GetUserRoles(ctx context.Context, userID string) ([]stri
 	defer rows.Close()
 
 	var roles []string
+
 	for rows.Next() {
 		var roleName string
+
 		if err := rows.Scan(&roleName); err != nil {
 			return nil, fmt.Errorf("scan role name: %w", err)
 		}
+
 		roles = append(roles, roleName)
 	}
 
