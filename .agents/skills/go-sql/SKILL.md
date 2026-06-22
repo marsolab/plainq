@@ -10,7 +10,19 @@ description: >-
   columns, and testing the data layer. Pair with go-http for the
   service-handler-storage stack, go-errors for wrapping `sql.ErrNoRows`,
   and go-testing for `Querier` mocking.
-version: 1.0.0
+when_to_use: >-
+  TRIGGER WHEN the user is writing or reviewing Go database code —
+  `sqlc.yaml` configuration, sqlc query annotations (`:one`, `:many`,
+  `:exec`, `:execrows`), the generated `Querier` interface for
+  mocking, goose Up/Down migrations, transaction patterns
+  (`db.BeginTx`, `db.WithTx`), `pgx` / `pgxpool` vs `database/sql`,
+  `sql.ErrNoRows` handling, JSON columns, prepared statements,
+  connection pool tuning, or testing the data layer. ALSO TRIGGER on
+  phrases like "wire up a database", "add a migration", "generate
+  sqlc queries", "open a transaction", "query Postgres from Go".
+  SKIP for ORM frameworks (GORM, ent) unless the user explicitly
+  asks for migration help.
+version: 1.1.0
 tags:
   - go
   - golang
@@ -19,6 +31,12 @@ tags:
   - goose
   - postgres
   - database
+paths:
+  - "**/*.go"
+  - "**/sqlc.yaml"
+  - "**/sqlc.yml"
+  - "**/queries/**/*.sql"
+  - "**/migrations/**/*.sql"
 ---
 
 # Go SQL

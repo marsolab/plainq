@@ -9,7 +9,17 @@ description: >-
   picking log levels (info/debug/warn/error), or designing observability
   patterns (USE method, RED method). Pair with go-http for request-scoped
   logging middleware and go-errors for the "log or return, not both" rule.
-version: 1.0.0
+when_to_use: >-
+  TRIGGER WHEN the user is adding, reviewing, or debugging logging in
+  Go — `log/slog`, `slog.Logger`, `slog.NewJSONHandler`,
+  `slog.NewTextHandler`, `slog.With`, `slog.Group`, `LogValuer` for
+  lazy values, injecting `*slog.Logger` as a dependency, propagating
+  loggers through `context.Context`, log levels (debug/info/warn/error),
+  request-scoped logging middleware, USE method, RED method, or
+  observability decisions. ALSO TRIGGER on phrases like "add logging",
+  "instrument this", "structured logs", "switch from log to slog".
+  SKIP for `fmt.Println` debugging or non-Go logging.
+version: 1.1.0
 tags:
   - go
   - golang
@@ -17,6 +27,8 @@ tags:
   - slog
   - observability
   - structured-logging
+paths:
+  - "**/*.go"
 ---
 
 # Go Logging

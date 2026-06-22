@@ -10,13 +10,26 @@ description: >-
   subcommands with rich help). Pair with go-style for naming and config
   patterns, go-errors for exit-code mapping, and go-logging for diagnostic
   output.
-version: 1.0.0
+when_to_use: >-
+  TRIGGER WHEN the user is building or modifying a Go command-line
+  tool — top-level flags with `flag.Parse`, subcommands via
+  `flag.NewFlagSet`, exit codes via `os.Exit`, writing errors to
+  `os.Stderr`, signal handling (`os/signal`, `signal.NotifyContext`),
+  environment-variable fallbacks, `-h` / `-help` output, `cmd/<tool>`
+  project layout, or deciding between stdlib `flag` vs cobra vs
+  urfave-cli. ALSO TRIGGER on phrases like "write a CLI", "build a
+  command-line tool", "make this a CLI", "add a subcommand", "parse
+  these flags". SKIP for non-Go CLI frameworks (click, clap, oclif).
+version: 1.1.0
 tags:
   - go
   - golang
   - cli
   - flag
   - subcommands
+paths:
+  - "**/*.go"
+  - "**/cmd/**"
 ---
 
 # Go CLI

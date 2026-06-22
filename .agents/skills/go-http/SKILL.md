@@ -11,7 +11,20 @@ description: >-
   and timeouts (`ReadTimeout`, `WriteTimeout`, `IdleTimeout`). Pair with
   go-sql for the data layer, go-logging for request-scoped logging,
   go-errors for status code mapping, and go-testing for handler tests.
-version: 1.0.0
+when_to_use: >-
+  TRIGGER WHEN the user is building or modifying an HTTP service in
+  Go — `chi.Router`, `chi.Use`, `middleware.Logger`,
+  `middleware.Recoverer`, `middleware.RequestID`, handler signatures
+  (`func(w http.ResponseWriter, r *http.Request)`), request decoding,
+  JSON responses, status code mapping from typed errors, graceful
+  shutdown via `http.Server.Shutdown`, `httptest.NewServer` /
+  `httptest.NewRecorder`, `ReadTimeout`/`WriteTimeout`/`IdleTimeout`,
+  or service layout (`cmd/server`, `internal/handler`,
+  `internal/service`). ALSO TRIGGER on indirect phrasings inside a Go
+  repo: "add an endpoint", "expose /healthz", "wire up a REST API",
+  "build a backend service", "add a middleware". SKIP for non-Go HTTP
+  frameworks (Express, FastAPI, Spring, Actix).
+version: 1.1.0
 tags:
   - go
   - golang
@@ -20,6 +33,10 @@ tags:
   - api
   - rest
   - service
+paths:
+  - "**/*.go"
+  - "**/handler/**"
+  - "**/cmd/server/**"
 ---
 
 # Go HTTP

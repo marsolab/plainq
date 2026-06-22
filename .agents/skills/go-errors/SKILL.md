@@ -8,13 +8,26 @@ description: >-
   combining failures, the "handle exactly once" rule, panic vs error,
   guard clauses and early return, error message formatting, or any
   `if err != nil` pattern. Use alongside go-style for general idioms.
-version: 1.0.0
+when_to_use: >-
+  TRIGGER WHEN the user is raising, returning, wrapping, matching, or
+  aggregating Go errors — `fmt.Errorf` with `%w`, `errors.Is`,
+  `errors.As`, `errors.Join`, sentinel errors (`var ErrFoo = ...`),
+  typed error structs implementing `Error() string`, the "handle
+  exactly once" rule, log-or-return decisions, panic vs error in
+  libraries, guard clauses, early return, lowercased no-punctuation
+  error messages, exit-code mapping from typed errors, or any
+  `if err != nil { ... }` review question. ALSO TRIGGER on phrases
+  like "wrap this error", "add error context", "join these errors",
+  "match a sentinel". SKIP for non-Go languages.
+version: 1.1.0
 tags:
   - go
   - golang
   - errors
   - error-handling
   - errors-join
+paths:
+  - "**/*.go"
 ---
 
 # Go Errors
