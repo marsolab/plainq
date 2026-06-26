@@ -24,6 +24,26 @@ need to scale out.
   structured logs, and per-queue knobs for retention, visibility timeout,
   max-receive attempts, and dead-letter / drop eviction.
 
+## Documentation
+
+Full documentation lives in [`docs/`](docs/README.md):
+
+- **Getting started** — [Quick start](docs/getting-started/quickstart.md) ·
+  [Installation](docs/getting-started/installation.md) ·
+  [Core concepts](docs/getting-started/core-concepts.md)
+- **Guides** — [CLI](docs/guides/cli.md) ·
+  [Queues & messages](docs/guides/queues-and-messages.md) ·
+  [gRPC API](docs/guides/grpc-api.md) ·
+  [Configuration](docs/guides/configuration.md) ·
+  [Deployment](docs/guides/deployment.md) ·
+  [Observability](docs/guides/observability.md) ·
+  [Houston](docs/guides/houston.md)
+- **Auth** — [Authentication & RBAC](docs/authentication-rbac.md) ·
+  [OAuth, organizations & teams](docs/oauth-organizations-teams.md)
+- **Examples** — [Examples & recipes](docs/examples/README.md)
+- **Reference** — [CLI](docs/reference/cli.md) ·
+  [Configuration](docs/reference/configuration.md)
+
 ## Table of contents
 
 - [Quick start](#quick-start)
