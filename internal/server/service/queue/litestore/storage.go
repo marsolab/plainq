@@ -17,6 +17,7 @@ import (
 	"github.com/marsolab/servekit/errkit"
 	"github.com/marsolab/servekit/idkit"
 	"github.com/marsolab/servekit/logkit"
+	"github.com/oklog/ulid/v2"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -37,6 +38,12 @@ const (
 
 	// maxReceiveAttempts represents the maximum number of receive attempts for a message.
 	maxReceiveAttempts = 5
+
+	// maxSendInsertBatch caps how many messages go into a single multi-row
+	// INSERT. Each message binds two parameters, so a batch must stay under
+	// SQLite's bind-parameter limit; larger Send batches are split into this
+	// many messages per statement.
+	maxSendInsertBatch = 5000
 
 	// queuePropsCacheSize represents the size of the queue properties cache.
 	queuePropsCacheSize = 1000
@@ -375,7 +382,30 @@ func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest)
 func (s *Storage) Send(ctx context.Context, input *v1.SendRequest) (_ *v1.SendResponse, sErr error) {
 	queueID := input.GetQueueId()
 
-	s.cache.getByID(queueID)
+	messages := input.GetMessages()
+
+	output := v1.SendResponse{
+		MessageIds: make([]string, 0, len(messages)),
+	}
+
+	if len(messages) == 0 {
+		return &output, nil
+	}
+
+	// Pre-generate IDs (response order matches request order) and flatten the
+	// batch into one (msg_id, msg_body, …) argument slice for multi-row INSERT.
+	args := make([]any, 0, len(messages)*2)
+
+	var sentBytes uint64
+
+	for _, m := range messages {
+		msgID := idkit.ULID()
+
+		args = append(args, msgID, m.Body)
+		output.MessageIds = append(output.MessageIds, msgID)
+
+		sentBytes += uint64(len(m.Body))
+	}
 
 	tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if txErr != nil {
@@ -388,49 +418,31 @@ func (s *Storage) Send(ctx context.Context, input *v1.SendRequest) (_ *v1.SendRe
 		}
 	}()
 
-	stmt, prepareErr := tx.PrepareContext(ctx, queryInsertMessages(queueID))
-	if prepareErr != nil {
-		return nil, fmt.Errorf("prepare statement: %w", prepareErr)
-	}
+	// One multi-row INSERT per chunk instead of one INSERT per message. Chunks
+	// stay under SQLite's bind-parameter limit; the surrounding transaction
+	// keeps the whole Send all-or-nothing.
+	for start := 0; start < len(messages); start += maxSendInsertBatch {
+		end := min(start+maxSendInsertBatch, len(messages))
 
-	defer func() {
-		if err := stmt.Close(); err != nil {
-			sErr = errors.Join(sErr, fmt.Errorf("close prepared statement: %w", err))
+		if _, err := tx.ExecContext(ctx, queryInsertMessagesBatch(queueID, end-start), args[start*2:end*2]...); err != nil {
+			return nil, fmt.Errorf("insert messages: %w", err)
 		}
-	}()
-
-	output := v1.SendResponse{
-		MessageIds: make([]string, 0, len(input.Messages)),
-	}
-
-	for _, m := range input.GetMessages() {
-		msgID := idkit.ULID()
-
-		if _, err := stmt.ExecContext(ctx, msgID, m.Body); err != nil {
-			return nil, fmt.Errorf("insert message: %w", err)
-		}
-
-		output.MessageIds = append(output.MessageIds, msgID)
-
-		s.observer.MessagesSentBytes(queueID).Add(uint64(len(m.Body)))
 	}
 
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
 
+	s.observer.MessagesSentBytes(queueID).Add(sentBytes)
 	s.observer.MessagesSent(queueID).Add(uint64(len(output.MessageIds)))
 
 	return &output, nil
 }
 
-//nolint:cyclop,gocyclo // sErr is set by deferred rollback; complex message receiving logic.
 func (s *Storage) Receive(ctx context.Context, input *v1.ReceiveRequest) (_ *v1.ReceiveResponse, sErr error) {
 	queueID := input.GetQueueId()
 
-	info, describeErr := s.DescribeQueue(ctx, &v1.DescribeQueueRequest{
-		QueueId: queueID,
-	})
+	info, describeErr := s.DescribeQueue(ctx, &v1.DescribeQueueRequest{QueueId: queueID})
 	if describeErr != nil {
 		return nil, fmt.Errorf("describe queue (id: %q): %w", queueID, describeErr)
 	}
@@ -446,139 +458,184 @@ func (s *Storage) Receive(ctx context.Context, input *v1.ReceiveRequest) (_ *v1.
 		}
 	}()
 
-	limit := input.BatchSize
-	if limit == 0 {
-		limit = 1
-	}
-
-	stmt, prepareErr := tx.PrepareContext(ctx, queryUpdateMessages(queueID))
-	if prepareErr != nil {
-		return nil, fmt.Errorf("prepare statement: %w", prepareErr)
-	}
-
-	defer func() {
-		if err := stmt.Close(); err != nil {
-			sErr = errors.Join(sErr, fmt.Errorf("close prepared statement: %w", err))
-		}
-	}()
-
-	rows, queryErr := tx.QueryContext(ctx, querySelectMessages(queueID),
-		info.MaxReceiveAttempts,
-		limit,
-	)
-	if queryErr != nil {
-		return nil, fmt.Errorf("select query: %w", queryErr)
-	}
-
-	defer func() {
-		if err := rows.Close(); err != nil {
-			sErr = errors.Join(sErr, fmt.Errorf("close rows: %w", err))
-		}
-	}()
-
-	output := v1.ReceiveResponse{
-		Messages: make([]*v1.ReceiveMessage, 0, input.BatchSize),
+	messages, selectErr := selectVisibleMessages(ctx, tx, queueID, info.MaxReceiveAttempts, input.BatchSize)
+	if selectErr != nil {
+		return nil, selectErr
 	}
 
 	//nolint:gosec // VisibilityTimeoutSeconds is bounded by validation; conversion to int64 is safe.
 	visibleAt := time.Now().UTC().Add(time.Duration(info.VisibilityTimeoutSeconds) * time.Second)
 
-	for rows.Next() {
-		var m v1.ReceiveMessage
-
-		if err := rows.Scan(&m.Id, &m.Body); err != nil {
-			return nil, fmt.Errorf("scan message record: %w", err)
-		}
-
-		if _, err := stmt.ExecContext(ctx, visibleAt, m.Id); err != nil {
-			return nil, fmt.Errorf("update message record: %w", err)
-		}
-
-		output.Messages = append(output.Messages, &m)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate message rows: %w", err)
+	if err := bumpVisibility(ctx, tx, queueID, messages, visibleAt); err != nil {
+		return nil, err
 	}
 
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
 
-	if len(output.Messages) == 0 {
+	if len(messages) == 0 {
 		s.observer.EmptyReceives(queueID).Inc()
 	}
 
-	messagesCount := uint64(len(output.Messages))
+	s.observer.MessagesReceived(queueID).Add(uint64(len(messages)))
 
-	s.observer.MessagesReceived(queueID).Add(messagesCount)
-
-	return &output, nil
+	return &v1.ReceiveResponse{Messages: messages}, nil
 }
 
-func (s *Storage) Delete(ctx context.Context, input *v1.DeleteRequest) (_ *v1.DeleteResponse, sErr error) {
+// selectVisibleMessages reads up to limit visible, under-attempt-limit messages
+// ordered by created_at. It fully drains and closes the read cursor before
+// returning so the caller can issue the batched visibility UPDATE — SQLite
+// cannot write through an open read cursor on the same connection. A batch size
+// of 0 defaults to 1.
+func selectVisibleMessages(
+	ctx context.Context,
+	tx *sql.Tx,
+	queueID string,
+	maxReceiveAttempts, batchSize uint32,
+) (_ []*v1.ReceiveMessage, err error) {
+	limit := batchSize
+	if limit == 0 {
+		limit = 1
+	}
+
+	rows, queryErr := tx.QueryContext(ctx, querySelectMessages(queueID), maxReceiveAttempts, limit)
+	if queryErr != nil {
+		return nil, fmt.Errorf("select query: %w", queryErr)
+	}
+
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("close rows: %w", closeErr)
+		}
+	}()
+
+	messages := make([]*v1.ReceiveMessage, 0, limit)
+
+	for rows.Next() {
+		var m v1.ReceiveMessage
+
+		if scanErr := rows.Scan(&m.Id, &m.Body); scanErr != nil {
+			return nil, fmt.Errorf("scan message record: %w", scanErr)
+		}
+
+		messages = append(messages, &m)
+	}
+
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return nil, fmt.Errorf("iterate message rows: %w", rowsErr)
+	}
+
+	return messages, nil
+}
+
+// bumpVisibility hides a freshly-received batch until visibleAt and increments
+// each message's retry count in a single UPDATE. A nil/empty batch is a no-op.
+func bumpVisibility(ctx context.Context, tx *sql.Tx, queueID string, messages []*v1.ReceiveMessage, visibleAt time.Time) error {
+	if len(messages) == 0 {
+		return nil
+	}
+
+	args := make([]any, 0, len(messages)+1)
+	args = append(args, visibleAt)
+
+	for _, m := range messages {
+		args = append(args, m.Id)
+	}
+
+	if _, err := tx.ExecContext(ctx, queryUpdateMessagesVisibility(queueID, len(messages)), args...); err != nil {
+		return fmt.Errorf("update messages visibility: %w", err)
+	}
+
+	return nil
+}
+
+func (s *Storage) Delete(ctx context.Context, input *v1.DeleteRequest) (*v1.DeleteResponse, error) {
 	queueID := input.GetQueueId()
 
-	tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
-	if txErr != nil {
-		return nil, fmt.Errorf("begin transaction: %w", txErr)
-	}
-
-	defer func() {
-		if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
-			sErr = errors.Join(sErr, fmt.Errorf("rollback transaction: %w", err))
-		}
-	}()
-
-	stmt, prepareErr := tx.PrepareContext(ctx, queryDeleteMessage(queueID))
-	if prepareErr != nil {
-		return nil, fmt.Errorf("prepare statement: %w", prepareErr)
-	}
-
-	defer func() {
-		if err := stmt.Close(); err != nil {
-			sErr = errors.Join(sErr, fmt.Errorf("close prepared statement: %w", err))
-		}
-	}()
+	ids := input.GetMessageIds()
 
 	output := v1.DeleteResponse{
-		Successful: make([]string, 0, len(input.MessageIds)),
-		Failed:     make([]*v1.DeleteFailure, 0, 1),
+		Successful: make([]string, 0, len(ids)),
+		Failed:     make([]*v1.DeleteFailure, 0),
 	}
 
-	for _, id := range input.GetMessageIds() {
-		if _, err := stmt.ExecContext(ctx, id); err != nil {
-			output.Failed = append(output.Failed, &v1.DeleteFailure{
-				MessageId: id,
-			})
+	if len(ids) == 0 {
+		return &output, nil
+	}
+
+	args := make([]any, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+
+	// One DELETE … IN (…) RETURNING removes the whole batch in a single
+	// statement; the returned ids are the messages that actually existed.
+	rows, queryErr := s.db.QueryContext(ctx, queryDeleteMessages(queueID, len(ids)), args...)
+	if queryErr != nil {
+		return nil, fmt.Errorf("delete messages: %w", queryErr)
+	}
+
+	deleted, collectErr := collectReturnedIDs(rows)
+	if collectErr != nil {
+		return nil, collectErr
+	}
+
+	// Ids that came back were removed (successful); ids that didn't were not in
+	// the queue (failed).
+	for _, id := range ids {
+		if _, ok := deleted[id]; !ok {
+			output.Failed = append(output.Failed, &v1.DeleteFailure{MessageId: id})
 
 			continue
 		}
 
-		if xID, err := idkit.ParseXID(id); err == nil {
-			s.observer.TimeInQueue(queueID).Dur(xID.Time())
-		} else {
-			// The fact that queue contains messages with invalid ID format
-			// means that something is really wrong with the queue. Looks like
-			// someone has modified the storage manually.
-			panic(fmt.Errorf(
-				"queue (id: %q) contains messages with invalid id (id: %q): %s",
-				queueID, id, err.Error(),
-			))
-		}
+		recordTimeInQueue(s.observer, queueID, id)
 
 		output.Successful = append(output.Successful, id)
 	}
 
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit transaction: %w", err)
-	}
-
-	messagesCount := uint64(len(output.Successful))
-
-	s.observer.MessagesDeleted(queueID).Add(messagesCount)
+	s.observer.MessagesDeleted(queueID).Add(uint64(len(output.Successful)))
 
 	return &output, nil
+}
+
+// collectReturnedIDs drains a RETURNING result set into a set of ids, closing
+// the cursor when done.
+func collectReturnedIDs(rows *sql.Rows) (_ map[string]struct{}, err error) {
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("close rows: %w", closeErr)
+		}
+	}()
+
+	ids := make(map[string]struct{})
+
+	for rows.Next() {
+		var id string
+
+		if scanErr := rows.Scan(&id); scanErr != nil {
+			return nil, fmt.Errorf("scan deleted id: %w", scanErr)
+		}
+
+		ids[id] = struct{}{}
+	}
+
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return nil, fmt.Errorf("iterate deleted ids: %w", rowsErr)
+	}
+
+	return ids, nil
+}
+
+// recordTimeInQueue observes how long a message lived in the queue, using the
+// timestamp embedded in its ULID id as the enqueue instant. A message id that
+// fails to parse is skipped rather than fatal: the metric is best-effort and
+// must never take the server down on delete.
+func recordTimeInQueue(observer telemetry.Observer, queueID, msgID string) {
+	if u, err := ulid.Parse(msgID); err == nil {
+		observer.TimeInQueue(queueID).Dur(ulid.Time(u.Time()))
+	}
 }
 
 // Health implements hc.HealthChecker interface.
