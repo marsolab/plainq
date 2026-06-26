@@ -73,7 +73,7 @@ func querySelectMessages(queueID string) string {
 // claimed batch in one statement. The first placeholder is the new visible_at;
 // the remaining n placeholders are the claimed message ids. SQLite has no
 // SKIP LOCKED, but collapsing the per-message UPDATE loop into a single
-// statement minimises how long the receive holds the single-writer lock.
+// statement minimizes how long the receive holds the single-writer lock.
 func queryUpdateMessagesVisibility(queueID string, n int) string {
 	return `update ` + queueID + ` set visible_at = ?, retries = retries + 1 where msg_id in (` +
 		placeholders(n) + `);`

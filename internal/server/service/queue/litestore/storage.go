@@ -447,11 +447,6 @@ func (s *Storage) Receive(ctx context.Context, input *v1.ReceiveRequest) (_ *v1.
 		return nil, fmt.Errorf("describe queue (id: %q): %w", queueID, describeErr)
 	}
 
-	limit := input.BatchSize
-	if limit == 0 {
-		limit = 1
-	}
-
 	tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if txErr != nil {
 		return nil, fmt.Errorf("begin transaction: %w", txErr)
@@ -463,39 +458,15 @@ func (s *Storage) Receive(ctx context.Context, input *v1.ReceiveRequest) (_ *v1.
 		}
 	}()
 
-	output := v1.ReceiveResponse{
-		Messages: make([]*v1.ReceiveMessage, 0, limit),
-	}
-
-	rows, queryErr := tx.QueryContext(ctx, querySelectMessages(queueID), info.MaxReceiveAttempts, limit)
-	if queryErr != nil {
-		return nil, fmt.Errorf("select query: %w", queryErr)
-	}
-
-	for rows.Next() {
-		var m v1.ReceiveMessage
-
-		if err := rows.Scan(&m.Id, &m.Body); err != nil {
-			rows.Close()
-
-			return nil, fmt.Errorf("scan message record: %w", err)
-		}
-
-		output.Messages = append(output.Messages, &m)
-	}
-
-	// The read cursor must be closed before the batched UPDATE runs: SQLite
-	// cannot write through an open read cursor on the same connection.
-	rows.Close()
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate message rows: %w", err)
+	messages, selectErr := selectVisibleMessages(ctx, tx, queueID, info.MaxReceiveAttempts, input.BatchSize)
+	if selectErr != nil {
+		return nil, selectErr
 	}
 
 	//nolint:gosec // VisibilityTimeoutSeconds is bounded by validation; conversion to int64 is safe.
 	visibleAt := time.Now().UTC().Add(time.Duration(info.VisibilityTimeoutSeconds) * time.Second)
 
-	if err := bumpVisibility(ctx, tx, queueID, output.Messages, visibleAt); err != nil {
+	if err := bumpVisibility(ctx, tx, queueID, messages, visibleAt); err != nil {
 		return nil, err
 	}
 
@@ -503,13 +474,54 @@ func (s *Storage) Receive(ctx context.Context, input *v1.ReceiveRequest) (_ *v1.
 		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
 
-	if len(output.Messages) == 0 {
+	if len(messages) == 0 {
 		s.observer.EmptyReceives(queueID).Inc()
 	}
 
-	s.observer.MessagesReceived(queueID).Add(uint64(len(output.Messages)))
+	s.observer.MessagesReceived(queueID).Add(uint64(len(messages)))
 
-	return &output, nil
+	return &v1.ReceiveResponse{Messages: messages}, nil
+}
+
+// selectVisibleMessages reads up to limit visible, under-attempt-limit messages
+// ordered by created_at. It fully drains and closes the read cursor before
+// returning so the caller can issue the batched visibility UPDATE — SQLite
+// cannot write through an open read cursor on the same connection. A batch size
+// of 0 defaults to 1.
+func selectVisibleMessages(ctx context.Context, tx *sql.Tx, queueID string, maxReceiveAttempts, batchSize uint32) (_ []*v1.ReceiveMessage, err error) {
+	limit := batchSize
+	if limit == 0 {
+		limit = 1
+	}
+
+	rows, queryErr := tx.QueryContext(ctx, querySelectMessages(queueID), maxReceiveAttempts, limit)
+	if queryErr != nil {
+		return nil, fmt.Errorf("select query: %w", queryErr)
+	}
+
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("close rows: %w", closeErr)
+		}
+	}()
+
+	messages := make([]*v1.ReceiveMessage, 0, limit)
+
+	for rows.Next() {
+		var m v1.ReceiveMessage
+
+		if scanErr := rows.Scan(&m.Id, &m.Body); scanErr != nil {
+			return nil, fmt.Errorf("scan message record: %w", scanErr)
+		}
+
+		messages = append(messages, &m)
+	}
+
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return nil, fmt.Errorf("iterate message rows: %w", rowsErr)
+	}
+
+	return messages, nil
 }
 
 // bumpVisibility hides a freshly-received batch until visibleAt and increments
@@ -559,24 +571,9 @@ func (s *Storage) Delete(ctx context.Context, input *v1.DeleteRequest) (*v1.Dele
 		return nil, fmt.Errorf("delete messages: %w", queryErr)
 	}
 
-	deleted := make(map[string]struct{}, len(ids))
-
-	for rows.Next() {
-		var id string
-
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-
-			return nil, fmt.Errorf("scan deleted id: %w", err)
-		}
-
-		deleted[id] = struct{}{}
-	}
-
-	rows.Close()
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate deleted ids: %w", err)
+	deleted, collectErr := collectReturnedIDs(rows)
+	if collectErr != nil {
+		return nil, collectErr
 	}
 
 	// Ids that came back were removed (successful); ids that didn't were not in
@@ -596,6 +593,34 @@ func (s *Storage) Delete(ctx context.Context, input *v1.DeleteRequest) (*v1.Dele
 	s.observer.MessagesDeleted(queueID).Add(uint64(len(output.Successful)))
 
 	return &output, nil
+}
+
+// collectReturnedIDs drains a RETURNING result set into a set of ids, closing
+// the cursor when done.
+func collectReturnedIDs(rows *sql.Rows) (_ map[string]struct{}, err error) {
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("close rows: %w", closeErr)
+		}
+	}()
+
+	ids := make(map[string]struct{})
+
+	for rows.Next() {
+		var id string
+
+		if scanErr := rows.Scan(&id); scanErr != nil {
+			return nil, fmt.Errorf("scan deleted id: %w", scanErr)
+		}
+
+		ids[id] = struct{}{}
+	}
+
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return nil, fmt.Errorf("iterate deleted ids: %w", rowsErr)
+	}
+
+	return ids, nil
 }
 
 // recordTimeInQueue observes how long a message lived in the queue, using the
