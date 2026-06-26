@@ -23,9 +23,11 @@ This documentation is organized so you can move from "never heard of it" to
 | [Queues & messages](guides/queues-and-messages.md)             | Visibility timeout, retries, retention, eviction, dead-letter.      |
 | [gRPC API](guides/grpc-api.md)                                 | The wire protocol, the eight RPCs, generating clients.              |
 | [Configuration](guides/configuration.md)                       | Every `serve` flag, grouped and explained.                          |
+| [Advanced topics](guides/advanced.md)                          | Pub/sub fan-out, throughput tuning, scaling, GC, delivery guarantees. |
 | [Deployment](guides/deployment.md)                             | SQLite + Litestream, PostgreSQL, containers, hardening.             |
 | [Observability](guides/observability.md)                       | Health, Prometheus metrics, telemetry, logs.                        |
 | [Houston (admin UI)](guides/houston.md)                        | The bundled dashboard and onboarding flow.                          |
+| [Troubleshooting & FAQ](guides/troubleshooting.md)             | Common errors, fixes, and frequent questions.                       |
 | [Authentication & RBAC](authentication-rbac.md)                | JWT sessions, roles, queue permissions, onboarding.                 |
 | [OAuth, organizations & teams](oauth-organizations-teams.md)   | External identity providers and multi-tenancy.                      |
 

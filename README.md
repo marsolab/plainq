@@ -35,9 +35,11 @@ Full documentation lives in [`docs/`](docs/README.md):
   [Queues & messages](docs/guides/queues-and-messages.md) ·
   [gRPC API](docs/guides/grpc-api.md) ·
   [Configuration](docs/guides/configuration.md) ·
+  [Advanced topics](docs/guides/advanced.md) ·
   [Deployment](docs/guides/deployment.md) ·
   [Observability](docs/guides/observability.md) ·
-  [Houston](docs/guides/houston.md)
+  [Houston](docs/guides/houston.md) ·
+  [Troubleshooting & FAQ](docs/guides/troubleshooting.md)
 - **Auth** — [Authentication & RBAC](docs/authentication-rbac.md) ·
   [OAuth, organizations & teams](docs/oauth-organizations-teams.md)
 - **Examples** — [Examples & recipes](docs/examples/README.md)
