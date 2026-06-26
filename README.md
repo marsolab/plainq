@@ -116,11 +116,14 @@ make docker IMAGE=plainq VERSION=dev
 docker build -t plainq:dev .
 
 docker run --rm -p 8080:8080 -p 8081:8081 -v plainq-data:/data \
-  plainq:dev serve -auth.jwt.secret="$(openssl rand -hex 32)"
+  plainq:dev serve -storage.path=/data/plainq.db \
+  -auth.jwt.secret="$(openssl rand -hex 32)"
 ```
 
-The image exposes `8080` (gRPC) and `8081` (HTTP/Houston) and stores the SQLite
-database under `/data`.
+The image exposes `8080` (gRPC) and `8081` (HTTP/Houston). A bare
+`docker run plainq:dev` prints usage — pass an explicit `serve ...` command (as
+above) to start the server, pointing `-storage.path` at the mounted `/data`
+volume for a durable SQLite database.
 
 ### Kubernetes (Helm)
 

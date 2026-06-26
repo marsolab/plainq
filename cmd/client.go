@@ -516,17 +516,22 @@ func receiveCommand() *scotty.Command {
 				return fmt.Errorf("receive messages: %w", receiveErr)
 			}
 
+			// Render output before acknowledging so that a failed write (closed
+			// pipe, encoding error) never deletes messages the caller never
+			// actually received — this is what -ack's "after printing" means.
+			if jsonOut {
+				if err := encodeJSON(os.Stdout, receive); err != nil {
+					return err
+				}
+			} else {
+				printReceivedText(os.Stdout, receive.GetMessages())
+			}
+
 			if ack {
 				if err := ackReceived(ctx, cli, id, receive.GetMessages()); err != nil {
 					return err
 				}
 			}
-
-			if jsonOut {
-				return encodeJSON(os.Stdout, receive)
-			}
-
-			printReceivedText(os.Stdout, receive.GetMessages())
 
 			return nil
 		},

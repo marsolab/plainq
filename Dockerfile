@@ -82,5 +82,12 @@ EXPOSE 8080 8081
 # mounted. Mount a volume here in production.
 VOLUME ["/data"]
 
+# A bare `docker run` prints usage rather than crashing: `plainq serve`
+# requires an auth secret, so we don't bake a default `serve` command that
+# would exit immediately. Run the server explicitly, e.g.:
+#
+#   docker run -p 8080:8080 -p 8081:8081 -v plainq-data:/data <image> \
+#     serve -storage.path=/data/plainq.db -auth.jwt.secret="$(openssl rand -hex 32)"
+#
+# The Helm chart passes the full `serve ...` argument list for you.
 ENTRYPOINT ["/usr/local/bin/plainq"]
-CMD ["serve", "-grpc.addr=:8080", "-http.addr=:8081", "-storage.path=/data/plainq.db"]
