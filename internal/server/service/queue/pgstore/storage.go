@@ -311,46 +311,46 @@ func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest)
 	return &v1.DeleteQueueResponse{}, nil
 }
 
-func (s *Storage) Send(ctx context.Context, input *v1.SendRequest) (_ *v1.SendResponse, sErr error) {
+func (s *Storage) Send(ctx context.Context, input *v1.SendRequest) (*v1.SendResponse, error) {
 	queueID := input.GetQueueId()
-	s.cache.getByID(queueID)
 
-	tx, txErr := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
-	if txErr != nil {
-		return nil, fmt.Errorf(fmtBeginTxError, txErr)
-	}
-
-	defer func() { sErr = errors.Join(sErr, rollback(ctx, tx)) }()
-
-	insertSQL := queryInsertMessages(queueID)
+	messages := input.GetMessages()
 
 	output := v1.SendResponse{
-		MessageIds: make([]string, 0, len(input.Messages)),
+		MessageIds: make([]string, 0, len(messages)),
 	}
 
-	for _, m := range input.GetMessages() {
+	if len(messages) == 0 {
+		return &output, nil
+	}
+
+	// Collect every message into one multi-row INSERT: a single round trip and
+	// a single implicit transaction for the whole batch, instead of opening a
+	// SERIALIZABLE transaction and issuing one INSERT per message.
+	args := make([]any, 0, len(messages)*2)
+
+	var sentBytes uint64
+
+	for _, m := range messages {
 		msgID := idkit.ULID()
 
-		if _, err := tx.Exec(ctx, insertSQL, msgID, m.Body); err != nil {
-			return nil, fmt.Errorf("insert message: %w", err)
-		}
-
+		args = append(args, msgID, m.Body)
 		output.MessageIds = append(output.MessageIds, msgID)
 
-		s.observer.MessagesSentBytes(queueID).Add(uint64(len(m.Body)))
+		sentBytes += uint64(len(m.Body))
 	}
 
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit transaction: %w", err)
+	if _, err := s.pool.Exec(ctx, queryInsertMessagesBatch(queueID, len(messages)), args...); err != nil {
+		return nil, fmt.Errorf("insert messages: %w", err)
 	}
 
+	s.observer.MessagesSentBytes(queueID).Add(sentBytes)
 	s.observer.MessagesSent(queueID).Add(uint64(len(output.MessageIds)))
 
 	return &output, nil
 }
 
-//nolint:cyclop // Complex message receiving with visibility timeout and polling.
-func (s *Storage) Receive(ctx context.Context, input *v1.ReceiveRequest) (_ *v1.ReceiveResponse, sErr error) {
+func (s *Storage) Receive(ctx context.Context, input *v1.ReceiveRequest) (*v1.ReceiveResponse, error) {
 	queueID := input.GetQueueId()
 
 	info, describeErr := s.DescribeQueue(ctx, &v1.DescribeQueueRequest{QueueId: queueID})
@@ -358,58 +358,42 @@ func (s *Storage) Receive(ctx context.Context, input *v1.ReceiveRequest) (_ *v1.
 		return nil, fmt.Errorf("describe queue (id: %q): %w", queueID, describeErr)
 	}
 
-	tx, txErr := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
-	if txErr != nil {
-		return nil, fmt.Errorf(fmtBeginTxError, txErr)
-	}
-
-	defer func() { sErr = errors.Join(sErr, rollback(ctx, tx)) }()
-
 	limit := input.BatchSize
 	if limit == 0 {
 		limit = 1
 	}
 
-	rows, queryErr := tx.Query(ctx, querySelectMessages(queueID), info.MaxReceiveAttempts, limit)
+	//nolint:gosec // VisibilityTimeoutSeconds is bounded by validation; conversion to int64 is safe.
+	visibleAt := time.Now().UTC().Add(time.Duration(info.VisibilityTimeoutSeconds) * time.Second)
+
+	// The claim is a single UPDATE … RETURNING with FOR UPDATE SKIP LOCKED in
+	// its subquery, which runs atomically in its own implicit transaction — no
+	// explicit BeginTx/Commit (and no SERIALIZABLE) needed. SKIP LOCKED lets
+	// concurrent receivers each grab a disjoint set of rows instead of
+	// colliding and retrying.
+	rows, queryErr := s.pool.Query(ctx, queryReceiveMessages(queueID), visibleAt, info.MaxReceiveAttempts, limit)
 	if queryErr != nil {
-		return nil, fmt.Errorf("select query: %w", queryErr)
+		return nil, fmt.Errorf("receive query: %w", queryErr)
 	}
 
+	defer rows.Close()
+
 	output := v1.ReceiveResponse{
-		Messages: make([]*v1.ReceiveMessage, 0, input.BatchSize),
+		Messages: make([]*v1.ReceiveMessage, 0, limit),
 	}
 
 	for rows.Next() {
 		var m v1.ReceiveMessage
 
 		if err := rows.Scan(&m.Id, &m.Body); err != nil {
-			rows.Close()
-
 			return nil, fmt.Errorf("scan message record: %w", err)
 		}
 
 		output.Messages = append(output.Messages, &m)
 	}
 
-	rows.Close()
-
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate messages: %w", err)
-	}
-
-	//nolint:gosec // VisibilityTimeoutSeconds is bounded by validation; conversion to int64 is safe.
-	visibleAt := time.Now().UTC().Add(time.Duration(info.VisibilityTimeoutSeconds) * time.Second)
-
-	updateSQL := queryUpdateMessages(queueID)
-
-	for _, m := range output.Messages {
-		if _, err := tx.Exec(ctx, updateSQL, visibleAt, m.Id); err != nil {
-			return nil, fmt.Errorf("update message record: %w", err)
-		}
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
 
 	if len(output.Messages) == 0 {

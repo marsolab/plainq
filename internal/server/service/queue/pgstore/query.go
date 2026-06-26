@@ -2,6 +2,7 @@ package pgstore
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
@@ -44,22 +45,56 @@ func queryInsertMessages(queueID string) string {
 	return fmt.Sprintf(`INSERT INTO %s (msg_id, msg_body) VALUES ($1, $2);`, quoteIdent(queueID))
 }
 
+// queryInsertMessagesBatch builds a single multi-row INSERT for n messages so
+// an entire Send batch costs one round trip (and one implicit transaction)
+// instead of n sequential INSERTs. Placeholders are laid out as
+// ($1,$2),($3,$4),… — callers pass args in (msg_id, msg_body) pairs.
+func queryInsertMessagesBatch(queueID string, n int) string {
+	var b strings.Builder
+
+	fmt.Fprintf(&b, `INSERT INTO %s (msg_id, msg_body) VALUES `, quoteIdent(queueID))
+
+	for i := range n {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+
+		fmt.Fprintf(&b, "($%d,$%d)", i*2+1, i*2+2)
+	}
+
+	b.WriteByte(';')
+
+	return b.String()
+}
+
 func queryDeleteQueueTable(queueID string) string {
 	return fmt.Sprintf(`DROP TABLE %s;`, quoteIdent(queueID))
 }
 
-func querySelectMessages(queueID string) string {
-	return fmt.Sprintf(
-		`SELECT msg_id, msg_body FROM %s WHERE visible_at <= now() AND retries <= $1 ORDER BY created_at LIMIT $2;`,
-		quoteIdent(queueID),
-	)
-}
+// queryReceiveMessages atomically claims up to $3 messages in a single round
+// trip. The inner SELECT picks the oldest visible, under-attempt-limit rows
+// with FOR UPDATE SKIP LOCKED so concurrent consumers never block on — or
+// fight over — the same rows; the outer UPDATE bumps their visibility deadline
+// and retry count and RETURNs the claimed payloads. This replaces the previous
+// "SELECT then N× UPDATE" pattern, which both did N+1 round trips per call and,
+// lacking row locks, handed the same messages to every concurrent receiver
+// (forcing serialization-failure retries under SERIALIZABLE).
+//
+// $1 = new visible_at, $2 = max_receive_attempts, $3 = batch size.
+func queryReceiveMessages(queueID string) string {
+	ident := quoteIdent(queueID)
 
-func queryUpdateMessages(queueID string) string {
-	return fmt.Sprintf(
-		`UPDATE %s SET visible_at = $1, retries = retries + 1 WHERE msg_id = $2;`,
-		quoteIdent(queueID),
-	)
+	return fmt.Sprintf(`
+		UPDATE %[1]s SET visible_at = $1, retries = retries + 1
+		WHERE msg_id IN (
+			SELECT msg_id FROM %[1]s
+			WHERE visible_at <= now() AND retries <= $2
+			ORDER BY created_at
+			LIMIT $3
+			FOR UPDATE SKIP LOCKED
+		)
+		RETURNING msg_id, msg_body;
+	`, ident)
 }
 
 func queryDeleteMessage(queueID string) string {
