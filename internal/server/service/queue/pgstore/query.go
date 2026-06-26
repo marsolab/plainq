@@ -55,14 +55,15 @@ func queryInsertMessagesBatch(queueID string, n int) string {
 	fmt.Fprintf(&b, `INSERT INTO %s (msg_id, msg_body) VALUES `, quoteIdent(queueID))
 
 	for i := range n {
+		sep := ""
 		if i > 0 {
-			b.WriteByte(',')
+			sep = ","
 		}
 
-		fmt.Fprintf(&b, "($%d,$%d)", i*2+1, i*2+2)
+		fmt.Fprintf(&b, "%s($%d,$%d)", sep, i*2+1, i*2+2)
 	}
 
-	b.WriteByte(';')
+	fmt.Fprint(&b, ";")
 
 	return b.String()
 }
