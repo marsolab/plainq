@@ -1,0 +1,22 @@
+# Patterns to ignore when building packages.
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
+.DS_Store
+# Common VCS dirs
+.git/
+.gitignore
+.bzr/
+.bzrignore
+.hg/
+.hgignore
+.svn/
+# Common backup files
+*.tgz
+# Various IDEs
+.project
+.idea/
+.vscode/
+*.tmproj

@@ -1,0 +1,41 @@
+{{- if .Values.ingress.enabled -}}
+{{- $fullName := include "plainq.fullname" . -}}
+{{- $grpcPort := .Values.service.grpcPort -}}
+{{- $httpPort := .Values.service.httpPort -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullName }}
+  labels:
+    {{- include "plainq.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range .Values.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ $fullName }}
+                # Route to the named Service port. Use "grpc" for the queue API
+                # (requires backend-protocol: GRPC on the controller) or "http"
+                # for the Houston UI / REST API.
+                port:
+                  number: {{ if eq (.port | default "http") "grpc" }}{{ $grpcPort }}{{ else }}{{ $httpPort }}{{ end }}
+          {{- end }}
+    {{- end }}
+{{- end }}
