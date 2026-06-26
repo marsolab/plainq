@@ -488,7 +488,12 @@ func (s *Storage) Receive(ctx context.Context, input *v1.ReceiveRequest) (_ *v1.
 // returning so the caller can issue the batched visibility UPDATE — SQLite
 // cannot write through an open read cursor on the same connection. A batch size
 // of 0 defaults to 1.
-func selectVisibleMessages(ctx context.Context, tx *sql.Tx, queueID string, maxReceiveAttempts, batchSize uint32) (_ []*v1.ReceiveMessage, err error) {
+func selectVisibleMessages(
+	ctx context.Context,
+	tx *sql.Tx,
+	queueID string,
+	maxReceiveAttempts, batchSize uint32,
+) (_ []*v1.ReceiveMessage, err error) {
 	limit := batchSize
 	if limit == 0 {
 		limit = 1
