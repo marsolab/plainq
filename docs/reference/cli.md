@@ -17,8 +17,14 @@ always authoritative.
 | `plainq describe <queue-id>`   | Describe a queue.                                           |
 | `plainq purge <queue-id>`      | Delete all messages in a queue.                            |
 | `plainq delete <queue-id>`     | Delete a queue.                                             |
-| `plainq send <queue-id>`       | Send a message.                                            |
+| `plainq send <queue-id>`       | Send one or more messages.                                |
 | `plainq receive <queue-id>`    | Receive messages.                                          |
+| `plainq delete-message <queue-id> <id>...` | Acknowledge (delete) messages by ID.          |
+| `plainq tui`                   | Launch the interactive terminal UI.                       |
+| `plainq schema`                | Print the gRPC API surface (text or `-json`).             |
+
+> Client commands take flags **before** the positional queue id, e.g.
+> `plainq send -message hi <queue-id>`. Flags after the positional are ignored.
 
 ## Common client flags
 
@@ -50,15 +56,17 @@ Accepted by every client command (`list`, `create`, `describe`, `purge`,
 
 ### `send`
 
-| Flag        | Default   | Meaning                       |
-| ----------- | --------- | ----------------------------- |
-| `--message` | _(empty)_ | Message body, as a string.    |
+| Flag        | Default   | Meaning                                                  |
+| ----------- | --------- | -------------------------------------------------------- |
+| `-message`  | _(empty)_ | Message body. Repeat the flag to send a batch.           |
+| `-file`     | _(empty)_ | Read newline-delimited bodies from a file (`-` = stdin). |
 
 ### `receive`
 
 | Flag      | Default | Meaning                                       |
 | --------- | ------- | --------------------------------------------- |
-| `--batch` | `1`     | Number of messages to receive (server max 10).|
+| `-batch`  | `1`     | Number of messages to receive (server max 10).|
+| `-ack`    | `false` | Delete each received message after printing.   |
 
 ### `delete`
 

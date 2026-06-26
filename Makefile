@@ -25,3 +25,26 @@ test:
 .PHONY: test-cover
 test-cover:
 	go test -v -race -coverprofile=coverage.out ./...
+
+.PHONY: lint
+lint:
+	golangci-lint run ./...
+
+.PHONY: fmt
+fmt:
+	golangci-lint fmt ./...
+
+# IMAGE and VERSION can be overridden, e.g. make docker IMAGE=ghcr.io/marsolab/plainq VERSION=v0.1.0
+IMAGE ?= plainq
+VERSION ?= dev
+
+.PHONY: docker
+docker:
+	docker build \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg COMMIT=$(shell git rev-parse --short HEAD) \
+		-t $(IMAGE):$(VERSION) .
+
+.PHONY: helm-lint
+helm-lint:
+	helm lint deploy/helm/plainq --set auth.jwtSecret=ci-test-secret

@@ -1,0 +1,40 @@
+name: Helm
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'deploy/helm/**'
+      - '.github/workflows/helm.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'deploy/helm/**'
+      - '.github/workflows/helm.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: helm lint
+        run: helm lint deploy/helm/plainq --set auth.jwtSecret=ci-test-secret
+
+      - name: helm template (sqlite)
+        run: helm template plainq deploy/helm/plainq --set auth.jwtSecret=ci-test-secret > /dev/null
+
+      - name: helm template (postgres)
+        run: |
+          helm template plainq deploy/helm/plainq \
+            --set storage.driver=postgres \
+            --set storage.postgres.dsn=postgres://user:pass@db:5432/plainq \
+            --set auth.jwtSecret=ci-test-secret > /dev/null
