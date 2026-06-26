@@ -73,28 +73,36 @@ func queryDeleteQueueTable(queueID string) string {
 }
 
 // queryReceiveMessages atomically claims up to $3 messages in a single round
-// trip. The inner SELECT picks the oldest visible, under-attempt-limit rows
+// trip. The `claimed` CTE picks the oldest visible, under-attempt-limit rows
 // with FOR UPDATE SKIP LOCKED so concurrent consumers never block on — or
-// fight over — the same rows; the outer UPDATE bumps their visibility deadline
-// and retry count and RETURNs the claimed payloads. This replaces the previous
-// "SELECT then N× UPDATE" pattern, which both did N+1 round trips per call and,
-// lacking row locks, handed the same messages to every concurrent receiver
-// (forcing serialization-failure retries under SERIALIZABLE).
+// fight over — the same rows; the `updated` CTE bumps their visibility
+// deadline and retry count. This replaces the previous "SELECT then N× UPDATE"
+// pattern, which both did N+1 round trips per call and, lacking row locks,
+// handed the same messages to every concurrent receiver (forcing
+// serialization-failure retries under SERIALIZABLE).
+//
+// The final SELECT re-imposes `ORDER BY created_at` because UPDATE … RETURNING
+// has no defined row order — without it a batch could surface newer messages
+// before older ones.
 //
 // $1 = new visible_at, $2 = max_receive_attempts, $3 = batch size.
 func queryReceiveMessages(queueID string) string {
 	ident := quoteIdent(queueID)
 
 	return fmt.Sprintf(`
-		UPDATE %[1]s SET visible_at = $1, retries = retries + 1
-		WHERE msg_id IN (
+		WITH claimed AS (
 			SELECT msg_id FROM %[1]s
 			WHERE visible_at <= now() AND retries <= $2
 			ORDER BY created_at
 			LIMIT $3
 			FOR UPDATE SKIP LOCKED
+		),
+		updated AS (
+			UPDATE %[1]s SET visible_at = $1, retries = retries + 1
+			WHERE msg_id IN (SELECT msg_id FROM claimed)
+			RETURNING msg_id, msg_body, created_at
 		)
-		RETURNING msg_id, msg_body;
+		SELECT msg_id, msg_body FROM updated ORDER BY created_at;
 	`, ident)
 }
 
