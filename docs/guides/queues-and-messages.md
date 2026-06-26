@@ -157,7 +157,10 @@ consumers.
 ## A real consumer loop
 
 The CLI's `receive` doesn't acknowledge, so a production consumer uses the gRPC
-`Delete` RPC. In Go with the bundled client:
+`Delete` RPC. In Go with the bundled client (the `internal/client` import below
+only compiles inside this repo — external projects should generate a client from
+the [Buf registry](https://buf.build/plainq/schema); see the
+[gRPC API guide](grpc-api.md#generating-a-client)):
 
 ```go
 package main

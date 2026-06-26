@@ -162,11 +162,17 @@ The queue model and semantics are identical across both. See
 
 PlainQ has authentication and RBAC built in, not bolted on:
 
-- The **HTTP/Houston** surface uses JWT sessions (access + refresh tokens),
-  role-based authorization, and per-queue permissions. The first run triggers an
-  **onboarding** flow to create the initial admin.
+- PlainQ ships a JWT session subsystem (access + refresh tokens), role-based
+  authorization, per-queue permissions, and a first-run **onboarding** flow to
+  create the initial admin. Houston uses these for its login.
 - External identity providers (Kinde, Auth0, Okta, WorkOS) plug in via OAuth/OIDC,
   with optional organization and team multi-tenancy.
+
+> **Current limitation:** the auth/RBAC middleware is **not** yet wired onto the
+> HTTP API routes — the REST endpoints under `/api/v1` (and the gRPC API) accept
+> requests without a token in the current build. Don't rely on built-in auth as
+> your only access control; see
+> [Deployment → network exposure](../guides/deployment.md#network-exposure).
 
 See [Authentication & RBAC](../authentication-rbac.md) and
 [OAuth, organizations & teams](../oauth-organizations-teams.md).

@@ -178,8 +178,10 @@ func main() {
 - The bundled Go client dials with **insecure (plaintext) transport** and a 10s
   dial timeout. The gRPC port is intended to sit on a trusted network or behind a
   proxy that terminates TLS — see [Deployment](deployment.md#network-exposure).
-- The gRPC surface today does not enforce the JWT auth used by the HTTP/Houston
-  API. Treat `:8080` as a privileged port and restrict who can reach it.
+- Neither the gRPC surface nor the HTTP API routes currently enforce JWT auth at
+  the server (the auth/RBAC subsystem exists but isn't wired onto the routes).
+  Treat `:8080` as a privileged port and restrict who can reach it — see
+  [Deployment → network exposure](deployment.md#network-exposure).
 - PlainQ registers the
   [vtprotobuf](https://github.com/planetscale/vtprotobuf) codec for faster
   marshaling; generated clients interoperate normally over standard protobuf.

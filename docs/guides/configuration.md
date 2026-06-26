@@ -67,7 +67,7 @@ recommended):
 
 | Flag                                | Default  | Purpose                                                      |
 | ----------------------------------- | -------- | ------------------------------------------------------------ |
-| `--auth.enable`                     | `true`   | Master switch for JWT auth on the HTTP/Houston surface.      |
+| `--auth.enable`                     | `true`   | Master switch for the JWT auth subsystem (account APIs, Houston login). |
 | `--auth.jwt.secret`                 | _(empty)_| HMAC secret signing access/refresh tokens. **Required** to issue sessions. |
 | `--auth.access.ttl`                 | `60m`    | Access-token lifetime.                                       |
 | `--auth.refresh.ttl`                | `720h`   | Refresh-token lifetime (30 days).                            |
@@ -80,6 +80,12 @@ recommended):
 > or an environment variable; don't hardcode it.
 
 See [Authentication & RBAC](../authentication-rbac.md) for the full model.
+
+> **Note:** in the current build the auth/RBAC middleware is not applied to the
+> HTTP API routes, so these settings govern the auth *subsystem* (sessions,
+> account endpoints, Houston login) rather than gating the queue/RBAC/OAuth REST
+> endpoints. Keep the HTTP and gRPC listeners on a trusted network — see
+> [Deployment → network exposure](deployment.md#network-exposure).
 
 ## OAuth & multi-tenancy
 

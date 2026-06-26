@@ -35,11 +35,13 @@ You'll see startup logs and:
 - an **HTTP** listener on `:8081` (Houston UI, `/health`, `/metrics`),
 - a SQLite database created at `./plainq.db`.
 
-> **Heads up:** the gRPC API the CLI talks to is currently unauthenticated — the
-> JWT secret protects the **HTTP/Houston** surface (accounts, RBAC, the admin
-> UI). See [Authentication & RBAC](../authentication-rbac.md) for the full
-> picture and [Deployment](../guides/deployment.md#network-exposure) for how to
-> keep the gRPC port private.
+> **Heads up:** in the current wiring, **neither** the gRPC API **nor** the HTTP
+> API routes are gated by auth middleware at the server. The JWT secret powers
+> Houston's login/onboarding and the account subsystem, but the queue, RBAC, and
+> OAuth REST endpoints are reachable without a token. Treat **both** the gRPC
+> (`:8080`) and HTTP (`:8081`) ports as privileged — keep them on a trusted
+> network. See [Authentication & RBAC](../authentication-rbac.md) and
+> [Deployment → network exposure](../guides/deployment.md#network-exposure).
 
 ## 3. Send and receive a message
 

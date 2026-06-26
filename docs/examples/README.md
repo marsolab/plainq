@@ -1,7 +1,17 @@
 # Examples & recipes
 
-Practical, copy-pasteable patterns for working with PlainQ. Each recipe is
-self-contained; adapt the queue IDs and addresses to your setup.
+Practical patterns for working with PlainQ. Adapt the queue IDs and addresses to
+your setup.
+
+> **About the Go snippets:** they import `github.com/marsolab/plainq/internal/...`
+> packages, which are **`internal/` — they only compile from inside this
+> repository's module.** An external Go module will be rejected by the compiler
+> with `use of internal package ... not allowed`. If you're building a consumer
+> in your own project, generate a client from the
+> [Buf Schema Registry](https://buf.build/plainq/schema) and swap the imports for
+> your generated package — the request/response types and call shapes are
+> identical. See [Go SDK setup](#go-sdk) below. The CLI and `jq` recipes have no
+> such restriction.
 
 - [Producer / consumer with the CLI](#producer--consumer-with-the-cli)
 - [A reliable worker loop (Go)](#a-reliable-worker-loop-go)

@@ -68,8 +68,14 @@ keeps it lean:
 FROM golang:1.26 AS build
 WORKDIR /src
 COPY . .
-# Build the server + CLI. (Add `make houston` + bun if you want the UI embedded.)
-RUN CGO_ENABLED=0 go build -o /out/plainq ./cmd
+# The server embeds internal/houston/ui/dist via //go:embed, and that directory
+# is gitignored (absent in the build context), so a bare `go build` fails with
+# "pattern all:ui/dist: no matching files found". Provide a placeholder bundle so
+# the embed resolves. To ship the real UI instead, add a Bun stage that runs
+# `make houston` before this build.
+RUN mkdir -p internal/houston/ui/dist \
+ && printf '<!doctype html><title>Houston disabled</title>' > internal/houston/ui/dist/index.html \
+ && CGO_ENABLED=0 go build -o /out/plainq ./cmd
 
 # Runtime stage
 FROM gcr.io/distroless/base-debian12
@@ -93,9 +99,9 @@ docker run --rm -p 8081:8081 -p 8080:8080 \
 Mount a **persistent volume** for the SQLite file (and its `-wal`/`-shm`
 siblings) so data survives container restarts.
 
-> The above builds without Houston for simplicity. To embed the admin UI, run
-> `make houston` before `go build`, or add a Bun build stage — see
-> [Installation](../getting-started/installation.md).
+> The above ships a placeholder UI for simplicity. To embed the real admin UI,
+> add a Bun stage that runs `make houston` before the Go build — see
+> [Installation](../getting-started/installation.md#building-without-the-houston-toolchain).
 
 ## SQLite + Litestream
 
@@ -146,9 +152,15 @@ PlainQ has two listeners with different trust assumptions:
   it as privileged: bind it to loopback or a private interface
   (`--grpc.addr=127.0.0.1:8080`) and reach it over a trusted network, a service
   mesh, or a TLS-terminating proxy.
-- **HTTP (`:8081`)** — Houston, REST APIs, `/health`, `/metrics`. Protected by
-  JWT sessions and RBAC, but you should still front it with a reverse proxy
-  (TLS, rate limiting, sane timeouts).
+- **HTTP (`:8081`)** — Houston, REST APIs, `/health`, `/metrics`. PlainQ ships a
+  full JWT/RBAC subsystem and Houston uses it for its login and onboarding flow,
+  **but as currently wired the server does not apply auth middleware to the HTTP
+  API routes** — the queue, RBAC, OAuth, and metrics endpoints under `/api/v1`
+  are mounted with logging and CORS only. Treat `:8081` as **privileged too**:
+  keep it on a trusted network and put your own access control (a
+  TLS-terminating, authenticating reverse proxy, network policy, or both) in
+  front of it. Do not rely on PlainQ's built-in auth as the only gate on the
+  HTTP surface today.
 
 A typical layout:
 
@@ -172,7 +184,9 @@ operators reach Houston through the proxy.
 
 - [ ] `--auth.jwt.secret` supplied from a secret manager, not the command line history.
 - [ ] gRPC bound to a private interface or fronted by mTLS/proxy.
-- [ ] HTTP behind a TLS-terminating reverse proxy with timeouts.
+- [ ] HTTP behind a TLS-terminating reverse proxy with timeouts **and access
+      control** — the `/api/v1` routes are not auth-gated at the server today, so
+      enforce authn/authz at the proxy or network layer.
 - [ ] Persistent volume for the SQLite file (or a managed PostgreSQL).
 - [ ] Backups: Litestream (SQLite) or your PostgreSQL backup tooling.
 - [ ] `/health` wired to your orchestrator's liveness/readiness probes.

@@ -8,12 +8,13 @@ image aren't published yet — building from source is the supported path.
 | Tool                                  | Version    | Needed for                                  |
 | ------------------------------------- | ---------- | ------------------------------------------- |
 | [Go](https://go.dev/dl/)              | 1.26.1+    | Building the server and CLI.                |
-| [Bun](https://bun.sh)                 | latest     | Building the Houston admin UI.              |
-| [buf](https://buf.build/docs/installation) | latest | Regenerating gRPC code (`make schema`).     |
-| [sqlc](https://docs.sqlc.dev)         | latest     | Regenerating SQL access code (`make sqlc-generate`). |
+| [Bun](https://bun.sh)                 | latest     | Building the Houston admin UI (`make houston`). |
+| [buf](https://buf.build/docs/installation) | latest | Generating gRPC code — `make build` runs `make schema`, which calls `buf generate`. |
+| [sqlc](https://docs.sqlc.dev)         | latest     | Regenerating SQL access code (`make sqlc-generate`, run on demand). |
 
-`buf` and `sqlc` are only required if you regenerate code; a plain `make build`
-of a clean checkout does not need them beyond what's vendored.
+`make build` depends on `make houston` **and** `make schema`, so a clean
+`make build` needs both **Bun** and **buf** on your `PATH`. `sqlc` is only needed
+when you regenerate the SQL layer.
 
 ## Build from source
 
@@ -33,19 +34,35 @@ This runs three steps in order:
 The result is a single self-contained `./plainq` executable: server, CLI, and
 admin UI in one file.
 
-## Building without Houston
+## Building without the Houston toolchain
 
-If you only need the server and CLI (for a headless deployment, CI, or a quick
-test), you can skip the UI build and compile directly:
+If you don't want to install Bun, you can build the server and CLI without
+producing a real admin UI — but you **cannot** skip the embed entirely. The
+server embeds the UI with `//go:embed all:ui/dist`
+(`internal/houston/houston.go`), and `internal/houston/ui/dist` is gitignored, so
+it's **absent on a fresh checkout**. A direct `go build` then fails at compile
+time with:
+
+```
+pattern all:ui/dist: no matching files found
+```
+
+You have two options:
 
 ```shell
+# Option A — build the real UI once (needs Bun), then compile.
+make houston
+go build -o plainq ./cmd
+
+# Option B — no Bun: create a placeholder bundle so the embed resolves.
+mkdir -p internal/houston/ui/dist
+echo '<!doctype html><title>Houston disabled</title>' > internal/houston/ui/dist/index.html
 go build -o plainq ./cmd
 ```
 
-The binary still starts and serves the gRPC + HTTP APIs. The Houston routes will
-serve whatever is embedded (an empty bundle if `internal/houston/ui/dist` was
-never built), but `/health`, `/metrics`, the gRPC API, and the REST API all work
-normally.
+Either way the resulting binary serves the gRPC + HTTP APIs, `/health`, and
+`/metrics` normally; with Option B the Houston dashboard is a placeholder page
+instead of the real app.
 
 ## Embedding the build version
 
