@@ -318,7 +318,7 @@ func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest)
 	return &v1.DeleteQueueResponse{}, nil
 }
 
-func (s *Storage) Send(ctx context.Context, input *v1.SendRequest) (_ *v1.SendResponse, sErr error) {
+func (s *Storage) Send(ctx context.Context, input *v1.SendRequest) (*v1.SendResponse, error) {
 	queueID := input.GetQueueId()
 
 	messages := input.GetMessages()
@@ -346,39 +346,50 @@ func (s *Storage) Send(ctx context.Context, input *v1.SendRequest) (_ *v1.SendRe
 		sentBytes += uint64(len(m.Body))
 	}
 
-	// The common case — a batch within the parameter limit — is one INSERT in
-	// its own implicit transaction, no explicit BeginTx needed. Larger batches
-	// are chunked under PostgreSQL's 65535 bind-parameter cap and wrapped in a
-	// single transaction so the whole Send stays all-or-nothing.
-	if len(messages) <= maxSendInsertBatch {
-		if _, err := s.pool.Exec(ctx, queryInsertMessagesBatch(queueID, len(messages)), args...); err != nil {
-			return nil, fmt.Errorf("insert messages: %w", err)
-		}
-	} else {
-		tx, txErr := s.pool.BeginTx(ctx, pgx.TxOptions{})
-		if txErr != nil {
-			return nil, fmt.Errorf(fmtBeginTxError, txErr)
-		}
-
-		defer func() { sErr = errors.Join(sErr, rollback(ctx, tx)) }()
-
-		for start := 0; start < len(messages); start += maxSendInsertBatch {
-			end := min(start+maxSendInsertBatch, len(messages))
-
-			if _, err := tx.Exec(ctx, queryInsertMessagesBatch(queueID, end-start), args[start*2:end*2]...); err != nil {
-				return nil, fmt.Errorf("insert messages: %w", err)
-			}
-		}
-
-		if err := tx.Commit(ctx); err != nil {
-			return nil, fmt.Errorf("commit transaction: %w", err)
-		}
+	if err := s.insertMessages(ctx, queueID, len(messages), args); err != nil {
+		return nil, err
 	}
 
 	s.observer.MessagesSentBytes(queueID).Add(sentBytes)
 	s.observer.MessagesSent(queueID).Add(uint64(len(output.MessageIds)))
 
 	return &output, nil
+}
+
+// insertMessages writes count messages whose (msg_id, msg_body) pairs are
+// flattened, in order, into args. A batch within the parameter limit is one
+// INSERT in its own implicit transaction (the common case). Larger batches are
+// chunked under PostgreSQL's 65535 bind-parameter cap and wrapped in a single
+// transaction so the whole Send stays all-or-nothing.
+func (s *Storage) insertMessages(ctx context.Context, queueID string, count int, args []any) (sErr error) {
+	if count <= maxSendInsertBatch {
+		if _, err := s.pool.Exec(ctx, queryInsertMessagesBatch(queueID, count), args...); err != nil {
+			return fmt.Errorf("insert messages: %w", err)
+		}
+
+		return nil
+	}
+
+	tx, txErr := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if txErr != nil {
+		return fmt.Errorf(fmtBeginTxError, txErr)
+	}
+
+	defer func() { sErr = errors.Join(sErr, rollback(ctx, tx)) }()
+
+	for start := 0; start < count; start += maxSendInsertBatch {
+		end := min(start+maxSendInsertBatch, count)
+
+		if _, err := tx.Exec(ctx, queryInsertMessagesBatch(queueID, end-start), args[start*2:end*2]...); err != nil {
+			return fmt.Errorf("insert messages: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit transaction: %w", err)
+	}
+
+	return nil
 }
 
 func (s *Storage) Receive(ctx context.Context, input *v1.ReceiveRequest) (*v1.ReceiveResponse, error) {
