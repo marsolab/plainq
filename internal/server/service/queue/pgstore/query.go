@@ -106,8 +106,12 @@ func queryReceiveMessages(queueID string) string {
 	`, ident)
 }
 
-func queryDeleteMessage(queueID string) string {
-	return fmt.Sprintf(`DELETE FROM %s WHERE msg_id = $1;`, quoteIdent(queueID))
+// queryDeleteMessages deletes every message whose id is in the $1 array in a
+// single round trip and RETURNs the ids actually removed, so the caller can
+// report found ids as successful and unknown ids as failed without N separate
+// DELETEs.
+func queryDeleteMessages(queueID string) string {
+	return fmt.Sprintf(`DELETE FROM %s WHERE msg_id = ANY($1) RETURNING msg_id;`, quoteIdent(queueID))
 }
 
 func queryPurgeQueue(queueID string) string {

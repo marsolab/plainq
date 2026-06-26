@@ -12,6 +12,7 @@ require (
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/marsolab/servekit v0.4.4
 	github.com/maxatome/go-testdeep v1.15.0
+	github.com/oklog/ulid/v2 v2.1.1
 	github.com/planetscale/vtprotobuf v0.6.1-0.20250313105119-ba97887b0a25
 	google.golang.org/grpc v1.80.0
 	google.golang.org/protobuf v1.36.11
@@ -55,7 +56,6 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.42 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
-	github.com/oklog/ulid/v2 v2.1.1 // indirect
 	github.com/pierrec/lz4/v4 v4.1.26 // indirect
 	github.com/prometheus/client_golang v1.23.2 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect

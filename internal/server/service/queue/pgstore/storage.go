@@ -18,6 +18,7 @@ import (
 	"github.com/marsolab/servekit/errkit"
 	"github.com/marsolab/servekit/idkit"
 	"github.com/marsolab/servekit/logkit"
+	"github.com/oklog/ulid/v2"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -447,49 +448,75 @@ func (s *Storage) Receive(ctx context.Context, input *v1.ReceiveRequest) (*v1.Re
 	return &output, nil
 }
 
-func (s *Storage) Delete(ctx context.Context, input *v1.DeleteRequest) (_ *v1.DeleteResponse, sErr error) {
+func (s *Storage) Delete(ctx context.Context, input *v1.DeleteRequest) (*v1.DeleteResponse, error) {
 	queueID := input.GetQueueId()
 
-	tx, txErr := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
-	if txErr != nil {
-		return nil, fmt.Errorf(fmtBeginTxError, txErr)
-	}
-
-	defer func() { sErr = errors.Join(sErr, rollback(ctx, tx)) }()
-
-	deleteSQL := queryDeleteMessage(queueID)
+	ids := input.GetMessageIds()
 
 	output := v1.DeleteResponse{
-		Successful: make([]string, 0, len(input.MessageIds)),
-		Failed:     make([]*v1.DeleteFailure, 0, 1),
+		Successful: make([]string, 0, len(ids)),
+		Failed:     make([]*v1.DeleteFailure, 0),
 	}
 
-	for _, id := range input.GetMessageIds() {
-		if _, err := tx.Exec(ctx, deleteSQL, id); err != nil {
+	if len(ids) == 0 {
+		return &output, nil
+	}
+
+	// One DELETE … = ANY($1) RETURNING removes the whole batch in a single
+	// round trip; the returned ids are the messages that actually existed.
+	rows, err := s.pool.Query(ctx, queryDeleteMessages(queueID), ids)
+	if err != nil {
+		return nil, fmt.Errorf("delete messages: %w", err)
+	}
+
+	deleted := make(map[string]struct{}, len(ids))
+
+	for rows.Next() {
+		var id string
+
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+
+			return nil, fmt.Errorf("scan deleted id: %w", err)
+		}
+
+		deleted[id] = struct{}{}
+	}
+
+	rows.Close()
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate deleted ids: %w", err)
+	}
+
+	// Ids that came back were removed (successful); ids that didn't were not in
+	// the queue (failed). recordTimeInQueue derives the enqueue instant from
+	// the message's ULID rather than a separate column.
+	for _, id := range ids {
+		if _, ok := deleted[id]; !ok {
 			output.Failed = append(output.Failed, &v1.DeleteFailure{MessageId: id})
 
 			continue
 		}
 
-		if xID, err := idkit.ParseXID(id); err == nil {
-			s.observer.TimeInQueue(queueID).Dur(xID.Time())
-		} else {
-			panic(fmt.Errorf(
-				"queue (id: %q) contains messages with invalid id (id: %q): %s",
-				queueID, id, err.Error(),
-			))
-		}
+		recordTimeInQueue(s.observer, queueID, id)
 
 		output.Successful = append(output.Successful, id)
-	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
 
 	s.observer.MessagesDeleted(queueID).Add(uint64(len(output.Successful)))
 
 	return &output, nil
+}
+
+// recordTimeInQueue observes how long a message lived in the queue, using the
+// timestamp embedded in its ULID id as the enqueue instant. A message id that
+// fails to parse is skipped rather than fatal: the metric is best-effort and
+// must never take the server down on delete.
+func recordTimeInQueue(observer telemetry.Observer, queueID, msgID string) {
+	if u, err := ulid.Parse(msgID); err == nil {
+		observer.TimeInQueue(queueID).Dur(ulid.Time(u.Time()))
+	}
 }
 
 // Health implements hc.HealthChecker.

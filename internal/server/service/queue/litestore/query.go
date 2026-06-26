@@ -2,6 +2,7 @@ package litestore
 
 import (
 	"fmt"
+	"strings"
 
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 )
@@ -28,13 +29,6 @@ func queryCreateQueueTable(queueID string) string {
 
 		create index if not exists ` + queueID + `_visible_at_index
 			on ` + queueID + `(visible_at);
-
-		create trigger if not exists ` + queueID + `_update_msg_updated_at
-			after update on ` + queueID + `
-			for each row
-		begin
-			update ` + queueID + ` set updated_at = current_timestamp where msg_id = old.msg_id;
-		end;
 	`
 
 	return q
@@ -42,6 +36,28 @@ func queryCreateQueueTable(queueID string) string {
 
 func queryInsertMessages(queueID string) string {
 	return `insert into ` + queueID + ` (msg_id, msg_body) values (?, ?);`
+}
+
+// queryInsertMessagesBatch builds a single multi-row INSERT for n messages so
+// an entire Send batch is one statement (and one trip through SQLite's
+// single-writer lock) instead of n. Args are passed as (msg_id, msg_body)
+// pairs.
+func queryInsertMessagesBatch(queueID string, n int) string {
+	var b strings.Builder
+
+	b.WriteString(`insert into ` + queueID + ` (msg_id, msg_body) values `)
+
+	for i := range n {
+		if i > 0 {
+			b.WriteString(",")
+		}
+
+		b.WriteString("(?,?)")
+	}
+
+	b.WriteString(";")
+
+	return b.String()
 }
 
 func queryDeleteQueueTable(queueID string) string {
@@ -53,12 +69,29 @@ func querySelectMessages(queueID string) string {
 		` where visible_at <= current_timestamp and retries <= ? order by created_at limit ?;`
 }
 
-func queryUpdateMessages(queueID string) string {
-	return `update ` + queueID + ` set visible_at = ?, retries = retries + 1 where msg_id = ?;`
+// queryUpdateMessagesVisibility bumps visibility deadline and retry count for a
+// claimed batch in one statement. The first placeholder is the new visible_at;
+// the remaining n placeholders are the claimed message ids. SQLite has no
+// SKIP LOCKED, but collapsing the per-message UPDATE loop into a single
+// statement minimises how long the receive holds the single-writer lock.
+func queryUpdateMessagesVisibility(queueID string, n int) string {
+	return `update ` + queueID + ` set visible_at = ?, retries = retries + 1 where msg_id in (` +
+		placeholders(n) + `);`
 }
 
-func queryDeleteMessage(queueID string) string {
-	return `delete from ` + queueID + ` where msg_id = ?;`
+// queryDeleteMessages deletes a batch of ids in one statement and RETURNs the
+// ids actually removed so the caller can split successful from unknown ids.
+func queryDeleteMessages(queueID string, n int) string {
+	return `delete from ` + queueID + ` where msg_id in (` + placeholders(n) + `) returning msg_id;`
+}
+
+// placeholders returns "?,?,…" with n bind placeholders for an IN clause.
+func placeholders(n int) string {
+	if n <= 0 {
+		return ""
+	}
+
+	return strings.Repeat("?,", n-1) + "?"
 }
 
 func queryPurgeQueue(queueID string) string {
