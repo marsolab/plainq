@@ -45,6 +45,11 @@ func main() {
 		deleteQueueCommand(),
 		sendCommand(),
 		receiveCommand(),
+		deleteMessageCommand(),
+
+		// Interactive and introspection commands.
+		tuiCommand(),
+		schemaCommand(),
 	)
 
 	if err := rootCmd.Exec(); err != nil {

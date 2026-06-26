@@ -13,7 +13,6 @@ import (
 	"github.com/heartwilltell/scotty"
 	"github.com/marsolab/plainq/internal/client"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
-	"github.com/marsolab/servekit/idkit"
 )
 
 const (
@@ -238,8 +237,8 @@ func describeQueueCommand() *scotty.Command {
 
 			id := args[0]
 
-			if err := idkit.ValidateXID(id); err != nil {
-				return fmt.Errorf("validate queue id: %w", err)
+			if err := validateQueueID(id); err != nil {
+				return err
 			}
 
 			cli, cliErr := client.New(addr)
@@ -251,18 +250,16 @@ func describeQueueCommand() *scotty.Command {
 				QueueId: id,
 			}
 
-			purge, purgeErr := cli.DescribeQueue(ctx, in)
-			if purgeErr != nil {
-				return fmt.Errorf("describe queue (id: %q): %w", id, purgeErr)
+			queue, describeErr := cli.DescribeQueue(ctx, in)
+			if describeErr != nil {
+				return fmt.Errorf("describe queue (id: %q): %w", id, describeErr)
 			}
 
 			if jsonOut {
-				if err := json.NewEncoder(os.Stdout).Encode(purge); err != nil {
-					return fmt.Errorf(fmtEncodeResponseError, err)
-				}
-
-				return nil
+				return encodeJSON(os.Stdout, queue)
 			}
+
+			printQueueText(os.Stdout, queue)
 
 			return nil
 		},
@@ -298,8 +295,8 @@ func purgeQueueCommand() *scotty.Command {
 
 			id := args[0]
 
-			if err := idkit.ValidateXID(id); err != nil {
-				return fmt.Errorf("validate queue id: %w", err)
+			if err := validateQueueID(id); err != nil {
+				return err
 			}
 
 			cli, cliErr := client.New(addr)
@@ -363,8 +360,8 @@ func deleteQueueCommand() *scotty.Command {
 
 			id := args[0]
 
-			if err := idkit.ValidateXID(id); err != nil {
-				return fmt.Errorf("validate queue id: %w", err)
+			if err := validateQueueID(id); err != nil {
+				return err
 			}
 
 			cli, cliErr := client.New(addr)
@@ -399,20 +396,24 @@ func deleteQueueCommand() *scotty.Command {
 
 func sendCommand() *scotty.Command {
 	var (
-		addr    string
-		message string
-		jsonOut bool
+		addr     string
+		messages stringSliceFlag
+		file     string
+		jsonOut  bool
 	)
 
 	cmd := scotty.Command{
 		Name:  "send",
-		Short: "Sent a message to the queue",
+		Short: "Send one or more messages to a queue",
 		SetFlags: func(flags *scotty.FlagSet) {
 			flags.StringVar(&addr, flagGRPCAddr, defaultGRPCAddr,
 				flagGRPCAddrUsage,
 			)
-			flags.StringVar(&message, "message", "",
-				"sets message as a string",
+			flags.Var(&messages, "message",
+				"message body; repeat the flag to send a batch",
+			)
+			flags.StringVar(&file, "file", "",
+				`read newline-delimited message bodies from a file ("-" for stdin)`,
 			)
 			flags.BoolVar(&jsonOut, flagJSON, false,
 				flagJSONUsage,
@@ -428,8 +429,13 @@ func sendCommand() *scotty.Command {
 
 			id := args[0]
 
-			if err := idkit.ValidateXID(id); err != nil {
-				return fmt.Errorf("validate queue id: %w", err)
+			if err := validateQueueID(id); err != nil {
+				return err
+			}
+
+			bodies, bodiesErr := collectSendMessages(messages, file)
+			if bodiesErr != nil {
+				return bodiesErr
 			}
 
 			cli, cliErr := client.New(addr)
@@ -437,27 +443,18 @@ func sendCommand() *scotty.Command {
 				return fmt.Errorf(fmtCreateClientError, cliErr)
 			}
 
-			in := &v1.SendRequest{
-				QueueId: id,
-				Messages: []*v1.SendMessage{
-					{Body: []byte(message)},
-				},
-			}
-
-			send, sendErr := cli.Send(ctx, in)
+			send, sendErr := cli.Send(ctx, &v1.SendRequest{QueueId: id, Messages: bodies})
 			if sendErr != nil {
-				return fmt.Errorf("sent message: %w", sendErr)
+				return fmt.Errorf("send messages: %w", sendErr)
 			}
 
 			if jsonOut {
-				if err := json.NewEncoder(os.Stdout).Encode(send); err != nil {
-					return fmt.Errorf(fmtEncodeResponseError, err)
-				}
-
-				return nil
+				return encodeJSON(os.Stdout, send)
 			}
 
-			fmt.Println(send.GetMessageIds())
+			for _, messageID := range send.GetMessageIds() {
+				fmt.Println(messageID)
+			}
 
 			return nil
 		},
@@ -470,18 +467,22 @@ func receiveCommand() *scotty.Command {
 	var (
 		addr    string
 		batch   uint
+		ack     bool
 		jsonOut bool
 	)
 
 	cmd := scotty.Command{
 		Name:  "receive",
-		Short: "Receive a messages from the queue",
+		Short: "Receive messages from a queue",
 		SetFlags: func(flags *scotty.FlagSet) {
 			flags.StringVar(&addr, flagGRPCAddr, defaultGRPCAddr,
 				flagGRPCAddrUsage,
 			)
 			flags.UintVar(&batch, "batch", 1,
-				"set receive batch size",
+				"set receive batch size (1-10)",
+			)
+			flags.BoolVar(&ack, "ack", false,
+				"delete each received message after printing it",
 			)
 			flags.BoolVar(&jsonOut, flagJSON, false,
 				flagJSONUsage,
@@ -492,13 +493,17 @@ func receiveCommand() *scotty.Command {
 			defer cancel()
 
 			if len(args) < 1 {
-				return errors.New("queue id should be specified: plainq send [flags...] [queue id]")
+				return errors.New("queue id should be specified: plainq receive [flags...] [queue id]")
 			}
 
 			id := args[0]
 
-			if err := idkit.ValidateXID(id); err != nil {
-				return fmt.Errorf("validate queue id: %w", err)
+			if err := validateQueueID(id); err != nil {
+				return err
+			}
+
+			if batch > math.MaxUint32 {
+				return fmt.Errorf("batch size value too large: %d", batch)
 			}
 
 			cli, cliErr := client.New(addr)
@@ -506,33 +511,45 @@ func receiveCommand() *scotty.Command {
 				return fmt.Errorf(fmtCreateClientError, cliErr)
 			}
 
-			if batch > math.MaxUint32 {
-				return fmt.Errorf("batch size value too large: %d", batch)
-			}
-
-			in := &v1.ReceiveRequest{
-				QueueId:   id,
-				BatchSize: uint32(batch),
-			}
-
-			receive, receiveErr := cli.Receive(ctx, in)
+			receive, receiveErr := cli.Receive(ctx, &v1.ReceiveRequest{QueueId: id, BatchSize: uint32(batch)})
 			if receiveErr != nil {
-				return fmt.Errorf("receive message: %w", receiveErr)
+				return fmt.Errorf("receive messages: %w", receiveErr)
+			}
+
+			if ack {
+				if err := ackReceived(ctx, cli, id, receive.GetMessages()); err != nil {
+					return err
+				}
 			}
 
 			if jsonOut {
-				if err := json.NewEncoder(os.Stdout).Encode(receive); err != nil {
-					return fmt.Errorf(fmtEncodeResponseError, err)
-				}
-
-				return nil
+				return encodeJSON(os.Stdout, receive)
 			}
 
-			fmt.Println(receive.GetMessages())
+			printReceivedText(os.Stdout, receive.GetMessages())
 
 			return nil
 		},
 	}
 
 	return &cmd
+}
+
+// ackReceived deletes the given received messages from the queue, acknowledging
+// them so they are not redelivered.
+func ackReceived(ctx context.Context, cli *client.Client, queueID string, messages []*v1.ReceiveMessage) error {
+	if len(messages) == 0 {
+		return nil
+	}
+
+	ids := make([]string, 0, len(messages))
+	for _, msg := range messages {
+		ids = append(ids, msg.GetId())
+	}
+
+	if _, err := cli.Delete(ctx, &v1.DeleteRequest{QueueId: queueID, MessageIds: ids}); err != nil {
+		return fmt.Errorf("ack messages: %w", err)
+	}
+
+	return nil
 }
