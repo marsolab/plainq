@@ -45,6 +45,10 @@ type Storage interface {
 	// Delete delete messages from the queue.
 	Delete(ctx context.Context, input *v1.DeleteRequest) (*v1.DeleteResponse, error)
 
+	// Peek browses messages without consuming them — visibility deadlines and
+	// retry counts are left untouched. It backs the Houston message browser.
+	Peek(ctx context.Context, input *PeekRequest) (*PeekResponse, error)
+
 	ListTopics(ctx context.Context) (*ListTopicsResponse, error)
 	CreateTopic(ctx context.Context, input *CreateTopicRequest) (*CreateTopicResponse, error)
 	DeleteTopic(ctx context.Context, topicID string) error
@@ -80,6 +84,14 @@ func NewService(cfg *config.Config, logger *slog.Logger, storage Storage) *Servi
 		r.Get("/{id}", s.describeQueueHandler)
 		r.Post("/{id}/purge", s.purgeQueueHandler)
 		r.Delete("/{id}", s.deleteQueueHandler)
+
+		// Message-level operations for the Houston admin UI. Browse is
+		// non-consuming (peek); receive claims with a visibility timeout; ack
+		// deletes by id; send enqueues.
+		r.Get("/{id}/messages", s.peekMessagesHandler)
+		r.Post("/{id}/messages", s.sendMessagesHandler)
+		r.Post("/{id}/messages/receive", s.receiveMessagesHandler)
+		r.Post("/{id}/messages/ack", s.ackMessagesHandler)
 	})
 
 	s.router.Route("/topics", func(r chi.Router) {

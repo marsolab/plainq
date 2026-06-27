@@ -112,6 +112,97 @@ func Test_messageBatchQueries_roundTrip(t *testing.T) {
 	td.Cmp(t, deleted, []string{"m1"}, "only the existing id is returned")
 }
 
+// Test_queryPeekMessages_browsesWithoutConsuming proves the peek query returns
+// messages oldest-first, flags in-flight rows, and — unlike Receive — leaves
+// visibility and retry counts untouched.
+func Test_queryPeekMessages_browsesWithoutConsuming(t *testing.T) {
+	db := openTestDB(t)
+
+	const queueID = "qpeek"
+
+	_, err := db.Exec(queryCreateQueueTable(queueID))
+	td.Require(t).CmpNoError(err, "create queue table")
+
+	_, err = db.Exec(queryInsertMessagesBatch(queueID, 3),
+		"m1", []byte("a"),
+		"m2", []byte("b"),
+		"m3", []byte("c"),
+	)
+	td.Require(t).CmpNoError(err, "batch insert")
+
+	// Hide m2 far into the future so it reads as in-flight.
+	_, err = db.Exec(`update ` + queueID + ` set visible_at = '2999-01-01 00:00:00' where msg_id = 'm2';`)
+	td.Require(t).CmpNoError(err, "hide m2")
+
+	type peeked struct {
+		id       string
+		body     string
+		retries  int
+		inFlight int
+	}
+
+	browse := func(limit, offset int) []peeked {
+		rows, qErr := db.Query(queryPeekMessages(queueID), limit, offset)
+		td.Require(t).CmpNoError(qErr, "peek query")
+
+		defer func() { _ = rows.Close() }()
+
+		var out []peeked
+
+		for rows.Next() {
+			var (
+				p                    peeked
+				createdAt, visibleAt string
+			)
+
+			td.Require(t).CmpNoError(
+				rows.Scan(&p.id, &p.body, &createdAt, &visibleAt, &p.retries, &p.inFlight),
+				"scan peeked row",
+			)
+
+			out = append(out, p)
+		}
+
+		td.Require(t).CmpNoError(rows.Err())
+
+		return out
+	}
+
+	all := browse(10, 0)
+	td.Cmp(t, all, []peeked{
+		{id: "m1", body: "a", retries: 0, inFlight: 0},
+		{id: "m2", body: "b", retries: 0, inFlight: 1},
+		{id: "m3", body: "c", retries: 0, inFlight: 0},
+	}, "browse returns all rows oldest-first with the in-flight flag set for m2")
+
+	// limit/offset paginate.
+	page := browse(1, 1)
+	td.Cmp(t, page, []peeked{{id: "m2", body: "b", retries: 0, inFlight: 1}}, "offset/limit window")
+
+	// A peek must not consume: every row's retry count is still zero and the
+	// not-hidden rows are still visible to a real Receive.
+	rows, err := db.Query(querySelectMessages(queueID), maxReceiveAttempts, 10)
+	td.Require(t).CmpNoError(err, "post-peek receive select")
+
+	var receivable []string
+
+	for rows.Next() {
+		var (
+			id   string
+			body []byte
+		)
+
+		td.Require(t).CmpNoError(rows.Scan(&id, &body), "scan receivable")
+
+		receivable = append(receivable, id)
+	}
+
+	td.Require(t).CmpNoError(rows.Err())
+	td.Require(t).CmpNoError(rows.Close())
+
+	td.Cmp(t, receivable, []string{"m1", "m3"}, "peek left m1/m3 visible and m2 hidden")
+}
+
 func Test_placeholders(t *testing.T) {
 	td.Cmp(t, placeholders(0), "")
 	td.Cmp(t, placeholders(1), "?")

@@ -114,6 +114,19 @@ func queryDeleteMessages(queueID string) string {
 	return fmt.Sprintf(`DELETE FROM %s WHERE msg_id = ANY($1) RETURNING msg_id;`, quoteIdent(queueID))
 }
 
+// queryPeekMessages reads a window of messages oldest-first WITHOUT touching
+// visibility or retry count — a pure read for the admin browser. The in_flight
+// flag reuses the same `visible_at > now()` predicate as Receive so a peek
+// reports exactly the rows a receiver would (not) see. The created_at index
+// backs the ORDER BY. $1 = limit, $2 = offset.
+func queryPeekMessages(queueID string) string {
+	return fmt.Sprintf(
+		`SELECT msg_id, msg_body, created_at, visible_at, retries, (visible_at > now()) `+
+			`FROM %s ORDER BY created_at LIMIT $1 OFFSET $2;`,
+		quoteIdent(queueID),
+	)
+}
+
 func queryPurgeQueue(queueID string) string {
 	return fmt.Sprintf(`DELETE FROM %s;`, quoteIdent(queueID))
 }

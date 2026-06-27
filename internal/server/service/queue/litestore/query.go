@@ -69,6 +69,17 @@ func querySelectMessages(queueID string) string {
 		` where visible_at <= current_timestamp and retries <= ? order by created_at limit ?;`
 }
 
+// queryPeekMessages reads a window of messages oldest-first WITHOUT touching
+// visibility or retry count — it is a pure read used by the admin browser. The
+// in_flight flag reuses the same `visible_at > current_timestamp` predicate as
+// Receive so a peek reports exactly the rows a receiver would (not) see. The
+// created_at index already backs the ORDER BY. Placeholders: limit, offset.
+func queryPeekMessages(queueID string) string {
+	return `select msg_id, msg_body, cast(created_at as text), cast(visible_at as text), retries, ` +
+		`(visible_at > current_timestamp) from ` + queueID +
+		` order by created_at limit ? offset ?;`
+}
+
 // queryUpdateMessagesVisibility bumps visibility deadline and retry count for a
 // claimed batch in one statement. The first placeholder is the new visible_at;
 // the remaining n placeholders are the claimed message ids. SQLite has no

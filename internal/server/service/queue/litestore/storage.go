@@ -10,6 +10,7 @@ import (
 
 	"github.com/heartwilltell/hc"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
+	"github.com/marsolab/plainq/internal/server/service/queue"
 	"github.com/marsolab/plainq/internal/server/service/queue/litestore/sqlcgen"
 	"github.com/marsolab/plainq/internal/server/service/telemetry"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
@@ -54,6 +55,10 @@ const (
 
 	// defaultPageSize represents the default page size used for listing queues.
 	defaultPageSize uint32 = 10
+
+	// peekDefaultLimit is the fallback browse page size when a Peek request
+	// leaves Limit unset. Callers (the HTTP handler) normally pre-clamp it.
+	peekDefaultLimit uint32 = 50
 )
 
 // Option represents an optional functions which configures the Storage.
@@ -598,6 +603,90 @@ func (s *Storage) Delete(ctx context.Context, input *v1.DeleteRequest) (*v1.Dele
 	s.observer.MessagesDeleted(queueID).Add(uint64(len(output.Successful)))
 
 	return &output, nil
+}
+
+// Peek browses up to input.Limit messages starting at input.Offset, oldest
+// first, without consuming them or touching their visibility/retry state. It is
+// a pure read for the admin UI; the queue's created_at index backs the scan.
+func (s *Storage) Peek(ctx context.Context, input *queue.PeekRequest) (_ *queue.PeekResponse, err error) {
+	queueID := input.QueueID
+
+	if _, describeErr := s.DescribeQueue(ctx, &v1.DescribeQueueRequest{QueueId: queueID}); describeErr != nil {
+		return nil, fmt.Errorf("describe queue (id: %q): %w", queueID, describeErr)
+	}
+
+	limit := input.Limit
+	if limit == 0 {
+		limit = peekDefaultLimit
+	}
+
+	rows, queryErr := s.db.QueryContext(ctx, queryPeekMessages(queueID), limit, input.Offset)
+	if queryErr != nil {
+		return nil, fmt.Errorf("peek query: %w", queryErr)
+	}
+
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("close rows: %w", closeErr)
+		}
+	}()
+
+	messages, scanErr := scanPeekMessages(rows, limit)
+	if scanErr != nil {
+		return nil, scanErr
+	}
+
+	total, countErr := s.countMessages(ctx, queueID)
+	if countErr != nil {
+		return nil, countErr
+	}
+
+	return &queue.PeekResponse{
+		Messages: messages,
+		Total:    total,
+	}, nil
+}
+
+// scanPeekMessages drains a peek result set into PeekMessage values.
+func scanPeekMessages(rows *sql.Rows, capacity uint32) ([]*queue.PeekMessage, error) {
+	messages := make([]*queue.PeekMessage, 0, capacity)
+
+	for rows.Next() {
+		var (
+			m        queue.PeekMessage
+			retries  int64
+			inFlight int64
+		)
+
+		if scanErr := rows.Scan(&m.ID, &m.Body, &m.CreatedAt, &m.VisibleAt, &retries, &inFlight); scanErr != nil {
+			return nil, fmt.Errorf("scan message record: %w", scanErr)
+		}
+
+		m.Retries = uint32(retries) //nolint:gosec // retries is a non-negative counter.
+		m.InFlight = inFlight != 0
+
+		messages = append(messages, &m)
+	}
+
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return nil, fmt.Errorf("iterate message rows: %w", rowsErr)
+	}
+
+	return messages, nil
+}
+
+// countMessages returns the total number of messages in a queue.
+func (s *Storage) countMessages(ctx context.Context, queueID string) (uint64, error) {
+	var total int64
+	if err := s.db.QueryRowContext(ctx, queryCountMessages(queueID)).Scan(&total); err != nil {
+		return 0, fmt.Errorf("count messages: %w", err)
+	}
+
+	if total < 0 {
+		return 0, nil
+	}
+
+	return uint64(total), nil
 }
 
 // collectReturnedIDs drains a RETURNING result set into a set of ids, closing

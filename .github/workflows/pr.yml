@@ -44,3 +44,23 @@ jobs:
         with:
           version: latest
           args: --timeout=3m
+
+  houston:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.13
+
+      - name: install houston deps
+        working-directory: internal/houston/ui
+        run: bun install --frozen-lockfile
+
+      - name: typecheck houston (astro check)
+        working-directory: internal/houston/ui
+        run: bun run check
+
+      - name: build houston
+        working-directory: internal/houston/ui
+        run: bun run build

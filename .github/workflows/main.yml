@@ -22,6 +22,10 @@ jobs:
       - name: build houston ui
         run: make houston
 
+      - name: typecheck houston (astro check)
+        working-directory: internal/houston/ui
+        run: bun run check
+
       - name: go tests
         run: go test -cover ./...
 
