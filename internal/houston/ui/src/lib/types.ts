@@ -59,6 +59,41 @@ export interface TopicListResponse {
   topics: Topic[];
 }
 
+/** A message as returned by a browse (peek) request. `body` is decoded to text
+ * by the API client. */
+export interface PeekMessage {
+  id: string;
+  body: string;
+  createdAt: string;
+  visibleAt: string;
+  retries: number;
+  inFlight: boolean;
+}
+
+export interface PeekResponse {
+  messages: PeekMessage[];
+  total: number;
+}
+
+/** A message as returned by a receive (consume) request. */
+export interface ReceiveMessage {
+  id: string;
+  body: string;
+}
+
+export interface ReceiveResponse {
+  messages: ReceiveMessage[];
+}
+
+export interface SendResponse {
+  messageIds: string[];
+}
+
+export interface DeleteResponse {
+  successful: string[];
+  failed?: { messageId: string; error: string }[];
+}
+
 export interface PublishResponse {
   topicId: string;
   queueIds: string[];

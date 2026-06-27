@@ -132,8 +132,28 @@ separate Ingress/host if you need different backend protocols.
 | `resources` | requests 100m/128Mi | Container resources. |
 | `autoscaling.enabled` | `false` | HPA (postgres only). |
 | `ingress.enabled` | `false` | Create an Ingress. |
+| `metrics.serviceMonitor.enabled` | `false` | Create a Prometheus Operator `ServiceMonitor` scraping the HTTP `/metrics` endpoint. |
+| `metrics.serviceMonitor.interval` | `30s` | Scrape interval. |
+| `metrics.serviceMonitor.labels` | `{}` | Extra labels (e.g. `release: kube-prometheus-stack`) so the operator selects it. |
 
 See [`values.yaml`](./values.yaml) for the fully commented set.
+
+### Prometheus scraping
+
+With the [Prometheus Operator](https://github.com/prometheus-operator/prometheus-operator)
+installed, enable a `ServiceMonitor` so PlainQ's `/metrics` endpoint is scraped
+automatically:
+
+```shell
+helm install plainq deploy/helm/plainq \
+  --set auth.jwtSecret="$(openssl rand -hex 32)" \
+  --set metrics.serviceMonitor.enabled=true \
+  --set metrics.serviceMonitor.labels.release=kube-prometheus-stack
+```
+
+The `release` label must match your operator's `serviceMonitorSelector` (for
+the kube-prometheus-stack chart that is the release name). Without the operator
+CRDs installed the template is skipped.
 
 ## Upgrade notes
 

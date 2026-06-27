@@ -39,7 +39,7 @@ A producer is an application (or person) that publishes messages to a queue.
 - gRPC: `PlainQService.Send` ([schema](../schema/v1/schema.proto))
 - CLI: `plainq send <queue-id> --message <text>` / `--file` / stdin
 - TUI: `s` (send) action in the queue detail view
-- Houston: queue detail page
+- Houston: queue detail → **Messages** tab (Send a message)
 
 ### P2 — Send a batch from a file or stdin ✅
 > As a producer, I want to pipe message bodies from a file or stdin so that I
@@ -86,6 +86,7 @@ A consumer is an application (or person) that reads and acknowledges messages.
 - gRPC: `Receive`
 - CLI: `plainq receive <queue-id> --batch <n>`
 - TUI: `r` (receive) action in the queue detail view
+- Houston: queue detail → **Messages** tab (Receive with batch 1–10)
 
 ### C2 — Acknowledge (delete) processed messages ✅
 > As a consumer, I want to delete messages I have processed so that they are
@@ -97,8 +98,9 @@ A consumer is an application (or person) that reads and acknowledges messages.
 
 **Implemented in**
 - gRPC: `Delete`
-- CLI: `plainq delete-message <queue-id> <message-id>...` *(added in this work)*
+- CLI: `plainq delete-message <queue-id> <message-id>...`
 - TUI: `d` (delete) action in the message list
+- Houston: queue detail → **Messages** tab (Ack on in-flight or browsed rows)
 
 ### C3 — Receive-then-delete in one step ✅
 > As a consumer, I want a convenience flow that receives and immediately
@@ -109,6 +111,22 @@ A consumer is an application (or person) that reads and acknowledges messages.
 
 **Implemented in**
 - CLI: `plainq receive <queue-id> --ack`
+
+### C4 — Browse messages without consuming them ✅
+> As a consumer (or admin), I want to inspect what is sitting in a queue from
+> the web UI without claiming or hiding the messages, so that I can debug a
+> backlog safely.
+
+**Acceptance criteria**
+- A browse (peek) returns messages oldest-first with id, body, retry count, and
+  an in-flight indicator, paginated by limit/offset.
+- Peeking never changes a message's visibility deadline or retry count, so it is
+  safe to refresh repeatedly while consumers are running.
+
+**Implemented in**
+- HTTP: `GET /api/v1/queue/{id}/messages` (non-consuming `Storage.Peek` in both
+  the SQLite and Postgres backends)
+- Houston: queue detail → **Messages** tab (Browse table with pagination)
 
 ---
 
@@ -190,7 +208,8 @@ An operator deploys, scales, observes, and secures the server.
 
 **Implemented in**
 - HTTP: `-health.route` (`/health`), `-metrics.route` (`/metrics`)
-- Helm: liveness/readiness probes
+- Helm: liveness/readiness probes; optional Prometheus Operator `ServiceMonitor`
+  (`metrics.serviceMonitor.enabled`)
 
 ### O4 — Pick the right storage backend ✅
 > As an operator, I want embedded SQLite for small/local deployments and
@@ -253,9 +272,10 @@ An automated agent or service drives PlainQ programmatically.
 | P1 Send | ✅ | ✅ | ✅ | ✅ |
 | P2 Batch/stdin | — | ✅ | — | — |
 | P3 Delivery semantics | ✅ | ✅ | — | ✅ |
-| C1 Receive | ✅ | ✅ | ✅ | — |
-| C2 Delete message | ✅ | ✅ | ✅ | — |
+| C1 Receive | ✅ | ✅ | ✅ | ✅ |
+| C2 Delete message | ✅ | ✅ | ✅ | ✅ |
 | C3 Receive+ack | — | ✅ | — | — |
+| C4 Browse (peek) | — | — | — | ✅ |
 | A1 Queue lifecycle | ✅ | ✅ | ✅ | ✅ |
 | A2 Onboarding | ✅ | — | — | ✅ |
 | A3 RBAC | ✅ | — | — | ✅ |

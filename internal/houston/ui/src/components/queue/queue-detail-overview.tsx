@@ -3,6 +3,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsList, TabsTab, TabsPanel } from "@/components/ui/tabs";
+import { QueueMessages } from "./queue-messages";
 import { EVICTION_POLICY_LABELS } from "@/lib/constants";
 import type { Queue } from "@/lib/types";
 import { api } from "@/lib/api-client";
@@ -139,9 +140,7 @@ export function QueueDetailOverview({ queue }: QueueDetailOverviewProps) {
         </TabsPanel>
 
         <TabsPanel value="messages">
-          <div className="mt-4 flex h-48 items-center justify-center rounded-lg border border-dashed text-muted-foreground">
-            Message browser coming soon
-          </div>
+          <QueueMessages queueId={queue.queueId} />
         </TabsPanel>
 
         <TabsPanel value="metrics">

@@ -15,6 +15,7 @@ type mockStorage struct {
 	sendFunc          func(ctx context.Context, input *v1.SendRequest) (*v1.SendResponse, error)
 	receiveFunc       func(ctx context.Context, input *v1.ReceiveRequest) (*v1.ReceiveResponse, error)
 	deleteFunc        func(ctx context.Context, input *v1.DeleteRequest) (*v1.DeleteResponse, error)
+	peekFunc          func(ctx context.Context, input *PeekRequest) (*PeekResponse, error)
 }
 
 func (m *mockStorage) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest) (*v1.CreateQueueResponse, error) {
@@ -47,6 +48,10 @@ func (m *mockStorage) Receive(ctx context.Context, input *v1.ReceiveRequest) (*v
 
 func (m *mockStorage) Delete(ctx context.Context, input *v1.DeleteRequest) (*v1.DeleteResponse, error) {
 	return m.deleteFunc(ctx, input)
+}
+
+func (m *mockStorage) Peek(ctx context.Context, input *PeekRequest) (*PeekResponse, error) {
+	return m.peekFunc(ctx, input)
 }
 
 func (m *mockStorage) ListTopics(ctx context.Context) (*ListTopicsResponse, error) {

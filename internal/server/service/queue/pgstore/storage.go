@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
+	"github.com/marsolab/plainq/internal/server/service/queue"
 	"github.com/marsolab/plainq/internal/server/service/queue/pgstore/sqlcgen"
 	"github.com/marsolab/plainq/internal/server/service/telemetry"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
@@ -33,6 +34,10 @@ const (
 	queuePropsCacheSize                  = 1000
 	queuePropsCacheFillingTimeout        = 30 * time.Second
 	defaultPageSize               uint32 = 10
+
+	// peekDefaultLimit is the fallback browse page size when a Peek request
+	// leaves Limit unset. Callers (the HTTP handler) normally pre-clamp it.
+	peekDefaultLimit uint32 = 50
 
 	// maxSendInsertBatch caps how many messages go into a single multi-row
 	// INSERT. Each message binds two parameters (msg_id, msg_body), so a batch
@@ -507,6 +512,70 @@ func (s *Storage) Delete(ctx context.Context, input *v1.DeleteRequest) (*v1.Dele
 	s.observer.MessagesDeleted(queueID).Add(uint64(len(output.Successful)))
 
 	return &output, nil
+}
+
+// Peek browses up to input.Limit messages starting at input.Offset, oldest
+// first, without consuming them or touching their visibility/retry state. It is
+// a pure read for the admin UI; the queue's created_at index backs the scan.
+func (s *Storage) Peek(ctx context.Context, input *queue.PeekRequest) (*queue.PeekResponse, error) {
+	queueID := input.QueueID
+
+	if _, describeErr := s.DescribeQueue(ctx, &v1.DescribeQueueRequest{QueueId: queueID}); describeErr != nil {
+		return nil, fmt.Errorf("describe queue (id: %q): %w", queueID, describeErr)
+	}
+
+	limit := input.Limit
+	if limit == 0 {
+		limit = peekDefaultLimit
+	}
+
+	rows, err := s.pool.Query(ctx, queryPeekMessages(queueID), limit, input.Offset)
+	if err != nil {
+		return nil, fmt.Errorf("peek query: %w", err)
+	}
+
+	defer rows.Close()
+
+	messages := make([]*queue.PeekMessage, 0, limit)
+
+	for rows.Next() {
+		var (
+			m         queue.PeekMessage
+			createdAt time.Time
+			visibleAt time.Time
+			retries   int32
+			inFlight  bool
+		)
+
+		if scanErr := rows.Scan(&m.ID, &m.Body, &createdAt, &visibleAt, &retries, &inFlight); scanErr != nil {
+			return nil, fmt.Errorf("scan message record: %w", scanErr)
+		}
+
+		m.CreatedAt = createdAt.UTC().Format(time.RFC3339)
+		m.VisibleAt = visibleAt.UTC().Format(time.RFC3339)
+		m.Retries = uint32(retries) //nolint:gosec // retries is a non-negative counter.
+		m.InFlight = inFlight
+
+		messages = append(messages, &m)
+	}
+
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return nil, fmt.Errorf("iterate messages: %w", rowsErr)
+	}
+
+	var total int64
+	if countErr := s.pool.QueryRow(ctx, queryCountMessages(queueID)).Scan(&total); countErr != nil {
+		return nil, fmt.Errorf("count messages: %w", countErr)
+	}
+
+	if total < 0 {
+		total = 0
+	}
+
+	return &queue.PeekResponse{
+		Messages: messages,
+		Total:    uint64(total),
+	}, nil
 }
 
 // recordTimeInQueue observes how long a message lived in the queue, using the

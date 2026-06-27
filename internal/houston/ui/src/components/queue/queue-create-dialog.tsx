@@ -40,7 +40,11 @@ const createQueueSchema = z.object({
   evictionPolicy: z.string().optional(),
 });
 
-type CreateQueueFormData = z.infer<typeof createQueueSchema>;
+// Input is what the form fields hold before zod coercion (z.coerce.number()
+// accepts unknown); Data is the coerced output handed to onSubmit. Splitting
+// them keeps the zodResolver types aligned with react-hook-form's generics.
+type CreateQueueFormInput = z.input<typeof createQueueSchema>;
+type CreateQueueFormData = z.output<typeof createQueueSchema>;
 
 interface QueueCreateDialogProps {
   onCreated?: () => void;
@@ -53,7 +57,7 @@ export function QueueCreateDialog({ onCreated }: QueueCreateDialogProps) {
     handleSubmit,
     reset,
     formState: { errors, isSubmitting },
-  } = useForm<CreateQueueFormData>({
+  } = useForm<CreateQueueFormInput, unknown, CreateQueueFormData>({
     resolver: zodResolver(createQueueSchema),
     defaultValues: {
       retentionPeriodSeconds: 345600,

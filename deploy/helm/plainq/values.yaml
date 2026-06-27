@@ -215,3 +215,23 @@ readinessProbe:
   periodSeconds: 10
   timeoutSeconds: 3
   failureThreshold: 3
+
+# -- Prometheus Operator integration.
+metrics:
+  serviceMonitor:
+    # -- Create a ServiceMonitor scraping the HTTP /metrics endpoint. Requires
+    # the Prometheus Operator CRDs (monitoring.coreos.com) to be installed.
+    enabled: false
+    # -- Scrape interval.
+    interval: 30s
+    # -- Per-scrape timeout.
+    scrapeTimeout: 10s
+    # -- Extra labels for the ServiceMonitor. Many operator installs require a
+    # release label to select it, e.g. release: kube-prometheus-stack.
+    labels: {}
+    # -- Extra annotations for the ServiceMonitor.
+    annotations: {}
+    # -- Prometheus relabeling rules applied before scraping.
+    relabelings: []
+    # -- Prometheus relabeling rules applied to scraped samples.
+    metricRelabelings: []
