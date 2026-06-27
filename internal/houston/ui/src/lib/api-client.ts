@@ -111,7 +111,9 @@ export const api = {
       },
       // Enqueue one or more text bodies.
       send: async (id: string, bodies: string[]): Promise<SendResponse> => {
-        const res = await apiFetch<{ message_ids?: string[] }>(
+        // Responses are marshaled with protojson (UseProtoNames: false), so
+        // the key is camelCase `messageIds`, not snake_case.
+        const res = await apiFetch<{ messageIds?: string[] }>(
           `/queue/${id}/messages`,
           {
             method: "POST",
@@ -120,7 +122,7 @@ export const api = {
             }),
           },
         );
-        return { messageIds: res.message_ids ?? [] };
+        return { messageIds: res.messageIds ?? [] };
       },
       // Consume a batch, making messages invisible for the visibility timeout.
       receive: async (
@@ -138,19 +140,20 @@ export const api = {
           })),
         };
       },
-      // Acknowledge (delete) messages by id.
+      // Acknowledge (delete) messages by id. Request and response both use
+      // protojson camelCase field names.
       ack: async (id: string, ids: string[]): Promise<DeleteResponse> => {
         const res = await apiFetch<{
           successful?: string[];
-          failed?: { message_id: string; error: string }[];
+          failed?: { messageId: string; error: string }[];
         }>(`/queue/${id}/messages/ack`, {
           method: "POST",
-          body: JSON.stringify({ message_ids: ids }),
+          body: JSON.stringify({ messageIds: ids }),
         });
         return {
           successful: res.successful ?? [],
           failed: (res.failed ?? []).map((f) => ({
-            messageId: f.message_id,
+            messageId: f.messageId,
             error: f.error,
           })),
         };
