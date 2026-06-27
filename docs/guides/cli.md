@@ -40,9 +40,17 @@ plainq
 ├── describe       Describe a queue by ID
 ├── purge          Delete all messages in a queue
 ├── delete         Delete a queue
-├── send           Send a message to a queue
-└── receive        Receive messages from a queue
+├── send           Send one or more messages to a queue
+├── receive        Receive messages from a queue
+├── delete-message Acknowledge (delete) messages by ID
+├── tui            Launch the interactive terminal UI
+└── schema         Print the gRPC API surface (text or --json)
 ```
+
+> **Flag ordering.** Client commands take their flags **before** the positional
+> queue id, e.g. `plainq send -message hi <queue-id>` (not
+> `plainq send <queue-id> -message hi`). Flags placed after the positional
+> argument are ignored.
 
 ## Queue management
 
@@ -126,45 +134,90 @@ Deletes the queue itself. By default a non-empty queue is protected; pass
 
 ## Messaging
 
-### `send` — enqueue a message
+### `send` — enqueue one or more messages
 
 ```shell
-plainq send <queue-id> --message='...'
+plainq send -message='...' <queue-id>
 ```
 
-Sends a single message and prints its message ID(s). The body is taken verbatim
-from `--message`.
+Prints the new message ID(s), one per line (or the full response with `-json`).
+You can send a **batch** in a single call:
 
 ```shell
-plainq send "$QID" --message='{"order_id": 42, "action": "ship"}'
-plainq send "$QID" --message="$(cat payload.json)"
+# Repeat -message to batch several bodies.
+plainq send -message='{"order_id":42}' -message='{"order_id":43}' "$QID"
+
+# Read newline-delimited bodies from a file...
+plainq send -file=payloads.ndjson "$QID"
+
+# ...or from stdin ("-").
+generate-events | plainq send -file=- "$QID"
 ```
 
-> The CLI sends one message per invocation. The underlying gRPC `Send` RPC
-> accepts a batch of messages in a single call — use the
-> [gRPC API](grpc-api.md) or [Go SDK](../examples/README.md#go-sdk) for batched
-> sends.
+Each non-empty line of a `-file` source becomes one message. Bodies are sent
+verbatim as bytes.
 
 ### `receive` — dequeue messages
 
 ```shell
-plainq receive <queue-id> [--batch N] [--json]
+plainq receive -batch=N [-ack] [-json] <queue-id>
 ```
 
-Receives up to `--batch` messages (default 1; the server caps a batch at 10).
+Receives up to `-batch` messages (default 1; the server caps a batch at 10).
 Each received message is hidden for the queue's visibility timeout and its retry
 counter is incremented.
 
 ```shell
 plainq receive "$QID"
-plainq receive "$QID" --batch=10 --json | jq '.messages[].id'
+plainq receive -batch=10 -json "$QID" | jq '.messages[].id'
 ```
 
-> **`receive` does not delete.** It is at-least-once delivery: to remove a
-> message you must acknowledge it with a delete by message ID. The CLI does not
-> expose a standalone `delete-message` command today — acknowledgment is done via
-> the gRPC `Delete` RPC. See [Queues & messages](queues-and-messages.md#a-real-consumer-loop)
-> for a full consumer loop and the [Go SDK example](../examples/README.md#go-sdk).
+By default `receive` does **not** delete — delivery is at-least-once. Two ways
+to acknowledge:
+
+- `-ack` deletes each received message right after printing it (handy for
+  draining a queue in scripts):
+
+  ```shell
+  plainq receive -batch=10 -ack "$QID"
+  ```
+
+- `delete-message` acknowledges specific IDs (e.g. after your worker finishes):
+
+  ```shell
+  plainq delete-message "$QID" <message-id> [<message-id>...]
+  ```
+
+### `delete-message` — acknowledge messages
+
+```shell
+plainq delete-message <queue-id> <message-id> [<message-id>...]
+```
+
+Deletes (acknowledges) the given messages so they are not redelivered. Text
+output prints `deleted\t<id>` per success and `failed\t<id>\t<error>` per
+failure; `-json` returns the full `DeleteResponse`.
+
+## Introspection
+
+### `schema` — print the gRPC API surface
+
+```shell
+plainq schema          # human-readable
+plainq schema -json    # machine-readable, for AI agents and codegen
+```
+
+Lists every gRPC service and method (with input/output message names) straight
+from the embedded protobuf descriptor — no network call required.
+
+### `tui` — interactive terminal UI
+
+```shell
+plainq tui -grpc.addr localhost:8080
+```
+
+Opens the [Bubble Tea TUI](tui.md) to browse queues and send/receive messages
+interactively.
 
 ## Contexts
 
@@ -189,20 +242,20 @@ plainq ctx list    # show current + available contexts
 set -euo pipefail
 
 ADDR="${PLAINQ_ADDR:-localhost:8080}"
-QID=$(plainq create jobs --grpc.addr="$ADDR")
+QID=$(plainq create -grpc.addr="$ADDR" jobs)
 
-for i in $(seq 1 100); do
-  plainq send "$QID" --grpc.addr="$ADDR" --message="job-$i" >/dev/null
-done
+# Batch all 100 jobs into a single send via stdin.
+for i in $(seq 1 100); do echo "job-$i"; done \
+  | plainq send -grpc.addr="$ADDR" -file=- "$QID" >/dev/null
 
 echo "Enqueued 100 jobs to $QID"
-plainq describe "$QID" --grpc.addr="$ADDR" --json | jq
+plainq describe -grpc.addr="$ADDR" -json "$QID" | jq
 ```
 
 **Pull a batch and extract IDs:**
 
 ```shell
-plainq receive "$QID" --batch=10 --json \
+plainq receive -batch=10 -json "$QID" \
   | jq -r '.messages[] | "\(.id)\t\(.body | @base64d)"'
 ```
 

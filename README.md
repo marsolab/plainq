@@ -10,11 +10,15 @@ need to scale out.
 ## Highlights
 
 - **One binary, no broker fleet.** Run `./plainq serve` and you have a queue.
-- **gRPC API + CLI.** Same surface, scripted or interactive. Schema is
-  published to the [Buf Schema Registry](https://buf.build/plainq/schema) so
-  you can generate clients in any supported language.
+- **gRPC API + CLI + TUI.** Same surface, scripted or interactive. The CLI is
+  built for humans *and* AI agents (`-json` everywhere, `schema` introspection);
+  `plainq tui` is a rich [Bubble Tea](https://github.com/charmbracelet/bubbletea)
+  terminal dashboard. The schema is published to the
+  [Buf Schema Registry](https://buf.build/plainq/schema) for client codegen.
 - **Houston admin UI.** An Astro + React dashboard for queues, accounts,
   RBAC, and metrics — served straight from the same binary.
+- **Ship it anywhere.** An optimized multi-stage [Docker image](Dockerfile)
+  (distroless, static binary) and a production [Helm chart](deploy/helm/plainq).
 - **Pick your storage.** Embedded SQLite (default) for local and Litestream-friendly
   deployments, or PostgreSQL when you want a shared backend.
 - **Auth that's actually built in.** JWT sessions, refresh tokens, RBAC, and
@@ -31,7 +35,9 @@ Full documentation lives in [`docs/`](docs/README.md):
 - **Getting started** — [Quick start](docs/getting-started/quickstart.md) ·
   [Installation](docs/getting-started/installation.md) ·
   [Core concepts](docs/getting-started/core-concepts.md)
+- **Product** — [User stories](docs/user-stories.md)
 - **Guides** — [CLI](docs/guides/cli.md) ·
+  [Terminal UI (TUI)](docs/guides/tui.md) ·
   [Queues & messages](docs/guides/queues-and-messages.md) ·
   [gRPC API](docs/guides/grpc-api.md) ·
   [Configuration](docs/guides/configuration.md) ·
@@ -73,13 +79,14 @@ make build
 # Start the server (SQLite at ./plainq.db, gRPC on :8080, Houston on :8081).
 ./plainq serve --auth.jwt.secret="$(openssl rand -hex 32)"
 
-# In another shell:
+# In another shell (flags go BEFORE the queue id):
 QID=$(./plainq create my-queue)
-./plainq send "$QID" --message='hello, plainq'
-./plainq receive "$QID"
+./plainq send -message='hello, plainq' "$QID"
+./plainq receive -ack "$QID"
 ```
 
-Open <http://localhost:8081> for the Houston admin UI.
+Open <http://localhost:8081> for the Houston admin UI, or drive queues from the
+terminal with `./plainq tui`.
 
 ## Installation
 
@@ -98,29 +105,64 @@ make build
 server embeds at compile time. `make build` then produces a `./plainq` binary
 at the repo root.
 
-Prebuilt binaries and a Docker image aren't published yet — building from
-source is the supported path today.
+### Docker
+
+Build the optimized image (multi-stage: Bun builds Houston, Go builds a static
+binary, shipped on `distroless:nonroot`):
+
+```shell
+make docker IMAGE=plainq VERSION=dev
+# or directly:
+docker build -t plainq:dev .
+
+docker run --rm -p 8080:8080 -p 8081:8081 -v plainq-data:/data \
+  plainq:dev serve -storage.path=/data/plainq.db \
+  -auth.jwt.secret="$(openssl rand -hex 32)"
+```
+
+The image exposes `8080` (gRPC) and `8081` (HTTP/Houston). A bare
+`docker run plainq:dev` prints usage — pass an explicit `serve ...` command (as
+above) to start the server, pointing `-storage.path` at the mounted `/data`
+volume for a durable SQLite database.
+
+### Kubernetes (Helm)
+
+A production-grade chart lives in [`deploy/helm/plainq`](deploy/helm/plainq):
+
+```shell
+helm install plainq deploy/helm/plainq \
+  --set auth.jwtSecret="$(openssl rand -hex 32)"
+```
+
+It deploys a StatefulSet + PVC for SQLite (or a Deployment + HPA when
+`storage.driver=postgres`) and sources the JWT secret from a Kubernetes Secret.
+See the [chart README](deploy/helm/plainq/README.md) and the
+[Deployment guide](docs/guides/deployment.md).
 
 ## Usage
 
 ### CLI
 
 The `plainq` binary is both the server and the client. Every client command
-talks gRPC and accepts `--grpc.addr` (default `localhost:8080`) and `--json`
-for machine-readable output.
+talks gRPC and accepts `-grpc.addr` (default `localhost:8080`) and `-json`
+for machine-readable output. **Flags go before the positional queue id**
+(e.g. `plainq send -message hi <queue-id>`).
 
-| Command                       | Description                                          |
-| ----------------------------- | ---------------------------------------------------- |
-| `plainq serve`                | Run the PlainQ server (gRPC + HTTP + Houston UI).    |
-| `plainq version`              | Print the build version, commit, and build time.    |
-| `plainq ctx`                  | Manage local client contexts.                        |
-| `plainq list`                 | List queues.                                         |
-| `plainq create <queue-name>`  | Create a queue. Supports `--retention-period`, `--visibility-timeout`, `--max-receive-attempts`, `--drop-policy` (`drop` or `dead-letter`), `--dead-letter-queue-id`. |
-| `plainq describe <queue-id>`  | Describe a queue.                                    |
-| `plainq purge <queue-id>`     | Delete all messages from a queue.                    |
-| `plainq delete <queue-id>`    | Delete a queue (`--force` to skip safety checks).    |
-| `plainq send <queue-id>`      | Send a message (`--message=...`).                    |
-| `plainq receive <queue-id>`   | Receive messages (`--batch=N`, up to 10).            |
+| Command                          | Description                                          |
+| -------------------------------- | ---------------------------------------------------- |
+| `plainq serve`                   | Run the PlainQ server (gRPC + HTTP + Houston UI).    |
+| `plainq version`                 | Print the build version, commit, and build time.    |
+| `plainq ctx`                     | Manage local client contexts.                        |
+| `plainq list`                    | List queues.                                         |
+| `plainq create <queue-name>`     | Create a queue. Supports `-retention-period`, `-visibility-timeout`, `-max-receive-attempts`, `-drop-policy` (`drop` or `dead-letter`), `-dead-letter-queue-id`. |
+| `plainq describe <queue-id>`     | Describe a queue.                                    |
+| `plainq purge <queue-id>`        | Delete all messages from a queue.                    |
+| `plainq delete <queue-id>`       | Delete a queue (`-force` to skip safety checks).     |
+| `plainq send <queue-id>`         | Send one or more messages (`-message=...` repeatable, or `-file=-` for stdin). |
+| `plainq receive <queue-id>`      | Receive messages (`-batch=N` up to 10, `-ack` to delete after read). |
+| `plainq delete-message <queue-id> <id>...` | Acknowledge (delete) messages by ID.       |
+| `plainq tui`                     | Launch the interactive terminal UI.                  |
+| `plainq schema`                  | Print the gRPC API surface (text or `-json`).        |
 
 Run any command with `-h` for its full flag list.
 
@@ -196,11 +238,15 @@ backend across replicas.
 
 ```
 .
-├── cmd/                    # CLI entry points (server + client commands)
-├── docs/                   # Architecture and auth documentation
+├── cmd/                    # CLI entry points (server + client + tui + schema)
+├── deploy/
+│   └── helm/plainq/        # Production Helm chart
+├── docs/                   # Guides, reference, user stories
+├── Dockerfile              # Optimized multi-stage image build
 ├── internal/
 │   ├── client/             # gRPC client library
 │   ├── houston/            # Admin dashboard (Astro + React)
+│   ├── tui/                # Interactive terminal UI (Bubble Tea)
 │   ├── server/             # HTTP/gRPC server
 │   │   ├── middleware/
 │   │   ├── interceptor/

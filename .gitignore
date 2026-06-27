@@ -680,7 +680,9 @@ Temporary Items
 .apdisk!/internal/houston/build/.gitkeep
 !/internal/houston/build/robots.txt
 plainq.db
-plainq
+# Anchor to the repo root so this only ignores the built binary, not
+# directories named "plainq" elsewhere in the tree (e.g. deploy/helm/plainq).
+/plainq
 !/internal/houston/build/.gitkeep
 
 # Zed

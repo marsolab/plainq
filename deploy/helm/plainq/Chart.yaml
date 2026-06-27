@@ -1,0 +1,25 @@
+apiVersion: v2
+name: plainq
+description: A Helm chart for PlainQ — a lightweight, self-hostable queue server with a gRPC API and the Houston admin web UI.
+type: application
+
+# version is the chart version. Bump this on every change to the chart itself.
+version: 0.1.0
+
+# appVersion tracks the PlainQ application version. Used as the default image tag.
+appVersion: "0.1.0"
+
+keywords:
+  - queue
+  - message-queue
+  - grpc
+  - plainq
+  - houston
+
+home: https://github.com/marsolab/plainq
+sources:
+  - https://github.com/marsolab/plainq
+
+maintainers:
+  - name: marsolab
+    url: https://github.com/marsolab

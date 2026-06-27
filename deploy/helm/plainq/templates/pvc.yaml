@@ -1,0 +1,21 @@
+{{- if and (eq .Values.storage.driver "sqlite") .Values.storage.sqlite.persistence.enabled -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ printf "%s-data" (include "plainq.fullname" .) }}
+  labels:
+    {{- include "plainq.labels" . | nindent 4 }}
+  {{- with .Values.storage.sqlite.persistence.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  accessModes:
+    - {{ .Values.storage.sqlite.persistence.accessMode | quote }}
+  {{- if .Values.storage.sqlite.persistence.storageClass }}
+  storageClassName: {{ .Values.storage.sqlite.persistence.storageClass | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.storage.sqlite.persistence.size | quote }}
+{{- end }}

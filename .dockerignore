@@ -1,0 +1,29 @@
+# Git and CI metadata.
+.git
+.github
+.gitignore
+
+# Build output and local artifacts.
+plainq
+*.db
+*.db-shm
+*.db-wal
+coverage.out
+dist/
+
+# Node/Bun deps for the UI — the image rebuilds these from lockfiles.
+internal/houston/ui/node_modules
+internal/houston/ui/dist
+
+# Local tooling and editor noise.
+.serena
+.claude
+.agents
+.idea
+.vscode
+
+# Docs and deploy assets are not needed inside the build context.
+docs
+deploy
+*.md
+!README.md
