@@ -275,7 +275,7 @@ func (s *Service) peekMessagesHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	limit, offset, paramErr := parsePeekParams(r.URL.Query())
+	params, paramErr := parsePeekParams(r.URL.Query())
 	if paramErr != nil {
 		httpkit.ErrorHTTP(w, r, paramErr)
 
@@ -284,8 +284,8 @@ func (s *Service) peekMessagesHandler(w http.ResponseWriter, r *http.Request) {
 
 	output, peekErr := s.storage.Peek(r.Context(), &PeekRequest{
 		QueueID: id,
-		Limit:   limit,
-		Offset:  offset,
+		Limit:   params.limit,
+		Offset:  params.offset,
 	})
 	if peekErr != nil {
 		httpkit.ErrorHTTP(w, r, peekErr)
@@ -320,35 +320,41 @@ func parseBatchSize(raw string) (uint32, error) {
 		return 0, fmt.Errorf("%w: batch must be between 1 and %d", errkit.ErrInvalidArgument, maxReceiveBatchSize)
 	}
 
-	return uint32(n), nil //nolint:gosec // validated 1..maxReceiveBatchSize above.
+	return uint32(n), nil
+}
+
+// peekParams holds the parsed browse window.
+type peekParams struct {
+	limit  uint32
+	offset uint32
 }
 
 // parsePeekParams parses limit/offset for a browse request, clamping limit to
 // maxPeekLimit and defaulting an empty limit to defaultPeekLimit.
-func parsePeekParams(q url.Values) (limit, offset uint32, err error) {
-	limit = defaultPeekLimit
+func parsePeekParams(q url.Values) (peekParams, error) {
+	params := peekParams{limit: defaultPeekLimit}
 
 	if raw := q.Get("limit"); raw != "" {
 		n, parseErr := strconv.Atoi(raw)
 		if parseErr != nil || n < 1 {
-			return 0, 0, fmt.Errorf("%w: invalid limit", errkit.ErrInvalidArgument)
+			return peekParams{}, fmt.Errorf("%w: invalid limit", errkit.ErrInvalidArgument)
 		}
 
 		if uint32(n) > maxPeekLimit { //nolint:gosec // n is a validated positive int.
 			n = int(maxPeekLimit)
 		}
 
-		limit = uint32(n) //nolint:gosec // clamped to maxPeekLimit above.
+		params.limit = uint32(n)
 	}
 
 	if raw := q.Get("offset"); raw != "" {
 		n, parseErr := strconv.Atoi(raw)
 		if parseErr != nil || n < 0 {
-			return 0, 0, fmt.Errorf("%w: invalid offset", errkit.ErrInvalidArgument)
+			return peekParams{}, fmt.Errorf("%w: invalid offset", errkit.ErrInvalidArgument)
 		}
 
-		offset = uint32(n) //nolint:gosec // validated non-negative above.
+		params.offset = uint32(n) //nolint:gosec // validated non-negative above.
 	}
 
-	return limit, offset, nil
+	return params, nil
 }

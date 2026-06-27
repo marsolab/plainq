@@ -631,7 +631,25 @@ func (s *Storage) Peek(ctx context.Context, input *queue.PeekRequest) (_ *queue.
 		}
 	}()
 
-	messages := make([]*queue.PeekMessage, 0, limit)
+	messages, scanErr := scanPeekMessages(rows, limit)
+	if scanErr != nil {
+		return nil, scanErr
+	}
+
+	total, countErr := s.countMessages(ctx, queueID)
+	if countErr != nil {
+		return nil, countErr
+	}
+
+	return &queue.PeekResponse{
+		Messages: messages,
+		Total:    total,
+	}, nil
+}
+
+// scanPeekMessages drains a peek result set into PeekMessage values.
+func scanPeekMessages(rows *sql.Rows, capacity uint32) ([]*queue.PeekMessage, error) {
+	messages := make([]*queue.PeekMessage, 0, capacity)
 
 	for rows.Next() {
 		var (
@@ -654,19 +672,21 @@ func (s *Storage) Peek(ctx context.Context, input *queue.PeekRequest) (_ *queue.
 		return nil, fmt.Errorf("iterate message rows: %w", rowsErr)
 	}
 
+	return messages, nil
+}
+
+// countMessages returns the total number of messages in a queue.
+func (s *Storage) countMessages(ctx context.Context, queueID string) (uint64, error) {
 	var total int64
-	if countErr := s.db.QueryRowContext(ctx, queryCountMessages(queueID)).Scan(&total); countErr != nil {
-		return nil, fmt.Errorf("count messages: %w", countErr)
+	if err := s.db.QueryRowContext(ctx, queryCountMessages(queueID)).Scan(&total); err != nil {
+		return 0, fmt.Errorf("count messages: %w", err)
 	}
 
 	if total < 0 {
-		total = 0
+		return 0, nil
 	}
 
-	return &queue.PeekResponse{
-		Messages: messages,
-		Total:    uint64(total),
-	}, nil
+	return uint64(total), nil
 }
 
 // collectReturnedIDs drains a RETURNING result set into a set of ids, closing
