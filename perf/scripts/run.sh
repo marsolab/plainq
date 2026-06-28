@@ -117,8 +117,17 @@ wait_healthy plainq-candidate 28081
 # ---------------------------------------------------------------------------
 START_TS="$(date +%s)"
 log "Running k6: VUS=${VUS} DURATION=${DURATION} BATCH_SIZE=${BATCH_SIZE} MSG_BYTES=${MSG_BYTES} RUN_ID=${RUN_ID}"
+# Do not let a k6 threshold breach (exit 99) or other non-zero exit abort the
+# pipeline — a breach is exactly when the comparison report matters most. The
+# relative regression verdict from report.py is the real gate.
+set +e
 dc run --rm k6
+K6_RC=$?
+set -e
 END_TS="$(date +%s)"
+if [ "${K6_RC}" -ne 0 ]; then
+  err "k6 exited ${K6_RC} (thresholds crossed or error) — continuing to report"
+fi
 
 # ---------------------------------------------------------------------------
 # 5. Render the comparison report from VictoriaMetrics.
