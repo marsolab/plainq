@@ -52,6 +52,15 @@ export function QueueMessages({ queueId }: QueueMessagesProps) {
       });
       setMessages(res.messages);
       setTotal(res.total);
+
+      // If the queue shrank (acks here or external drains) the current offset
+      // can land past the end — clamp back to the last populated page so the
+      // user never gets stranded on an empty page.
+      if (offset > 0 && offset >= res.total) {
+        const lastPage =
+          Math.max(0, Math.ceil(res.total / PAGE_SIZE) - 1) * PAGE_SIZE;
+        setOffset(lastPage);
+      }
     } catch (err) {
       toast.error(
         err instanceof Error ? err.message : "Failed to load messages",
