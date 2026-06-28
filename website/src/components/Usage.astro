@@ -1,0 +1,58 @@
+---
+import Terminal from "./Terminal.astro";
+
+const cli = `# Flags go BEFORE the positional queue id
+$ plainq create \\
+    -visibility-timeout=30 \\
+    -max-receive-attempts=5 \\
+    -drop-policy=dead-letter \\
+    my-queue
+
+$ plainq send -message='{"job":"resize"}' "$QID"
+$ plainq receive -batch=10 -ack "$QID"
+
+# Machine-readable output for scripts and agents
+$ plainq list -json | jq '.queues[].queue_name'`;
+
+const grpc = `// The wire API is published to the Buf Schema Registry:
+//   buf.build/plainq/schema
+service PlainQ {
+  rpc ListQueues(ListQueuesRequest)   returns (...);
+  rpc DescribeQueue(DescribeRequest)  returns (...);
+  rpc CreateQueue(CreateQueueRequest) returns (...);
+  rpc PurgeQueue(PurgeQueueRequest)   returns (...);
+  rpc DeleteQueue(DeleteQueueRequest) returns (...);
+  rpc Send(SendRequest)               returns (...);
+  rpc Receive(ReceiveRequest)         returns (...);
+  rpc Delete(DeleteRequest)           returns (...);
+}`;
+---
+
+<section id="usage" class="border-b border-[var(--color-border)] bg-[var(--color-muted)]">
+  <div class="mx-auto max-w-6xl px-4 py-20 sm:px-6">
+    <div class="max-w-2xl">
+      <h2 class="text-3xl font-bold tracking-tight sm:text-4xl">
+        One surface, scripted or wired
+      </h2>
+      <p class="mt-4 text-lg text-[var(--color-muted-foreground)]">
+        Drive queues from the terminal, or generate a client SDK straight from
+        the published protobuf schema. Same semantics either way.
+      </p>
+    </div>
+
+    <div class="mt-12 grid gap-6 lg:grid-cols-2">
+      <div>
+        <h3 class="mb-3 font-mono text-sm font-medium text-[var(--color-muted-foreground)]">
+          CLI
+        </h3>
+        <Terminal code={cli} title="plainq" />
+      </div>
+      <div>
+        <h3 class="mb-3 font-mono text-sm font-medium text-[var(--color-muted-foreground)]">
+          gRPC
+        </h3>
+        <Terminal code={grpc} title="schema.proto" />
+      </div>
+    </div>
+  </div>
+</section>

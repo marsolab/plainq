@@ -1,0 +1,23 @@
+{
+  // Cloudflare Worker manifest for the PlainQ marketing site + docs.
+  //
+  // This is a fully static Astro build served by Workers Static Assets — no
+  // Worker script (`main`) is required; Cloudflare serves the files in `dist`
+  // directly from its edge. Deploy with:
+  //
+  //   bun run build && bunx wrangler deploy
+  //
+  // (or `bun run deploy`, which does both). Requires Wrangler >= 4.24.4.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "plainq-website",
+  "compatibility_date": "2026-06-28",
+  "assets": {
+    "directory": "./dist",
+    // Astro emits a static 404.html; serve it for unmatched routes.
+    "not_found_handling": "404-page",
+    "html_handling": "auto-trailing-slash"
+  },
+  "observability": {
+    "enabled": true
+  }
+}

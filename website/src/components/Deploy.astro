@@ -1,0 +1,62 @@
+---
+import Terminal from "./Terminal.astro";
+
+const docker = `# Distroless, static binary, nonroot
+$ docker run --rm -p 8080:8080 -p 8081:8081 \\
+    -v plainq-data:/data plainq:dev serve \\
+    -storage.path=/data/plainq.db \\
+    -auth.jwt.secret="$(openssl rand -hex 32)"`;
+
+const helm = `# Production-grade chart with StatefulSet + PVC
+$ helm install plainq deploy/helm/plainq \\
+    --set auth.jwtSecret="$(openssl rand -hex 32)"`;
+
+const targets = [
+  {
+    title: "Single binary",
+    body: "make build produces ./plainq. Copy it to a box, run serve, and you are done — SQLite lives in one file.",
+  },
+  {
+    title: "Docker",
+    body: "An optimized multi-stage image: Bun builds Houston, Go builds a static binary, shipped on distroless:nonroot.",
+  },
+  {
+    title: "Kubernetes (Helm)",
+    body: "A StatefulSet + PVC for SQLite, or a Deployment + HPA when you point it at PostgreSQL. JWT secret from a Secret.",
+  },
+];
+---
+
+<section id="deploy" class="border-b border-[var(--color-border)]">
+  <div class="mx-auto max-w-6xl px-4 py-20 sm:px-6">
+    <div class="max-w-2xl">
+      <h2 class="text-3xl font-bold tracking-tight sm:text-4xl">
+        Ship it anywhere
+      </h2>
+      <p class="mt-4 text-lg text-[var(--color-muted-foreground)]">
+        From a laptop to a cluster, the same binary follows you. Pick the
+        smallest thing that works.
+      </p>
+    </div>
+
+    <div class="mt-12 grid gap-10 lg:grid-cols-2 lg:items-start">
+      <div class="grid gap-px overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-border)]">
+        {
+          targets.map((target) => (
+            <div class="bg-[var(--color-card)] p-6">
+              <h3 class="font-semibold">{target.title}</h3>
+              <p class="mt-2 text-sm leading-relaxed text-[var(--color-muted-foreground)]">
+                {target.body}
+              </p>
+            </div>
+          ))
+        }
+      </div>
+
+      <div class="space-y-6">
+        <Terminal code={docker} title="docker" />
+        <Terminal code={helm} title="helm" />
+      </div>
+    </div>
+  </div>
+</section>
