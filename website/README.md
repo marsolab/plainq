@@ -86,5 +86,30 @@ bun run cf-preview
 ```
 
 Requires Wrangler ≥ 4.24.4 and a Cloudflare account (`wrangler login`). The
-Worker is named `plainq-website`; adjust `name` (and add `routes`/a custom
-domain) in `wrangler.jsonc` to taste.
+Worker is named `plainq-website`.
+
+### Custom domain
+
+`wrangler.jsonc` attaches the Worker to **`plainq.dev`** and **`www.plainq.dev`**
+as [custom domains](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/):
+
+```jsonc
+"routes": [
+  { "pattern": "plainq.dev", "custom_domain": true },
+  { "pattern": "www.plainq.dev", "custom_domain": true }
+]
+```
+
+The `plainq.dev` zone must already exist on your Cloudflare account (it does).
+On the first `wrangler deploy`, Cloudflare automatically creates the proxied
+DNS records and provisions the edge TLS certificate — no manual DNS step is
+needed. These patterns must match the `site` in `astro.config.mjs`.
+
+To deploy from your machine:
+
+```shell
+cd website
+bun install
+wrangler login          # one-time, interactive OAuth
+bun run deploy          # astro build + wrangler deploy
+```

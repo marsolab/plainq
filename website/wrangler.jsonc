@@ -11,6 +11,15 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "plainq-website",
   "compatibility_date": "2026-06-28",
+  // Custom domains. The zone must already be on your Cloudflare account;
+  // `custom_domain: true` makes Cloudflare create the DNS record + edge
+  // certificate automatically on first deploy. These must match the `site`
+  // in astro.config.mjs — if you meant a different apex (e.g. `plain.dev`),
+  // change the patterns below.
+  "routes": [
+    { "pattern": "plainq.dev", "custom_domain": true },
+    { "pattern": "www.plainq.dev", "custom_domain": true }
+  ],
   "assets": {
     "directory": "./dist",
     // Astro emits a static 404.html; serve it for unmatched routes.
