@@ -14,25 +14,24 @@ Docker image, or deploy the Helm chart on Kubernetes.
 
 - Go **1.26.1** or later
 - [Bun](https://bun.sh) (for building the Houston admin UI)
-- [`buf`](https://buf.build/docs/installation) and
-  [`sqlc`](https://docs.sqlc.dev) if you plan to regenerate code
+- [`buf`](https://buf.build/docs/installation) (for generating the gRPC code)
+- [`sqlc`](https://docs.sqlc.dev) — only if you plan to regenerate the SQL
+  access code
 
 ```shell
 make build
 ```
 
-`make houston` builds the admin UI into `internal/houston/ui/dist`, which the
-server embeds at compile time. `make build` then produces a `./plainq` binary at
-the repo root.
+`make build` runs three steps in order: `make houston` builds the admin UI into
+`internal/houston/ui/dist` (which the server embeds at compile time via
+`//go:embed`), `make schema` regenerates the gRPC code with `buf`, and finally
+`go build -o plainq ./cmd` produces a `./plainq` binary at the repo root.
 
-### Building without Houston
-
-If you only want the server and CLI and don't have Bun installed, build the Go
-binary directly — the embedded UI assets fall back to an empty directory:
-
-```shell
-go build -o plainq ./cmd/plainq
-```
+:::note
+The Houston UI is embedded into the binary with `//go:embed all:ui/dist`, so the
+`internal/houston/ui/dist` directory must exist before the Go build — that's why
+`make build` runs `make houston` first. There is no Bun-free build path.
+:::
 
 ## Docker
 

@@ -46,13 +46,16 @@ List queues. Supports pagination, an optional name prefix, and sort order.
 
 Create a queue. Prints the new queue ID.
 
-| Flag                     | Default  | Description                                     |
-| ------------------------ | -------- | ----------------------------------------------- |
-| `-visibility-timeout`    | `30s`    | How long a received message stays invisible.    |
-| `-max-receive-attempts`  | `5`      | Receives allowed before eviction.               |
-| `-retention-period`      | `0` (→7d)| Max message lifetime before eviction.           |
-| `-drop-policy`           | `drop`   | Eviction policy: `drop` or `dead-letter`.       |
-| `-dead-letter-queue-id`  | —        | Target queue when `-drop-policy=dead-letter`.   |
+All values are whole numbers of seconds where applicable, and flags must precede
+the positional queue name.
+
+| Flag                     | Default   | Description                                    |
+| ------------------------ | --------- | ---------------------------------------------- |
+| `-visibility-timeout`    | `30`      | Seconds a received message stays invisible.    |
+| `-max-receive-attempts`  | `5`       | Receives allowed before eviction.              |
+| `-retention-period`      | `0` (→7d) | Seconds a message may live before eviction.    |
+| `-drop-policy`           | `drop`    | Eviction policy: `drop` or `dead-letter`.      |
+| `-dead-letter-queue-id`  | —         | Target queue when `-drop-policy=dead-letter`.  |
 
 ### `plainq describe <queue-id>`
 

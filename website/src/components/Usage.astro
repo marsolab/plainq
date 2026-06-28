@@ -2,16 +2,17 @@
 import Terminal from "./Terminal.astro";
 
 const cli = `# Flags go BEFORE the positional queue id
-$ plainq create my-queue \\
-    -visibility-timeout=30s \\
+$ plainq create \\
+    -visibility-timeout=30 \\
     -max-receive-attempts=5 \\
-    -drop-policy=dead-letter
+    -drop-policy=dead-letter \\
+    my-queue
 
 $ plainq send -message='{"job":"resize"}' "$QID"
 $ plainq receive -batch=10 -ack "$QID"
 
 # Machine-readable output for scripts and agents
-$ plainq list -json | jq '.queues[].name'`;
+$ plainq list -json | jq '.queues[].queue_name'`;
 
 const grpc = `// The wire API is published to the Buf Schema Registry:
 //   buf.build/plainq/schema

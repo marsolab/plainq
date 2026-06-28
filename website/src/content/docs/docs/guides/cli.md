@@ -38,13 +38,17 @@ Run any command with `-h` for its full flag list.
 
 ### Create a queue with a dead-letter policy
 
+Remember: **flags go before the positional queue name**, and durations are given
+as whole seconds.
+
 ```shell
 DLQ=$(plainq create my-queue-dlq)
-plainq create my-queue \
-  -visibility-timeout=30s \
+plainq create \
+  -visibility-timeout=30 \
   -max-receive-attempts=5 \
   -drop-policy=dead-letter \
-  -dead-letter-queue-id="$DLQ"
+  -dead-letter-queue-id="$DLQ" \
+  my-queue
 ```
 
 ### Send messages
@@ -72,9 +76,12 @@ plainq delete-message "$QID" <message-id>
 
 Every client command accepts `-json`:
 
+The `-json` output is the JSON encoding of the gRPC response, so its keys are the
+schema's snake_case field names (e.g. `queue_name`, `visibility_timeout_seconds`):
+
 ```shell
-plainq list -json | jq '.queues[].name'
-plainq describe -json "$QID" | jq '.visibility_timeout'
+plainq list -json | jq '.queues[].queue_name'
+plainq describe -json "$QID" | jq '.visibility_timeout_seconds'
 ```
 
 ## See also

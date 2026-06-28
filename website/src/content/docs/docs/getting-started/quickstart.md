@@ -9,13 +9,13 @@ Go from a fresh clone to a message round-trip in about a minute.
 
 ## Prerequisites
 
+`make build` compiles the embedded Houston UI and generates the gRPC code, so a
+fresh-clone build needs:
+
 - **Go 1.26.1** or later
 - **Bun** (to build the Houston admin UI that gets embedded into the binary)
-
-:::note
-Don't have Bun and only want the server + CLI? See
-[Installation](/docs/getting-started/installation/) for a Houston-free build.
-:::
+- **[buf](https://buf.build/docs/installation)** (to generate the gRPC code that
+  `make build` regenerates via its `schema` step)
 
 ## 1. Build the binary
 
