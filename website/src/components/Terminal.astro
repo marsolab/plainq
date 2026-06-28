@@ -1,0 +1,56 @@
+---
+import CopyButton from "./CopyButton";
+
+interface Props {
+  /** Raw shell/code text. Lines starting with `#` render as comments, `$ ` as prompts. */
+  code: string;
+  /** Window title shown in the title bar. */
+  title?: string;
+  class?: string;
+}
+
+const { code, title = "bash", class: className } = Astro.props;
+const lines = code.replace(/\n$/, "").split("\n");
+
+function classify(line: string) {
+  const trimmed = line.trimStart();
+  if (trimmed.startsWith("#")) return "comment";
+  if (trimmed.startsWith("$")) return "prompt";
+  return "output";
+}
+---
+
+<div
+  class:list={[
+    "overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-sm",
+    className,
+  ]}
+>
+  <div
+    class="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-muted)] px-4 py-2.5"
+  >
+    <div class="flex items-center gap-1.5">
+      <span class="h-2.5 w-2.5 rounded-full bg-[var(--color-border)]"></span>
+      <span class="h-2.5 w-2.5 rounded-full bg-[var(--color-border)]"></span>
+      <span class="h-2.5 w-2.5 rounded-full bg-[var(--color-border)]"></span>
+      <span class="ml-2 font-mono text-xs text-[var(--color-muted-foreground)]"
+        >{title}</span
+      >
+    </div>
+    <CopyButton value={code} client:visible />
+  </div>
+  <pre
+    class="overflow-x-auto p-4 font-mono text-[13px] leading-relaxed"><code>{lines.map((line) => {
+      const kind = classify(line);
+      if (kind === "comment") {
+        return <span class="block text-[var(--color-muted-foreground)]">{line}</span>;
+      }
+      if (kind === "prompt") {
+        const rest = line.replace(/^(\s*)\$\s?/, "");
+        return (
+          <span class="block text-[var(--color-foreground)]"><span class="select-none text-[var(--color-muted-foreground)]">$ </span>{rest}</span>
+        );
+      }
+      return <span class="block text-[var(--color-muted-foreground)]">{line}</span>;
+    })}</code></pre>
+</div>

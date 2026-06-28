@@ -1,0 +1,27 @@
+---
+const items = [
+  { value: "1", label: "binary — no broker fleet" },
+  { value: "8", label: "gRPC RPCs, fully typed" },
+  { value: "2", label: "storage backends (SQLite · Postgres)" },
+  { value: "0", label: "external dependencies to run" },
+];
+---
+
+<section class="border-b border-[var(--color-border)] bg-[var(--color-muted)]">
+  <div
+    class="mx-auto grid max-w-6xl grid-cols-2 divide-x divide-[var(--color-border)] px-4 sm:px-6 md:grid-cols-4"
+  >
+    {
+      items.map((item) => (
+        <div class="px-4 py-8 text-center">
+          <div class="font-mono text-3xl font-bold tracking-tight">
+            {item.value}
+          </div>
+          <div class="mt-1 text-sm text-[var(--color-muted-foreground)]">
+            {item.label}
+          </div>
+        </div>
+      ))
+    }
+  </div>
+</section>

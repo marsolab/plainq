@@ -1,0 +1,77 @@
+---
+// Inline SVG icon paths (lucide-style, 24x24, stroke=currentColor).
+const features = [
+  {
+    title: "One binary, no broker fleet",
+    body: "Run ./plainq serve and you have a queue. No Zookeeper, no separate broker cluster, no operational sprawl.",
+    icon: "M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z M3.3 7 12 12l8.7-5 M12 22V12",
+  },
+  {
+    title: "gRPC API + CLI + TUI",
+    body: "The same surface, scripted or interactive. Eight typed RPCs, a full CLI, and a rich Bubble Tea terminal dashboard.",
+    icon: "m8 9 3 3-3 3 M13 15h3 M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z",
+  },
+  {
+    title: "Houston admin UI",
+    body: "An Astro + React dashboard for queues, accounts, RBAC, and metrics — served straight from the same binary.",
+    icon: "M3 3v18h18 M18.7 8l-5.1 5.2-2.8-2.7L7 14",
+  },
+  {
+    title: "Pick your storage",
+    body: "Embedded SQLite by default — Litestream-friendly for cheap replication. Switch to PostgreSQL for a shared backend.",
+    icon: "M12 8c4.97 0 9-1.34 9-3s-4.03-3-9-3-9 1.34-9 3 4.03 3 9 3z M3 5v14c0 1.66 4.03 3 9 3s9-1.34 9-3V5 M3 12c0 1.66 4.03 3 9 3s9-1.34 9-3",
+  },
+  {
+    title: "Auth that's actually built in",
+    body: "JWT sessions, refresh tokens, RBAC, and OAuth/OIDC hooks (Kinde, Auth0, Okta, WorkOS) ship with the server.",
+    icon: "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z M9 12l2 2 4-4",
+  },
+  {
+    title: "Built for humans and agents",
+    body: "-json everywhere and schema introspection make the CLI a first-class tool for scripts and AI agents alike.",
+    icon: "M12 8V4H8 M2 14h2 M20 14h2 M15 13v2 M9 13v2 M4 8h16a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2z",
+  },
+];
+---
+
+<section id="features" class="border-b border-[var(--color-border)]">
+  <div class="mx-auto max-w-6xl px-4 py-20 sm:px-6">
+    <div class="max-w-2xl">
+      <h2 class="text-3xl font-bold tracking-tight sm:text-4xl">
+        Everything in the box
+      </h2>
+      <p class="mt-4 text-lg text-[var(--color-muted-foreground)]">
+        PlainQ is intentionally boring on the inside, so the surface stays small
+        and the operations stay quiet.
+      </p>
+    </div>
+
+    <div class="mt-12 grid gap-px overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-border)] sm:grid-cols-2 lg:grid-cols-3">
+      {
+        features.map((feature) => (
+          <div class="bg-[var(--color-card)] p-6">
+            <div class="flex h-10 w-10 items-center justify-center rounded-md border border-[var(--color-border)] bg-[var(--color-muted)]">
+              <svg
+                width="20"
+                height="20"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.75"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path d={feature.icon} />
+              </svg>
+            </div>
+            <h3 class="mt-4 font-semibold">{feature.title}</h3>
+            <p class="mt-2 text-sm leading-relaxed text-[var(--color-muted-foreground)]">
+              {feature.body}
+            </p>
+          </div>
+        ))
+      }
+    </div>
+  </div>
+</section>

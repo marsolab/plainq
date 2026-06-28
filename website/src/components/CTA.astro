@@ -1,0 +1,39 @@
+---
+import Terminal from "./Terminal.astro";
+
+const oneLiner = `$ make build && ./plainq serve \\
+    --auth.jwt.secret="$(openssl rand -hex 32)"`;
+---
+
+<section class="border-b border-[var(--color-border)]">
+  <div class="mx-auto max-w-4xl px-4 py-24 text-center sm:px-6">
+    <h2 class="text-balance text-3xl font-bold tracking-tight sm:text-4xl">
+      A queue, in under a minute.
+    </h2>
+    <p
+      class="text-balance mx-auto mt-4 max-w-xl text-lg text-[var(--color-muted-foreground)]"
+    >
+      From a fresh clone to a message round-trip. No services to provision, no
+      YAML to write first.
+    </p>
+
+    <div class="mx-auto mt-8 max-w-2xl text-left">
+      <Terminal code={oneLiner} title="get started" />
+    </div>
+
+    <div class="mt-8 flex flex-wrap items-center justify-center gap-3">
+      <a
+        href="/docs/getting-started/quickstart/"
+        class="inline-flex h-11 items-center justify-center rounded-md bg-[var(--color-primary)] px-6 text-base font-medium text-[var(--color-primary-foreground)] transition-opacity hover:opacity-90"
+      >
+        Read the quickstart
+      </a>
+      <a
+        href="/docs/"
+        class="inline-flex h-11 items-center justify-center rounded-md border border-[var(--color-border)] bg-[var(--color-background)] px-6 text-base font-medium text-[var(--color-foreground)] transition-colors hover:bg-[var(--color-muted)]"
+      >
+        Browse the docs
+      </a>
+    </div>
+  </div>
+</section>

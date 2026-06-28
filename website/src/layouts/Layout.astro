@@ -1,0 +1,85 @@
+---
+import "../styles/globals.css";
+
+interface Props {
+  title?: string;
+  description?: string;
+}
+
+const {
+  title = "PlainQ — Truly Simple Queue Service",
+  description = "PlainQ is a small, self-contained queue server written in Go. One binary gives you a gRPC API, a CLI, a TUI, and a built-in admin UI — backed by SQLite or PostgreSQL.",
+} = Astro.props;
+
+const canonical = new URL(Astro.url.pathname, Astro.site).toString();
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="generator" content={Astro.generator} />
+
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={canonical} />
+
+    <!-- Open Graph / Twitter -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={canonical} />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+
+    <!-- Fonts: Inter + JetBrains Mono, matching the Houston admin UI -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
+    />
+
+    <!-- Apply the saved/system theme before paint to avoid a flash. -->
+    <script is:inline>
+      (function () {
+        try {
+          // Light is the default; only go dark if the user has chosen it.
+          const stored = localStorage.getItem("plainq-theme");
+          document.documentElement.classList.toggle("dark", stored === "dark");
+        } catch (e) {
+          /* default: light */
+        }
+      })();
+    </script>
+  </head>
+  <body class="min-h-screen bg-[var(--color-background)] text-[var(--color-foreground)]">
+    <slot />
+
+    {/*
+      Agentation visual-feedback widget (https://www.agentation.com/).
+
+      A dev-time tool: click any element, add a note, and copy structured
+      context that AI coding agents can act on. The `if (import.meta.env.DEV)`
+      guard lets Vite tree-shake the agentation dependency out of the production
+      build entirely — it only loads during `astro dev`.
+    */}
+    <script>
+      if (import.meta.env.DEV) {
+        const [{ Agentation }, { createRoot }, { createElement }] =
+          await Promise.all([
+            import("agentation"),
+            import("react-dom/client"),
+            import("react"),
+          ]);
+        const mount = document.createElement("div");
+        mount.id = "agentation-root";
+        document.body.appendChild(mount);
+        createRoot(mount).render(createElement(Agentation));
+      }
+    </script>
+  </body>
+</html>

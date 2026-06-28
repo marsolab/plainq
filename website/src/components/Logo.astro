@@ -1,0 +1,29 @@
+---
+interface Props {
+  class?: string;
+  /** Show the "PlainQ" wordmark next to the mark. */
+  withWordmark?: boolean;
+}
+const { class: className, withWordmark = true } = Astro.props;
+---
+
+<span class:list={["inline-flex items-center gap-2", className]}>
+  <svg
+    width="28"
+    height="28"
+    viewBox="0 0 32 32"
+    fill="none"
+    aria-hidden="true"
+    class="shrink-0"
+  >
+    <rect width="32" height="32" rx="7" fill="currentColor" />
+    <rect x="8" y="9.5" width="16" height="3" rx="1.5" class="fill-[var(--color-background)]" />
+    <rect x="8" y="14.5" width="12" height="3" rx="1.5" class="fill-[var(--color-background)]" opacity="0.7" />
+    <rect x="8" y="19.5" width="8" height="3" rx="1.5" class="fill-[var(--color-background)]" opacity="0.45" />
+  </svg>
+  {
+    withWordmark && (
+      <span class="text-lg font-bold tracking-tight">PlainQ</span>
+    )
+  }
+</span>
