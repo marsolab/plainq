@@ -124,6 +124,7 @@ END_TS="$(date +%s)"
 # 5. Render the comparison report from VictoriaMetrics.
 # ---------------------------------------------------------------------------
 REPORT="${RESULTS}/report-${RUN_ID}.md"
+REPORT_RC=0
 log "Generating comparison report"
 if command -v python3 >/dev/null 2>&1; then
   set +e
@@ -156,3 +157,7 @@ if [ "${KEEP_UP}" != "1" ]; then
 else
   log "Stack left running. Stop it with: make -C perf down"
 fi
+
+# Preserve report.py's exit status so CI fails on a detected regression
+# (report.py exits 1 on regression) even after teardown/footer above.
+exit "${REPORT_RC}"

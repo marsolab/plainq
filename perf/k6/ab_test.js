@@ -115,6 +115,11 @@ export function candidate(data) {
   workload(CANDIDATE_ADDR, 'candidate', data.candidate);
 }
 
+// isOK reports whether a gRPC response completed successfully.
+function isOK(res) {
+  return !!res && res.status === grpc.StatusOK;
+}
+
 // timed invokes fn, records req/err/latency under {variant, op}, and asserts OK.
 function timed(variant, op, fn) {
   const t0 = Date.now();
@@ -122,14 +127,13 @@ function timed(variant, op, fn) {
   const dt = Date.now() - t0;
 
   const tags = { variant, op };
-  const ok = !!res && res.status === grpc.StatusOK;
 
   reqs.add(1, tags);
   latency.add(dt, tags);
-  if (!ok) {
+  if (!isOK(res)) {
     errs.add(1, tags);
   }
-  check(res, { [`${op} ok`]: (r) => !!r && r.status === grpc.StatusOK }, tags);
+  check(res, { [`${op} ok`]: isOK }, tags);
 
   return res;
 }
@@ -142,13 +146,15 @@ function workload(addr, variant, queueID) {
   }
 
   const t0 = Date.now();
+  let failed = false;
 
-  timed(variant, 'send', () =>
+  const sendRes = timed(variant, 'send', () =>
     client.invoke(`${SERVICE}/Send`, {
       queue_id: queueID,
       messages: [{ body: BODY }],
     }),
   );
+  failed = failed || !isOK(sendRes);
 
   const recv = timed(variant, 'receive', () =>
     client.invoke(`${SERVICE}/Receive`, {
@@ -156,26 +162,33 @@ function workload(addr, variant, queueID) {
       batch_size: BATCH_SIZE,
     }),
   );
+  failed = failed || !isOK(recv);
 
   const ids = [];
-  if (recv && recv.status === grpc.StatusOK && recv.message && recv.message.messages) {
+  if (isOK(recv) && recv.message && recv.message.messages) {
     for (const m of recv.message.messages) {
       ids.push(m.id);
     }
   }
 
   if (ids.length > 0) {
-    timed(variant, 'delete', () =>
+    const delRes = timed(variant, 'delete', () =>
       client.invoke(`${SERVICE}/Delete`, {
         queue_id: queueID,
         message_ids: ids,
       }),
     );
+    failed = failed || !isOK(delRes);
   }
 
-  // Record the end-to-end lifecycle latency under op=total.
-  latency.add(Date.now() - t0, { variant, op: 'total' });
-  reqs.add(1, { variant, op: 'total' });
+  // Record the end-to-end lifecycle outcome under op=total. The error sample
+  // is what report.py uses for its regression error-rate verdict.
+  const tags = { variant, op: 'total' };
+  latency.add(Date.now() - t0, tags);
+  reqs.add(1, tags);
+  if (failed) {
+    errs.add(1, tags);
+  }
 }
 
 export function handleSummary(data) {
