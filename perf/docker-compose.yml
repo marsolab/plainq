@@ -60,7 +60,6 @@ services:
       - "-grpc.addr=:8080"
       - "-http.addr=:8081"
       - "-storage.path=/data/plainq.db"
-      - "-storage.journal-mode=wal"
       - "-auth.enable=false"
       - "-auth.jwt.secret=perf-not-a-secret"
       - "-telemetry.enable=false"
@@ -81,7 +80,6 @@ services:
       - "-grpc.addr=:8080"
       - "-http.addr=:8081"
       - "-storage.path=/data/plainq.db"
-      - "-storage.journal-mode=wal"
       - "-auth.enable=false"
       - "-auth.jwt.secret=perf-not-a-secret"
       - "-telemetry.enable=false"
@@ -107,7 +105,8 @@ services:
     environment:
       # Stream metrics to VictoriaMetrics over Prometheus remote-write.
       K6_PROMETHEUS_RW_SERVER_URL: http://victoriametrics:8428/api/v1/write
-      K6_PROMETHEUS_RW_TREND_STATS: "p50,p90,p95,p99,max"
+      # k6 wants percentiles as p(NN); exported series are still _p50/_p95/etc.
+      K6_PROMETHEUS_RW_TREND_STATS: "p(50),p(90),p(95),p(99),max"
       # In-network addresses of the two servers under test.
       BASELINE_ADDR: plainq-baseline:8080
       CANDIDATE_ADDR: plainq-candidate:8080

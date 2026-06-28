@@ -62,10 +62,12 @@ def collect(vm_url, variant, window, at):
 
     for op in OPS:
         opsel = f'{sel},op="{op}"'
+        # k6's Prometheus remote-write exports time metrics in seconds; convert
+        # to milliseconds for display.
         data[op] = {
-            "p50": avg_gauge(vm_url, "k6_plainq_latency_p50", opsel, window, at),
-            "p95": avg_gauge(vm_url, "k6_plainq_latency_p95", opsel, window, at),
-            "p99": avg_gauge(vm_url, "k6_plainq_latency_p99", opsel, window, at),
+            "p50": _ms(avg_gauge(vm_url, "k6_plainq_latency_p50", opsel, window, at)),
+            "p95": _ms(avg_gauge(vm_url, "k6_plainq_latency_p95", opsel, window, at)),
+            "p99": _ms(avg_gauge(vm_url, "k6_plainq_latency_p99", opsel, window, at)),
             "reqs": counter(vm_url, "k6_plainq_reqs", opsel, window, at),
             "errs": counter(vm_url, "k6_plainq_errs", opsel, window, at),
         }
@@ -81,6 +83,11 @@ def collect(vm_url, variant, window, at):
 
 def _div(value, denom):
     return None if value is None else value / denom
+
+
+def _ms(value):
+    """Convert a seconds value (k6 prom-rw unit) to milliseconds for display."""
+    return None if value is None else value * 1000.0
 
 
 def fmt(value, suffix="", nd=2):

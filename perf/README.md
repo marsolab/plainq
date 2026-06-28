@@ -113,6 +113,14 @@ Server-side series scraped from each PlainQ `/metrics` (label `variant`,
 > they read `n/a`, the AB comparison still works — k6's client-side metrics are
 > the source of truth for latency and throughput.
 
+> **High error rates under load are expected** with the SQLite backend: it is
+> single-writer, so many concurrent VUs doing `Send`/`Delete` raise
+> `SQLITE_BUSY`. That contention hits **both** variants equally, so the
+> *relative* candidate-vs-baseline verdict stays meaningful even when absolute
+> error rates are high. Lower `VUS`, raise `BATCH_SIZE`, or point at PostgreSQL
+> for a cleaner absolute picture. k6's absolute thresholds are intentionally
+> loose for this reason — `report.py`'s relative comparison is the real gate.
+
 ## Regression gating in CI
 
 `report.py` exits non-zero when the candidate's end-to-end p95 is more than

@@ -1,0 +1,122 @@
+name: Performance AB
+
+# Runs the PlainQ gRPC AB performance harness on every PR (candidate = PR,
+# baseline = target branch) and on pushes to main (candidate = new main,
+# baseline = previous commit). The result is posted as a sticky PR comment.
+#
+# Informational by design: a detected regression is reported but never fails
+# the check (shared CI runners are noisy). Flip RUN_SH's exit handling / remove
+# `continue-on-error` here if you want it to gate merges.
+
+on:
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+concurrency:
+  group: perf-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the baseline ref + git worktree are available.
+          fetch-depth: 0
+
+      - name: Resolve workload parameters
+        id: cfg
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # Light, fast run for quick PR signal.
+            git fetch --quiet origin "${{ github.base_ref }}"
+            echo "baseline_ref=origin/${{ github.base_ref }}" >> "$GITHUB_OUTPUT"
+            echo "duration=45s" >> "$GITHUB_OUTPUT"
+            echo "vus=10" >> "$GITHUB_OUTPUT"
+            echo "run_id=pr-${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+          else
+            # Thorough run on main vs the previous commit for the baseline trend.
+            echo "baseline_ref=HEAD~1" >> "$GITHUB_OUTPUT"
+            echo "duration=2m" >> "$GITHUB_OUTPUT"
+            echo "vus=30" >> "$GITHUB_OUTPUT"
+            echo "run_id=main-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run AB test
+        id: run
+        continue-on-error: true
+        env:
+          KEEP_UP: "0"
+          BASELINE_REF: ${{ steps.cfg.outputs.baseline_ref }}
+          DURATION: ${{ steps.cfg.outputs.duration }}
+          VUS: ${{ steps.cfg.outputs.vus }}
+          RUN_ID: ${{ steps.cfg.outputs.run_id }}
+        run: ./perf/scripts/run.sh
+
+      - name: Locate report
+        id: report
+        if: always()
+        run: |
+          path="perf/results/report-${{ steps.cfg.outputs.run_id }}.md"
+          if [ -f "$path" ]; then
+            echo "path=$path" >> "$GITHUB_OUTPUT"
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-results-${{ steps.cfg.outputs.run_id }}
+          path: perf/results/
+          if-no-files-found: warn
+
+      - name: Comment report on PR
+        # Skip on forks (their GITHUB_TOKEN is read-only) and on push events.
+        if: >-
+          always() &&
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- plainq-perf-ab -->';
+            const found = '${{ steps.report.outputs.found }}' === 'true';
+            const path = '${{ steps.report.outputs.path }}';
+
+            let body;
+            if (found) {
+              const report = fs.readFileSync(path, 'utf8');
+              body = `${marker}\n${report}\n\n` +
+                `<sub>Light PR run (${{ steps.cfg.outputs.vus }} VUs, ${{ steps.cfg.outputs.duration }}). ` +
+                `Informational only — does not block merge. ` +
+                `Full data in the run's <b>perf-results</b> artifact.</sub>`;
+            } else {
+              body = `${marker}\n### PlainQ AB Performance\n\n` +
+                `⚠️ The perf run did not produce a report (build or startup failed). ` +
+                `See the [workflow logs](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}).`;
+            }
+
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.rest.issues.listComments({ owner, repo, issue_number });
+            const existing = comments.data.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }

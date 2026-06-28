@@ -61,7 +61,7 @@
       "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
       "id": 2,
       "fieldConfig": {
-        "defaults": { "unit": "ms", "color": { "mode": "palette-classic" } },
+        "defaults": { "unit": "s", "color": { "mode": "palette-classic" } },
         "overrides": []
       },
       "options": {
@@ -88,7 +88,7 @@
       "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
       "id": 3,
       "fieldConfig": {
-        "defaults": { "unit": "ms", "color": { "mode": "palette-classic" } },
+        "defaults": { "unit": "s", "color": { "mode": "palette-classic" } },
         "overrides": []
       },
       "options": {
@@ -180,7 +180,7 @@
       "id": 6,
       "fieldConfig": {
         "defaults": {
-          "unit": "ms",
+          "unit": "s",
           "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10, "showPoints": "never" }
         },
         "overrides": []
@@ -206,7 +206,7 @@
       "id": 7,
       "fieldConfig": {
         "defaults": {
-          "unit": "ms",
+          "unit": "s",
           "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10, "showPoints": "never" }
         },
         "overrides": []
@@ -300,7 +300,7 @@
       "id": 12,
       "fieldConfig": {
         "defaults": {
-          "unit": "ms",
+          "unit": "s",
           "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 5, "showPoints": "never" }
         },
         "overrides": []
