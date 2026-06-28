@@ -39,22 +39,29 @@ against the baseline ref under the same load.
 
 - "Did this change make PlainQ slower/faster?" / suspected perf regression.
 - Comparing a branch or PR against `main` (or a tag) for latency/throughput.
+- "Just spin a load test" against a running server.
 - Reading the AB Grafana dashboard or `perf/results/report-*.md`.
-- Editing the harness: `k6/ab_test.js`, `victoriametrics/scrape.yml`,
-  `grafana/`, `Dockerfile.plainq`, `scripts/`, or `.github/workflows/perf.yml`.
+- Editing the harness: `cmd/perfctl`, `k6/ab_test.js`, `k6/load_test.js`,
+  `victoriametrics/scrape.yml`, `grafana/`, `Dockerfile.plainq`, `scripts/`,
+  or `.github/workflows/perf.yml`.
 
 ## Quick reference
 
+`perfctl` (`cmd/perfctl`) is the single-entry CLI; `make` targets wrap it.
+
 | Action | Command |
 | --- | --- |
-| Full AB run vs `origin/main` (leaves stack up) | `make -C perf ab` |
-| Compare against a specific ref | `make -C perf ab BASELINE_REF=v0.1.0` |
-| Heavier / longer run | `make -C perf ab DURATION=5m VUS=50 MSG_BYTES=1024` |
-| Re-run only k6 against the live stack | `make -C perf k6` |
-| Stop stack / full cleanup | `make -C perf down` / `make -C perf clean` |
+| Build the CLI | `make -C perf cli` → `./perf/perfctl` |
+| AB run vs `origin/main` (leaves stack up) | `perfctl ab` or `make -C perf ab` |
+| AB vs a specific ref, heavier run | `perfctl ab -baseline v0.1.0 -vus 50 -duration 5m` |
+| **Load one running server** (no baseline) | `perfctl load -target localhost:8080` |
+| Stack up / URLs / down / cleanup | `perfctl up` / `dashboard` / `down` / `clean` |
+| Re-run only AB k6 on the live stack | `make -C perf k6` |
 
-Knobs (env): `BASELINE_REF`, `VUS`, `DURATION`, `BATCH_SIZE`, `MSG_BYTES`,
-`RUN_ID`, `KEEP_UP`. See `perf/README.md` for the full table.
+Each flag has an env fallback (`-vus`/`VUS`, `-baseline`/`BASELINE_REF`,
+`-target`/`TARGET_ADDR`, …). Use `-target host.docker.internal:PORT` to load a
+server on the host. Knobs: `BASELINE_REF`, `VUS`, `DURATION`, `BATCH_SIZE`,
+`MSG_BYTES`, `RUN_ID`, `KEEP_UP`. See `perf/README.md` for the full table.
 
 ## Reading results
 

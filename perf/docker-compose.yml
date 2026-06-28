@@ -129,6 +129,40 @@ services:
       - "run_id=${RUN_ID:-local}"
       - /k6/ab_test.js
 
+  # Single-target load generator (no AB comparison). Targets any running gRPC
+  # server via TARGET_ADDR; use host.docker.internal:PORT to reach a server on
+  # the host. Launched on demand by `perfctl load` / `make load`.
+  k6-load:
+    image: grafana/k6:0.55.0
+    container_name: plainq-perf-k6-load
+    profiles: ["load"]
+    depends_on:
+      - victoriametrics
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      K6_PROMETHEUS_RW_SERVER_URL: http://victoriametrics:8428/api/v1/write
+      K6_PROMETHEUS_RW_TREND_STATS: "p(50),p(90),p(95),p(99),max"
+      TARGET_ADDR: "${TARGET_ADDR:-host.docker.internal:8080}"
+      VARIANT: "${VARIANT:-load}"
+      VUS: "${VUS:-20}"
+      DURATION: "${DURATION:-2m}"
+      BATCH_SIZE: "${BATCH_SIZE:-1}"
+      MSG_BYTES: "${MSG_BYTES:-256}"
+      RUN_ID: "${RUN_ID:-local}"
+    volumes:
+      - ./k6:/k6:ro
+      - ../schema:/proto:ro
+      - ./results:/results
+    entrypoint:
+      - k6
+      - run
+      - "--out"
+      - experimental-prometheus-rw
+      - "--tag"
+      - "run_id=${RUN_ID:-local}"
+      - /k6/load_test.js
+
 volumes:
   vmdata:
   grafana:
