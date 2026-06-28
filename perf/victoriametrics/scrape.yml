@@ -1,0 +1,21 @@
+# VictoriaMetrics scrape config.
+#
+# Scrapes the Prometheus-style /metrics endpoint of each PlainQ server under
+# test and attaches a `variant` label so baseline and candidate series can be
+# compared side by side in Grafana. k6 metrics arrive separately over remote
+# write (also carrying a `variant` label, set per-scenario in the test script).
+
+global:
+  scrape_interval: 5s
+  scrape_timeout: 5s
+
+scrape_configs:
+  - job_name: plainq
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["plainq-baseline:8081"]
+        labels:
+          variant: baseline
+      - targets: ["plainq-candidate:8081"]
+        labels:
+          variant: candidate

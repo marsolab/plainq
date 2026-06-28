@@ -1,0 +1,135 @@
+# PlainQ performance / AB-testing stack.
+#
+#   VictoriaMetrics  - time-series DB; scrapes both PlainQ servers and
+#                      receives k6 metrics over Prometheus remote-write.
+#   Grafana          - provisioned with the VictoriaMetrics datasource and the
+#                      "PlainQ AB Performance" dashboard.
+#   plainq-baseline  - server built from the stable ref (see scripts/run.sh).
+#   plainq-candidate - server built from the current checkout.
+#   k6               - gRPC load generator; runs the same scenario against
+#                      both servers and tags every metric with `variant`.
+#
+# Bring the infra up with `make up` (or `docker compose up -d`), then run the
+# AB test with `make ab`. See README.md for the full workflow.
+
+name: plainq-perf
+
+services:
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:v1.115.0
+    container_name: plainq-perf-vm
+    command:
+      - "-storageDataPath=/vmdata"
+      - "-promscrape.config=/etc/vm/scrape.yml"
+      - "-retentionPeriod=30d"
+      # Accept Prometheus remote-write from k6 at /api/v1/write (built in).
+      - "-search.latencyOffset=1s"
+    ports:
+      - "8428:8428"
+    volumes:
+      - ./victoriametrics/scrape.yml:/etc/vm/scrape.yml:ro
+      - vmdata:/vmdata
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: plainq-perf-grafana
+    depends_on:
+      - victoriametrics
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_USERS_DEFAULT_THEME: dark
+      # Land directly on the AB dashboard.
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/plainq-ab.json
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana:/var/lib/grafana
+    restart: unless-stopped
+
+  plainq-baseline:
+    image: plainq-perf:baseline
+    container_name: plainq-perf-baseline
+    command:
+      - "serve"
+      - "-grpc.addr=:8080"
+      - "-http.addr=:8081"
+      - "-storage.path=/data/plainq.db"
+      - "-storage.journal-mode=wal"
+      - "-auth.enable=false"
+      - "-auth.jwt.secret=perf-not-a-secret"
+      - "-telemetry.enable=false"
+      - "-log.access.enable=false"
+      - "-log.level=warn"
+    ports:
+      - "18080:8080"
+      - "18081:8081"
+    tmpfs:
+      - /data
+    restart: unless-stopped
+
+  plainq-candidate:
+    image: plainq-perf:candidate
+    container_name: plainq-perf-candidate
+    command:
+      - "serve"
+      - "-grpc.addr=:8080"
+      - "-http.addr=:8081"
+      - "-storage.path=/data/plainq.db"
+      - "-storage.journal-mode=wal"
+      - "-auth.enable=false"
+      - "-auth.jwt.secret=perf-not-a-secret"
+      - "-telemetry.enable=false"
+      - "-log.access.enable=false"
+      - "-log.level=warn"
+    ports:
+      - "28080:8080"
+      - "28081:8081"
+    tmpfs:
+      - /data
+    restart: unless-stopped
+
+  # On-demand load generator. Not started by `docker compose up`; launched by
+  # `scripts/run.sh` (make ab) via `docker compose run`.
+  k6:
+    image: grafana/k6:0.55.0
+    container_name: plainq-perf-k6
+    profiles: ["test"]
+    depends_on:
+      - victoriametrics
+      - plainq-baseline
+      - plainq-candidate
+    environment:
+      # Stream metrics to VictoriaMetrics over Prometheus remote-write.
+      K6_PROMETHEUS_RW_SERVER_URL: http://victoriametrics:8428/api/v1/write
+      K6_PROMETHEUS_RW_TREND_STATS: "p50,p90,p95,p99,max"
+      # In-network addresses of the two servers under test.
+      BASELINE_ADDR: plainq-baseline:8080
+      CANDIDATE_ADDR: plainq-candidate:8080
+      # Workload knobs (overridable from the host environment).
+      VUS: "${VUS:-20}"
+      DURATION: "${DURATION:-2m}"
+      BATCH_SIZE: "${BATCH_SIZE:-1}"
+      MSG_BYTES: "${MSG_BYTES:-256}"
+      RUN_ID: "${RUN_ID:-local}"
+    volumes:
+      - ./k6:/k6:ro
+      - ../schema:/proto:ro
+      - ./results:/results
+    entrypoint:
+      - k6
+      - run
+      - "--out"
+      - experimental-prometheus-rw
+      - "--tag"
+      - "run_id=${RUN_ID:-local}"
+      - /k6/ab_test.js
+
+volumes:
+  vmdata:
+  grafana:

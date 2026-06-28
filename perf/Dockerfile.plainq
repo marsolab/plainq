@@ -1,0 +1,63 @@
+# syntax=docker/dockerfile:1
+#
+# Performance-testing build of the PlainQ server.
+#
+# This is a slimmed-down sibling of the repository root Dockerfile. The perf
+# harness only exercises the gRPC API, so we skip the Bun/Astro Houston build
+# entirely and stub out the embedded UI bundle that //go:embed requires. The
+# result is a much faster, network-light build that produces an identical
+# queue server on the gRPC + /metrics surface.
+#
+# The build context is a PlainQ source tree (the current checkout for the
+# "candidate" image, a git worktree of the stable ref for the "baseline"
+# image). Because the Dockerfile is passed with `-f`, it does not need to
+# exist inside the context, so it can build older commits too.
+
+FROM golang:1.26-alpine AS build
+
+# build-base provides gcc/musl-dev needed by cgo (mattn/go-sqlite3).
+RUN apk add --no-cache build-base git ca-certificates
+
+WORKDIR /src
+
+# Download modules first for better layer caching.
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy the source tree.
+COPY . .
+
+# The server embeds the Houston UI via `//go:embed all:ui/dist`. The perf
+# harness never serves the UI, so create a stub bundle if one was not copied
+# in. This lets us build without Bun and without a network round-trip.
+RUN test -f internal/houston/ui/dist/index.html \
+    || (mkdir -p internal/houston/ui/dist \
+        && printf '<!doctype html><meta charset="utf-8"><title>plainq perf build</title>' \
+           > internal/houston/ui/dist/index.html)
+
+ARG VERSION=perf
+ARG COMMIT=unknown
+
+# Statically link so the binary runs on a distroless base.
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=1 GOOS=linux go build \
+    -tags "sqlite_omit_load_extension" \
+    -trimpath \
+    -ldflags="-s -w -linkmode external -extldflags '-static' \
+      -X main.Branch=${VERSION} \
+      -X main.Commit=${COMMIT}" \
+    -o /out/plainq ./cmd
+
+# ---------------------------------------------------------------------------
+# Minimal runtime image.
+# ---------------------------------------------------------------------------
+FROM gcr.io/distroless/static-debian12:nonroot AS runtime
+
+COPY --from=build /out/plainq /usr/local/bin/plainq
+
+USER nonroot:nonroot
+
+EXPOSE 8080 8081
+VOLUME ["/data"]
+
+ENTRYPOINT ["/usr/local/bin/plainq"]
