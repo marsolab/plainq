@@ -683,6 +683,8 @@ plainq.db
 # Anchor to the repo root so this only ignores the built binary, not
 # directories named "plainq" elsewhere in the tree (e.g. deploy/helm/plainq).
 /plainq
+# perfctl binary if built at the repo root (`go build ./cmd/perfctl`).
+/perfctl
 !/internal/houston/build/.gitkeep
 
 # Zed

@@ -62,6 +62,38 @@ The stack is left running so you can explore Grafana. Stop it with
 `make -C perf down`, or fully clean up (volumes, images, worktree) with
 `make -C perf clean`.
 
+## The `perfctl` CLI
+
+`perfctl` ([`cmd/perfctl`](../cmd/perfctl)) is the single-entry CLI for the
+harness — `make ab` / `make load` are thin wrappers over it. Build it once,
+then drive everything from one binary:
+
+```shell
+make -C perf cli          # builds ./perf/perfctl
+./perf/perfctl -h         # list commands
+
+# AB comparison (candidate = current checkout, baseline = a git ref):
+./perf/perfctl ab
+./perf/perfctl ab -baseline v0.1.0 -vus 50 -duration 5m
+
+# Single-target load: just hammer one already-running server, no baseline,
+# no build. Spins up VictoriaMetrics + Grafana so the dashboard works.
+./perf/perfctl load -target localhost:8080 -vus 30 -duration 2m
+
+# Stack management:
+./perf/perfctl up         # VictoriaMetrics + Grafana only
+./perf/perfctl dashboard  # print URLs
+./perf/perfctl down       # stop
+./perf/perfctl clean      # stop + remove volumes, images, results
+```
+
+Every flag also reads an env var fallback (`-vus`/`VUS`, `-baseline`/
+`BASELINE_REF`, `-target`/`TARGET_ADDR`, …), and `-h` works on each
+subcommand. To load a server running on the **host** from inside Docker, use
+`-target host.docker.internal:PORT` (the default). `perfctl load` reuses the
+same metric names as the AB test, so the *PlainQ AB Performance* dashboard
+shows the run under the `load` variant.
+
 ## How it works
 
 1. **Build both variants.** `scripts/run.sh` builds `plainq-perf:candidate`

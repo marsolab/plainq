@@ -4,8 +4,13 @@
 #   make ab                 # build both variants, run the AB test, report
 #   make ab DURATION=5m VUS=50
 #   make ab BASELINE_REF=v0.1.0
+#   make load TARGET=localhost:8080   # load any running server
+#   make cli                # build the perfctl CLI -> ./perfctl
 #   make up / make down     # manage an already-built stack
 #   make clean              # tear everything down and remove images/worktree
+#
+# `perfctl` is the single-entry CLI for all of the above:
+#   ../cmd/perfctl  ->  perfctl ab | load | up | down | clean | dashboard
 
 COMPOSE := docker compose -f docker-compose.yml
 
@@ -15,12 +20,21 @@ VUS          ?= 20
 DURATION     ?= 2m
 BATCH_SIZE   ?= 1
 MSG_BYTES    ?= 256
+TARGET       ?= host.docker.internal:8080
 
 export VUS DURATION BATCH_SIZE MSG_BYTES
+
+.PHONY: cli
+cli: ## Build the perfctl CLI -> ./perfctl
+	cd .. && go build -o perf/perfctl ./cmd/perfctl
 
 .PHONY: ab
 ab: ## Build both variants, run the AB test, render the report
 	BASELINE_REF=$(BASELINE_REF) ./scripts/run.sh
+
+.PHONY: load
+load: ## Load-test a single running server (TARGET=host:port)
+	cd .. && go run ./cmd/perfctl load -target $(TARGET) -vus $(VUS) -duration $(DURATION) -batch $(BATCH_SIZE) -msg-bytes $(MSG_BYTES)
 
 .PHONY: up
 up: ## Start the stack (requires images already built by `make ab`)
