@@ -95,7 +95,7 @@ func abCommand() *scotty.Command {
 			f.StringVarE(&batch, "batch", "BATCH_SIZE", defaultBatch, "receive batch size (1-10)")
 			f.StringVarE(&msgBytes, "msg-bytes", "MSG_BYTES", defaultMsgBytes, "message body size in bytes")
 			f.StringVarE(&runID, "run-id", "RUN_ID", "", "run label (default: git short sha)")
-			f.BoolVarE(&keepUp, "keep-up", "", true, "keep the stack running after the test")
+			f.BoolVarE(&keepUp, "keep-up", "KEEP_UP", true, "keep the stack running after the test")
 		},
 		Run: func(_ *scotty.Command, _ []string) error {
 			root, err := repoRoot()
@@ -168,6 +168,12 @@ func loadCommand() *scotty.Command {
 				"MSG_BYTES":   msgBytes,
 				"RUN_ID":      runID,
 			})
+
+			// k6 writes its summary into the bind-mounted results dir as a
+			// non-root user, so it must exist and be writable first.
+			if err := ensureWorldWritableDir(filepath.Join(root, "perf", "results")); err != nil {
+				return err
+			}
 
 			if stack {
 				if err := run(root, env, "docker", "compose", "-f", compose, "up", "-d", "victoriametrics", "grafana"); err != nil {
@@ -374,6 +380,21 @@ func envWith(overrides map[string]string) []string {
 	}
 
 	return env
+}
+
+// ensureWorldWritableDir creates dir (if absent) and makes it world-writable,
+// mirroring scripts/run.sh: the k6 image runs as a non-root user and must be
+// able to write its run summary into the bind-mounted results directory.
+func ensureWorldWritableDir(path string) error {
+	if err := os.MkdirAll(path, 0o777); err != nil {
+		return fmt.Errorf("create %s: %w", path, err)
+	}
+
+	if err := os.Chmod(path, 0o777); err != nil {
+		return fmt.Errorf("chmod %s: %w", path, err)
+	}
+
+	return nil
 }
 
 // boolEnv renders a bool as the "1"/"0" the shell scripts expect.
