@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -37,14 +38,21 @@ const (
 	csvSeparator = ","
 )
 
+type MetricsStore interface {
+	GetMetrics(ctx context.Context, metricName, queueID string, from, to int64, resolution string) ([]collector.DataPoint, error)
+	GetRateHistory(ctx context.Context, metricName, queueID string, from, to int64) ([]collector.DataPoint, error)
+	GetMetricsSummary(ctx context.Context, queueID string, from, to int64) (*collector.MetricsSummary, error)
+	GetTopicMetricsSummary(ctx context.Context, topicID string, from, to int64) (*collector.TopicMetricsSummary, error)
+}
+
 // MetricsHandler handles metrics API requests.
 type MetricsHandler struct {
 	collector *collector.Collector
-	store     *collector.SQLiteStore
+	store     MetricsStore
 }
 
 // NewMetricsHandler creates a new MetricsHandler.
-func NewMetricsHandler(c *collector.Collector, s *collector.SQLiteStore) *MetricsHandler {
+func NewMetricsHandler(c *collector.Collector, s MetricsStore) *MetricsHandler {
 	return &MetricsHandler{
 		collector: c,
 		store:     s,
@@ -175,10 +183,43 @@ type QueueMetricsData struct {
 	EmptyReceives    uint64  `json:"emptyReceives"`
 }
 
+// TopicDashboardOverviewResponse represents the topic overview dashboard data.
+type TopicDashboardOverviewResponse struct {
+	SystemMetrics TopicSystemMetricsData `json:"systemMetrics"`
+	TopicMetrics  []TopicMetricsData     `json:"topicMetrics"`
+	TimeRange     TimeRange              `json:"timeRange"`
+	UpdatedAt     int64                  `json:"updatedAt"`
+}
+
+// TopicSystemMetricsData represents system-wide topic metrics.
+type TopicSystemMetricsData struct {
+	PublishRate          float64 `json:"publishRate"`
+	DeliveryRate         float64 `json:"deliveryRate"`
+	MessagesPublished    uint64  `json:"messagesPublished"`
+	Deliveries           uint64  `json:"deliveries"`
+	SubscriptionsCurrent *int64  `json:"subscriptionsCurrent"`
+	SubscriptionsCreated uint64  `json:"subscriptionsCreated"`
+	SubscriptionsDeleted uint64  `json:"subscriptionsDeleted"`
+}
+
+// TopicMetricsData represents metrics for a single topic.
+type TopicMetricsData struct {
+	TopicID              string  `json:"topicId"`
+	PublishRate          float64 `json:"publishRate"`
+	DeliveryRate         float64 `json:"deliveryRate"`
+	MessagesPublished    uint64  `json:"messagesPublished"`
+	Deliveries           uint64  `json:"deliveries"`
+	SubscriptionsCurrent *int64  `json:"subscriptionsCurrent"`
+	SubscriptionsCreated uint64  `json:"subscriptionsCreated"`
+	SubscriptionsDeleted uint64  `json:"subscriptionsDeleted"`
+	UpdatedAt            int64   `json:"updatedAt"`
+}
+
 // MetricsChartResponse represents time-series data for charts.
 type MetricsChartResponse struct {
 	MetricName string                `json:"metricName"`
 	QueueID    string                `json:"queueId,omitempty"`
+	TopicID    string                `json:"topicId,omitempty"`
 	TimeRange  TimeRange             `json:"timeRange"`
 	Resolution string                `json:"resolution"`
 	DataPoints []collector.DataPoint `json:"dataPoints"`
@@ -232,6 +273,38 @@ func (h *MetricsHandler) GetDashboardOverview(w http.ResponseWriter, r *http.Req
 	}
 
 	httpkit.JSON(w, r, resp)
+}
+
+func parseRequestTimeRange(w http.ResponseWriter, r *http.Request) *TimeRange {
+	preset := r.URL.Query().Get("range")
+
+	var customFrom, customTo int64
+
+	if fromStr := r.URL.Query().Get("from"); fromStr != "" {
+		v, err := strconv.ParseInt(fromStr, 10, 64)
+		if err != nil {
+			http.Error(w, `{"error": "invalid 'from' parameter"}`, http.StatusBadRequest)
+
+			return nil
+		}
+
+		customFrom = v
+	}
+
+	if toStr := r.URL.Query().Get("to"); toStr != "" {
+		v, err := strconv.ParseInt(toStr, 10, 64)
+		if err != nil {
+			http.Error(w, `{"error": "invalid 'to' parameter"}`, http.StatusBadRequest)
+
+			return nil
+		}
+
+		customTo = v
+	}
+
+	tr := ParseTimeRange(preset, customFrom, customTo)
+
+	return &tr
 }
 
 // GetMetricsChart returns time-series data for a metric.
@@ -296,6 +369,58 @@ func (h *MetricsHandler) GetMetricsChart(w http.ResponseWriter, r *http.Request)
 	httpkit.JSON(w, r, resp)
 }
 
+// GetTopicDashboardOverview returns the topic overview dashboard data.
+func (h *MetricsHandler) GetTopicDashboardOverview(w http.ResponseWriter, r *http.Request) {
+	systemRates := h.collector.GetTopicSystemRates()
+	systemCounters := h.collector.GetTopicSystemCounters()
+	now := time.Now().UnixMilli()
+
+	topicIDs := h.collector.GetAllTopicIDs()
+	topicMetrics := make([]TopicMetricsData, 0, len(topicIDs))
+
+	for _, topicID := range topicIDs {
+		rates := h.collector.GetTopicRates(topicID)
+		counters := h.collector.GetTopicCounters(topicID)
+		subscriptionsCurrent, subscriptionsKnown := h.collector.GetTopicSubscriptionsCurrentKnown(topicID)
+		topicMetrics = append(topicMetrics, TopicMetricsData{
+			TopicID:              topicID,
+			PublishRate:          rates.PublishRate,
+			DeliveryRate:         rates.DeliveryRate,
+			MessagesPublished:    counters.MessagesPublished,
+			Deliveries:           counters.Deliveries,
+			SubscriptionsCurrent: int64PtrIfKnown(subscriptionsCurrent, subscriptionsKnown),
+			SubscriptionsCreated: counters.SubscriptionsCreated,
+			SubscriptionsDeleted: counters.SubscriptionsDeleted,
+			UpdatedAt:            h.collector.GetTopicLastUpdated(topicID),
+		})
+	}
+
+	resp := TopicDashboardOverviewResponse{
+		SystemMetrics: TopicSystemMetricsData{
+			PublishRate:          systemRates.PublishRate,
+			DeliveryRate:         systemRates.DeliveryRate,
+			MessagesPublished:    systemCounters.MessagesPublished,
+			Deliveries:           systemCounters.Deliveries,
+			SubscriptionsCurrent: int64PtrIfKnown(systemCounters.SubscriptionsCurrent, systemCounters.SubscriptionsCurrentKnown),
+			SubscriptionsCreated: systemCounters.SubscriptionsCreated,
+			SubscriptionsDeleted: systemCounters.SubscriptionsDeleted,
+		},
+		TopicMetrics: topicMetrics,
+		TimeRange:    TimeRange{From: time.Now().Add(-1 * time.Hour).UnixMilli(), To: now},
+		UpdatedAt:    now,
+	}
+
+	httpkit.JSON(w, r, resp)
+}
+
+func int64PtrIfKnown(value int64, known bool) *int64 {
+	if !known {
+		return nil
+	}
+
+	return &value
+}
+
 // GetRatesChart returns rate history for a queue.
 func (h *MetricsHandler) GetRatesChart(w http.ResponseWriter, r *http.Request) {
 	queueID := chi.URLParam(r, "id")
@@ -342,6 +467,42 @@ func (h *MetricsHandler) GetRatesChart(w http.ResponseWriter, r *http.Request) {
 			{MetricName: collector.MetricDeleteRate, QueueID: queueID, DataPoints: deleteRates},
 		},
 		TimeRange: tr,
+	}
+
+	httpkit.JSON(w, r, resp)
+}
+
+// GetTopicMetrics returns detailed metrics for a specific topic.
+func (h *MetricsHandler) GetTopicMetrics(w http.ResponseWriter, r *http.Request) {
+	topicID := chi.URLParam(r, "id")
+
+	tr := parseRequestTimeRange(w, r)
+	if tr == nil {
+		return
+	}
+
+	summary, err := h.store.GetTopicMetricsSummary(r.Context(), topicID, tr.From, tr.To)
+	if err != nil {
+		http.Error(w, `{"error": "`+err.Error()+`"}`, http.StatusInternalServerError)
+
+		return
+	}
+
+	if subscriptions, known := h.collector.GetTopicSubscriptionsCurrentKnown(topicID); known {
+		summary.Subscriptions = &subscriptions
+	}
+
+	rates := h.collector.GetTopicRates(topicID)
+	resp := struct {
+		*collector.TopicMetricsSummary
+		CurrentPublishRate  float64   `json:"currentPublishRate"`
+		CurrentDeliveryRate float64   `json:"currentDeliveryRate"`
+		TimeRange           TimeRange `json:"timeRange"`
+	}{
+		TopicMetricsSummary: summary,
+		CurrentPublishRate:  rates.PublishRate,
+		CurrentDeliveryRate: rates.DeliveryRate,
+		TimeRange:           *tr,
 	}
 
 	httpkit.JSON(w, r, resp)
@@ -406,6 +567,40 @@ func (h *MetricsHandler) GetQueueMetrics(w http.ResponseWriter, r *http.Request)
 	httpkit.JSON(w, r, resp)
 }
 
+// GetTopicRatesChart returns topic rate history for a topic.
+func (h *MetricsHandler) GetTopicRatesChart(w http.ResponseWriter, r *http.Request) {
+	topicID := chi.URLParam(r, "id")
+
+	tr := parseRequestTimeRange(w, r)
+	if tr == nil {
+		return
+	}
+
+	publishRates, err := h.store.GetRateHistory(r.Context(), collector.MetricTopicPublishRate, topicID, tr.From, tr.To)
+	if err != nil {
+		http.Error(w, `{"error": "`+err.Error()+`"}`, http.StatusInternalServerError)
+
+		return
+	}
+
+	deliveryRates, err := h.store.GetRateHistory(r.Context(), collector.MetricTopicDeliveryRate, topicID, tr.From, tr.To)
+	if err != nil {
+		http.Error(w, `{"error": "`+err.Error()+`"}`, http.StatusInternalServerError)
+
+		return
+	}
+
+	resp := MultiMetricsChartResponse{
+		Metrics: []MetricsChartResponse{
+			{MetricName: collector.MetricTopicPublishRate, TopicID: topicID, DataPoints: publishRates},
+			{MetricName: collector.MetricTopicDeliveryRate, TopicID: topicID, DataPoints: deliveryRates},
+		},
+		TimeRange: *tr,
+	}
+
+	httpkit.JSON(w, r, resp)
+}
+
 // GetInFlightMetrics returns in-flight message counts.
 func (h *MetricsHandler) GetInFlightMetrics(w http.ResponseWriter, r *http.Request) {
 	queueID := chi.URLParam(r, "id")
@@ -464,6 +659,13 @@ func (*MetricsHandler) GetAvailableMetrics(w http.ResponseWriter, r *http.Reques
 		{collector.MetricMessageDwellTime, metricTypeHistogram, "Time from send to receive"},
 		{collector.MetricBatchSize, metricTypeHistogram, "Batch operation sizes"},
 		{collector.MetricMessageSizeBytes, metricTypeHistogram, "Message body sizes"},
+		{collector.MetricTopicPublishRate, metricTypeGauge, "Messages published to a topic per second"},
+		{collector.MetricTopicDeliveryRate, metricTypeGauge, "Topic message deliveries per second"},
+		{collector.MetricTopicMessagesPublishedTotal, metricTypeCounter, "Total messages published to a topic"},
+		{collector.MetricTopicDeliveriesTotal, metricTypeCounter, "Total topic message deliveries"},
+		{collector.MetricTopicSubscriptionsCurrent, metricTypeGauge, "Current subscriptions on a topic"},
+		{collector.MetricTopicSubscriptionsCreatedTotal, metricTypeCounter, "Total topic subscriptions created"},
+		{collector.MetricTopicSubscriptionsDeletedTotal, metricTypeCounter, "Total topic subscriptions deleted"},
 	}
 
 	httpkit.JSON(w, r, metrics)

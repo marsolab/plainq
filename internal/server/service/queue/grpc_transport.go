@@ -47,6 +47,8 @@ func (s *Service) DeleteQueue(ctx context.Context, r *v1.DeleteQueueRequest) (*v
 		return grpckit.ErrorGRPC[*v1.DeleteQueueResponse](ctx, err)
 	}
 
+	s.reconcileTopicSubscriptionCounts(ctx)
+
 	return &v1.DeleteQueueResponse{}, nil
 }
 

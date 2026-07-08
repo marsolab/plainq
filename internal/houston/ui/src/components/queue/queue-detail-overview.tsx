@@ -1,9 +1,8 @@
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsList, TabsTab, TabsPanel } from "@/components/ui/tabs";
 import { QueueMessages } from "./queue-messages";
+import { QueueDetailMetrics } from "@/components/metrics/queue-detail-metrics";
 import { EVICTION_POLICY_LABELS } from "@/lib/constants";
 import type { Queue } from "@/lib/types";
 import { api } from "@/lib/api-client";
@@ -144,9 +143,10 @@ export function QueueDetailOverview({ queue }: QueueDetailOverviewProps) {
         </TabsPanel>
 
         <TabsPanel value="metrics">
-          <div className="mt-4 flex h-48 items-center justify-center rounded-lg border border-dashed text-muted-foreground">
-            Queue metrics coming soon
-          </div>
+          <QueueDetailMetrics
+            queueId={queue.queueId}
+            queueName={queue.queueName}
+          />
         </TabsPanel>
 
         <TabsPanel value="settings">

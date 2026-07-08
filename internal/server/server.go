@@ -81,6 +81,7 @@ func NewServer(
 	// Initialize metrics collector if telemetry database is provided.
 	if pq.metricsStore != nil {
 		pq.metricsCollector = collector.New(pq.metricsStore, collector.WithLogger(logger))
+		pq.queue.SetTopicMetricsRecorder(pq.metricsCollector)
 		pq.metricsHandler = NewMetricsHandler(pq.metricsCollector, pq.metricsStore)
 
 		// Start the collector in background.
@@ -131,6 +132,7 @@ func NewServer(
 				v1.Route("/metrics", func(metrics chi.Router) {
 					// Overview dashboard data.
 					metrics.Get("/overview", pq.metricsHandler.GetDashboardOverview)
+					metrics.Get("/topics/overview", pq.metricsHandler.GetTopicDashboardOverview)
 
 					// Time-series chart data.
 					metrics.Get("/chart", pq.metricsHandler.GetMetricsChart)
@@ -155,6 +157,11 @@ func NewServer(
 						queueMetrics.Get("/", pq.metricsHandler.GetQueueMetrics)
 						queueMetrics.Get("/rates", pq.metricsHandler.GetRatesChart)
 						queueMetrics.Get("/inflight", pq.metricsHandler.GetInFlightMetrics)
+					})
+
+					metrics.Route("/topic/{id}", func(topicMetrics chi.Router) {
+						topicMetrics.Get("/", pq.metricsHandler.GetTopicMetrics)
+						topicMetrics.Get("/rates", pq.metricsHandler.GetTopicRatesChart)
 					})
 				})
 			}

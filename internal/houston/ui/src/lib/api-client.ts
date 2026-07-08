@@ -1,15 +1,21 @@
 import { API_BASE } from "./constants";
 import type {
-  Queue,
-  QueueListResponse,
-  TopicListResponse,
-  PublishResponse,
   AuthTokens,
   ApiError,
+  DashboardOverviewResponse,
+  DeleteResponse,
+  InFlightMetricsResponse,
+  MultiMetricsChartResponse,
   PeekResponse,
+  PublishResponse,
+  Queue,
+  QueueListResponse,
+  QueueMetricsSummary,
   ReceiveResponse,
   SendResponse,
-  DeleteResponse,
+  TopicListResponse,
+  TopicMetricsOverview,
+  TopicMetricsSummary,
 } from "./types";
 
 async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
@@ -39,7 +45,7 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
     const error: ApiError = await response
       .json()
       .catch(() => ({ message: response.statusText }));
-    throw new Error(error.message || "Request failed");
+    throw new Error(`${response.status}: ${error.message || response.statusText}`);
   }
 
   if (response.status === 204) return undefined as T;
@@ -179,6 +185,20 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ messages: [{ body: utf8ToBase64(body) }] }),
       }),
+  },
+  metrics: {
+    overview: () => apiFetch<DashboardOverviewResponse>("/metrics/overview"),
+    queue: (id: string, range = "1h") =>
+      apiFetch<QueueMetricsSummary>(`/metrics/queue/${id}?range=${range}`),
+    queueRates: (id: string, range = "1h") =>
+      apiFetch<MultiMetricsChartResponse>(`/metrics/queue/${id}/rates?range=${range}`),
+    queueInFlight: (id: string, range = "1h") =>
+      apiFetch<InFlightMetricsResponse>(`/metrics/queue/${id}/inflight?range=${range}`),
+    topicOverview: () => apiFetch<TopicMetricsOverview>("/metrics/topics/overview"),
+    topic: (id: string, range = "1h") =>
+      apiFetch<TopicMetricsSummary>(`/metrics/topic/${id}?range=${range}`),
+    topicRates: (id: string, range = "1h") =>
+      apiFetch<MultiMetricsChartResponse>(`/metrics/topic/${id}/rates?range=${range}`),
   },
   auth: {
     signin: (data: { email: string; password: string }) =>
