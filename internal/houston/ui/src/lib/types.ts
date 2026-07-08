@@ -100,3 +100,105 @@ export interface PublishResponse {
   messageIds: string[];
   deliveredCount: number;
 }
+
+export interface TimeRange {
+  from: number;
+  to: number;
+}
+
+export interface MetricDataPoint {
+  timestamp: number;
+  value: number;
+  min?: number;
+  max?: number;
+  avg?: number;
+  sum?: number;
+  count?: number;
+}
+
+export interface MetricsChartResponse {
+  metricName: string;
+  queueId?: string;
+  topicId?: string;
+  timeRange?: TimeRange;
+  resolution?: string;
+  dataPoints: MetricDataPoint[];
+}
+
+export interface MultiMetricsChartResponse {
+  metrics: MetricsChartResponse[];
+  timeRange: TimeRange;
+}
+
+export interface QueueMetricsSummary {
+  queueId: string;
+  totalSent: number;
+  totalReceived: number;
+  totalDeleted: number;
+  avgSendRate: number;
+  avgReceiveRate: number;
+  avgDeleteRate: number;
+  maxSendRate: number;
+  maxReceiveRate: number;
+  maxDeleteRate: number;
+  currentInFlight: number;
+  currentSendRate: number;
+  currentReceiveRate: number;
+  currentDeleteRate: number;
+  timeRange: TimeRange;
+}
+
+export interface TopicMetricsSummary {
+  topicId: string;
+  totalPublished: number;
+  totalDeliveries: number;
+  avgPublishRate: number;
+  avgDeliveryRate: number;
+  maxPublishRate: number;
+  maxDeliveryRate: number;
+  subscriptions: number | null;
+  currentPublishRate: number;
+  currentDeliveryRate: number;
+  timeRange: TimeRange;
+}
+
+export interface TopicMetricsRow {
+  topicId: string;
+  publishRate: number;
+  deliveryRate: number;
+  messagesPublished: number;
+  deliveries: number;
+  subscriptionsCurrent: number | null;
+  subscriptionsCreated: number;
+  subscriptionsDeleted: number;
+  updatedAt: number;
+}
+
+export interface TopicMetricsOverview {
+  systemMetrics: {
+    publishRate: number;
+    deliveryRate: number;
+    messagesPublished: number;
+    deliveries: number;
+    subscriptionsCurrent: number | null;
+    subscriptionsCreated: number;
+    subscriptionsDeleted: number;
+  };
+  topicMetrics: TopicMetricsRow[];
+  timeRange: TimeRange;
+  updatedAt: number;
+}
+
+export interface InFlightMetricsResponse {
+  current: number;
+  queueId?: string;
+  history: MetricDataPoint[];
+  timeRange: TimeRange;
+}
+
+export interface DashboardOverviewResponse {
+  systemMetrics: Record<string, number>;
+  queueMetrics: Array<Record<string, string | number>>;
+  timeRange: TimeRange;
+  updatedAt: number;
+}

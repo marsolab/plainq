@@ -57,14 +57,22 @@ type Storage interface {
 	Publish(ctx context.Context, topicID string, input *PublishRequest) (*PublishResponse, error)
 }
 
+type TopicMetricsRecorder interface {
+	RecordTopicPublish(topicID string, messagesPublished, deliveries uint64)
+	RecordTopicSubscriptionCreated(topicID string, currentCount int64)
+	RecordTopicSubscriptionDeleted(topicID string, currentCount int64)
+	ReconcileTopicSubscriptionCounts(countsByTopic map[string]int64)
+}
+
 // Service holds logic of interacting with a queue.
 type Service struct {
 	v1.UnimplementedPlainQServiceServer
 
-	cfg     *config.Config
-	logger  *slog.Logger
-	router  chi.Router
-	storage Storage
+	cfg          *config.Config
+	logger       *slog.Logger
+	router       chi.Router
+	storage      Storage
+	topicMetrics TopicMetricsRecorder
 }
 
 // NewService creates a new queue service.
@@ -104,6 +112,11 @@ func NewService(cfg *config.Config, logger *slog.Logger, storage Storage) *Servi
 	})
 
 	return &s
+}
+
+func (s *Service) SetTopicMetricsRecorder(recorder TopicMetricsRecorder) {
+	s.topicMetrics = recorder
+	s.reconcileTopicSubscriptionCounts(context.Background())
 }
 
 func (s *Service) Mount(server *grpc.Server)                        { v1.RegisterPlainQServiceServer(server, s) }

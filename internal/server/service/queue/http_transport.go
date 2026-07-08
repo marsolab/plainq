@@ -128,6 +128,8 @@ func (s *Service) deleteQueueHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.reconcileTopicSubscriptionCounts(r.Context())
+
 	httpkit.JSON(w, r, output, httpkit.WithStatus(http.StatusOK))
 }
 

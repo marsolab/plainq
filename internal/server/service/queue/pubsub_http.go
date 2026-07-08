@@ -1,6 +1,7 @@
 package queue
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -52,6 +53,8 @@ func (s *Service) deleteTopicHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.reconcileTopicSubscriptionCounts(r.Context())
+
 	httpkit.JSON(w, r, map[string]any{}, httpkit.WithStatus(http.StatusOK))
 }
 
@@ -82,6 +85,8 @@ func (s *Service) subscribeTopicHandler(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	s.recordTopicSubscriptionCreated(r.Context(), chi.URLParam(r, "topicID"))
+
 	httpkit.JSON(w, r, output, httpkit.WithStatus(http.StatusCreated))
 }
 
@@ -91,6 +96,8 @@ func (s *Service) unsubscribeTopicHandler(w http.ResponseWriter, r *http.Request
 
 		return
 	}
+
+	s.recordTopicSubscriptionDeleted(r.Context(), chi.URLParam(r, "topicID"))
 
 	httpkit.JSON(w, r, map[string]any{}, httpkit.WithStatus(http.StatusOK))
 }
@@ -116,5 +123,74 @@ func (s *Service) publishTopicHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	topicID := chi.URLParam(r, "topicID")
+
+	if s.topicMetrics != nil {
+		var deliveredCount uint64
+		if output.DeliveredCount > 0 {
+			deliveredCount = uint64(output.DeliveredCount)
+		}
+
+		s.topicMetrics.RecordTopicPublish(topicID, uint64(len(input.Messages)), deliveredCount)
+	}
+
 	httpkit.JSON(w, r, output, httpkit.WithStatus(http.StatusAccepted))
+}
+
+func (s *Service) recordTopicSubscriptionCreated(ctx context.Context, topicID string) {
+	if s.topicMetrics == nil {
+		return
+	}
+
+	s.topicMetrics.RecordTopicSubscriptionCreated(topicID, s.topicSubscriptionCount(ctx, topicID))
+}
+
+func (s *Service) recordTopicSubscriptionDeleted(ctx context.Context, topicID string) {
+	if s.topicMetrics == nil {
+		return
+	}
+
+	s.topicMetrics.RecordTopicSubscriptionDeleted(topicID, s.topicSubscriptionCount(ctx, topicID))
+}
+
+func (s *Service) reconcileTopicSubscriptionCounts(ctx context.Context) {
+	if s.topicMetrics == nil {
+		return
+	}
+
+	output, err := s.storage.ListTopics(ctx)
+	if err != nil {
+		s.logger.WarnContext(ctx, "reconcile topic subscription metrics",
+			slog.String("error", err.Error()),
+		)
+
+		return
+	}
+
+	countsByTopic := make(map[string]int64, len(output.Topics))
+	for _, topic := range output.Topics {
+		countsByTopic[topic.TopicID] = int64(len(topic.Subscriptions))
+	}
+
+	s.topicMetrics.ReconcileTopicSubscriptionCounts(countsByTopic)
+}
+
+func (s *Service) topicSubscriptionCount(ctx context.Context, topicID string) int64 {
+	output, err := s.storage.ListTopics(ctx)
+	if err != nil {
+		s.logger.WarnContext(ctx, "count topic subscriptions for metrics",
+			slog.String("topic_id", topicID),
+			slog.String("error", err.Error()),
+		)
+
+		return -1
+	}
+
+	for _, topic := range output.Topics {
+		if topic.TopicID == topicID {
+			return int64(len(topic.Subscriptions))
+		}
+	}
+
+	return -1
 }

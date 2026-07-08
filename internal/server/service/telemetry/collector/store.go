@@ -546,3 +546,172 @@ type MetricsSummary struct {
 	MaxDeleteRate   float64 `json:"maxDeleteRate"`
 	CurrentInFlight int64   `json:"currentInFlight"`
 }
+
+// TopicMetricsSummary contains aggregated topic metrics summary.
+type TopicMetricsSummary struct {
+	TopicID         string  `json:"topicId"`
+	From            int64   `json:"from"`
+	To              int64   `json:"to"`
+	TotalPublished  int64   `json:"totalPublished"`
+	TotalDeliveries int64   `json:"totalDeliveries"`
+	AvgPublishRate  float64 `json:"avgPublishRate"`
+	AvgDeliveryRate float64 `json:"avgDeliveryRate"`
+	MaxPublishRate  float64 `json:"maxPublishRate"`
+	MaxDeliveryRate float64 `json:"maxDeliveryRate"`
+	Subscriptions   *int64  `json:"subscriptions"`
+}
+
+// GetTopicMetricsSummary retrieves a summary of topic metrics for a time range.
+func (s *SQLiteStore) GetTopicMetricsSummary(ctx context.Context, topicID string, from, to int64) (*TopicMetricsSummary, error) {
+	summary := &TopicMetricsSummary{TopicID: topicID, From: from, To: to}
+
+	totalPublished, err := s.getTopicCounterTotal(ctx, MetricTopicMessagesPublishedTotal, topicID, from, to)
+	if err != nil {
+		return nil, fmt.Errorf("get topic published total: %w", err)
+	}
+
+	totalDeliveries, err := s.getTopicCounterTotal(ctx, MetricTopicDeliveriesTotal, topicID, from, to)
+	if err != nil {
+		return nil, fmt.Errorf("get topic deliveries total: %w", err)
+	}
+
+	summary.TotalPublished = totalPublished
+	summary.TotalDeliveries = totalDeliveries
+
+	avgRateQuery := `SELECT COALESCE(AVG(rate_per_second), 0)
+		FROM rate_snapshots
+		WHERE metric_name = ? AND queue_id = ? AND timestamp >= ? AND timestamp <= ?`
+	if err := s.db.QueryRowContext(ctx, avgRateQuery, MetricTopicPublishRate, topicID, from, to).
+		Scan(&summary.AvgPublishRate); err != nil {
+		return nil, fmt.Errorf("query topic avg publish rate: %w", err)
+	}
+
+	if err := s.db.QueryRowContext(ctx, avgRateQuery, MetricTopicDeliveryRate, topicID, from, to).
+		Scan(&summary.AvgDeliveryRate); err != nil {
+		return nil, fmt.Errorf("query topic avg delivery rate: %w", err)
+	}
+
+	maxRateQuery := `SELECT COALESCE(MAX(rate_per_second), 0)
+		FROM rate_snapshots
+		WHERE metric_name = ? AND queue_id = ? AND timestamp >= ? AND timestamp <= ?`
+	if err := s.db.QueryRowContext(ctx, maxRateQuery, MetricTopicPublishRate, topicID, from, to).
+		Scan(&summary.MaxPublishRate); err != nil {
+		return nil, fmt.Errorf("query topic max publish rate: %w", err)
+	}
+
+	if err := s.db.QueryRowContext(ctx, maxRateQuery, MetricTopicDeliveryRate, topicID, from, to).
+		Scan(&summary.MaxDeliveryRate); err != nil {
+		return nil, fmt.Errorf("query topic max delivery rate: %w", err)
+	}
+
+	latestSubscriptions, known, err := s.getLatestMetricValueKnown(ctx, MetricTopicSubscriptionsCurrent, topicID)
+	if err != nil {
+		return nil, fmt.Errorf("query topic subscriptions current: %w", err)
+	}
+
+	if known {
+		subscriptions := int64(latestSubscriptions.Value)
+		summary.Subscriptions = &subscriptions
+	}
+
+	return summary, nil
+}
+
+func (s *SQLiteStore) getLatestMetricValueKnown(ctx context.Context, metricName, queueID string) (LatestMetric, bool, error) {
+	query := `
+		SELECT metric_value, timestamp
+		FROM metrics_raw
+		WHERE metric_name = ? AND queue_id = ?
+		ORDER BY timestamp DESC
+		LIMIT 1
+	`
+
+	var m LatestMetric
+
+	err := s.db.QueryRowContext(ctx, query, metricName, queueID).Scan(&m.Value, &m.Timestamp)
+	if err == sql.ErrNoRows {
+		return LatestMetric{}, false, nil
+	}
+
+	if err != nil {
+		return LatestMetric{}, false, fmt.Errorf("query latest metric: %w", err)
+	}
+
+	return m, true, nil
+}
+
+func (s *SQLiteStore) getTopicCounterTotal(ctx context.Context, metricName, topicID string, from, to int64) (int64, error) {
+	const totalQuery = `
+		WITH last_before_range AS (
+			SELECT timestamp, id, metric_value, 1 AS is_prior
+			FROM metrics_raw
+			WHERE metric_name = ? AND queue_id = ? AND timestamp < ?
+			ORDER BY timestamp DESC, id DESC
+			LIMIT 1
+		),
+		counter_points AS (
+			SELECT timestamp, id, metric_value, is_prior FROM last_before_range
+			UNION ALL
+			SELECT timestamp, id, metric_value, 0 AS is_prior FROM metrics_raw
+			WHERE metric_name = ? AND queue_id = ? AND timestamp >= ? AND timestamp <= ?
+		)
+		SELECT metric_value, is_prior
+		FROM counter_points
+		ORDER BY timestamp ASC, id ASC
+	`
+
+	rows, err := s.db.QueryContext(
+		ctx,
+		totalQuery,
+		metricName, topicID, from,
+		metricName, topicID, from, to,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("query topic counter total: %w", err)
+	}
+	defer rows.Close()
+
+	var (
+		total       float64
+		previous    float64
+		havePrev    bool
+		haveInRange bool
+	)
+
+	for rows.Next() {
+		var (
+			value   float64
+			isPrior int
+		)
+
+		if err := rows.Scan(&value, &isPrior); err != nil {
+			return 0, fmt.Errorf(errScanRow, err)
+		}
+
+		if isPrior == 1 && !haveInRange {
+			previous = value
+			havePrev = true
+
+			continue
+		}
+
+		switch {
+		case !havePrev:
+			total += value
+		case value >= previous:
+			total += value - previous
+		default:
+			total += value
+		}
+
+		previous = value
+		havePrev = true
+		haveInRange = true
+	}
+
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterate topic counter total: %w", err)
+	}
+
+	return int64(total), nil
+}

@@ -16,6 +16,12 @@ type mockStorage struct {
 	receiveFunc       func(ctx context.Context, input *v1.ReceiveRequest) (*v1.ReceiveResponse, error)
 	deleteFunc        func(ctx context.Context, input *v1.DeleteRequest) (*v1.DeleteResponse, error)
 	peekFunc          func(ctx context.Context, input *PeekRequest) (*PeekResponse, error)
+	listTopicsFunc    func(ctx context.Context) (*ListTopicsResponse, error)
+	createTopicFunc   func(ctx context.Context, input *CreateTopicRequest) (*CreateTopicResponse, error)
+	deleteTopicFunc   func(ctx context.Context, topicID string) error
+	subscribeFunc     func(ctx context.Context, topicID string, input *SubscribeRequest) (*SubscribeResponse, error)
+	unsubscribeFunc   func(ctx context.Context, topicID, subscriptionID string) error
+	publishFunc       func(ctx context.Context, topicID string, input *PublishRequest) (*PublishResponse, error)
 }
 
 func (m *mockStorage) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest) (*v1.CreateQueueResponse, error) {
@@ -55,23 +61,43 @@ func (m *mockStorage) Peek(ctx context.Context, input *PeekRequest) (*PeekRespon
 }
 
 func (m *mockStorage) ListTopics(ctx context.Context) (*ListTopicsResponse, error) {
+	if m.listTopicsFunc != nil {
+		return m.listTopicsFunc(ctx)
+	}
 	return &ListTopicsResponse{}, nil
 }
 
 func (m *mockStorage) CreateTopic(ctx context.Context, input *CreateTopicRequest) (*CreateTopicResponse, error) {
+	if m.createTopicFunc != nil {
+		return m.createTopicFunc(ctx, input)
+	}
 	return &CreateTopicResponse{}, nil
 }
 
-func (m *mockStorage) DeleteTopic(ctx context.Context, topicID string) error { return nil }
+func (m *mockStorage) DeleteTopic(ctx context.Context, topicID string) error {
+	if m.deleteTopicFunc != nil {
+		return m.deleteTopicFunc(ctx, topicID)
+	}
+	return nil
+}
 
 func (m *mockStorage) Subscribe(ctx context.Context, topicID string, input *SubscribeRequest) (*SubscribeResponse, error) {
+	if m.subscribeFunc != nil {
+		return m.subscribeFunc(ctx, topicID, input)
+	}
 	return &SubscribeResponse{}, nil
 }
 
 func (m *mockStorage) Unsubscribe(ctx context.Context, topicID, subscriptionID string) error {
+	if m.unsubscribeFunc != nil {
+		return m.unsubscribeFunc(ctx, topicID, subscriptionID)
+	}
 	return nil
 }
 
 func (m *mockStorage) Publish(ctx context.Context, topicID string, input *PublishRequest) (*PublishResponse, error) {
+	if m.publishFunc != nil {
+		return m.publishFunc(ctx, topicID, input)
+	}
 	return &PublishResponse{}, nil
 }

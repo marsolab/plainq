@@ -4,6 +4,7 @@ import { formatDistanceToNow } from "date-fns";
 import { RadioTower, Send, Trash2 } from "lucide-react";
 import { api } from "@/lib/api-client";
 import type { Queue, Topic } from "@/lib/types";
+import { TopicMetricsDashboard } from "@/components/metrics/topic-metrics-dashboard";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -14,6 +15,7 @@ export function TopicList() {
   const [topicName, setTopicName] = useState("");
   const [message, setMessage] = useState("Hello from PlainQ pub/sub");
   const [loading, setLoading] = useState(true);
+  const [metricsRefreshKey, setMetricsRefreshKey] = useState(0);
 
   async function refresh() {
     setLoading(true);
@@ -40,24 +42,28 @@ export function TopicList() {
     await api.topics.create({ topicName: topicName.trim() });
     setTopicName("");
     toast.success("Topic created");
-    refresh();
+    await refresh();
+    setMetricsRefreshKey((key) => key + 1);
   }
 
   async function subscribe(topicId: string, queueId: string) {
     if (!queueId) return;
     await api.topics.subscribe(topicId, queueId);
     toast.success("Queue subscribed");
-    refresh();
+    await refresh();
+    setMetricsRefreshKey((key) => key + 1);
   }
 
   async function publish(topicId: string) {
     const delivered = await api.topics.publish(topicId, message);
     toast.success(`Published ${delivered.deliveredCount} message deliveries`);
+    setMetricsRefreshKey((key) => key + 1);
   }
 
   return (
     <div className="space-y-6">
       <Toaster position="top-right" />
+      <TopicMetricsDashboard topics={topics} refreshKey={metricsRefreshKey} />
       <div className="flex items-end justify-between gap-4">
         <div>
           <h2 className="text-lg font-semibold">Pub/Sub Topics</h2>
@@ -126,7 +132,8 @@ export function TopicList() {
                         size="sm"
                         onClick={async () => {
                           await api.topics.unsubscribe(topic.topicId, sub.subscriptionId);
-                          refresh();
+                          await refresh();
+                          setMetricsRefreshKey((key) => key + 1);
                         }}
                       >
                         <Trash2 className="size-4" />
