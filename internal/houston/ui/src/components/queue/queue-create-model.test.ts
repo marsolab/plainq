@@ -4,6 +4,7 @@ import {
   DEAD_LETTER_POLICY,
   createQueueSchema,
   getEvictionPolicyOptions,
+  getQueueOptionLabel,
   loadQueueOptions,
   mergeQueueOption,
   reconcileQueueOptions,
@@ -103,6 +104,14 @@ describe("createQueueSchema", () => {
 });
 
 describe("queue creation helpers", () => {
+  test("uses the queue name as the selected dead-letter label", () => {
+    const options = [{ queueId: "queue-dlq", queueName: "orders-dlq" }];
+
+    expect(getQueueOptionLabel(options, "queue-dlq")).toBe("orders-dlq");
+    expect(getQueueOptionLabel(options, "missing-queue")).toBe("missing-queue");
+    expect(getQueueOptionLabel(options, null)).toBe("Select a queue");
+  });
+
   test("preserves the dead-letter target in a dead-letter request", () => {
     expect(
       toCreateQueueInput({

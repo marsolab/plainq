@@ -55,6 +55,19 @@ export function getEvictionPolicyOptions(allowDeadLetter: boolean) {
     .map(([value, label]) => ({ value, label }));
 }
 
+export function getQueueOptionLabel(
+  options: QueueOption[],
+  queueId: string | null,
+): string {
+  if (!queueId) {
+    return "Select a queue";
+  }
+
+  return (
+    options.find((option) => option.queueId === queueId)?.queueName ?? queueId
+  );
+}
+
 export function toCreateQueueInput(data: CreateQueueFormData): CreateQueueInput {
   const input: CreateQueueInput = {
     queueName: data.queueName,

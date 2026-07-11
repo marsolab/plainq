@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import { Controller, useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
@@ -32,6 +32,7 @@ import {
   DEAD_LETTER_POLICY,
   createQueueSchema,
   getEvictionPolicyOptions,
+  getQueueOptionLabel,
   loadQueueOptions,
   mergeQueueOption,
   reconcileQueueOptions,
@@ -50,6 +51,7 @@ interface QueueCreateDialogProps {
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
   onCreated?: (queue: QueueOption) => void;
+  finalFocus?: RefObject<HTMLElement | null>;
 }
 
 export function getQueueCreateDialogConfig(mode: QueueCreateDialogMode) {
@@ -71,12 +73,14 @@ export function QueueCreateDialog({
   open,
   onOpenChange,
   onCreated,
+  finalFocus,
 }: QueueCreateDialogProps) {
   const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
   const [childOpen, setChildOpen] = useState(false);
   const [queueOptions, setQueueOptions] = useState<QueueOption[]>([]);
   const [isLoadingQueues, setIsLoadingQueues] = useState(false);
   const [queueLoadError, setQueueLoadError] = useState<string | null>(null);
+  const deadLetterQueueTriggerRef = useRef<HTMLButtonElement>(null);
   const dialogOpen = open ?? uncontrolledOpen;
   const config = getQueueCreateDialogConfig(mode);
   const {
@@ -182,7 +186,10 @@ export function QueueCreateDialog({
             Create Queue
           </DialogTrigger>
         )}
-        <DialogPopup className="max-h-[calc(100dvh-2rem)] max-w-md overflow-y-auto">
+        <DialogPopup
+          className="max-h-[calc(100dvh-2rem)] max-w-md overflow-y-auto"
+          finalFocus={finalFocus}
+        >
           <DialogTitle>{config.title}</DialogTitle>
           <DialogDescription className="mb-4">
             {config.description}
@@ -268,8 +275,12 @@ export function QueueCreateDialog({
                         field.onChange(value ?? undefined);
                       }}
                     >
-                      <SelectTrigger>
-                        <SelectValue placeholder="Select a queue" />
+                      <SelectTrigger ref={deadLetterQueueTriggerRef}>
+                        <SelectValue>
+                          {(value: string | null) =>
+                            getQueueOptionLabel(queueOptions, value)
+                          }
+                        </SelectValue>
                       </SelectTrigger>
                       <SelectPopup className="max-h-[calc(100dvh-2rem)] max-w-md overflow-y-auto">
                         {isLoadingQueues ? (
@@ -333,6 +344,7 @@ export function QueueCreateDialog({
           open={childOpen}
           onOpenChange={setChildOpen}
           onCreated={handleChildCreated}
+          finalFocus={deadLetterQueueTriggerRef}
         />
       )}
     </>
