@@ -3,6 +3,7 @@ import {
   CREATE_QUEUE_VALUE,
   DEAD_LETTER_POLICY,
   createQueueSchema,
+  getEvictionPolicyLabel,
   getEvictionPolicyOptions,
   getQueueOptionLabel,
   loadQueueOptions,
@@ -104,6 +105,18 @@ describe("createQueueSchema", () => {
 });
 
 describe("queue creation helpers", () => {
+  test("uses friendly labels for selected eviction policies", () => {
+    const options = getEvictionPolicyOptions(true);
+
+    expect(getEvictionPolicyLabel(options, "EVICTION_POLICY_DROP")).toBe(
+      "Drop",
+    );
+    expect(getEvictionPolicyLabel(options, "unknown-policy")).toBe(
+      "unknown-policy",
+    );
+    expect(getEvictionPolicyLabel(options, null)).toBe("Select a policy");
+  });
+
   test("uses the queue name as the selected dead-letter label", () => {
     const options = [{ queueId: "queue-dlq", queueName: "orders-dlq" }];
 
