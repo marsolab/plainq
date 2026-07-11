@@ -770,9 +770,10 @@ func (s *Storage) listQueues(ctx context.Context, query string, pageSize uint32)
 
 	for rows.Next() {
 		var (
-			info      v1.DescribeQueueResponse
-			createdAt time.Time
-			gcAt      time.Time
+			info              v1.DescribeQueueResponse
+			createdAt         time.Time
+			gcAt              time.Time
+			deadLetterQueueID sql.NullString
 		)
 
 		if err := rows.Scan(
@@ -784,11 +785,12 @@ func (s *Storage) listQueues(ctx context.Context, query string, pageSize uint32)
 			&info.VisibilityTimeoutSeconds,
 			&info.MaxReceiveAttempts,
 			&info.EvictionPolicy,
-			&info.DeadLetterQueueId,
+			&deadLetterQueueID,
 		); err != nil {
 			return nil, fmt.Errorf("row scan: %w", err)
 		}
 
+		info.DeadLetterQueueId = deadLetterQueueID.String
 		info.CreatedAt = timestamppb.New(createdAt)
 
 		// Default eviction policy is DROP.
