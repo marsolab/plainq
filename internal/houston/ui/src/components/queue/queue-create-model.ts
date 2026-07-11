@@ -55,6 +55,17 @@ export function getEvictionPolicyOptions(allowDeadLetter: boolean) {
     .map(([value, label]) => ({ value, label }));
 }
 
+export function getEvictionPolicyLabel(
+  options: ReadonlyArray<{ value: string; label: string }>,
+  policy: string | null,
+): string {
+  if (!policy) {
+    return "Select a policy";
+  }
+
+  return options.find((option) => option.value === policy)?.label ?? policy;
+}
+
 export function getQueueOptionLabel(
   options: QueueOption[],
   queueId: string | null,

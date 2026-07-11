@@ -31,6 +31,7 @@ import {
   CREATE_QUEUE_VALUE,
   DEAD_LETTER_POLICY,
   createQueueSchema,
+  getEvictionPolicyLabel,
   getEvictionPolicyOptions,
   getQueueOptionLabel,
   loadQueueOptions,
@@ -244,7 +245,11 @@ export function QueueCreateDialog({
                     }
                   >
                     <SelectTrigger>
-                      <SelectValue />
+                      <SelectValue>
+                        {(value: string | null) =>
+                          getEvictionPolicyLabel(config.policyOptions, value)
+                        }
+                      </SelectValue>
                     </SelectTrigger>
                     <SelectPopup className="max-h-[calc(100dvh-2rem)] max-w-md overflow-y-auto">
                       {config.policyOptions.map((option) => (
