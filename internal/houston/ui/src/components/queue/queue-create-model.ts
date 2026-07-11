@@ -104,3 +104,13 @@ export function mergeQueueOption(
 
   return [...options, created];
 }
+
+export function reconcileQueueOptions(
+  loaded: QueueOption[],
+  current: QueueOption[],
+): QueueOption[] {
+  return current.reduce(
+    (options, option) => mergeQueueOption(options, option),
+    loaded,
+  );
+}

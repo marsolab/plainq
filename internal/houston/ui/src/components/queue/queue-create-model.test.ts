@@ -6,6 +6,7 @@ import {
   getEvictionPolicyOptions,
   loadQueueOptions,
   mergeQueueOption,
+  reconcileQueueOptions,
   toCreateQueueInput,
 } from "./queue-create-model";
 import type { QueueListApi } from "./queue-create-model";
@@ -289,6 +290,23 @@ describe("queue creation helpers", () => {
     expect(mergeQueueOption([...options, created], duplicate)).toEqual([
       options[0],
       created,
+    ]);
+  });
+
+  test("reconciles loaded options without dropping a child-created queue", () => {
+    const loaded = [
+      { queueId: "q-1", queueName: "first" },
+      { queueId: "q-2", queueName: "loaded-second" },
+    ];
+    const current = [
+      { queueId: "q-2", queueName: "child-second" },
+      { queueId: "q-3", queueName: "child-third" },
+    ];
+
+    expect(reconcileQueueOptions(loaded, current)).toEqual([
+      { queueId: "q-1", queueName: "first" },
+      { queueId: "q-2", queueName: "loaded-second" },
+      { queueId: "q-3", queueName: "child-third" },
     ]);
   });
 
