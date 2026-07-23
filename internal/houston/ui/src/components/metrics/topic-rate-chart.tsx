@@ -1,21 +1,23 @@
+"use client";
+
 import { useEffect, useMemo, useState } from "react";
-import {
-  CartesianGrid,
-  Line,
-  LineChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
+
 import { api } from "@/lib/api-client";
 import type { MultiMetricsChartResponse } from "@/lib/types";
-import {
-  formatMetricTimestamp,
-  isTelemetryUnavailableError,
-  transformRateMetrics,
-} from "@/lib/metrics";
+import { isTelemetryUnavailableError, transformRateMetrics } from "@/lib/metrics";
+import { formatRate } from "@/lib/format";
+import { EmptyState } from "@/components/ui/empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
+import { SeriesLegend, type SeriesSpec } from "./lifecycle";
+import { describeSeries, SeriesChart, type ChartRow } from "./series-chart";
+
+const CHART_HEIGHT = 240;
+
+/** Publish is the send half of the lifecycle; delivery is the receive half. */
+const TOPIC_SERIES: SeriesSpec[] = [
+  { key: "publish", label: "published", tone: "send" },
+  { key: "delivery", label: "delivered", tone: "receive" },
+];
 
 interface TopicRateChartProps {
   topicId: string;
@@ -109,69 +111,55 @@ export function TopicRateChart({
     };
   }, [metricsApi, topicId, timeRange, refreshKey]);
 
-  const rows = useMemo(() => transformRateMetrics(data?.metrics ?? []), [data]);
+  const rows = useMemo<ChartRow[]>(
+    () =>
+      transformRateMetrics(data?.metrics ?? []).map(
+        ({ timestamp, ...rest }) => ({ t: timestamp, ...rest }) as ChartRow,
+      ),
+    [data],
+  );
 
   if (loading) {
-    return <Skeleton className="h-72" />;
+    return <Skeleton style={{ height: CHART_HEIGHT }} className="w-full" />;
   }
 
   if (unavailable) {
     return (
-      <ChartMessageState>
-        Telemetry is not enabled. Topic rate charts are unavailable.
-      </ChartMessageState>
+      <ChartMessageState
+        title="Telemetry is not enabled"
+        body="Topic rate charts need telemetry storage configured. Pub/Sub management is unaffected."
+      />
     );
   }
 
   if (error) {
-    return <ChartMessageState>{error}</ChartMessageState>;
+    return <ChartMessageState title="Samples could not be loaded" body={error} />;
   }
 
   if (rows.length === 0) {
-    return (
-      <div className="flex h-72 items-center justify-center text-sm text-muted-foreground">
-        No topic metrics for this range
-      </div>
-    );
+    return <ChartMessageState title="No samples in this range" body="No data for this range" />;
   }
 
+  const summary = describeSeries(rows, TOPIC_SERIES, timeRange, formatRate);
+
   return (
-    <div className="h-72">
-      <ResponsiveContainer width="100%" height="100%">
-        <LineChart data={rows}>
-          <CartesianGrid strokeDasharray="3 3" />
-          <XAxis
-            dataKey="timestamp"
-            tickFormatter={formatMetricTimestamp}
-          />
-          <YAxis />
-          <Tooltip
-            labelFormatter={(value) => new Date(Number(value)).toLocaleString()}
-          />
-          <Line
-            type="monotone"
-            dataKey="publish"
-            stroke="#2563eb"
-            dot={false}
-            name="Publish"
-          />
-          <Line
-            type="monotone"
-            dataKey="delivery"
-            stroke="#16a34a"
-            dot={false}
-            name="Delivery"
-          />
-        </LineChart>
-      </ResponsiveContainer>
+    <div className="flex flex-col gap-2">
+      <SeriesLegend series={TOPIC_SERIES} />
+      <SeriesChart
+        data={rows}
+        series={TOPIC_SERIES}
+        height={CHART_HEIGHT}
+        formatValue={formatRate}
+        summary={summary}
+      />
     </div>
   );
 }
 
-function ChartMessageState({ children }: { children: string }) {
+function ChartMessageState({ title, body }: { title: string; body: string }) {
   return (
-    <div className="flex h-72 items-center justify-center text-center text-sm text-muted-foreground">
-      <p className="max-w-sm">{children}</p>
+    <div className="flex items-center justify-center" style={{ minHeight: CHART_HEIGHT }}>
+      <EmptyState title={title} description={body} />
     </div>
   );
 }

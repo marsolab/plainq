@@ -1,26 +1,40 @@
+"use client";
+
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { RefreshCw } from "lucide-react";
+
 import { api } from "@/lib/api-client";
 import type { Topic, TopicMetricsOverview, TopicMetricsRow } from "@/lib/types";
-import {
-  formatMetricNumber,
-  formatMetricRate,
-  formatMetricTimestamp,
-  isTelemetryUnavailableError,
-} from "@/lib/metrics";
+import { isTelemetryUnavailableError } from "@/lib/metrics";
+import { formatClock, formatCount } from "@/lib/format";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { EmptyState } from "@/components/ui/empty-state";
+import { Panel, PanelBody, PanelTitleBar } from "@/components/ui/panel";
+import { SectionHeader } from "@/components/ui/page-header";
 import {
   Select,
+  SelectContent,
   SelectItem,
-  SelectPopup,
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Status } from "@/components/ui/status";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableIdentityCell,
+  TableRow,
+} from "@/components/ui/table";
+import { formatRateFigure } from "./format-metrics";
+import { SeriesSwatch, type LifecycleTone } from "./lifecycle";
+import { Segmented } from "./segmented";
 import { TopicRateChart } from "./topic-rate-chart";
 
+/** The presets the server's range parser understands. */
 const TIME_RANGES = [
   { value: "5m", label: "5m" },
   { value: "15m", label: "15m" },
@@ -28,7 +42,7 @@ const TIME_RANGES = [
   { value: "6h", label: "6h" },
   { value: "24h", label: "24h" },
   { value: "7d", label: "7d" },
-];
+] as const;
 
 interface TopicMetricsDashboardProps {
   topics: Topic[];
@@ -207,7 +221,9 @@ export function TopicMetricsDashboard({
     return <TopicMetricsTelemetryDisabledState />;
   }
 
-  if (error) {
+  // A failed refresh keeps the last good overview on screen; only a first read
+  // that never landed leaves nothing to show.
+  if (error && !overview) {
     return (
       <MetricsEmptyState
         title="Metrics could not be loaded"
@@ -244,9 +260,10 @@ export function TopicMetricsDashboard({
 
 export function TopicMetricsTelemetryDisabledState() {
   return (
-    <div className="rounded-lg border border-dashed p-6 text-sm text-muted-foreground">
-      Telemetry is not enabled. Pub/Sub management still works.
-    </div>
+    <MetricsEmptyState
+      title="Telemetry is not enabled"
+      body="Pub/Sub management still works. Start PlainQ with telemetry storage configured to collect dashboard data."
+    />
   );
 }
 
@@ -264,104 +281,91 @@ export function TopicMetricsPanelContent({
   loading = false,
 }: TopicMetricsPanelContentProps) {
   return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 className="text-lg font-semibold">Pub/Sub metrics</h2>
-          <p className="text-sm text-muted-foreground">
-            Publish activity, deliveries, and active subscriptions by topic.
-          </p>
-        </div>
+    <div className="flex flex-col gap-4">
+      <SectionHeader
+        title="Pub/Sub metrics"
+        description="Publish activity, deliveries, and active subscriptions by topic."
+        actions={
+          <>
+            <Segmented
+              label="Time range"
+              value={timeRange}
+              onChange={onTimeRangeChange}
+              options={TIME_RANGES.map((range) => ({
+                value: range.value as string,
+                label: range.label,
+              }))}
+            />
+            <Button
+              variant="outline"
+              size="icon"
+              onClick={onRefresh}
+              loading={loading}
+              aria-label="Refresh topic metrics"
+            >
+              <RefreshCw className="size-4" aria-hidden />
+            </Button>
+          </>
+        }
+      />
 
-        <div className="flex items-center gap-2">
-          <Select
-            value={timeRange}
-            onValueChange={(value) => {
-              if (value) onTimeRangeChange(value);
-            }}
-          >
-            <SelectTrigger className="w-28">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectPopup>
-              {TIME_RANGES.map((range) => (
-                <SelectItem key={range.value} value={range.value}>
-                  {range.label}
-                </SelectItem>
-              ))}
-            </SelectPopup>
-          </Select>
-
-          <Button
-            variant="outline"
-            size="icon"
-            onClick={onRefresh}
-            disabled={loading}
-            aria-label="Refresh topic metrics"
-          >
-            <RefreshCw className="size-4" />
-          </Button>
-        </div>
-      </div>
-
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
+      <div className="grid grid-cols-2 gap-3 xl:grid-cols-5">
         <MetricTile
           label="Publish rate"
-          value={formatMetricRate(overview.systemMetrics.publishRate)}
-          unit="msg/s"
+          tone="send"
+          value={formatRateFigure(overview.systemMetrics.publishRate)}
+          unit="/s"
         />
         <MetricTile
           label="Delivery rate"
-          value={formatMetricRate(overview.systemMetrics.deliveryRate)}
-          unit="msg/s"
+          tone="receive"
+          value={formatRateFigure(overview.systemMetrics.deliveryRate)}
+          unit="/s"
         />
         <MetricTile
           label="Published"
-          value={formatMetricNumber(overview.systemMetrics.messagesPublished)}
-          unit="msgs"
+          value={formatCount(overview.systemMetrics.messagesPublished)}
         />
-        <MetricTile
-          label="Deliveries"
-          value={formatMetricNumber(overview.systemMetrics.deliveries)}
-          unit="msgs"
-        />
+        <MetricTile label="Deliveries" value={formatCount(overview.systemMetrics.deliveries)} />
         <MetricTile
           label="Subscriptions"
-          value={formatOptionalMetricNumber(overview.systemMetrics.subscriptionsCurrent)}
-          unit="active"
+          value={formatOptionalCount(overview.systemMetrics.subscriptionsCurrent)}
         />
       </div>
 
       {selectedTopicId ? (
-        <Card>
-          <CardHeader className="flex-row items-center justify-between gap-3">
-            <CardTitle className="text-sm">{selectedTopicLabel}</CardTitle>
-            <Select
-              value={selectedTopicId}
-              onValueChange={(value) => {
-                if (value) onTopicChange(value);
-              }}
-            >
-              <SelectTrigger className="w-56">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectPopup>
-                {topicOptions.map((option) => (
-                  <SelectItem key={option.value} value={option.value}>
-                    {option.label}
-                  </SelectItem>
-                ))}
-              </SelectPopup>
-            </Select>
-          </CardHeader>
-          <CardContent>
+        <Panel className="flex flex-col">
+          <PanelTitleBar
+            className="items-center py-2.5"
+            title={selectedTopicLabel}
+            action={
+              <Select
+                value={selectedTopicId}
+                onValueChange={(value) => {
+                  if (value) onTopicChange(value);
+                }}
+              >
+                <SelectTrigger className="w-56" aria-label="Topic series">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {topicOptions.map((option) => (
+                    <SelectItem key={option.value} value={option.value}>
+                      {option.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            }
+          />
+          <PanelBody className="px-4 py-3.5">
             <TopicRateChart
               topicId={selectedTopicId}
               timeRange={timeRange}
               refreshKey={chartRefreshKey}
             />
-          </CardContent>
-        </Card>
+          </PanelBody>
+        </Panel>
       ) : null}
 
       <TopicMetricsTable rows={overview.topicMetrics} topicNames={topicNames} />
@@ -378,55 +382,81 @@ function TopicMetricsTable({
 }) {
   if (rows.length === 0) {
     return (
-      <div className="rounded-lg border p-6 text-center text-sm text-muted-foreground">
-        No topic metrics have been recorded yet.
-      </div>
+      <Panel>
+        <EmptyState
+          title="No topics reporting"
+          description="No topic metrics have been recorded yet. Publish to a topic to start recording them."
+        />
+      </Panel>
     );
   }
 
   return (
-    <div className="rounded-lg border">
+    <Panel>
       <Table>
         <TableHeader>
           <TableRow>
             <TableHead>Topic</TableHead>
-            <TableHead>Publish rate</TableHead>
-            <TableHead>Delivery rate</TableHead>
-            <TableHead>Published</TableHead>
-            <TableHead>Deliveries</TableHead>
-            <TableHead>Subscriptions</TableHead>
+            <TableHead numeric>Publish /s</TableHead>
+            <TableHead numeric>Delivery /s</TableHead>
+            <TableHead numeric>Published</TableHead>
+            <TableHead numeric>Deliveries</TableHead>
+            <TableHead numeric>Subscriptions</TableHead>
             <TableHead>Last updated</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
-          {rows.map((row) => (
-            <TableRow key={row.topicId}>
-              <TableCell className="font-medium">
-                {topicNames.get(row.topicId) ?? row.topicId}
-              </TableCell>
-              <TableCell>{formatMetricRate(row.publishRate)} msg/s</TableCell>
-              <TableCell>{formatMetricRate(row.deliveryRate)} msg/s</TableCell>
-              <TableCell>{formatMetricNumber(row.messagesPublished)}</TableCell>
-              <TableCell>{formatMetricNumber(row.deliveries)}</TableCell>
-              <TableCell>{formatOptionalMetricNumber(row.subscriptionsCurrent)}</TableCell>
-              <TableCell>{formatMetricTimestamp(row.updatedAt)}</TableCell>
-            </TableRow>
-          ))}
+          {rows.map((row) => {
+            // Publishing into a topic with no subscribers delivers nothing —
+            // worth flagging, but it is a fact about the topic, not an error.
+            const orphaned = row.subscriptionsCurrent === 0;
+
+            return (
+              <TableRow key={row.topicId}>
+                <TableIdentityCell name={topicNames.get(row.topicId) ?? row.topicId} />
+                <TableCell numeric>{formatRateFigure(row.publishRate)}</TableCell>
+                <TableCell numeric>{formatRateFigure(row.deliveryRate)}</TableCell>
+                <TableCell numeric>{formatCount(row.messagesPublished)}</TableCell>
+                <TableCell numeric>{formatCount(row.deliveries)}</TableCell>
+                <TableCell numeric>
+                  {row.subscriptionsCurrent === null || row.subscriptionsCurrent === undefined ? (
+                    <span className="text-subtle">Unknown</span>
+                  ) : orphaned ? (
+                    <Status tone="warning" className="justify-end font-mono tabular">
+                      0
+                    </Status>
+                  ) : (
+                    formatCount(row.subscriptionsCurrent)
+                  )}
+                </TableCell>
+                <TableCell className="font-mono text-xs tabular">
+                  {formatClock(row.updatedAt)}
+                </TableCell>
+              </TableRow>
+            );
+          })}
         </TableBody>
       </Table>
-    </div>
+      <div className="border-t border-border px-4 py-2 text-[11px] text-subtle">
+        Counters run since process start and reset on restart — never lifetime totals. A
+        subscription count the transport does not report reads “Unknown”, never 0.
+      </div>
+    </Panel>
   );
 }
 
 function TopicMetricsDashboardSkeleton() {
   return (
-    <div className="space-y-4">
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
+    <div className="flex flex-col gap-4">
+      <div className="grid grid-cols-2 gap-3 xl:grid-cols-5">
         {Array.from({ length: 5 }).map((_, index) => (
-          <Skeleton key={index} className="h-24" />
+          <Panel key={index} className="px-3.5 py-3">
+            <Skeleton className="h-[15px] w-20" />
+            <Skeleton className="mt-2 h-[18px] w-14" />
+          </Panel>
         ))}
       </div>
-      <Skeleton className="h-72" />
+      <Skeleton className="h-[300px]" />
     </div>
   );
 }
@@ -435,41 +465,40 @@ function MetricTile({
   label,
   value,
   unit,
+  tone,
 }: {
   label: string;
   value: string;
-  unit: string;
+  unit?: string;
+  tone?: LifecycleTone;
 }) {
   return (
-    <Card>
-      <CardHeader className="pb-2">
-        <CardTitle className="text-sm font-medium text-muted-foreground">
-          {label}
-        </CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div className="flex items-baseline gap-2">
-          <span className="text-2xl font-semibold">{value}</span>
-          <span className="text-xs text-muted-foreground">{unit}</span>
-        </div>
-      </CardContent>
-    </Card>
+    <Panel className="px-3.5 py-3">
+      <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+        {tone ? <SeriesSwatch tone={tone} /> : null}
+        {label}
+      </div>
+      <div className="font-mono text-[18px] leading-[26px] font-medium tabular">
+        {value}
+        {unit ? <span className="text-[11px] text-subtle">{unit}</span> : null}
+      </div>
+    </Panel>
   );
 }
 
 function MetricsEmptyState({ title, body }: { title: string; body: string }) {
   return (
-    <div className="flex min-h-48 flex-col items-center justify-center rounded-lg border border-dashed text-center">
-      <p className="text-sm font-medium">{title}</p>
-      <p className="mt-1 max-w-md text-sm text-muted-foreground">{body}</p>
-    </div>
+    <Panel>
+      <EmptyState title={title} description={body} />
+    </Panel>
   );
 }
 
-function formatOptionalMetricNumber(value: number | null | undefined) {
+/** A subscription count the transport does not report. Never collapsed to 0. */
+function formatOptionalCount(value: number | null | undefined) {
   if (value === null || value === undefined) {
     return "Unknown";
   }
 
-  return formatMetricNumber(value);
+  return formatCount(value);
 }

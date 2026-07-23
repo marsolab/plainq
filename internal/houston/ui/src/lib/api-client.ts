@@ -28,6 +28,8 @@ const SESSION_KEY = "plainq.session";
 export interface Session {
   accessToken: string;
   refreshToken: string;
+  /** ISO-8601 exactly as the server sent it. Absent if it sent none. */
+  expiresAt?: string;
 }
 
 function pick(source: Record<string, unknown>, ...keys: string[]): string {
@@ -62,6 +64,31 @@ export function readSession(payload: unknown): Session | null {
   return {
     accessToken,
     refreshToken: pick(source, "RefreshToken", "refresh_token", "refreshToken"),
+    // Optional everywhere: the account service states no expiry, so an absent
+    // value must read as "unknown", never as "already expired".
+    expiresAt:
+      pick(source, "ExpiresAt", "expires_at", "expiresAt") || undefined,
+  };
+}
+
+/**
+ * Protobuf's JSON mapping serialises 64-bit integers as strings, so retention,
+ * visibility timeout and friends arrive as `"604800"` rather than `604800`.
+ * Coerce at the boundary — every consumer downstream expects a real number,
+ * and a silent NaN would render as "no value" instead of the truth.
+ */
+function toNumber(value: unknown): number {
+  if (typeof value === "number") return value;
+  if (typeof value === "string" && value.trim() !== "") return Number(value);
+  return Number.NaN;
+}
+
+function normalizeQueue(queue: Queue): Queue {
+  return {
+    ...queue,
+    retentionPeriodSeconds: toNumber(queue.retentionPeriodSeconds),
+    visibilityTimeoutSeconds: toNumber(queue.visibilityTimeoutSeconds),
+    maxReceiveAttempts: toNumber(queue.maxReceiveAttempts),
   };
 }
 
@@ -97,6 +124,25 @@ export function clearSession(): void {
   }
 }
 
+/**
+ * Whether a credential is held — not whether the server will accept it. An
+ * access token past its stated expiry still counts while a refresh token can
+ * renew it; without one it is dropped, so a dead token never poses as a
+ * session.
+ */
+export function hasSession(): boolean {
+  const session = getSession();
+  if (!session) return false;
+  if (session.refreshToken) return true;
+
+  const expiry = session.expiresAt ? Date.parse(session.expiresAt) : NaN;
+  if (Number.isNaN(expiry)) return true;
+  if (expiry > Date.now()) return true;
+
+  clearSession();
+  return false;
+}
+
 /** One refresh attempt against the token the browser holds. Never loops. */
 async function refreshSession(): Promise<boolean> {
   const session = getSession();
@@ -122,19 +168,23 @@ async function refreshSession(): Promise<boolean> {
 }
 
 /**
- * `isPublic` marks the sign-in / sign-up endpoints, which a client calls
- * precisely because it has no session yet. Their 401 means "bad credentials",
- * not "expired session", so they opt out of the refresh-then-redirect handling
- * below and let the 401 fall through as an ordinary error the form can show.
- * Reloading /login on a wrong password would otherwise discard that message.
+ * Carries the reason and the intended destination, so /login can say what
+ * happened and send the operator back where they were going.
  */
+function redirectToSignIn(): void {
+  if (typeof window === "undefined") return;
+  if (window.location.pathname === "/login") return;
+
+  const next = `${window.location.pathname}${window.location.search}`;
+  window.location.href = `/login?reason=expired&next=${encodeURIComponent(next)}`;
+}
+
 async function apiFetch<T>(
   path: string,
   options?: RequestInit,
   mayRefresh = true,
-  isPublic = false,
 ): Promise<T> {
-  const session = isPublic ? null : getSession();
+  const session = getSession();
 
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
@@ -145,7 +195,7 @@ async function apiFetch<T>(
     },
   });
 
-  if (response.status === 401 && !isPublic) {
+  if (response.status === 401) {
     // Exactly one deterministic refresh before giving up. fetch does not throw
     // on 4xx, so a retry driven by a failed refresh would recurse forever.
     if (mayRefresh && (await refreshSession())) {
@@ -153,7 +203,7 @@ async function apiFetch<T>(
     }
 
     clearSession();
-    window.location.href = "/login";
+    redirectToSignIn();
 
     throw new Error("Session expired");
   }
@@ -209,8 +259,11 @@ export const api = {
     list: (params: { limit?: number; cursor?: string } = {}) =>
       apiFetch<QueueListResponse>(
         `/queue?limit=${params.limit ?? 10}&cursor=${params.cursor ?? ""}`,
-      ),
-    get: (id: string) => apiFetch<Queue>(`/queue/${id}`),
+      ).then((response) => ({
+        ...response,
+        queues: (response.queues ?? []).map(normalizeQueue),
+      })),
+    get: (id: string) => apiFetch<Queue>(`/queue/${id}`).then(normalizeQueue),
     create: (data: CreateQueueInput) =>
       apiFetch<{ queueId: string }>("/queue", {
         method: "POST",
@@ -326,16 +379,13 @@ export const api = {
   auth: {
     // Sign-in and sign-up only count as succeeding once the session they
     // return is actually held: navigating into the app without one lands on a
-    // page that can only 401. Both are public identity requests (last arg), so
-    // a 401 surfaces as an error the form can show rather than a redirect.
+    // page that can only 401.
     signin: async (data: { email: string; password: string }) => {
       const session = readSession(
-        await apiFetch<unknown>(
-          "/account/signin",
-          { method: "POST", body: JSON.stringify(data) },
-          false,
-          true,
-        ),
+        await apiFetch<unknown>("/account/signin", {
+          method: "POST",
+          body: JSON.stringify(data),
+        }),
       );
       if (!session) throw new Error("Sign in did not return a session");
 
@@ -343,17 +393,14 @@ export const api = {
 
       return session;
     },
-    // Sign-up answers 201 with an empty body and no session, so the returned
-    // value is usually null. The caller uses that to decide where to send the
-    // user: into the app only when a real session exists, otherwise to sign in.
+    // Registration may establish no session at all: the server can answer 201
+    // with an empty body, which reads back as null rather than as a failure.
     signup: async (data: { email: string; password: string; name?: string }) => {
       const session = readSession(
-        await apiFetch<unknown>(
-          "/account/signup",
-          { method: "POST", body: JSON.stringify(data) },
-          false,
-          true,
-        ),
+        await apiFetch<unknown>("/account/signup", {
+          method: "POST",
+          body: JSON.stringify(data),
+        }),
       );
       if (session) storeSession(session);
 

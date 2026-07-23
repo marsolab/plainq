@@ -1,0 +1,14 @@
+---
+import Layout from "@/layouts/Layout.astro";
+import { AppShell } from "@/components/layout/app-shell";
+import { NotFoundPage } from "@/components/system/error-pages";
+
+// Standalone by design: no fetch, no session, no client directive on the body.
+// Service health is left unknown rather than claimed — this page never probed.
+---
+
+<Layout title="Not found — PlainQ">
+  <AppShell currentPath="/404" title="Not found" health="unknown" client:load>
+    <NotFoundPage />
+  </AppShell>
+</Layout>
