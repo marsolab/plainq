@@ -148,8 +148,13 @@ func (s *Storage) CreateRefreshToken(ctx context.Context, t account.RefreshToken
 }
 
 func (s *Storage) DeleteRefreshToken(ctx context.Context, token string) error {
-	if err := s.queries.DeleteRefreshToken(ctx, token); err != nil {
+	rows, err := s.queries.DeleteRefreshToken(ctx, token)
+	if err != nil {
 		return fmt.Errorf("delete refresh token: %w", err)
+	}
+
+	if rows == 0 {
+		return account.ErrRefreshTokenNotFound
 	}
 
 	return nil

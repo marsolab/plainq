@@ -73,14 +73,17 @@ func (q *Queries) DeleteAccount(ctx context.Context, userID string) (int64, erro
 	return result.RowsAffected()
 }
 
-const deleteRefreshToken = `-- name: DeleteRefreshToken :exec
+const deleteRefreshToken = `-- name: DeleteRefreshToken :execrows
 DELETE FROM refresh_tokens
 WHERE token = ?
 `
 
-func (q *Queries) DeleteRefreshToken(ctx context.Context, token string) error {
-	_, err := q.db.ExecContext(ctx, deleteRefreshToken, token)
-	return err
+func (q *Queries) DeleteRefreshToken(ctx context.Context, token string) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteRefreshToken, token)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const deleteRefreshTokenByTokenID = `-- name: DeleteRefreshTokenByTokenID :exec

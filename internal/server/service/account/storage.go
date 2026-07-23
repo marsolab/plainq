@@ -163,7 +163,7 @@ func (s *SQLiteStorage) DeleteRefreshToken(ctx context.Context, token string) er
 	}
 
 	if affected == 0 {
-		return errors.New("refresh token not found")
+		return ErrRefreshTokenNotFound
 	}
 
 	return nil

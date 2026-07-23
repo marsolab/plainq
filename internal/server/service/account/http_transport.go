@@ -3,6 +3,7 @@ package account
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -161,6 +162,19 @@ func (s *Service) signOutHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Denying the access token is not enough: the session's refresh token would
+	// still mint a new one via the public /refresh endpoint. Access and refresh
+	// tokens of a session share a token id (jti), so drop the refresh row by
+	// that id to revoke the whole session. Best effort — an unparseable token
+	// has no id to match, and the access token is already denied regardless.
+	if parsed, parseErr := s.tokman.ParseVerify(token); parseErr == nil {
+		if err := s.storage.DeleteRefreshTokenByTokenID(r.Context(), parsed.ID); err != nil {
+			httpkit.ErrorHTTP(w, r, fmt.Errorf("delete refresh token: %w", err))
+
+			return
+		}
+	}
+
 	httpkit.Status(w, r, http.StatusOK)
 }
 
@@ -206,8 +220,16 @@ func (s *Service) refreshHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Delete the old refresh token.
+	// Consume the presented refresh token as a single-use credential. A missing
+	// row means it was already rotated away or revoked on sign-out, so refuse to
+	// mint a new session rather than resurrect a dead one.
 	if err := s.storage.DeleteRefreshToken(r.Context(), req.RefreshToken); err != nil {
+		if errors.Is(err, ErrRefreshTokenNotFound) {
+			httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: refresh token is no longer valid", errkit.ErrUnauthenticated))
+
+			return
+		}
+
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("delete refresh token: %w", err))
 
 		return

@@ -32,7 +32,7 @@ WHERE user_id = $1;
 INSERT INTO refresh_tokens (id, aid, token, created_at, expires_at)
 VALUES ($1, $2, $3, $4, $5);
 
--- name: DeleteRefreshToken :exec
+-- name: DeleteRefreshToken :execrows
 DELETE FROM refresh_tokens
 WHERE token = $1;
 

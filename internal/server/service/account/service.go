@@ -2,6 +2,7 @@ package account
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -12,6 +13,12 @@ import (
 	"github.com/marsolab/servekit/authkit/jwtkit"
 	"github.com/marsolab/servekit/mailkit"
 )
+
+// ErrRefreshTokenNotFound is returned by DeleteRefreshToken when the token has
+// no matching row — it was already rotated away or revoked on sign-out. The
+// refresh flow treats it as an authentication failure so a stale refresh token
+// cannot mint a new session.
+var ErrRefreshTokenNotFound = errors.New("refresh token not found")
 
 // Storage encapsulates interaction with account storage.
 //
@@ -38,7 +45,9 @@ type Storage interface {
 	// CreateRefreshToken creates refresh token record in database.
 	CreateRefreshToken(ctx context.Context, token RefreshToken) error
 
-	// DeleteRefreshToken deletes given token from database.
+	// DeleteRefreshToken deletes given token from database. It returns
+	// ErrRefreshTokenNotFound when no row matched, so the caller can tell a
+	// consumed or revoked token from a successful single-use rotation.
 	DeleteRefreshToken(ctx context.Context, token string) error
 
 	// DeleteRefreshTokenByTokenID deletes given token from database by its id.
