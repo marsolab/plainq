@@ -197,6 +197,25 @@ func (q *Queries) GetUserRoles(ctx context.Context, userID string) ([]string, er
 	return items, nil
 }
 
+const isAccessTokenDenied = `-- name: IsAccessTokenDenied :one
+SELECT count(*)
+FROM denylist
+WHERE token = ?
+  AND denied_until > ?
+`
+
+type IsAccessTokenDeniedParams struct {
+	Token       string
+	DeniedUntil int64
+}
+
+func (q *Queries) IsAccessTokenDenied(ctx context.Context, arg IsAccessTokenDeniedParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, isAccessTokenDenied, arg.Token, arg.DeniedUntil)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const purgeRefreshTokens = `-- name: PurgeRefreshTokens :exec
 DELETE FROM refresh_tokens
 WHERE aid = ?

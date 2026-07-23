@@ -48,6 +48,12 @@ WHERE aid = $1;
 INSERT INTO denylist (token, denied_until)
 VALUES ($1, $2);
 
+-- name: IsAccessTokenDenied :one
+SELECT count(*)
+FROM denylist
+WHERE token = $1
+  AND denied_until > $2;
+
 -- name: GetUserRoles :many
 SELECT r.role_name
 FROM roles r

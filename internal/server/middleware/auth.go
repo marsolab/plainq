@@ -18,6 +18,16 @@ type UserInfo struct {
 	Roles  []string
 }
 
+// TokenDenylist reports whether an access token has been revoked (e.g. via
+// sign-out) before its natural expiry. AuthenticateJWT consults it so a
+// signed-out token stops working immediately instead of lingering for the
+// access-token TTL.
+type TokenDenylist interface {
+	// IsAccessTokenDenied reports whether the given raw access token (without
+	// the "Bearer " prefix) is currently denied.
+	IsAccessTokenDenied(ctx context.Context, token string) (bool, error)
+}
+
 // ContextKey is a type for context keys to avoid collisions.
 type ContextKey string
 
@@ -27,9 +37,11 @@ const (
 )
 
 // AuthenticateJWT middleware validates JWT tokens and extracts user information.
+// The denylist, when non-nil, is consulted after signature verification so a
+// token that was signed out is rejected before its natural expiry.
 //
 //nolint:gocognit // Complex JWT validation and user extraction logic.
-func AuthenticateJWT(tokenManager jwtkit.TokenManager) func(next http.Handler) http.Handler {
+func AuthenticateJWT(tokenManager jwtkit.TokenManager, denylist TokenDenylist) func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			authHeader := r.Header.Get("Authorization")
@@ -53,6 +65,25 @@ func AuthenticateJWT(tokenManager jwtkit.TokenManager) func(next http.Handler) h
 				httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: invalid token: %s", errkit.ErrUnauthenticated, err.Error()))
 
 				return
+			}
+
+			// A valid signature is not enough: a signed-out token stays
+			// cryptographically valid until it expires, so honour the denylist.
+			// Fail closed on a lookup error rather than admit an unverifiable
+			// token.
+			if denylist != nil {
+				denied, denyErr := denylist.IsAccessTokenDenied(r.Context(), tokenString)
+				if denyErr != nil {
+					httpkit.ErrorHTTP(w, r, fmt.Errorf("check token denylist: %w", denyErr))
+
+					return
+				}
+
+				if denied {
+					httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: token has been revoked", errkit.ErrUnauthenticated))
+
+					return
+				}
 			}
 
 			// Extract user ID from token.

@@ -121,12 +121,20 @@ async function refreshSession(): Promise<boolean> {
   }
 }
 
+/**
+ * `isPublic` marks the sign-in / sign-up endpoints, which a client calls
+ * precisely because it has no session yet. Their 401 means "bad credentials",
+ * not "expired session", so they opt out of the refresh-then-redirect handling
+ * below and let the 401 fall through as an ordinary error the form can show.
+ * Reloading /login on a wrong password would otherwise discard that message.
+ */
 async function apiFetch<T>(
   path: string,
   options?: RequestInit,
   mayRefresh = true,
+  isPublic = false,
 ): Promise<T> {
-  const session = getSession();
+  const session = isPublic ? null : getSession();
 
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
@@ -137,7 +145,7 @@ async function apiFetch<T>(
     },
   });
 
-  if (response.status === 401) {
+  if (response.status === 401 && !isPublic) {
     // Exactly one deterministic refresh before giving up. fetch does not throw
     // on 4xx, so a retry driven by a failed refresh would recurse forever.
     if (mayRefresh && (await refreshSession())) {
@@ -318,13 +326,16 @@ export const api = {
   auth: {
     // Sign-in and sign-up only count as succeeding once the session they
     // return is actually held: navigating into the app without one lands on a
-    // page that can only 401.
+    // page that can only 401. Both are public identity requests (last arg), so
+    // a 401 surfaces as an error the form can show rather than a redirect.
     signin: async (data: { email: string; password: string }) => {
       const session = readSession(
-        await apiFetch<unknown>("/account/signin", {
-          method: "POST",
-          body: JSON.stringify(data),
-        }),
+        await apiFetch<unknown>(
+          "/account/signin",
+          { method: "POST", body: JSON.stringify(data) },
+          false,
+          true,
+        ),
       );
       if (!session) throw new Error("Sign in did not return a session");
 
@@ -332,12 +343,17 @@ export const api = {
 
       return session;
     },
+    // Sign-up answers 201 with an empty body and no session, so the returned
+    // value is usually null. The caller uses that to decide where to send the
+    // user: into the app only when a real session exists, otherwise to sign in.
     signup: async (data: { email: string; password: string; name?: string }) => {
       const session = readSession(
-        await apiFetch<unknown>("/account/signup", {
-          method: "POST",
-          body: JSON.stringify(data),
-        }),
+        await apiFetch<unknown>(
+          "/account/signup",
+          { method: "POST", body: JSON.stringify(data) },
+          false,
+          true,
+        ),
       );
       if (session) storeSession(session);
 

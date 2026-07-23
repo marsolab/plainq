@@ -182,6 +182,18 @@ func (s *Storage) DenyAccessToken(ctx context.Context, token string, ttl time.Du
 	return nil
 }
 
+func (s *Storage) IsAccessTokenDenied(ctx context.Context, token string) (bool, error) {
+	count, err := s.queries.IsAccessTokenDenied(ctx, sqlcgen.IsAccessTokenDeniedParams{
+		Token:       token,
+		DeniedUntil: time.Now().Unix(),
+	})
+	if err != nil {
+		return false, fmt.Errorf("is access token denied: %w", err)
+	}
+
+	return count > 0, nil
+}
+
 func (s *Storage) GetUserRoles(ctx context.Context, userID string) ([]string, error) {
 	roles, err := s.queries.GetUserRoles(ctx, userID)
 	if err != nil {

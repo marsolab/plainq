@@ -213,6 +213,19 @@ func (s *SQLiteStorage) DenyAccessToken(ctx context.Context, token string, ttl t
 	return nil
 }
 
+// IsAccessTokenDenied reports whether the given access token has been denied
+// and is still within its denial window.
+func (s *SQLiteStorage) IsAccessTokenDenied(ctx context.Context, token string) (bool, error) {
+	query := `SELECT count(*) FROM denylist WHERE token = ? AND denied_until > ?`
+
+	var count int64
+	if err := s.db.QueryRowContext(ctx, query, token, time.Now().Unix()).Scan(&count); err != nil {
+		return false, fmt.Errorf("is access token denied: %w", err)
+	}
+
+	return count > 0, nil
+}
+
 // GetUserRoles gets all roles for a user by user ID.
 func (s *SQLiteStorage) GetUserRoles(ctx context.Context, userID string) ([]string, error) {
 	query := `

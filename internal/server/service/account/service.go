@@ -50,6 +50,10 @@ type Storage interface {
 	// DenyAccessToken denies access token by given token string.
 	DenyAccessToken(ctx context.Context, token string, ttl time.Duration) error
 
+	// IsAccessTokenDenied reports whether the given access token has been
+	// denied (e.g. via sign-out) and is still within its denial window.
+	IsAccessTokenDenied(ctx context.Context, token string) (bool, error)
+
 	// GetUserRoles gets all roles for a user by user ID.
 	GetUserRoles(ctx context.Context, userID string) ([]string, error)
 }
@@ -138,3 +142,11 @@ func NewService(
 }
 
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.router.ServeHTTP(w, r) }
+
+// IsAccessTokenDenied reports whether the given raw access token (without the
+// "Bearer " prefix) has been revoked via sign-out and is still within its
+// denial window. The auth middleware consults this so a signed-out token stops
+// working immediately rather than lingering until its natural expiry.
+func (s *Service) IsAccessTokenDenied(ctx context.Context, token string) (bool, error) {
+	return s.storage.IsAccessTokenDenied(ctx, token)
+}
