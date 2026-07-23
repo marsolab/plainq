@@ -194,13 +194,24 @@ func (s *Storage) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest)
 		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
 
+	// The cached copy has to match what a read of this row would return, or
+	// DescribeQueue (which answers from cache) contradicts ListQueues (which
+	// reads the table). created_at comes from a column default, so mirror it
+	// here; an eviction policy left unspecified resolves to DROP exactly as
+	// listQueues resolves it on the way out.
+	evictionPolicy := input.EvictionPolicy
+	if evictionPolicy == v1.EvictionPolicy_EVICTION_POLICY_UNSPECIFIED {
+		evictionPolicy = v1.EvictionPolicy_EVICTION_POLICY_DROP
+	}
+
 	props := QueueProps{
 		ID:                       queueID,
 		Name:                     input.QueueName,
+		CreatedAt:                time.Now().UTC(),
 		RetentionPeriodSeconds:   input.RetentionPeriodSeconds,
 		VisibilityTimeoutSeconds: input.VisibilityTimeoutSeconds,
 		MaxReceiveAttempts:       input.MaxReceiveAttempts,
-		EvictionPolicy:           uint32(input.EvictionPolicy), //nolint:gosec // EvictionPolicy enum is non-negative.
+		EvictionPolicy:           uint32(evictionPolicy),
 		DeadLetterQueueID:        input.DeadLetterQueueId,
 	}
 

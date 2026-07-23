@@ -6,8 +6,8 @@ describe("getQueueCreateDialogConfig", () => {
   test("configures the default dialog with every eviction policy", () => {
     const config = getQueueCreateDialogConfig("default");
 
-    expect(config.title).toBe("Create Queue");
-    expect(config.description).toBe("Configure a new message queue.");
+    expect(config.title).toBe("Create queue");
+    expect(config.description).toBe("Configuration is immutable after creation.");
     expect(config.allowDeadLetter).toBe(true);
     expect(config.policyOptions).toContainEqual(
       expect.objectContaining({ value: DEAD_LETTER_POLICY }),

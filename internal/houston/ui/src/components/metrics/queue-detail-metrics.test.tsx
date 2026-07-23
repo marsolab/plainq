@@ -5,6 +5,8 @@ import type {
   MultiMetricsChartResponse,
   QueueMetricsSummary,
 } from "@/lib/types";
+import { formatCount } from "@/lib/format";
+import { formatRateFigure } from "./format-metrics";
 import {
   loadQueueMetricsState,
   QueueMetricsPanelContent,
@@ -144,14 +146,16 @@ describe("QueueMetricsPanelContent", () => {
 
     expect(markup).toContain("Queue metrics");
     expect(markup).toContain("orders");
+    // Rates render through the design system's one-decimal figure so a column
+    // of them keeps its decimal points aligned; counts are exact and grouped.
     expect(markup).toContain("Send rate");
-    expect(markup).toContain("12.35");
+    expect(markup).toContain(formatRateFigure(summary.currentSendRate));
     expect(markup).toContain("Receive rate");
-    expect(markup).toContain("8.50");
+    expect(markup).toContain(formatRateFigure(summary.currentReceiveRate));
     expect(markup).toContain("Delete rate");
-    expect(markup).toContain("6.00");
-    expect(markup).toContain("In flight");
-    expect(markup).toContain("42");
+    expect(markup).toContain(formatRateFigure(summary.currentDeleteRate));
+    expect(markup).toContain("In-flight");
+    expect(markup).toContain(formatCount(summary.currentInFlight));
     expect(markup.match(/No data for this range/g)).toHaveLength(2);
   });
 });

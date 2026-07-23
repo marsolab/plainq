@@ -1,0 +1,11 @@
+---
+import Layout from "@/layouts/Layout.astro";
+import { AppShell } from "@/components/layout/app-shell";
+import { AccessPage } from "@/components/access/access-page";
+---
+
+<Layout title="Access — PlainQ Houston">
+  <AppShell currentPath="/access" title="Access" client:load>
+    <AccessPage client:load />
+  </AppShell>
+</Layout>

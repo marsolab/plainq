@@ -1,0 +1,14 @@
+---
+import Layout from "@/layouts/Layout.astro";
+import { AppShell } from "@/components/layout/app-shell";
+import { ServerErrorPage } from "@/components/system/error-pages";
+
+// Shown when the server itself failed, so it must render from nothing: static
+// markup, plain links, no data of its own to lose.
+---
+
+<Layout title="Server error — PlainQ">
+  <AppShell currentPath="/500" title="Server error" health="unknown" client:load>
+    <ServerErrorPage />
+  </AppShell>
+</Layout>

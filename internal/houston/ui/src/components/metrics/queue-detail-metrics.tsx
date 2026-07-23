@@ -1,16 +1,8 @@
+"use client";
+
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { RefreshCw } from "lucide-react";
-import {
-  Area,
-  AreaChart,
-  CartesianGrid,
-  Line,
-  LineChart,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
+
 import { api } from "@/lib/api-client";
 import type {
   InFlightMetricsResponse,
@@ -19,24 +11,22 @@ import type {
   QueueMetricsSummary,
 } from "@/lib/types";
 import {
-  formatMetricNumber,
-  formatMetricRate,
-  formatMetricTimestamp,
   isTelemetryUnavailableError,
   type RateChartRow,
   transformRateMetrics,
 } from "@/lib/metrics";
+import { formatCount, formatRate } from "@/lib/format";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import {
-  Select,
-  SelectItem,
-  SelectPopup,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { EmptyState } from "@/components/ui/empty-state";
+import { Panel, PanelBody, PanelTitleBar } from "@/components/ui/panel";
+import { SectionHeader } from "@/components/ui/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
+import { formatRateFigure } from "./format-metrics";
+import { SeriesLegend, SeriesSwatch, type LifecycleTone, type SeriesSpec } from "./lifecycle";
+import { Segmented } from "./segmented";
+import { describeSeries, SeriesChart, type ChartRow } from "./series-chart";
 
+/** The presets the server's range parser understands. */
 const TIME_RANGES = [
   { value: "5m", label: "5m" },
   { value: "15m", label: "15m" },
@@ -44,7 +34,22 @@ const TIME_RANGES = [
   { value: "6h", label: "6h" },
   { value: "24h", label: "24h" },
   { value: "7d", label: "7d" },
+] as const;
+
+const CHART_HEIGHT = 220;
+
+/**
+ * Keys match what `transformRateMetrics` emits for `plainq_*_rate`. Deletion is
+ * the acknowledge end of the lifecycle, so it takes the acknowledge tone.
+ */
+const RATE_SERIES: SeriesSpec[] = [
+  { key: "send", label: "sent", tone: "send" },
+  { key: "receive", label: "received", tone: "receive" },
+  { key: "delete", label: "deleted", tone: "acknowledge", dashed: true },
 ];
+
+/** In-flight is a count of messages, not a rate — no denominator, own plot. */
+const IN_FLIGHT_SERIES: SeriesSpec[] = [{ key: "value", label: "in-flight", tone: "send" }];
 
 interface QueueDetailMetricsProps {
   queueId: string;
@@ -59,6 +64,7 @@ interface QueueMetricsPanelContentProps {
   inFlightRows: MetricDataPoint[];
   onRefresh: () => void;
   onTimeRangeChange: (value: string) => void;
+  loading?: boolean;
 }
 
 type QueueMetricsApi = Pick<
@@ -166,7 +172,9 @@ export function QueueDetailMetrics({
     return <QueueMetricsTelemetryDisabledState />;
   }
 
-  if (error) {
+  // A failed refresh keeps the last good sample on screen rather than blanking
+  // the panel; only a first read that never landed leaves nothing to show.
+  if (error && !summary) {
     return (
       <MetricsEmptyState
         title="Metrics could not be loaded"
@@ -184,6 +192,7 @@ export function QueueDetailMetrics({
       inFlightRows={inFlightRows}
       onRefresh={() => void refresh()}
       onTimeRangeChange={setTimeRange}
+      loading={loading}
     />
   );
 }
@@ -196,152 +205,121 @@ export function QueueMetricsPanelContent({
   inFlightRows,
   onRefresh,
   onTimeRangeChange,
+  loading = false,
 }: QueueMetricsPanelContentProps) {
+  const rateChartRows: ChartRow[] = rateRows.map(
+    ({ timestamp, ...rest }) => ({ t: timestamp, ...rest }) as ChartRow,
+  );
+  const inFlightChartRows: ChartRow[] = inFlightRows.map((point) => ({
+    t: point.timestamp,
+    value: point.value,
+  }));
+
   return (
-    <div className="mt-4 space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h3 className="text-base font-semibold">Queue metrics</h3>
-          <p className="text-sm text-muted-foreground">{queueName}</p>
-        </div>
+    <div className="mt-4 flex flex-col gap-4">
+      <SectionHeader
+        title="Queue metrics"
+        description={queueName}
+        actions={
+          <>
+            <Segmented
+              label="Time range"
+              value={timeRange}
+              onChange={onTimeRangeChange}
+              options={TIME_RANGES.map((range) => ({
+                value: range.value as string,
+                label: range.label,
+              }))}
+            />
+            <Button
+              variant="outline"
+              size="icon"
+              onClick={onRefresh}
+              loading={loading}
+              aria-label="Refresh metrics"
+            >
+              <RefreshCw className="size-4" aria-hidden />
+            </Button>
+          </>
+        }
+      />
 
-        <div className="flex items-center gap-2">
-          <Select
-            value={timeRange}
-            onValueChange={(value) => {
-              if (value) onTimeRangeChange(value);
-            }}
-          >
-            <SelectTrigger className="w-28">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectPopup>
-              {TIME_RANGES.map((range) => (
-                <SelectItem key={range.value} value={range.value}>
-                  {range.label}
-                </SelectItem>
-              ))}
-            </SelectPopup>
-          </Select>
-
-          <Button
-            variant="outline"
-            size="icon"
-            onClick={onRefresh}
-            aria-label="Refresh metrics"
-          >
-            <RefreshCw className="size-4" />
-          </Button>
-        </div>
-      </div>
-
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
         <MetricTile
           label="Send rate"
-          value={formatMetricRate(summary?.currentSendRate)}
-          unit="msg/s"
+          tone="send"
+          value={formatRateFigure(summary?.currentSendRate ?? 0)}
+          unit="/s"
         />
         <MetricTile
           label="Receive rate"
-          value={formatMetricRate(summary?.currentReceiveRate)}
-          unit="msg/s"
+          tone="receive"
+          value={formatRateFigure(summary?.currentReceiveRate ?? 0)}
+          unit="/s"
         />
         <MetricTile
           label="Delete rate"
-          value={formatMetricRate(summary?.currentDeleteRate)}
-          unit="msg/s"
+          tone="acknowledge"
+          value={formatRateFigure(summary?.currentDeleteRate ?? 0)}
+          unit="/s"
         />
-        <MetricTile
-          label="In flight"
-          value={formatMetricNumber(summary?.currentInFlight)}
-          unit="msgs"
-        />
+        <MetricTile label="In-flight" value={formatCount(summary?.currentInFlight ?? 0)} />
       </div>
 
       <div className="grid gap-4 xl:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-sm">Throughput</CardTitle>
-          </CardHeader>
-          <CardContent className="h-72">
-            {rateRows.length === 0 ? (
-              <ChartEmptyState />
-            ) : (
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={rateRows}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis
-                    dataKey="timestamp"
-                    tickFormatter={formatMetricTimestamp}
-                  />
-                  <YAxis />
-                  <Tooltip
-                    labelFormatter={(value) =>
-                      new Date(Number(value)).toLocaleString()
-                    }
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="send"
-                    stroke="#2563eb"
-                    dot={false}
-                    name="Send"
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="receive"
-                    stroke="#16a34a"
-                    dot={false}
-                    name="Receive"
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="delete"
-                    stroke="#9333ea"
-                    dot={false}
-                    name="Delete"
-                  />
-                </LineChart>
-              </ResponsiveContainer>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-sm">In-flight messages</CardTitle>
-          </CardHeader>
-          <CardContent className="h-72">
-            {inFlightRows.length === 0 ? (
-              <ChartEmptyState />
-            ) : (
-              <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={inFlightRows}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis
-                    dataKey="timestamp"
-                    tickFormatter={formatMetricTimestamp}
-                  />
-                  <YAxis />
-                  <Tooltip
-                    labelFormatter={(value) =>
-                      new Date(Number(value)).toLocaleString()
-                    }
-                  />
-                  <Area
-                    type="monotone"
-                    dataKey="value"
-                    stroke="#2563eb"
-                    fill="#bfdbfe"
-                    name="In flight"
-                  />
-                </AreaChart>
-              </ResponsiveContainer>
-            )}
-          </CardContent>
-        </Card>
+        <ChartPanel
+          title="Throughput"
+          series={RATE_SERIES}
+          rows={rateChartRows}
+          timeRange={timeRange}
+          formatValue={formatRate}
+        />
+        <ChartPanel
+          title="In-flight messages"
+          series={IN_FLIGHT_SERIES}
+          rows={inFlightChartRows}
+          timeRange={timeRange}
+          formatValue={formatCount}
+        />
       </div>
     </div>
+  );
+}
+
+function ChartPanel({
+  title,
+  series,
+  rows,
+  timeRange,
+  formatValue,
+}: {
+  title: string;
+  series: SeriesSpec[];
+  rows: ChartRow[];
+  timeRange: string;
+  formatValue: (value: number) => string;
+}) {
+  return (
+    <Panel className="flex flex-col">
+      <PanelTitleBar
+        className="items-center py-2.5"
+        title={title}
+        action={<SeriesLegend series={series} />}
+      />
+      <PanelBody className="flex flex-1 flex-col gap-2 px-4 py-3.5">
+        {rows.length === 0 ? (
+          <ChartEmptyState />
+        ) : (
+          <SeriesChart
+            data={rows}
+            series={series}
+            height={CHART_HEIGHT}
+            formatValue={formatValue}
+            summary={describeSeries(rows, series, timeRange, formatValue)}
+          />
+        )}
+      </PanelBody>
+    </Panel>
   );
 }
 
@@ -358,54 +336,60 @@ function MetricTile({
   label,
   value,
   unit,
+  tone,
 }: {
   label: string;
   value: string;
-  unit: string;
+  unit?: string;
+  tone?: LifecycleTone;
 }) {
   return (
-    <Card>
-      <CardHeader className="pb-2">
-        <CardTitle className="text-sm font-medium text-muted-foreground">
-          {label}
-        </CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div className="flex items-baseline gap-2">
-          <span className="text-2xl font-semibold">{value}</span>
-          <span className="text-xs text-muted-foreground">{unit}</span>
-        </div>
-      </CardContent>
-    </Card>
+    <Panel className="px-3.5 py-3">
+      <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+        {tone ? <SeriesSwatch tone={tone} /> : null}
+        {label}
+      </div>
+      <div className="font-mono text-[18px] leading-[26px] font-medium tabular">
+        {value}
+        {unit ? <span className="text-[11px] text-subtle">{unit}</span> : null}
+      </div>
+    </Panel>
   );
 }
 
 function QueueMetricsSkeleton() {
   return (
-    <div className="mt-4 space-y-4">
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+    <div className="mt-4 flex flex-col gap-4">
+      <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
         {Array.from({ length: 4 }).map((_, index) => (
-          <Skeleton key={index} className="h-24" />
+          <Panel key={index} className="px-3.5 py-3">
+            <Skeleton className="h-[15px] w-20" />
+            <Skeleton className="mt-2 h-[18px] w-14" />
+          </Panel>
         ))}
       </div>
-      <Skeleton className="h-72" />
+      <div className="grid gap-4 xl:grid-cols-2">
+        <Skeleton className="h-[280px]" />
+        <Skeleton className="h-[280px]" />
+      </div>
     </div>
   );
 }
 
 function MetricsEmptyState({ title, body }: { title: string; body: string }) {
   return (
-    <div className="mt-4 flex min-h-48 flex-col items-center justify-center rounded-lg border border-dashed text-center">
-      <p className="text-sm font-medium">{title}</p>
-      <p className="mt-1 max-w-md text-sm text-muted-foreground">{body}</p>
-    </div>
+    <Panel className="mt-4">
+      <EmptyState title={title} description={body} />
+    </Panel>
   );
 }
 
 function ChartEmptyState() {
   return (
-    <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-      No data for this range
-    </div>
+    <EmptyState
+      title="No samples in this range"
+      description="No data for this range"
+      className="px-4 py-8"
+    />
   );
 }

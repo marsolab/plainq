@@ -1,24 +1,38 @@
-import { Checkbox as BaseCheckbox } from "@base-ui/react/checkbox";
-import { cn } from "@/lib/utils";
-import { Check } from "lucide-react";
-import type { ComponentPropsWithoutRef } from "react";
+"use client";
 
+import * as React from "react";
+import { Checkbox as CheckboxPrimitive } from "radix-ui";
+import { Check } from "lucide-react";
+
+import { cn } from "@/lib/utils";
+
+/** 15px square. Checked fills solid; unchecked is a hairline on white. */
 function Checkbox({
   className,
   ...props
-}: ComponentPropsWithoutRef<typeof BaseCheckbox.Root>) {
+}: React.ComponentProps<typeof CheckboxPrimitive.Root>) {
   return (
-    <BaseCheckbox.Root
+    <CheckboxPrimitive.Root
+      data-slot="checkbox"
       className={cn(
-        "peer size-4 shrink-0 rounded-sm border border-primary shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50 data-[checked]:bg-primary data-[checked]:text-primary-foreground",
+        "peer relative flex size-[15px] shrink-0 items-center justify-center border border-muted-foreground bg-surface transition-colors outline-none",
+        // Widens the hit target without changing the drawn box.
+        "after:absolute after:-inset-x-2 after:-inset-y-1.5",
+        "data-checked:border-primary data-checked:bg-primary data-checked:text-primary-foreground",
+        "aria-invalid:border-destructive",
+        "disabled:cursor-not-allowed disabled:border-border disabled:bg-muted disabled:text-subtle",
+        "group-has-disabled/field:opacity-50",
         className,
       )}
       {...props}
     >
-      <BaseCheckbox.Indicator className="flex items-center justify-center text-current">
-        <Check className="size-3.5" />
-      </BaseCheckbox.Indicator>
-    </BaseCheckbox.Root>
+      <CheckboxPrimitive.Indicator
+        data-slot="checkbox-indicator"
+        className="grid place-content-center text-current"
+      >
+        <Check className="size-[11px]" strokeWidth={3} aria-hidden />
+      </CheckboxPrimitive.Indicator>
+    </CheckboxPrimitive.Root>
   );
 }
 

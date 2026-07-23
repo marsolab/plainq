@@ -7,7 +7,7 @@ import {
   TopicMetricsPanelContent,
   TopicMetricsTelemetryDisabledState,
 } from "./topic-metrics-dashboard";
-import { formatMetricTimestamp } from "@/lib/metrics";
+import { formatClock, formatCount } from "@/lib/format";
 
 const overview: TopicMetricsOverview = {
   systemMetrics: {
@@ -142,9 +142,11 @@ describe("TopicMetricsPanelContent", () => {
     );
 
     expect(markup).toContain("Deliveries");
-    expect(markup).toContain("6.54K");
+    // Counters are exact and digit-grouped rather than rounded to "6.54K" — a
+    // rounded counter reads as a claim the server never made.
+    expect(markup).toContain(formatCount(overview.systemMetrics.deliveries));
     expect(markup).toContain("Last updated");
-    expect(markup).toContain(formatMetricTimestamp(overview.topicMetrics[0].updatedAt));
+    expect(markup).toContain(formatClock(overview.topicMetrics[0].updatedAt));
   });
 
   test("renders unknown active subscriptions distinctly from zero", () => {

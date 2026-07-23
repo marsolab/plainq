@@ -1,41 +1,108 @@
 @import "tailwindcss";
+@import "tw-animate-css";
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/jetbrains-mono";
 
+/*
+ * Shorthands for the state attributes Radix puts on its primitives, so
+ * components can say `data-active:` instead of `data-[state=active]:`.
+ * These compose with `group-*` and `peer-*` like any built-in variant.
+ */
+@custom-variant data-open (&[data-state="open"]);
+@custom-variant data-closed (&[data-state="closed"]);
+@custom-variant data-active (&[data-state="active"]);
+@custom-variant data-inactive (&[data-state="inactive"]);
+@custom-variant data-checked (&[data-state="checked"]);
+@custom-variant data-unchecked (&[data-state="unchecked"]);
+@custom-variant data-horizontal (&[data-orientation="horizontal"]);
+@custom-variant data-vertical (&[data-orientation="vertical"]);
+@custom-variant data-disabled (&[data-disabled]);
+@custom-variant data-highlighted (&[data-highlighted]);
+@custom-variant data-placeholder (&[data-placeholder]);
+@custom-variant data-inset (&[data-inset]);
+
+/*
+ * Houston design tokens — S00.
+ *
+ * One token source. Square geometry: 0 radius on every component, switches
+ * included. Color never carries meaning alone; status pairs a square marker
+ * with text. Inter for prose, JetBrains Mono for IDs, values and timestamps.
+ */
 @theme {
+  /* Surfaces */
   --color-background: #fafafa;
   --color-foreground: #0a0a0a;
-  --color-muted: #f5f5f5;
-  --color-muted-foreground: #737373;
   --color-surface: #ffffff;
   --color-surface-foreground: #0a0a0a;
+  --color-muted: #f5f5f5;
+  --color-muted-foreground: #737373;
+  --color-subtle: #a3a3a3;
+  --color-strong: #404040;
+
   --color-border: #e5e5e5;
+  --color-border-strong: #c9c9c6;
   --color-input: #e5e5e5;
   --color-ring: #0a0a0a;
 
+  /* Actions */
   --color-primary: #0a0a0a;
+  --color-primary-hover: #262626;
   --color-primary-foreground: #fafafa;
   --color-secondary: #f5f5f5;
   --color-secondary-foreground: #171717;
   --color-accent: #f5f5f5;
   --color-accent-foreground: #171717;
+
+  /* Feedback */
   --color-destructive: #ef4444;
   --color-destructive-foreground: #fafafa;
-  --color-success: #22c55e;
-  --color-warning: #f59e0b;
+  --color-destructive-border: #fca5a5;
+  --color-destructive-surface: #fef2f2;
+  --color-destructive-text: #b91c1c;
 
+  --color-success: #22c55e;
+  --color-success-text: #15803d;
+
+  --color-warning: #f59e0b;
+  --color-warning-surface: #fffbeb;
+  --color-warning-text: #92400e;
+
+  /*
+   * Message lifecycle. These are the only hues allowed to carry meaning, and
+   * each is always paired with a label in the UI.
+   */
+  --color-send: #2563eb;
+  --color-send-text: #1d4ed8;
+  --color-receive: #16a34a;
+  --color-receive-text: #15803d;
+  --color-acknowledge: #9333ea;
+  --color-acknowledge-text: #7e22ce;
+  --color-retry: #f59e0b;
+  --color-retry-text: #92400e;
+
+  /* Sidebar */
   --color-sidebar: #fafafa;
   --color-sidebar-foreground: #0a0a0a;
+  --color-sidebar-muted: #404040;
   --color-sidebar-border: #e5e5e5;
-  --color-sidebar-accent: #f5f5f5;
-  --color-sidebar-active: #0a0a0a;
-  --color-sidebar-active-foreground: #fafafa;
+  --color-sidebar-active: #f5f5f5;
 
-  --radius-sm: 0.25rem;
-  --radius-md: 0.375rem;
-  --radius-lg: 0.5rem;
-  --radius-xl: 0.75rem;
+  /* Square geometry — any rounded-* utility resolves to 0. */
+  --radius-xs: 0px;
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 0px;
+  --radius-xl: 0px;
+  --radius-2xl: 0px;
+  --radius-3xl: 0px;
+  --radius-4xl: 0px;
 
-  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
+
+  /* Control metrics — 32px is the standard row height for buttons/inputs. */
+  --spacing-control: 2rem;
+  --spacing-control-sm: 1.75rem;
 }
 
 @layer base {
@@ -45,11 +112,46 @@
     border-color: var(--color-border);
   }
 
+  html {
+    font-family: var(--font-sans);
+  }
+
   body {
     background-color: var(--color-background);
     color: var(--color-foreground);
     font-family: var(--font-sans);
+    font-size: 13px;
+    line-height: 1.4;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
+
+  /* Focus is one thing everywhere: 2px black outline, 2px offset. */
+  :focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+  }
+
+  /* Values and timestamps line up in columns. */
+  code,
+  kbd,
+  samp,
+  pre {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@utility tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Mono caption used as a panel header / section eyebrow. */
+@utility caption {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 14px;
+  letter-spacing: 0.1em;
+  color: var(--color-muted-foreground);
+  text-transform: uppercase;
 }

@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
-import type { ReactNode } from "react";
+import { createRef, type ReactNode } from "react";
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 
 declare global {
@@ -12,34 +12,42 @@ function passthrough({ children }: { children?: ReactNode }) {
   return children;
 }
 
-mock.module("@base-ui/react/select", () => ({
+/** Records what the trigger primitive was handed, so ref forwarding is observable. */
+const trigger: { ref?: unknown } = {};
+
+const actual = await import("radix-ui");
+
+mock.module("radix-ui", () => ({
+  ...actual,
   Select: {
     Root: passthrough,
-    Value: passthrough,
     Group: passthrough,
-    GroupLabel: passthrough,
-    Trigger: passthrough,
+    Value: passthrough,
     Icon: passthrough,
     Portal: passthrough,
-    Positioner: ({ children, ...props }: { children?: ReactNode }) => (
-      <div data-select-positioner="" {...props}>
-        {children}
-      </div>
-    ),
-    Popup: ({ children, ...props }: { children?: ReactNode }) => (
+    Viewport: passthrough,
+    Label: passthrough,
+    Item: passthrough,
+    ItemIndicator: passthrough,
+    ItemText: passthrough,
+    Separator: passthrough,
+    ScrollUpButton: passthrough,
+    ScrollDownButton: passthrough,
+    Trigger: ({ children, ref }: { children?: ReactNode; ref?: unknown }) => {
+      trigger.ref = ref;
+      return <button type="button">{children}</button>;
+    },
+    Content: ({ children, ...props }: { children?: ReactNode }) => (
       <div role="listbox" {...props}>
         {children}
       </div>
     ),
-    Item: passthrough,
-    ItemIndicator: passthrough,
-    ItemText: passthrough,
   },
 }));
 
-const { SelectPopup, SelectTrigger } = await import("./select");
+const { SelectContent, SelectPopup, SelectTrigger } = await import("./select");
 
-describe("SelectPopup", () => {
+describe("SelectContent", () => {
   let renderer: ReactTestRenderer;
   let originalConsoleError: typeof console.error;
 
@@ -54,7 +62,7 @@ describe("SelectPopup", () => {
     };
 
     act(() => {
-      renderer = create(<SelectPopup>Option</SelectPopup>);
+      renderer = create(<SelectContent>Option</SelectContent>);
     });
   });
 
@@ -64,16 +72,27 @@ describe("SelectPopup", () => {
   });
 
   test("renders above modal dialogs", () => {
-    const positioner = renderer.root.findByProps({
-      "data-select-positioner": "",
-    });
+    const content = renderer.root.findByProps({ role: "listbox" });
 
-    expect(positioner.props.className).toContain("z-[60]");
+    expect(content.props.className).toContain("z-[60]");
+  });
+
+  test("is also exported as SelectPopup for existing call sites", () => {
+    expect(SelectPopup).toBe(SelectContent);
   });
 });
 
 describe("SelectTrigger", () => {
-  test("accepts a ref for dialog focus restoration", () => {
-    expect(SelectTrigger.$$typeof).toBe(Symbol.for("react.forward_ref"));
+  test("forwards a ref for dialog focus restoration", () => {
+    const ref = createRef<HTMLButtonElement>();
+    let renderer: ReactTestRenderer;
+
+    act(() => {
+      renderer = create(<SelectTrigger ref={ref}>Choose</SelectTrigger>);
+    });
+
+    expect(trigger.ref).toBe(ref);
+
+    act(() => renderer.unmount());
   });
 });

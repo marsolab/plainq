@@ -1,10 +1,16 @@
 import { cn } from "@/lib/utils";
-import type { HTMLAttributes } from "react";
 
-function Skeleton({ className, ...props }: HTMLAttributes<HTMLDivElement>) {
+/**
+ * A skeleton occupies exactly the space the real content will, so nothing
+ * reflows when data lands. Deliberately static: a pulse that fades to
+ * transparent reads as flicker on a dense instrument panel.
+ */
+function Skeleton({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
-      className={cn("animate-pulse rounded-md bg-primary/10", className)}
+      data-slot="skeleton"
+      aria-hidden
+      className={cn("bg-[#ececec]", className)}
       {...props}
     />
   );
