@@ -1,6 +1,5 @@
 import { API_BASE } from "./constants";
 import type {
-  AuthTokens,
   ApiError,
   DashboardOverviewResponse,
   DeleteResponse,
@@ -18,27 +17,137 @@ import type {
   TopicMetricsSummary,
 } from "./types";
 
-async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
+/**
+ * The server authenticates with `Authorization: Bearer` and never sets a
+ * cookie, so the browser is the only place a session can live. Sign-in ends in
+ * a full-page navigation, which rules out memory; localStorage is what is left.
+ * An HttpOnly cookie would be the better store, but the server issues none.
+ */
+const SESSION_KEY = "plainq.session";
+
+export interface Session {
+  accessToken: string;
+  refreshToken: string;
+}
+
+function pick(source: Record<string, unknown>, ...keys: string[]): string {
+  for (const key of keys) {
+    const value = source[key];
+    if (typeof value === "string" && value !== "") return value;
+  }
+
+  return "";
+}
+
+/**
+ * Two endpoints hand back the same session and spell it differently: the
+ * account service serialises its struct without JSON tags (`AccessToken`),
+ * while onboarding tags the same fields snake_case and nests them under
+ * `session`. Both are the server's own shapes, so read either rather than
+ * betting on one.
+ */
+export function readSession(payload: unknown): Session | null {
+  if (typeof payload !== "object" || payload === null) return null;
+
+  const record = payload as Record<string, unknown>;
+  const nested = record.session;
+  const source =
+    typeof nested === "object" && nested !== null
+      ? (nested as Record<string, unknown>)
+      : record;
+
+  const accessToken = pick(source, "AccessToken", "access_token", "accessToken");
+  if (!accessToken) return null;
+
+  return {
+    accessToken,
+    refreshToken: pick(source, "RefreshToken", "refresh_token", "refreshToken"),
+  };
+}
+
+export function getSession(): Session | null {
+  if (typeof window === "undefined") return null;
+
+  try {
+    const raw = window.localStorage.getItem(SESSION_KEY);
+    return raw ? (JSON.parse(raw) as Session) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function storeSession(session: Session): void {
+  if (typeof window === "undefined") return;
+
+  try {
+    window.localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+  } catch {
+    // A browser refusing storage still gets a working session for this
+    // document; only persistence across a reload is lost.
+  }
+}
+
+export function clearSession(): void {
+  if (typeof window === "undefined") return;
+
+  try {
+    window.localStorage.removeItem(SESSION_KEY);
+  } catch {
+    // Nothing to recover from: there is no session left to clear.
+  }
+}
+
+/** One refresh attempt against the token the browser holds. Never loops. */
+async function refreshSession(): Promise<boolean> {
+  const session = getSession();
+  if (!session?.refreshToken) return false;
+
+  try {
+    const response = await fetch(`${API_BASE}/account/refresh`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh_token: session.refreshToken }),
+    });
+    if (!response.ok) return false;
+
+    const next = readSession(await response.json());
+    if (!next) return false;
+
+    storeSession(next);
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function apiFetch<T>(
+  path: string,
+  options?: RequestInit,
+  mayRefresh = true,
+): Promise<T> {
+  const session = getSession();
+
   const response = await fetch(`${API_BASE}${path}`, {
-    credentials: "include",
+    ...options,
     headers: {
       "Content-Type": "application/json",
+      ...(session ? { Authorization: `Bearer ${session.accessToken}` } : {}),
       ...options?.headers,
     },
-    ...options,
   });
 
   if (response.status === 401) {
-    try {
-      await fetch(`${API_BASE}/account/refresh`, {
-        method: "POST",
-        credentials: "include",
-      });
-      return apiFetch(path, options);
-    } catch {
-      window.location.href = "/login";
-      throw new Error("Session expired");
+    // Exactly one deterministic refresh before giving up. fetch does not throw
+    // on 4xx, so a retry driven by a failed refresh would recurse forever.
+    if (mayRefresh && (await refreshSession())) {
+      return apiFetch<T>(path, options, false);
     }
+
+    clearSession();
+    window.location.href = "/login";
+
+    throw new Error("Session expired");
   }
 
   if (!response.ok) {
@@ -48,8 +157,14 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
     throw new Error(`${response.status}: ${error.message || response.statusText}`);
   }
 
+  // Not every success carries JSON: signup answers 201 with an empty body, and
+  // parsing that unconditionally turns a created account into a thrown error.
   if (response.status === 204) return undefined as T;
-  return response.json();
+
+  const body = await response.text();
+  if (body === "") return undefined as T;
+
+  return JSON.parse(body) as T;
 }
 
 function utf8ToBase64(input: string): string {
@@ -201,19 +316,42 @@ export const api = {
       apiFetch<MultiMetricsChartResponse>(`/metrics/topic/${id}/rates?range=${range}`),
   },
   auth: {
-    signin: (data: { email: string; password: string }) =>
-      apiFetch<AuthTokens>("/account/signin", {
-        method: "POST",
-        body: JSON.stringify(data),
-      }),
-    signup: (data: { email: string; password: string; name?: string }) =>
-      apiFetch<AuthTokens>("/account/signup", {
-        method: "POST",
-        body: JSON.stringify(data),
-      }),
-    signout: () =>
-      apiFetch<void>("/account/signout", { method: "POST" }),
-    refresh: () =>
-      apiFetch<AuthTokens>("/account/refresh", { method: "POST" }),
+    // Sign-in and sign-up only count as succeeding once the session they
+    // return is actually held: navigating into the app without one lands on a
+    // page that can only 401.
+    signin: async (data: { email: string; password: string }) => {
+      const session = readSession(
+        await apiFetch<unknown>("/account/signin", {
+          method: "POST",
+          body: JSON.stringify(data),
+        }),
+      );
+      if (!session) throw new Error("Sign in did not return a session");
+
+      storeSession(session);
+
+      return session;
+    },
+    signup: async (data: { email: string; password: string; name?: string }) => {
+      const session = readSession(
+        await apiFetch<unknown>("/account/signup", {
+          method: "POST",
+          body: JSON.stringify(data),
+        }),
+      );
+      if (session) storeSession(session);
+
+      return session;
+    },
+    signout: async () => {
+      try {
+        await apiFetch<void>("/account/signout", { method: "POST" });
+      } finally {
+        // Local credentials go regardless: a failed server revocation must not
+        // strand the operator in a session they asked to end.
+        clearSession();
+      }
+    },
+    refresh: () => refreshSession(),
   },
 };

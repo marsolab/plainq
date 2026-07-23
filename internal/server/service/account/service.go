@@ -103,13 +103,17 @@ func NewService(
 	cfg *config.Config,
 	logger *slog.Logger,
 	hasher hashkit.Hasher,
+	tokenManager jwtkit.TokenManager,
 	storage Storage,
 ) *Service {
 	s := Service{
-		cfg:     cfg,
-		router:  chi.NewRouter(),
-		logger:  logger,
-		hasher:  hasher,
+		cfg:    cfg,
+		router: chi.NewRouter(),
+		logger: logger,
+		hasher: hasher,
+		// Sessions are signed here (createSession), so without a token manager
+		// signin/signup/refresh dereference a nil interface and panic.
+		tokman:  tokenManager,
 		storage: storage,
 	}
 

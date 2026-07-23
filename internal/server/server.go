@@ -22,6 +22,7 @@ import (
 	"github.com/marsolab/plainq/internal/server/service/telemetry"
 	"github.com/marsolab/plainq/internal/server/service/telemetry/collector"
 	"github.com/marsolab/servekit"
+	"github.com/marsolab/servekit/authkit/jwtkit"
 	"github.com/marsolab/servekit/dbkit/litekit"
 	"github.com/marsolab/servekit/grpckit"
 	"github.com/marsolab/servekit/httpkit"
@@ -30,14 +31,15 @@ import (
 
 // PlainQ represents plainq logic.
 type PlainQ struct {
-	cfg        *config.Config
-	logger     *slog.Logger
-	queue      *queue.Service
-	account    *account.Service
-	onboarding *onboarding.Service
-	rbac       *rbac.Service
-	oauth      *oauth.Service
-	observer   telemetry.Observer
+	cfg          *config.Config
+	logger       *slog.Logger
+	queue        *queue.Service
+	account      *account.Service
+	onboarding   *onboarding.Service
+	rbac         *rbac.Service
+	oauth        *oauth.Service
+	observer     telemetry.Observer
+	tokenManager jwtkit.TokenManager
 
 	// Telemetry components.
 	metricsCollector *collector.Collector
@@ -52,6 +54,7 @@ func NewServer(
 	cfg *config.Config,
 	logger *slog.Logger,
 	checker hc.HealthChecker,
+	tokenManager jwtkit.TokenManager,
 	queueSvc *queue.Service,
 	accountSvc *account.Service,
 	onboardingSvc *onboarding.Service,
@@ -63,14 +66,15 @@ func NewServer(
 	server := servekit.NewServer(logger)
 
 	pq := PlainQ{
-		cfg:        cfg,
-		logger:     logger,
-		queue:      queueSvc,
-		account:    accountSvc,
-		onboarding: onboardingSvc,
-		rbac:       rbacSvc,
-		oauth:      oauthSvc,
-		observer:   telemetry.NewObserver(),
+		cfg:          cfg,
+		logger:       logger,
+		queue:        queueSvc,
+		account:      accountSvc,
+		onboarding:   onboardingSvc,
+		rbac:         rbacSvc,
+		oauth:        oauthSvc,
+		observer:     telemetry.NewObserver(),
+		tokenManager: tokenManager,
 	}
 
 	// Apply server options.
@@ -102,16 +106,15 @@ func NewServer(
 		api.Use(cors.AllowAll().Handler)
 
 		api.Route("/v1", func(v1 chi.Router) {
+			// Identity routes are always public: they are how a client obtains
+			// or renews a token, so they cannot themselves demand one. Account
+			// routes exist only when auth is enabled; onboarding bootstraps the
+			// first admin and self-closes once one exists.
 			if cfg.AuthEnable {
 				v1.Route("/account", func(account chi.Router) {
 					account.Mount("/", pq.account)
 				})
 			}
-
-			// Queue related routes.
-			v1.Route("/queue", func(queue chi.Router) {
-				queue.Mount("/", pq.queue)
-			})
 
 			// Onboarding is intentionally public — it only accepts
 			// requests before the first admin user exists.
@@ -119,17 +122,36 @@ func NewServer(
 				r.Mount("/", pq.onboarding)
 			})
 
+			// protect gates a subtree behind a valid bearer token whenever auth
+			// is enabled. With auth off the wrapper is a no-op, so the server is
+			// open by deliberate configuration rather than by omission.
+			protect := func(r chi.Router) {
+				if cfg.AuthEnable {
+					r.Use(middleware.AuthenticateJWT(pq.tokenManager))
+				}
+			}
+
+			// Queue related routes.
+			v1.Route("/queue", func(queue chi.Router) {
+				protect(queue)
+				queue.Mount("/", pq.queue)
+			})
+
 			v1.Route("/rbac", func(r chi.Router) {
+				protect(r)
 				r.Mount("/", pq.rbac)
 			})
 
 			v1.Route("/oauth", func(r chi.Router) {
+				protect(r)
 				r.Mount("/", pq.oauth)
 			})
 
 			// Metrics API routes for dashboard.
 			if pq.metricsHandler != nil {
 				v1.Route("/metrics", func(metrics chi.Router) {
+					protect(metrics)
+
 					// Overview dashboard data.
 					metrics.Get("/overview", pq.metricsHandler.GetDashboardOverview)
 					metrics.Get("/topics/overview", pq.metricsHandler.GetTopicDashboardOverview)
@@ -216,7 +238,14 @@ func (s *PlainQ) houstonStaticHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := fs.Stat(bundle, trimmed); err == nil {
+	if info, err := fs.Stat(bundle, trimmed); err == nil {
+		// Astro emits each route as <route>/index.html. Asking FileServer for
+		// the bare directory earns a 301 to the trailing-slash form, so add it
+		// here and let a nav click cost one request instead of two.
+		if info.IsDir() && !strings.HasSuffix(cleanPath, "/") {
+			r.URL.Path = pathPrefix + "/" + trimmed + "/"
+		}
+
 		fileServer.ServeHTTP(w, r)
 
 		return
@@ -236,13 +265,34 @@ func (s *PlainQ) houstonStaticHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		r.URL.Path = pathPrefix + "/"
-		fileServer.ServeHTTP(w, r)
+		// No such route. Answer 404 rather than rewriting to the root index:
+		// serving Queues for a mistyped URL is a silent redirect dressed up as
+		// success, and it hides typos from anyone reading logs or status codes.
+		s.serveHoustonNotFound(w, r, bundle)
 
 		return
 	}
 
 	fileServer.ServeHTTP(w, r)
+}
+
+// serveHoustonNotFound answers with the bundle's own not-found page when it
+// ships one, falling back to a plain 404 otherwise. Either way the status code
+// is the truth — that is what the caller acts on.
+func (s *PlainQ) serveHoustonNotFound(w http.ResponseWriter, r *http.Request, bundle fs.FS) {
+	page, err := fs.ReadFile(bundle, "404.html")
+	if err != nil {
+		http.NotFound(w, r)
+
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusNotFound)
+
+	if _, writeErr := w.Write(page); writeErr != nil {
+		s.logger.Error("write houston 404 page", slog.String("error", writeErr.Error()))
+	}
 }
 
 func listenerHTTP(cfg *config.Config, logger *slog.Logger, checker hc.HealthChecker) (*httpkit.ListenerHTTP, error) {

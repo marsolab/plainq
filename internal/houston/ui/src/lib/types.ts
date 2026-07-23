@@ -29,11 +29,6 @@ export interface User {
   createdAt: string;
 }
 
-export interface AuthTokens {
-  accessToken: string;
-  refreshToken: string;
-}
-
 export interface ApiError {
   message: string;
   code?: string;
