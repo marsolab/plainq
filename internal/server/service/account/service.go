@@ -3,6 +3,7 @@ package account
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -157,5 +158,10 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.router.S
 // denial window. The auth middleware consults this so a signed-out token stops
 // working immediately rather than lingering until its natural expiry.
 func (s *Service) IsAccessTokenDenied(ctx context.Context, token string) (bool, error) {
-	return s.storage.IsAccessTokenDenied(ctx, token)
+	denied, err := s.storage.IsAccessTokenDenied(ctx, token)
+	if err != nil {
+		return false, fmt.Errorf("account service: check access token denylist: %w", err)
+	}
+
+	return denied, nil
 }

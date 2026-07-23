@@ -39,8 +39,6 @@ const (
 // AuthenticateJWT middleware validates JWT tokens and extracts user information.
 // The denylist, when non-nil, is consulted after signature verification so a
 // token that was signed out is rejected before its natural expiry.
-//
-//nolint:gocognit // Complex JWT validation and user extraction logic.
 func AuthenticateJWT(tokenManager jwtkit.TokenManager, denylist TokenDenylist) func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -68,7 +66,7 @@ func AuthenticateJWT(tokenManager jwtkit.TokenManager, denylist TokenDenylist) f
 			}
 
 			// A valid signature is not enough: a signed-out token stays
-			// cryptographically valid until it expires, so honour the denylist.
+			// cryptographically valid until it expires, so honor the denylist.
 			// Fail closed on a lookup error rather than admit an unverifiable
 			// token.
 			if denylist != nil {
@@ -86,46 +84,50 @@ func AuthenticateJWT(tokenManager jwtkit.TokenManager, denylist TokenDenylist) f
 				}
 			}
 
-			// Extract user ID from token.
-			userID, ok := token.Meta["uid"].(string)
-			if !ok {
-				httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: missing user ID in token", errkit.ErrUnauthenticated))
+			userInfo, err := userInfoFromToken(token)
+			if err != nil {
+				httpkit.ErrorHTTP(w, r, err)
 
 				return
-			}
-
-			// Extract email from token.
-			email, ok := token.Meta["email"].(string)
-			if !ok {
-				httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: missing email in token", errkit.ErrUnauthenticated))
-
-				return
-			}
-
-			// Extract roles from token (optional).
-			var roles []string
-
-			if rolesInterface, exists := token.Meta["roles"]; exists {
-				if rolesList, ok := rolesInterface.([]any); ok {
-					for _, role := range rolesList {
-						if roleStr, ok := role.(string); ok {
-							roles = append(roles, roleStr)
-						}
-					}
-				}
-			}
-
-			// Store user info in context.
-			userInfo := UserInfo{
-				UserID: userID,
-				Email:  email,
-				Roles:  roles,
 			}
 
 			ctx := context.WithValue(r.Context(), UserContextKey, userInfo)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// userInfoFromToken extracts the authenticated identity from a verified token.
+// Roles are optional — a token without them is still valid — but a missing user
+// ID or email is not, since the rest of the stack keys authorization off them.
+func userInfoFromToken(token *jwtkit.Token) (UserInfo, error) {
+	userID, ok := token.Meta["uid"].(string)
+	if !ok {
+		return UserInfo{}, fmt.Errorf("%w: missing user ID in token", errkit.ErrUnauthenticated)
+	}
+
+	email, ok := token.Meta["email"].(string)
+	if !ok {
+		return UserInfo{}, fmt.Errorf("%w: missing email in token", errkit.ErrUnauthenticated)
+	}
+
+	var roles []string
+
+	if rolesInterface, exists := token.Meta["roles"]; exists {
+		if rolesList, ok := rolesInterface.([]any); ok {
+			for _, role := range rolesList {
+				if roleStr, ok := role.(string); ok {
+					roles = append(roles, roleStr)
+				}
+			}
+		}
+	}
+
+	return UserInfo{
+		UserID: userID,
+		Email:  email,
+		Roles:  roles,
+	}, nil
 }
 
 // RequireRoles middleware ensures the authenticated user has at least one of the required roles.
