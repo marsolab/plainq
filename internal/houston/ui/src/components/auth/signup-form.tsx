@@ -35,12 +35,15 @@ export function SignupForm() {
   const onSubmit = async (data: SignupFormData) => {
     setError(null);
     try {
-      await api.auth.signup({
+      const session = await api.auth.signup({
         name: data.name,
         email: data.email,
         password: data.password,
       });
-      window.location.href = "/";
+      // Registration returns 201 without a session, so entering the app would
+      // just 401 and bounce to login. Send the user to sign in instead; only a
+      // real session (should the server ever issue one) goes straight in.
+      window.location.href = session ? "/" : "/login?registered=1";
     } catch (err) {
       setError(err instanceof Error ? err.message : "Sign up failed");
     }

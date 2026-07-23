@@ -32,7 +32,7 @@ WHERE user_id = $1;
 INSERT INTO refresh_tokens (id, aid, token, created_at, expires_at)
 VALUES ($1, $2, $3, $4, $5);
 
--- name: DeleteRefreshToken :exec
+-- name: DeleteRefreshToken :execrows
 DELETE FROM refresh_tokens
 WHERE token = $1;
 
@@ -47,6 +47,12 @@ WHERE aid = $1;
 -- name: DenyAccessToken :exec
 INSERT INTO denylist (token, denied_until)
 VALUES ($1, $2);
+
+-- name: IsAccessTokenDenied :one
+SELECT count(*)
+FROM denylist
+WHERE token = $1
+  AND denied_until > $2;
 
 -- name: GetUserRoles :many
 SELECT r.role_name

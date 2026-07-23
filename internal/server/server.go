@@ -127,7 +127,7 @@ func NewServer(
 			// open by deliberate configuration rather than by omission.
 			protect := func(r chi.Router) {
 				if cfg.AuthEnable {
-					r.Use(middleware.AuthenticateJWT(pq.tokenManager))
+					r.Use(middleware.AuthenticateJWT(pq.tokenManager, pq.account))
 				}
 			}
 

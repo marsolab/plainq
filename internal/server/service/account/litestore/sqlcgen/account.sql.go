@@ -73,14 +73,17 @@ func (q *Queries) DeleteAccount(ctx context.Context, userID string) (int64, erro
 	return result.RowsAffected()
 }
 
-const deleteRefreshToken = `-- name: DeleteRefreshToken :exec
+const deleteRefreshToken = `-- name: DeleteRefreshToken :execrows
 DELETE FROM refresh_tokens
 WHERE token = ?
 `
 
-func (q *Queries) DeleteRefreshToken(ctx context.Context, token string) error {
-	_, err := q.db.ExecContext(ctx, deleteRefreshToken, token)
-	return err
+func (q *Queries) DeleteRefreshToken(ctx context.Context, token string) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteRefreshToken, token)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const deleteRefreshTokenByTokenID = `-- name: DeleteRefreshTokenByTokenID :exec
@@ -195,6 +198,25 @@ func (q *Queries) GetUserRoles(ctx context.Context, userID string) ([]string, er
 		return nil, err
 	}
 	return items, nil
+}
+
+const isAccessTokenDenied = `-- name: IsAccessTokenDenied :one
+SELECT count(*)
+FROM denylist
+WHERE token = ?
+  AND denied_until > ?
+`
+
+type IsAccessTokenDeniedParams struct {
+	Token       string
+	DeniedUntil int64
+}
+
+func (q *Queries) IsAccessTokenDenied(ctx context.Context, arg IsAccessTokenDeniedParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, isAccessTokenDenied, arg.Token, arg.DeniedUntil)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
 }
 
 const purgeRefreshTokens = `-- name: PurgeRefreshTokens :exec

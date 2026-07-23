@@ -17,6 +17,14 @@ type LoginFormData = z.infer<typeof loginSchema>;
 
 export function LoginForm() {
   const [error, setError] = useState<string | null>(null);
+  // Sign-up redirects here with ?registered=1 once the account exists; show a
+  // confirming note so the bounce to sign-in reads as success, not failure.
+  const [notice] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    return new URLSearchParams(window.location.search).has("registered")
+      ? "Account created. Sign in to continue."
+      : null;
+  });
   const {
     register,
     handleSubmit,
@@ -43,6 +51,11 @@ export function LoginForm() {
       </CardHeader>
       <CardContent>
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+          {notice && !error && (
+            <div className="rounded-md bg-primary/10 px-3 py-2 text-sm text-primary">
+              {notice}
+            </div>
+          )}
           {error && (
             <div className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
               {error}
