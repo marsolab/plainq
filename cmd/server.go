@@ -319,7 +319,7 @@ func serverCommand() *scotty.Command {
 				return tokenErr
 			}
 
-			accountService := account.NewService(&cfg, logger, hasher, accountStorage)
+			accountService := account.NewService(&cfg, logger, hasher, tokenManager, accountStorage)
 
 			onboardingStorage, onboardingStorageErr := initOnboardingStorage(&cfg, logger, backend)
 			if onboardingStorageErr != nil {
@@ -358,7 +358,7 @@ func serverCommand() *scotty.Command {
 				}
 			}
 
-			plainqServer, serverErr := server.NewServer(&cfg, logger, checker, queueService, accountService,
+			plainqServer, serverErr := server.NewServer(&cfg, logger, checker, tokenManager, queueService, accountService,
 				onboardingService, rbacService, oauthService, serverOpts...,
 			)
 			if serverErr != nil {
