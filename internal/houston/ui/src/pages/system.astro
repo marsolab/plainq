@@ -1,0 +1,13 @@
+---
+import Layout from "@/layouts/Layout.astro";
+import { SystemPage } from "@/components/system/system-page";
+
+// The System surface owns the shell: the sidebar's service health, the top
+// bar's freshness stamp and its refresh all describe the same live probe, and
+// none of it is knowable from the Astro page. A shell rendered here would have
+// to guess a health it never measured.
+---
+
+<Layout title="System — PlainQ">
+  <SystemPage client:load />
+</Layout>

@@ -1,32 +1,78 @@
-import { Tabs as BaseTabs } from "@base-ui/react/tabs";
-import { cn } from "@/lib/utils";
-import type { ComponentPropsWithoutRef } from "react";
+import * as React from "react";
+import { cva, type VariantProps } from "class-variance-authority";
+import { Tabs as TabsPrimitive } from "radix-ui";
 
-const Tabs = BaseTabs.Root;
+import { cn } from "@/lib/utils";
+
+function Tabs({
+  className,
+  orientation = "horizontal",
+  ...props
+}: React.ComponentProps<typeof TabsPrimitive.Root>) {
+  return (
+    <TabsPrimitive.Root
+      data-slot="tabs"
+      data-orientation={orientation}
+      className={cn("group/tabs flex gap-4 data-horizontal:flex-col", className)}
+      {...props}
+    />
+  );
+}
+
+/**
+ * Tabs are always underlined — there is no filled or pill variant. The
+ * `variant` prop survives for call-site compatibility and only controls how
+ * far the rule under the list runs.
+ */
+const tabsListVariants = cva(
+  "group/tabs-list inline-flex items-center gap-4 text-muted-foreground group-data-vertical/tabs:h-fit group-data-vertical/tabs:flex-col group-data-vertical/tabs:items-stretch group-data-vertical/tabs:gap-0 group-data-vertical/tabs:border-r group-data-vertical/tabs:border-border",
+  {
+    variants: {
+      variant: {
+        default: "w-full border-b border-border group-data-vertical/tabs:border-b-0",
+        line: "w-fit border-b border-border group-data-vertical/tabs:border-b-0",
+      },
+    },
+    defaultVariants: {
+      variant: "default",
+    },
+  },
+);
 
 function TabsList({
   className,
+  variant = "default",
   ...props
-}: ComponentPropsWithoutRef<typeof BaseTabs.List>) {
+}: React.ComponentProps<typeof TabsPrimitive.List> &
+  VariantProps<typeof tabsListVariants>) {
   return (
-    <BaseTabs.List
-      className={cn(
-        "inline-flex h-9 items-center justify-center rounded-lg bg-muted p-1 text-muted-foreground",
-        className,
-      )}
+    <TabsPrimitive.List
+      data-slot="tabs-list"
+      data-variant={variant}
+      className={cn(tabsListVariants({ variant }), className)}
       {...props}
     />
   );
 }
 
-function TabsTab({
+function TabsTrigger({
   className,
   ...props
-}: ComponentPropsWithoutRef<typeof BaseTabs.Tab>) {
+}: React.ComponentProps<typeof TabsPrimitive.Trigger>) {
   return (
-    <BaseTabs.Tab
+    <TabsPrimitive.Trigger
+      data-slot="tabs-trigger"
       className={cn(
-        "inline-flex items-center justify-center whitespace-nowrap rounded-md px-3 py-1 text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 data-[selected]:bg-surface data-[selected]:text-foreground data-[selected]:shadow-sm",
+        "relative inline-flex items-center justify-center gap-1.5 whitespace-nowrap",
+        "border-b-2 border-transparent pb-2 text-[13px] font-medium text-muted-foreground transition-colors",
+        // Sits the 2px rule on top of the list's hairline rather than below it.
+        "-mb-px hover:text-foreground",
+        "data-active:border-foreground data-active:font-semibold data-active:text-foreground",
+        "group-data-vertical/tabs:-mr-px group-data-vertical/tabs:mb-0 group-data-vertical/tabs:justify-start",
+        "group-data-vertical/tabs:border-b-0 group-data-vertical/tabs:border-r-2 group-data-vertical/tabs:px-3 group-data-vertical/tabs:py-1.5",
+        "group-data-vertical/tabs:data-active:border-foreground",
+        "disabled:pointer-events-none disabled:opacity-45",
+        "[&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-3.5",
         className,
       )}
       {...props}
@@ -34,19 +80,17 @@ function TabsTab({
   );
 }
 
-function TabsPanel({
+function TabsContent({
   className,
   ...props
-}: ComponentPropsWithoutRef<typeof BaseTabs.Panel>) {
+}: React.ComponentProps<typeof TabsPrimitive.Content>) {
   return (
-    <BaseTabs.Panel
-      className={cn(
-        "mt-2 ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
-        className,
-      )}
+    <TabsPrimitive.Content
+      data-slot="tabs-content"
+      className={cn("flex-1 text-[13px] outline-none", className)}
       {...props}
     />
   );
 }
 
-export { Tabs, TabsList, TabsTab, TabsPanel };
+export { Tabs, TabsList, TabsTrigger, TabsContent, tabsListVariants };

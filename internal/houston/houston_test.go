@@ -17,9 +17,14 @@ func TestBundle(t *testing.T) {
 		t.Fatalf("read root: %v", err)
 	}
 
+	// The routes Houston ships. "settings" and "users" were folded into
+	// "access" and "system" by the redesign; "telemetry" carries the Metrics
+	// surface because the server reserves /metrics for Prometheus.
 	want := map[string]bool{
-		"_astro": true, "favicon.svg": true, "index.html": true,
-		"login": true, "queue": true, "settings": true, "signup": true, "users": true,
+		"_astro": true, "favicon.svg": true, "index.html": true, "404.html": true,
+		"500.html": true, "access": true, "login": true, "queue": true,
+		"pubsub": true, "setup": true, "signup": true, "system": true,
+		"telemetry": true,
 	}
 	for _, e := range entries {
 		delete(want, e.Name())

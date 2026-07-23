@@ -1,14 +1,24 @@
-import { Separator as BaseSeparator } from "@base-ui/react/separator";
-import { cn } from "@/lib/utils";
-import type { ComponentPropsWithoutRef } from "react";
+import * as React from "react";
+import { Separator as SeparatorPrimitive } from "radix-ui";
 
+import { cn } from "@/lib/utils";
+
+/** A single hairline, the same weight and colour as every other border. */
 function Separator({
   className,
+  orientation = "horizontal",
+  decorative = true,
   ...props
-}: ComponentPropsWithoutRef<typeof BaseSeparator>) {
+}: React.ComponentProps<typeof SeparatorPrimitive.Root>) {
   return (
-    <BaseSeparator
-      className={cn("shrink-0 bg-border h-px w-full", className)}
+    <SeparatorPrimitive.Root
+      data-slot="separator"
+      decorative={decorative}
+      orientation={orientation}
+      className={cn(
+        "shrink-0 bg-border data-horizontal:h-px data-horizontal:w-full data-vertical:w-px data-vertical:self-stretch",
+        className,
+      )}
       {...props}
     />
   );
