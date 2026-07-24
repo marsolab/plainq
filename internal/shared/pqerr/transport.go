@@ -10,11 +10,11 @@ import (
 // AsTransport re-wraps a storage-layer error so the transport layer maps it to
 // the status code it deserves.
 //
-// Storage speaks pqerr; httpkit and grpckit only recognise errkit sentinels and
+// Storage speaks pqerr; httpkit and grpckit only recognize errkit sentinels and
 // answer 500 for everything else. Without this translation a missing role reads
 // as an internal failure, which is both wrong for the caller and misleading in
 // logs. Errors that carry no pqerr sentinel are returned untouched — an
-// unrecognised failure really is a 500.
+// unrecognized failure really is a 500.
 func AsTransport(err error) error {
 	if err == nil {
 		return nil

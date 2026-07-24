@@ -261,7 +261,7 @@ func (s *Service) callerOrg(r *http.Request) (string, error) {
 
 	orgID, err := s.storage.GetUserOrgID(r.Context(), user.UserID)
 	if err != nil {
-		return "", pqerr.AsTransport(fmt.Errorf("resolve caller organization: %w", err))
+		return "", fmt.Errorf("resolve caller organization: %w", pqerr.AsTransport(err))
 	}
 
 	return orgID, nil

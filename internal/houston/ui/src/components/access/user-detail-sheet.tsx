@@ -347,7 +347,7 @@ export function UserDetailSheet({
 
           {addingTeam ? (
             <TeamPicker
-              orgId={user.organization}
+              organizationLabel={user.organization}
               memberOf={teams}
               value={pendingTeamId}
               onValueChange={setPendingTeamId}
@@ -397,14 +397,15 @@ export function UserDetailSheet({
  * place that needs it and it is opened one account at a time.
  */
 function TeamPicker({
-  orgId,
+  organizationLabel,
   memberOf,
   value,
   onValueChange,
   onAdd,
   busy,
 }: {
-  orgId: string;
+  /** The account's organization as the directory reports it — a name or code. */
+  organizationLabel: string;
   memberOf: AccessTeam[];
   value: string;
   onValueChange: (value: string) => void;
@@ -422,7 +423,9 @@ function TeamPicker({
         const organizations = await api.oauth.organizations.list();
         const target =
           organizations.organizations.find(
-            (organization) => organization.org_name === orgId || organization.org_code === orgId,
+            (organization) =>
+              organization.org_name === organizationLabel ||
+              organization.org_code === organizationLabel,
           ) ?? organizations.organizations[0];
 
         if (!target) {
@@ -440,7 +443,7 @@ function TeamPicker({
     return () => {
       cancelled = true;
     };
-  }, [orgId]);
+  }, [organizationLabel]);
 
   if (error) {
     return <InlineAlert className="mb-2 items-start">{error}</InlineAlert>;

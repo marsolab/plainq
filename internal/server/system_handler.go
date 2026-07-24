@@ -77,10 +77,19 @@ func (h *SystemHandler) GetConfig(w http.ResponseWriter, r *http.Request) {
 	httpkit.JSON(w, r, ConfigResponse{Groups: groups, ReadAt: time.Now()})
 }
 
-// unsetNote is what an absent value means: the process did not choose one, so
-// the subsystem's own default is in force. Naming that default here would be
-// reporting a value nothing read.
-const unsetNote = "Unset — the subsystem's own default applies."
+const (
+	// unsetNote is what an absent value means: the process did not choose one,
+	// so the subsystem's own default is in force. Naming that default here
+	// would be reporting a value nothing read.
+	unsetNote = "Unset — the subsystem's own default applies."
+
+	// unsetValue is the value of a setting the process was started without.
+	unsetValue = "not set"
+
+	// statusLabel heads each group, so a reader can tell at a glance whether
+	// the subsystem the panel describes is running at all.
+	statusLabel = "Status"
+)
 
 func storageFacts(cfg *config.Config) []ConfigFact {
 	facts := []ConfigFact{
@@ -110,7 +119,7 @@ func storageFacts(cfg *config.Config) []ConfigFact {
 
 func authFacts(cfg *config.Config) []ConfigFact {
 	facts := []ConfigFact{
-		{Label: "Status", Value: enabled(cfg.AuthEnable)},
+		{Label: statusLabel, Value: enabled(cfg.AuthEnable)},
 	}
 
 	if !cfg.AuthEnable {
@@ -139,7 +148,7 @@ func authFacts(cfg *config.Config) []ConfigFact {
 
 func oauthFacts(cfg *config.Config) []ConfigFact {
 	facts := []ConfigFact{
-		{Label: "Status", Value: enabled(cfg.OAuthEnable)},
+		{Label: statusLabel, Value: enabled(cfg.OAuthEnable)},
 	}
 
 	if !cfg.OAuthEnable {
@@ -176,7 +185,7 @@ func oauthFacts(cfg *config.Config) []ConfigFact {
 
 func telemetryFacts(cfg *config.Config) []ConfigFact {
 	facts := []ConfigFact{
-		{Label: "Status", Value: enabled(cfg.TelemetryEnabled)},
+		{Label: statusLabel, Value: enabled(cfg.TelemetryEnabled)},
 	}
 
 	if !cfg.TelemetryEnabled {
@@ -237,9 +246,8 @@ func observabilityFacts(cfg *config.Config) []ConfigFact {
 }
 
 func loggingFacts(cfg *config.Config) []ConfigFact {
-	facts := []ConfigFact{
-		{Label: "Status", Value: enabled(cfg.LogEnable)},
-	}
+	facts := make([]ConfigFact, 0, 4)
+	facts = append(facts, ConfigFact{Label: statusLabel, Value: enabled(cfg.LogEnable)})
 
 	if !cfg.LogEnable {
 		return facts
@@ -253,13 +261,13 @@ func loggingFacts(cfg *config.Config) []ConfigFact {
 }
 
 // redactDSN removes the credentials from a database DSN, keeping the parts an
-// operator needs to recognise which database the process opened.
+// operator needs to recognize which database the process opened.
 //
 // A DSN that cannot be parsed is not passed through on the chance that it is
 // harmless — an unparseable string is exactly where a password would survive.
 func redactDSN(dsn string) string {
 	if dsn == "" {
-		return "not set"
+		return unsetValue
 	}
 
 	parsed, err := url.Parse(dsn)
@@ -300,10 +308,10 @@ func isSecretDSNParam(key string) bool {
 // durationFact reports a timeout or interval.
 //
 // A zero duration is "not set", never "0 s": the second reads as an interval of
-// no time at all, which is a setting nobody chose and no subsystem honours.
+// no time at all, which is a setting nobody chose and no subsystem honors.
 func durationFact(label string, d time.Duration) ConfigFact {
 	if d <= 0 {
-		return noteWhenUnset(ConfigFact{Label: label, Value: "not set"})
+		return noteWhenUnset(ConfigFact{Label: label, Value: unsetValue})
 	}
 
 	return ConfigFact{
@@ -315,7 +323,7 @@ func durationFact(label string, d time.Duration) ConfigFact {
 
 // noteWhenUnset explains an absent value rather than leaving it bare.
 func noteWhenUnset(fact ConfigFact) ConfigFact {
-	if fact.Value == "not set" {
+	if fact.Value == unsetValue {
 		fact.Note = unsetNote
 	}
 
@@ -351,12 +359,12 @@ func presence(set bool) string {
 		return "set"
 	}
 
-	return "not set"
+	return unsetValue
 }
 
 func orUnset(value string) string {
 	if value == "" {
-		return "not set"
+		return unsetValue
 	}
 
 	return value

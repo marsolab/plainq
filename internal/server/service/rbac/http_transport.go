@@ -289,7 +289,7 @@ func (s *Service) removeRoleFromUserHandler(w http.ResponseWriter, r *http.Reque
 func (s *Service) guardLastAdministrator(r *http.Request, userID, roleID string) error {
 	role, err := s.storage.GetRoleByID(r.Context(), roleID)
 	if err != nil {
-		return pqerr.AsTransport(fmt.Errorf("get role: %w", err))
+		return fmt.Errorf("get role: %w", pqerr.AsTransport(err))
 	}
 
 	if role.RoleName != AdminRoleName {
@@ -298,7 +298,7 @@ func (s *Service) guardLastAdministrator(r *http.Request, userID, roleID string)
 
 	holders, err := s.storage.GetUsersWithRole(r.Context(), roleID)
 	if err != nil {
-		return pqerr.AsTransport(fmt.Errorf("get users with role: %w", err))
+		return fmt.Errorf("get users with role: %w", pqerr.AsTransport(err))
 	}
 
 	// Only the removal that empties the role is refused; removing it from

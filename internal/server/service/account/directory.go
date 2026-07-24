@@ -153,7 +153,7 @@ func (s *Service) listDirectoryHandler(w http.ResponseWriter, r *http.Request) {
 	httpkit.JSON(w, r, page)
 }
 
-// directoryLimit parses the page size, rejecting values it cannot honour rather
+// directoryLimit parses the page size, rejecting values it cannot honor rather
 // than quietly substituting one: a caller that asked for 1000 rows and received
 // 200 without being told would page through the directory wrongly.
 func directoryLimit(raw string) (int, error) {
