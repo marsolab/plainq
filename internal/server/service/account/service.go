@@ -2,6 +2,8 @@ package account
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -12,6 +14,12 @@ import (
 	"github.com/marsolab/servekit/authkit/jwtkit"
 	"github.com/marsolab/servekit/mailkit"
 )
+
+// ErrRefreshTokenNotFound is returned by DeleteRefreshToken when the token has
+// no matching row — it was already rotated away or revoked on sign-out. The
+// refresh flow treats it as an authentication failure so a stale refresh token
+// cannot mint a new session.
+var ErrRefreshTokenNotFound = errors.New("refresh token not found")
 
 // Storage encapsulates interaction with account storage.
 //
@@ -38,7 +46,9 @@ type Storage interface {
 	// CreateRefreshToken creates refresh token record in database.
 	CreateRefreshToken(ctx context.Context, token RefreshToken) error
 
-	// DeleteRefreshToken deletes given token from database.
+	// DeleteRefreshToken deletes given token from database. It returns
+	// ErrRefreshTokenNotFound when no row matched, so the caller can tell a
+	// consumed or revoked token from a successful single-use rotation.
 	DeleteRefreshToken(ctx context.Context, token string) error
 
 	// DeleteRefreshTokenByTokenID deletes given token from database by its id.
@@ -49,6 +59,10 @@ type Storage interface {
 
 	// DenyAccessToken denies access token by given token string.
 	DenyAccessToken(ctx context.Context, token string, ttl time.Duration) error
+
+	// IsAccessTokenDenied reports whether the given access token has been
+	// denied (e.g. via sign-out) and is still within its denial window.
+	IsAccessTokenDenied(ctx context.Context, token string) (bool, error)
 
 	// GetUserRoles gets all roles for a user by user ID.
 	GetUserRoles(ctx context.Context, userID string) ([]string, error)
@@ -138,3 +152,16 @@ func NewService(
 }
 
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.router.ServeHTTP(w, r) }
+
+// IsAccessTokenDenied reports whether the given raw access token (without the
+// "Bearer " prefix) has been revoked via sign-out and is still within its
+// denial window. The auth middleware consults this so a signed-out token stops
+// working immediately rather than lingering until its natural expiry.
+func (s *Service) IsAccessTokenDenied(ctx context.Context, token string) (bool, error) {
+	denied, err := s.storage.IsAccessTokenDenied(ctx, token)
+	if err != nil {
+		return false, fmt.Errorf("account service: check access token denylist: %w", err)
+	}
+
+	return denied, nil
+}

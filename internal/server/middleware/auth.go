@@ -18,6 +18,16 @@ type UserInfo struct {
 	Roles  []string
 }
 
+// TokenDenylist reports whether an access token has been revoked (e.g. via
+// sign-out) before its natural expiry. AuthenticateJWT consults it so a
+// signed-out token stops working immediately instead of lingering for the
+// access-token TTL.
+type TokenDenylist interface {
+	// IsAccessTokenDenied reports whether the given raw access token (without
+	// the "Bearer " prefix) is currently denied.
+	IsAccessTokenDenied(ctx context.Context, token string) (bool, error)
+}
+
 // ContextKey is a type for context keys to avoid collisions.
 type ContextKey string
 
@@ -27,9 +37,9 @@ const (
 )
 
 // AuthenticateJWT middleware validates JWT tokens and extracts user information.
-//
-//nolint:gocognit // Complex JWT validation and user extraction logic.
-func AuthenticateJWT(tokenManager jwtkit.TokenManager) func(next http.Handler) http.Handler {
+// The denylist, when non-nil, is consulted after signature verification so a
+// token that was signed out is rejected before its natural expiry.
+func AuthenticateJWT(tokenManager jwtkit.TokenManager, denylist TokenDenylist) func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			authHeader := r.Header.Get("Authorization")
@@ -55,46 +65,69 @@ func AuthenticateJWT(tokenManager jwtkit.TokenManager) func(next http.Handler) h
 				return
 			}
 
-			// Extract user ID from token.
-			userID, ok := token.Meta["uid"].(string)
-			if !ok {
-				httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: missing user ID in token", errkit.ErrUnauthenticated))
+			// A valid signature is not enough: a signed-out token stays
+			// cryptographically valid until it expires, so honor the denylist.
+			// Fail closed on a lookup error rather than admit an unverifiable
+			// token.
+			if denylist != nil {
+				denied, denyErr := denylist.IsAccessTokenDenied(r.Context(), tokenString)
+				if denyErr != nil {
+					httpkit.ErrorHTTP(w, r, fmt.Errorf("check token denylist: %w", denyErr))
 
-				return
-			}
+					return
+				}
 
-			// Extract email from token.
-			email, ok := token.Meta["email"].(string)
-			if !ok {
-				httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: missing email in token", errkit.ErrUnauthenticated))
+				if denied {
+					httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: token has been revoked", errkit.ErrUnauthenticated))
 
-				return
-			}
-
-			// Extract roles from token (optional).
-			var roles []string
-
-			if rolesInterface, exists := token.Meta["roles"]; exists {
-				if rolesList, ok := rolesInterface.([]any); ok {
-					for _, role := range rolesList {
-						if roleStr, ok := role.(string); ok {
-							roles = append(roles, roleStr)
-						}
-					}
+					return
 				}
 			}
 
-			// Store user info in context.
-			userInfo := UserInfo{
-				UserID: userID,
-				Email:  email,
-				Roles:  roles,
+			userInfo, err := userInfoFromToken(token)
+			if err != nil {
+				httpkit.ErrorHTTP(w, r, err)
+
+				return
 			}
 
 			ctx := context.WithValue(r.Context(), UserContextKey, userInfo)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
+}
+
+// userInfoFromToken extracts the authenticated identity from a verified token.
+// Roles are optional — a token without them is still valid — but a missing user
+// ID or email is not, since the rest of the stack keys authorization off them.
+func userInfoFromToken(token *jwtkit.Token) (UserInfo, error) {
+	userID, ok := token.Meta["uid"].(string)
+	if !ok {
+		return UserInfo{}, fmt.Errorf("%w: missing user ID in token", errkit.ErrUnauthenticated)
+	}
+
+	email, ok := token.Meta["email"].(string)
+	if !ok {
+		return UserInfo{}, fmt.Errorf("%w: missing email in token", errkit.ErrUnauthenticated)
+	}
+
+	var roles []string
+
+	if rolesInterface, exists := token.Meta["roles"]; exists {
+		if rolesList, ok := rolesInterface.([]any); ok {
+			for _, role := range rolesList {
+				if roleStr, ok := role.(string); ok {
+					roles = append(roles, roleStr)
+				}
+			}
+		}
+	}
+
+	return UserInfo{
+		UserID: userID,
+		Email:  email,
+		Roles:  roles,
+	}, nil
 }
 
 // RequireRoles middleware ensures the authenticated user has at least one of the required roles.

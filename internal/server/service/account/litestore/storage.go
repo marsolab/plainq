@@ -147,8 +147,13 @@ func (s *Storage) CreateRefreshToken(ctx context.Context, t account.RefreshToken
 }
 
 func (s *Storage) DeleteRefreshToken(ctx context.Context, token string) error {
-	if err := s.queries.DeleteRefreshToken(ctx, token); err != nil {
+	rows, err := s.queries.DeleteRefreshToken(ctx, token)
+	if err != nil {
 		return fmt.Errorf("delete refresh token: %w", err)
+	}
+
+	if rows == 0 {
+		return account.ErrRefreshTokenNotFound
 	}
 
 	return nil
@@ -179,6 +184,18 @@ func (s *Storage) DenyAccessToken(ctx context.Context, token string, ttl time.Du
 	}
 
 	return nil
+}
+
+func (s *Storage) IsAccessTokenDenied(ctx context.Context, token string) (bool, error) {
+	count, err := s.queries.IsAccessTokenDenied(ctx, sqlcgen.IsAccessTokenDeniedParams{
+		Token:       token,
+		DeniedUntil: time.Now().Unix(),
+	})
+	if err != nil {
+		return false, fmt.Errorf("is access token denied: %w", err)
+	}
+
+	return count > 0, nil
 }
 
 func (s *Storage) GetUserRoles(ctx context.Context, userID string) ([]string, error) {
