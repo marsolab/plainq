@@ -29,7 +29,13 @@ func (s *Service) listProvidersHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stats, err := s.storage.ListProviderSyncStats(r.Context())
+	// The counts carry the same scope as the providers they accompany. A client
+	// joins the two by provider name, so a global count beside a scoped list
+	// would report another tenant's synchronization activity as this one's.
+	stats, err := s.storage.ListProviderSyncStats(r.Context(), SyncStatsQuery{
+		ScopeOrg: s.cfg.MultiTenancyEnable,
+		OrgID:    orgID,
+	})
 	if err != nil {
 		httpkit.ErrorHTTP(w, r, pqerr.AsTransport(fmt.Errorf("list provider sync stats: %w", err)))
 

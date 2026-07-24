@@ -66,6 +66,21 @@ function tokenWithClaims(claims: Record<string, unknown>): string {
   return `header.${payload}.signature`;
 }
 
+/**
+ * A token shaped the way the server actually mints one.
+ *
+ * This is not a convenience: the server signs its identity claims into a `meta`
+ * object, and a fixture that put `roles` at the top level would agree with a
+ * client reading the wrong place and pass while every real session failed.
+ */
+function serverToken(roles: string[]): string {
+  return tokenWithClaims({
+    jti: "01KYAYXXNNBQV97WZYA1J5D1W7",
+    iss: "plainq-server",
+    meta: { uid: "01KYAYXXKATRMEDKQFM9SRKTVP", email: "viewer@acme.test", roles },
+  });
+}
+
 beforeEach(() => {
   calls.length = 0;
   originalFetch = globalThis.fetch;
@@ -81,26 +96,45 @@ describe("sessionRoles", () => {
   test("reads the roles the server signed into the access token", () => {
     window.localStorage.setItem(
       SESSION_KEY,
-      JSON.stringify({
-        accessToken: tokenWithClaims({ uid: "u1", email: "a@b.test", roles: ["admin", "consumer"] }),
-        refreshToken: "r",
-      }),
+      JSON.stringify({ accessToken: serverToken(["admin", "consumer"]), refreshToken: "r" }),
     );
 
     expect(sessionRoles()).toEqual(["admin", "consumer"]);
     expect(isAdministrator()).toBe(true);
   });
 
+  test("a session the server issued with no roles is read-only, not unknown", () => {
+    // Onboarding and sign-in both mint `meta.roles`, and a non-admin gets an
+    // empty array. Reading that as "unknown" would leave every write control
+    // enabled for an operator the server will refuse.
+    window.localStorage.setItem(
+      SESSION_KEY,
+      JSON.stringify({ accessToken: serverToken([]), refreshToken: "r" }),
+    );
+
+    expect(sessionRoles()).toEqual([]);
+    expect(isAdministrator()).toBe(false);
+  });
+
   test("a token without the role is not an administrator", () => {
     window.localStorage.setItem(
       SESSION_KEY,
+      JSON.stringify({ accessToken: serverToken(["consumer"]), refreshToken: "r" }),
+    );
+
+    expect(isAdministrator()).toBe(false);
+  });
+
+  test("a top-level roles claim is still honored", () => {
+    window.localStorage.setItem(
+      SESSION_KEY,
       JSON.stringify({
-        accessToken: tokenWithClaims({ roles: ["consumer"] }),
+        accessToken: tokenWithClaims({ roles: ["admin"] }),
         refreshToken: "r",
       }),
     );
 
-    expect(isAdministrator()).toBe(false);
+    expect(isAdministrator()).toBe(true);
   });
 
   test("no session and an unreadable token are both unknown, never denied", () => {

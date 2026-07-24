@@ -111,3 +111,9 @@ WHERE role_id = ?;
 -- name: DeleteRoleQueuePermissions :execrows
 DELETE FROM queue_permissions
 WHERE role_id = ?;
+
+-- name: RemoveRoleFromUserUnlessLastHolder :execrows
+DELETE FROM user_roles
+WHERE user_roles.user_id = ?
+  AND user_roles.role_id = ?
+  AND (SELECT count(*) FROM user_roles other WHERE other.role_id = ?) > 1;

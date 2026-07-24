@@ -116,8 +116,12 @@ SELECT coalesce(u.oauth_provider, '') AS provider_name,
         FROM users u2
         WHERE u2.oauth_provider = u.oauth_provider
           AND u2.last_sync_at IS NOT NULL
+          AND (cast(sqlc.arg('scope_org') AS boolean) = FALSE
+            OR coalesce(u2.org_id, '') = cast(sqlc.arg('org_id') AS text))
         ORDER BY u2.last_sync_at DESC
         LIMIT 1)                      AS last_sync_at
 FROM users u
 WHERE u.is_oauth_user = TRUE
+  AND (cast(sqlc.arg('scope_org') AS boolean) = FALSE
+    OR coalesce(u.org_id, '') = cast(sqlc.arg('org_id') AS text))
 GROUP BY u.oauth_provider;

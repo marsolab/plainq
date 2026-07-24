@@ -180,7 +180,15 @@ export function sessionRoles(): string[] | null {
     const base64 = payload.replace(/-/g, "+").replace(/_/g, "/");
     const padded = base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), "=");
     const claims = JSON.parse(base64ToUtf8(padded)) as Record<string, unknown>;
-    const roles = claims.roles;
+
+    // The server signs its identity claims into the token's `meta` object —
+    // that is the shape its own middleware reads back. The top-level form is
+    // accepted too so a token minted by a different issuer still resolves.
+    const meta = claims.meta;
+    const roles =
+      typeof meta === "object" && meta !== null
+        ? ((meta as Record<string, unknown>).roles ?? claims.roles)
+        : claims.roles;
 
     if (!Array.isArray(roles)) return null;
 

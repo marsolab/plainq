@@ -56,7 +56,12 @@ type Storage interface {
 	GetUserByOAuthSub(ctx context.Context, providerName, subject string) (*SyncedUser, error)
 	UpdateUserLastSync(ctx context.Context, userID string) error
 	GetUserSyncStatus(ctx context.Context, userID string) (*UserSyncStatus, error)
-	ListProviderSyncStats(ctx context.Context) ([]ProviderSyncStat, error)
+
+	// ListProviderSyncStats counts the accounts each provider has synchronized.
+	// The query carries the same scope as the provider list it accompanies:
+	// stats keyed by provider name alone would combine two tenants that happen
+	// to use the same provider type.
+	ListProviderSyncStats(ctx context.Context, query SyncStatsQuery) ([]ProviderSyncStat, error)
 
 	// Organization and team management.
 	ListOrganizations(ctx context.Context) ([]Organization, error)
@@ -78,6 +83,15 @@ type UserSyncStatus struct {
 	IsSynced   bool       `json:"is_synced"`
 	Provider   string     `json:"provider,omitempty"`
 	LastSyncAt *time.Time `json:"last_sync_at,omitempty"`
+}
+
+// SyncStatsQuery selects which accounts the synchronization counts cover.
+//
+// ScopeOrg is a separate flag because an empty OrgID is a real scope — the
+// accounts belonging to no organization — and not the same as "count everyone".
+type SyncStatsQuery struct {
+	ScopeOrg bool
+	OrgID    string
 }
 
 // ProviderSyncStat is what a provider has actually synchronized, keyed by the

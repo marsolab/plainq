@@ -441,6 +441,27 @@ func (q *Queries) RemoveRoleFromUser(ctx context.Context, arg RemoveRoleFromUser
 	return result.RowsAffected()
 }
 
+const removeRoleFromUserUnlessLastHolder = `-- name: RemoveRoleFromUserUnlessLastHolder :execrows
+DELETE FROM user_roles
+WHERE user_roles.user_id = ?
+  AND user_roles.role_id = ?
+  AND (SELECT count(*) FROM user_roles other WHERE other.role_id = ?) > 1
+`
+
+type RemoveRoleFromUserUnlessLastHolderParams struct {
+	UserID   string
+	RoleID   string
+	RoleID_2 string
+}
+
+func (q *Queries) RemoveRoleFromUserUnlessLastHolder(ctx context.Context, arg RemoveRoleFromUserUnlessLastHolderParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, removeRoleFromUserUnlessLastHolder, arg.UserID, arg.RoleID, arg.RoleID_2)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const updateQueuePermission = `-- name: UpdateQueuePermission :execrows
 UPDATE queue_permissions
 SET can_send    = ?,

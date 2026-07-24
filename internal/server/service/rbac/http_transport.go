@@ -268,55 +268,38 @@ func (s *Service) removeRoleFromUserHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	if err := s.guardLastAdministrator(r, userID, roleID); err != nil {
-		httpkit.ErrorHTTP(w, r, err)
+	role, err := s.storage.GetRoleByID(r.Context(), roleID)
+	if err != nil {
+		httpkit.ErrorHTTP(w, r, pqerr.AsTransport(fmt.Errorf("get role: %w", err)))
 
 		return
 	}
 
-	if err := s.storage.RemoveRoleFromUser(r.Context(), userID, roleID); err != nil {
+	// The administrator role is the one a deployment cannot afford to empty, so
+	// its removal goes through a delete that carries the "another holder must
+	// remain" condition. Checking first and deleting after would let two
+	// concurrent removals each see the other account and both succeed.
+	remove := s.storage.RemoveRoleFromUser
+	if role.RoleName == AdminRoleName {
+		remove = s.storage.RemoveRoleFromUserUnlessLastHolder
+	}
+
+	if err := remove(r.Context(), userID, roleID); err != nil {
+		if errors.Is(err, ErrLastRoleHolder) {
+			httpkit.ErrorHTTP(w, r, fmt.Errorf(
+				"%w: this is the only account with the %q role — assign it to another account first",
+				errkit.ErrAlreadyExists, AdminRoleName,
+			))
+
+			return
+		}
+
 		httpkit.ErrorHTTP(w, r, pqerr.AsTransport(fmt.Errorf("remove role from user: %w", err)))
 
 		return
 	}
 
 	httpkit.Status(w, r, http.StatusNoContent)
-}
-
-// guardLastAdministrator refuses the removal that would leave the deployment
-// with no administrator. The UI states this rule, but stating it is not
-// enforcing it: the check has to happen where the write happens.
-func (s *Service) guardLastAdministrator(r *http.Request, userID, roleID string) error {
-	role, err := s.storage.GetRoleByID(r.Context(), roleID)
-	if err != nil {
-		return fmt.Errorf("get role: %w", pqerr.AsTransport(err))
-	}
-
-	if role.RoleName != AdminRoleName {
-		return nil
-	}
-
-	holders, err := s.storage.GetUsersWithRole(r.Context(), roleID)
-	if err != nil {
-		return fmt.Errorf("get users with role: %w", pqerr.AsTransport(err))
-	}
-
-	// Only the removal that empties the role is refused; removing it from
-	// somebody who is one of several administrators is ordinary work.
-	for _, holder := range holders {
-		if holder != userID {
-			return nil
-		}
-	}
-
-	if len(holders) == 0 {
-		return nil
-	}
-
-	return fmt.Errorf(
-		"%w: this is the only account with the %q role — assign it to another account first",
-		errkit.ErrAlreadyExists, AdminRoleName,
-	)
 }
 
 // Queue Permission Handlers.

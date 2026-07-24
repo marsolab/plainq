@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/marsolab/plainq/internal/server/service/oauth"
+	"github.com/marsolab/plainq/internal/server/service/oauth/pgstore/sqlcgen"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
 )
 
@@ -74,8 +75,13 @@ func (s *Storage) GetUserSyncStatus(ctx context.Context, userID string) (*oauth.
 	return &status, nil
 }
 
-func (s *Storage) ListProviderSyncStats(ctx context.Context) ([]oauth.ProviderSyncStat, error) {
-	rows, err := s.queries.ListProviderSyncStats(ctx)
+func (s *Storage) ListProviderSyncStats(
+	ctx context.Context, query oauth.SyncStatsQuery,
+) ([]oauth.ProviderSyncStat, error) {
+	rows, err := s.queries.ListProviderSyncStats(ctx, sqlcgen.ListProviderSyncStatsParams{
+		ScopeOrg: query.ScopeOrg,
+		OrgID:    query.OrgID,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("list provider sync stats: %w", err)
 	}

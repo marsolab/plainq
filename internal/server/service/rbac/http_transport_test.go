@@ -33,6 +33,7 @@ type fakeStorage struct {
 	replaceErr     error
 	assignErr      error
 	removed        [2]string
+	removedGuarded [2]string
 	deletedRole    string
 }
 
@@ -102,6 +103,26 @@ func (s *fakeStorage) RemoveRoleFromUser(_ context.Context, userID, roleID strin
 	return nil
 }
 
+// RemoveRoleFromUserUnlessLastHolder mimics the conditional delete: the storage
+// refuses when no other account would be left holding the role.
+func (s *fakeStorage) RemoveRoleFromUserUnlessLastHolder(_ context.Context, userID, roleID string) error {
+	others := 0
+
+	for _, holder := range s.holders[roleID] {
+		if holder != userID {
+			others++
+		}
+	}
+
+	if others == 0 {
+		return ErrLastRoleHolder
+	}
+
+	s.removedGuarded = [2]string{userID, roleID}
+
+	return nil
+}
+
 func (s *fakeStorage) DeleteRole(_ context.Context, roleID string) error {
 	s.deletedRole = roleID
 
@@ -163,6 +184,7 @@ func TestRemovingTheLastAdministratorIsRefused(t *testing.T) {
 	td.Cmp(t, rec.Code, http.StatusConflict,
 		"stripping the only administrator would lock everyone out")
 	td.Cmp(t, storage.removed, [2]string{}, "and the write must not happen")
+	td.Cmp(t, storage.removedGuarded, [2]string{})
 }
 
 func TestRemovingOneOfSeveralAdministratorsIsAllowed(t *testing.T) {
@@ -175,7 +197,9 @@ func TestRemovingOneOfSeveralAdministratorsIsAllowed(t *testing.T) {
 	rec := do(service, http.MethodDelete, "/users/user-1/roles/role-admin", "")
 
 	td.Cmp(t, rec.Code, http.StatusNoContent)
-	td.Cmp(t, storage.removed, [2]string{"user-1", "role-admin"})
+	td.Cmp(t, storage.removedGuarded, [2]string{"user-1", "role-admin"},
+		"the administrator role goes through the conditional delete")
+	td.Cmp(t, storage.removed, [2]string{}, "and not through the unconditional one")
 }
 
 func TestRemovingANonAdministratorRoleIsNotGuarded(t *testing.T) {
@@ -187,6 +211,9 @@ func TestRemovingANonAdministratorRoleIsNotGuarded(t *testing.T) {
 	rec := do(newService(storage), http.MethodDelete, "/users/user-1/roles/role-consumer", "")
 
 	td.Cmp(t, rec.Code, http.StatusNoContent)
+	// Emptying an ordinary role is ordinary work, so it takes the plain path.
+	td.Cmp(t, storage.removed, [2]string{"user-1", "role-consumer"})
+	td.Cmp(t, storage.removedGuarded, [2]string{})
 }
 
 func TestAssigningAHeldRoleIsAConflict(t *testing.T) {

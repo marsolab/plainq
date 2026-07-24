@@ -113,3 +113,37 @@ func classifyWrite(err error) error {
 		return err
 	}
 }
+
+// RemoveRoleFromUserUnlessLastHolder makes the "another holder must remain"
+// condition part of the delete, so two concurrent removals cannot both observe
+// the other account and both succeed.
+func (s *Storage) RemoveRoleFromUserUnlessLastHolder(ctx context.Context, userID, roleID string) error {
+	rows, err := s.queries.RemoveRoleFromUserUnlessLastHolder(ctx, sqlcgen.RemoveRoleFromUserUnlessLastHolderParams{
+		UserID: userID,
+		RoleID: roleID,
+	})
+	if err != nil {
+		return fmt.Errorf("remove role from user: %w", err)
+	}
+
+	if rows > 0 {
+		return nil
+	}
+
+	// No row went, for one of two reasons: the account did not hold the role,
+	// or it held it and was the last to do so. Only a read tells those apart,
+	// and it runs after the delete was already refused — so it shapes the
+	// message the caller sees, never the invariant.
+	roles, err := s.GetUserRoles(ctx, userID)
+	if err != nil {
+		return err
+	}
+
+	for _, held := range roles {
+		if held.RoleID == roleID {
+			return rbac.ErrLastRoleHolder
+		}
+	}
+
+	return fmt.Errorf("user role not found: %w", pqerr.ErrNotFound)
+}

@@ -116,8 +116,10 @@ SELECT coalesce(u.oauth_provider, '')::text AS provider_name,
         FROM users u2
         WHERE u2.oauth_provider = u.oauth_provider
           AND u2.last_sync_at IS NOT NULL
+          AND (NOT @scope_org::boolean OR coalesce(u2.org_id, '') = @org_id::text)
         ORDER BY u2.last_sync_at DESC
         LIMIT 1)                            AS last_sync_at
 FROM users u
 WHERE u.is_oauth_user = TRUE
+  AND (NOT @scope_org::boolean OR coalesce(u.org_id, '') = @org_id::text)
 GROUP BY u.oauth_provider;

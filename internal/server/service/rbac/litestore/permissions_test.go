@@ -156,6 +156,45 @@ func TestAssignRoleToUserReportsADuplicateRatherThanSucceeding(t *testing.T) {
 	td.Cmp(t, storage.AssignRoleToUser(ctx, "user-1", "role-consumer"), rbac.ErrRoleAlreadyAssigned)
 }
 
+// The invariant lives in the delete's own WHERE clause, so it holds without a
+// read-then-write window: an account can only lose the role while another
+// account still holds it.
+func TestRemoveRoleFromUserUnlessLastHolder(t *testing.T) {
+	storage, ctx := newPermissionsStorage(t)
+
+	td.Require(t).CmpNoError(storage.AssignRoleToUser(ctx, "user-1", "role-consumer"), "assign")
+	td.Require(t).CmpNoError(storage.AssignRoleToUser(ctx, "user-2", "role-consumer"), "assign")
+
+	td.Require(t).CmpNoError(
+		storage.RemoveRoleFromUserUnlessLastHolder(ctx, "user-1", "role-consumer"),
+		"one of two holders may lose the role",
+	)
+
+	// The second removal would empty the role, so the delete matches no row.
+	td.Cmp(t,
+		storage.RemoveRoleFromUserUnlessLastHolder(ctx, "user-2", "role-consumer"),
+		rbac.ErrLastRoleHolder,
+	)
+
+	holders, err := storage.CountUsersWithRole(ctx, "role-consumer")
+	td.Require(t).CmpNoError(err, "count holders")
+	td.Cmp(t, holders, int64(1), "the last holder still holds it")
+}
+
+func TestRemoveRoleFromUserUnlessLastHolderReportsAMissingAssignment(t *testing.T) {
+	storage, ctx := newPermissionsStorage(t)
+
+	td.Require(t).CmpNoError(storage.AssignRoleToUser(ctx, "user-1", "role-consumer"), "assign")
+
+	// An account that never held the role is a different answer from one the
+	// guard refused, and the caller acts on each differently.
+	err := storage.RemoveRoleFromUserUnlessLastHolder(ctx, "user-2", "role-consumer")
+
+	td.Require(t).CmpError(err, "removing an assignment that does not exist")
+	td.Cmp(t, errors.Is(err, pqerr.ErrNotFound), true)
+	td.Cmp(t, errors.Is(err, rbac.ErrLastRoleHolder), false)
+}
+
 func TestCountUsersPerRole(t *testing.T) {
 	storage, ctx := newPermissionsStorage(t)
 

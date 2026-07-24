@@ -389,12 +389,21 @@ SELECT coalesce(u.oauth_provider, '') AS provider_name,
         FROM users u2
         WHERE u2.oauth_provider = u.oauth_provider
           AND u2.last_sync_at IS NOT NULL
+          AND (cast(?1 AS boolean) = FALSE
+            OR coalesce(u2.org_id, '') = cast(?2 AS text))
         ORDER BY u2.last_sync_at DESC
         LIMIT 1)                      AS last_sync_at
 FROM users u
 WHERE u.is_oauth_user = TRUE
+  AND (cast(?1 AS boolean) = FALSE
+    OR coalesce(u.org_id, '') = cast(?2 AS text))
 GROUP BY u.oauth_provider
 `
+
+type ListProviderSyncStatsParams struct {
+	ScopeOrg bool
+	OrgID    string
+}
 
 type ListProviderSyncStatsRow struct {
 	ProviderName string
@@ -402,8 +411,8 @@ type ListProviderSyncStatsRow struct {
 	LastSyncAt   sql.NullTime
 }
 
-func (q *Queries) ListProviderSyncStats(ctx context.Context) ([]ListProviderSyncStatsRow, error) {
-	rows, err := q.db.QueryContext(ctx, listProviderSyncStats)
+func (q *Queries) ListProviderSyncStats(ctx context.Context, arg ListProviderSyncStatsParams) ([]ListProviderSyncStatsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listProviderSyncStats, arg.ScopeOrg, arg.OrgID)
 	if err != nil {
 		return nil, err
 	}

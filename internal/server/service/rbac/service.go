@@ -31,6 +31,13 @@ type Storage interface {
 	// the user already holds it, so a caller can tell a change from a no-op.
 	AssignRoleToUser(ctx context.Context, userID, roleID string) error
 	RemoveRoleFromUser(ctx context.Context, userID, roleID string) error
+
+	// RemoveRoleFromUserUnlessLastHolder removes the assignment only if another
+	// account still holds the role, reporting ErrLastRoleHolder when it would
+	// empty it. The condition is part of the delete rather than a read before
+	// it: two concurrent removals of the last two administrators would each see
+	// the other and both succeed, leaving a deployment nobody can administer.
+	RemoveRoleFromUserUnlessLastHolder(ctx context.Context, userID, roleID string) error
 	GetUserRoles(ctx context.Context, userID string) ([]Role, error)
 	GetUsersWithRole(ctx context.Context, roleID string) ([]string, error)
 	CountUsersWithRole(ctx context.Context, roleID string) (int64, error)
@@ -63,6 +70,10 @@ const AdminRoleName = "admin"
 // assignment changed nothing. It is distinct from success because a caller
 // showing "role added" for a no-op is describing a change that did not happen.
 var ErrRoleAlreadyAssigned = errors.New("role already assigned to user")
+
+// ErrLastRoleHolder reports that the removal was refused because it would leave
+// the role with no holders.
+var ErrLastRoleHolder = errors.New("account is the last holder of the role")
 
 // Role represents a role in the system.
 type Role struct {
