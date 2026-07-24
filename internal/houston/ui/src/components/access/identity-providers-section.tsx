@@ -4,14 +4,16 @@ import * as React from "react";
 import { Eye, EyeOff, MoreHorizontal, Plus, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 
+import { api } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/ui/empty-state";
 import { InlineAlert } from "@/components/ui/feedback";
 import { Input, MonoInput } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Panel } from "@/components/ui/panel";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Status } from "@/components/ui/status";
-import { CopyableId } from "@/components/ui/value";
+import { CopyableId, Timestamp } from "@/components/ui/value";
 import {
   Dialog,
   DialogContent,
@@ -45,48 +47,130 @@ import {
 
 import { Sheet, SheetContent } from "./sheet";
 import {
+  CLIENT_ID_KEY,
+  CLIENT_SECRET_KEY,
+  DISPLAY_NAME_KEY,
   IDENTITY_PROVIDER_TYPES,
+  ISSUER_KEY,
+  describeFailure,
+  providerTypeLabel,
+  toProvider,
   type IdentityProvider,
-} from "./mock-data";
+} from "./model";
 
-const EDIT_BLOCKED_REASON =
-  "Provider get and update endpoints aren't available yet, so there is no edit form.";
-
-/** The provider slug the callback route is registered under. */
-function slugOf(type: string): string {
-  return type.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-}
+/**
+ * Registering a provider stores its configuration. It does not make anybody
+ * able to sign in through it: PlainQ has no browser authorization-code flow and
+ * no callback route, so the sign-in half is genuinely absent rather than hidden
+ * behind a flag.
+ */
+const NO_BROWSER_FLOW =
+  "Providers are stored and can be activated, but PlainQ has no browser sign-in flow: there is no authorization-code redirect and no callback route. Configuration here is used by the server's synchronization API, not by a “Sign in with…” button.";
 
 interface IdentityProvidersSectionProps {
-  providers: IdentityProvider[];
-  /** Providers are scoped to the organization being administered. */
-  organizationName: string;
-  onProvidersChange: (providers: IdentityProvider[]) => void;
   blockedReason?: string;
 }
 
-export function IdentityProvidersSection({
-  providers,
-  organizationName,
-  onProvidersChange,
-  blockedReason,
-}: IdentityProvidersSectionProps) {
+export function IdentityProvidersSection({ blockedReason }: IdentityProvidersSectionProps) {
+  const [providers, setProviders] = React.useState<IdentityProvider[] | null>(null);
+  const [error, setError] = React.useState<string | null>(null);
+  const [loading, setLoading] = React.useState(true);
+  const [editing, setEditing] = React.useState<IdentityProvider | null>(null);
   const [creating, setCreating] = React.useState(false);
   const [deleteTarget, setDeleteTarget] = React.useState<IdentityProvider | null>(null);
   const [confirmName, setConfirmName] = React.useState("");
+  const [busy, setBusy] = React.useState<string | null>(null);
 
-  const remove = (provider: IdentityProvider) => {
-    onProvidersChange(
-      providers.filter((candidate) => candidate.providerId !== provider.providerId),
-    );
-    setDeleteTarget(null);
-    setConfirmName("");
-    toast.success(`${provider.name} deleted`);
+  const load = React.useCallback(async () => {
+    setLoading(true);
+
+    try {
+      const response = await api.oauth.providers.list();
+      setProviders(
+        (response.providers ?? []).map((provider) =>
+          toProvider(provider, response.sync_stats ?? []),
+        ),
+      );
+      setError(null);
+    } catch (failure) {
+      setError(describeFailure(failure, "read the identity providers"));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    void load();
+  }, [load]);
+
+  const remove = async (provider: IdentityProvider) => {
+    setBusy(provider.providerId);
+
+    try {
+      await api.oauth.providers.delete(provider.providerId);
+      setDeleteTarget(null);
+      setConfirmName("");
+      await load();
+      toast.success(`${provider.name} deleted`);
+    } catch (failure) {
+      setError(describeFailure(failure, `delete ${provider.name}`));
+    } finally {
+      setBusy(null);
+    }
   };
 
-  return (
-    <>
+  const toggleActive = async (provider: IdentityProvider) => {
+    setBusy(provider.providerId);
+
+    try {
+      await api.oauth.providers.update(provider.providerId, { is_active: !provider.active });
+      await load();
+      toast.success(`${provider.name} ${provider.active ? "deactivated" : "activated"}`);
+    } catch (failure) {
+      setError(
+        describeFailure(failure, `${provider.active ? "deactivate" : "activate"} ${provider.name}`),
+      );
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  if (loading && providers === null) {
+    return (
+      <Panel className="max-w-[720px] p-4">
+        <Skeleton className="h-4 w-48" />
+      </Panel>
+    );
+  }
+
+  if (error && providers === null) {
+    return (
       <Panel className="max-w-[720px]">
+        <EmptyState
+          icon={ShieldCheck}
+          title="Identity providers could not be read"
+          description={error}
+          action={
+            <Button variant="outline" onClick={() => void load()}>
+              Try again
+            </Button>
+          }
+        />
+      </Panel>
+    );
+  }
+
+  const rows = providers ?? [];
+
+  return (
+    <div className="flex max-w-[860px] flex-col gap-3">
+      <InlineAlert tone="warning" className="items-start">
+        {NO_BROWSER_FLOW}
+      </InlineAlert>
+
+      {error ? <InlineAlert className="items-start">{error}</InlineAlert> : null}
+
+      <Panel>
         <div className="flex h-11 items-center justify-between gap-3 border-b border-border px-4">
           <span className="text-[13px] font-semibold">Identity providers</span>
           <Button size="sm" blockedReason={blockedReason} onClick={() => setCreating(true)}>
@@ -95,11 +179,11 @@ export function IdentityProvidersSection({
           </Button>
         </div>
 
-        {providers.length === 0 ? (
+        {rows.length === 0 ? (
           <EmptyState
             icon={ShieldCheck}
             title="No identity providers"
-            description="Accounts sign in locally until a provider is registered. Creating one stores the configuration; the browser sign-in flow still needs integration."
+            description="Accounts sign in locally until a provider is registered. Creating one stores the configuration the synchronization API uses."
           />
         ) : (
           <Table>
@@ -107,18 +191,21 @@ export function IdentityProvidersSection({
               <TableRow>
                 <TableHead>Name</TableHead>
                 <TableHead>Type</TableHead>
-                <TableHead>Scope</TableHead>
+                <TableHead>Issuer</TableHead>
                 <TableHead>Active</TableHead>
-                <TableHead>Synchronization</TableHead>
+                <TableHead>Synchronized accounts</TableHead>
+                <TableHead>Last synchronized</TableHead>
                 <TableHead className="w-11" />
               </TableRow>
             </TableHeader>
             <TableBody>
-              {providers.map((provider) => (
+              {rows.map((provider) => (
                 <TableRow key={provider.providerId}>
                   <TableCell className="font-semibold">{provider.name}</TableCell>
-                  <TableCell>{provider.type}</TableCell>
-                  <TableCell className="text-muted-foreground">{provider.scope}</TableCell>
+                  <TableCell>{providerTypeLabel(provider.type)}</TableCell>
+                  <TableCell className="font-mono text-[11px] text-muted-foreground">
+                    {provider.issuer || <span className="text-subtle">not set</span>}
+                  </TableCell>
                   <TableCell>
                     <Status
                       tone={provider.active ? "healthy" : "neutral"}
@@ -128,8 +215,13 @@ export function IdentityProvidersSection({
                       {provider.active ? "Active" : "Inactive"}
                     </Status>
                   </TableCell>
-                  <TableCell className="text-xs text-muted-foreground">
-                    Unavailable — needs integration
+                  <TableCell className="font-mono tabular">{provider.userCount ?? "—"}</TableCell>
+                  <TableCell>
+                    {provider.lastSyncAt ? (
+                      <Timestamp value={provider.lastSyncAt} />
+                    ) : (
+                      <span className="text-subtle">never</span>
+                    )}
                   </TableCell>
                   <TableCell>
                     <DropdownMenu>
@@ -138,13 +230,27 @@ export function IdentityProvidersSection({
                           variant="ghost"
                           size="icon-sm"
                           aria-label={`Actions for ${provider.name}`}
+                          loading={busy === provider.providerId}
                         >
                           <MoreHorizontal aria-hidden />
                         </Button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
-                        <DropdownMenuItem disabled title={EDIT_BLOCKED_REASON}>
-                          Edit provider — unavailable
+                        <DropdownMenuItem
+                          disabled={Boolean(blockedReason)}
+                          onSelect={() => {
+                            window.requestAnimationFrame(() => setEditing(provider));
+                          }}
+                        >
+                          {blockedReason ? "Edit provider — not permitted" : "Edit provider"}
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          disabled={Boolean(blockedReason)}
+                          onSelect={() => {
+                            window.requestAnimationFrame(() => void toggleActive(provider));
+                          }}
+                        >
+                          {provider.active ? "Deactivate" : "Activate"}
                         </DropdownMenuItem>
                         <DropdownMenuSeparator />
                         {/*
@@ -184,20 +290,27 @@ export function IdentityProvidersSection({
         )}
 
         <div className="border-t border-border px-4 py-2.5 text-[11px] leading-[15px] text-subtle">
-          Deleting a provider requires typing its exact name. Editing stays unavailable until the
-          get and update endpoints land — no fake edit form, no "Test connection", and no "Sign in
-          with…" until the full browser flow works.
+          Deleting a provider requires typing its exact name. Client secrets are never returned by
+          the server: an edit that leaves the secret field blank keeps the stored one, and there is
+          no "Test connection" because nothing here can perform a sign-in.
         </div>
       </Panel>
 
-      <CreateProviderSheet
-        open={creating}
-        scope={organizationName}
-        onOpenChange={setCreating}
-        onCreate={(provider) => {
-          onProvidersChange([...providers, provider]);
+      <ProviderSheet
+        key={editing?.providerId ?? "new"}
+        open={creating || editing !== null}
+        provider={editing}
+        onOpenChange={(open) => {
+          if (!open) {
+            setCreating(false);
+            setEditing(null);
+          }
+        }}
+        onSaved={async (message) => {
           setCreating(false);
-          toast.success(`${provider.name} created`);
+          setEditing(null);
+          await load();
+          toast.success(message);
         }}
       />
 
@@ -214,8 +327,8 @@ export function IdentityProvidersSection({
           <DialogHeader>
             <DialogTitle>Delete {deleteTarget?.name}?</DialogTitle>
             <DialogDescription>
-              Accounts synchronized from this provider keep their roles, but nobody can sign in
-              through it again. Type the provider name to confirm.
+              Accounts synchronized from this provider keep their roles, but the server will no
+              longer synchronize through it. Type the provider name to confirm.
             </DialogDescription>
           </DialogHeader>
           <Input
@@ -237,75 +350,94 @@ export function IdentityProvidersSection({
             <Button
               variant="destructive"
               disabled={confirmName !== deleteTarget?.name}
-              onClick={() => deleteTarget && remove(deleteTarget)}
+              loading={busy === deleteTarget?.providerId}
+              onClick={() => deleteTarget && void remove(deleteTarget)}
             >
               Delete provider
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </>
+    </div>
   );
 }
 
-interface CreateProviderSheetProps {
+interface ProviderSheetProps {
   open: boolean;
-  scope: string;
+  /** Null when registering a new provider. */
+  provider: IdentityProvider | null;
   onOpenChange: (open: boolean) => void;
-  onCreate: (provider: IdentityProvider) => void;
+  onSaved: (message: string) => Promise<void>;
 }
 
-function CreateProviderSheet({
-  open,
-  scope,
-  onOpenChange,
-  onCreate,
-}: CreateProviderSheetProps) {
-  const [type, setType] = React.useState(IDENTITY_PROVIDER_TYPES[0]!);
-  const [name, setName] = React.useState("");
-  const [issuer, setIssuer] = React.useState("");
-  const [clientId, setClientId] = React.useState("");
+function ProviderSheet({ open, provider, onOpenChange, onSaved }: ProviderSheetProps) {
+  const editingExisting = provider !== null;
+
+  const [type, setType] = React.useState(provider?.type ?? IDENTITY_PROVIDER_TYPES[0]!);
+  const [name, setName] = React.useState(provider?.name ?? "");
+  const [issuer, setIssuer] = React.useState(provider?.issuer ?? "");
+  const [clientId, setClientId] = React.useState(provider?.clientId ?? "");
   const [clientSecret, setClientSecret] = React.useState("");
   const [revealSecret, setRevealSecret] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
+  const [saving, setSaving] = React.useState(false);
   const [origin, setOrigin] = React.useState("");
 
   React.useEffect(() => {
     setOrigin(window.location.origin);
   }, []);
 
-  React.useEffect(() => {
-    if (!open) return;
-    setType(IDENTITY_PROVIDER_TYPES[0]!);
-    setName("");
-    setIssuer("");
-    setClientId("");
-    setClientSecret("");
-    setRevealSecret(false);
-    setError(null);
-  }, [open]);
+  const secretStored = provider?.redactedKeys.includes(CLIENT_SECRET_KEY) ?? false;
+  const callbackUrl = `${origin}/auth/callback/${type}`;
 
-  const callbackUrl = `${origin}/auth/callback/${slugOf(type)}`;
-
-  const submit = () => {
-    if (!name.trim() || !issuer.trim() || !clientId.trim() || !clientSecret) {
-      setError("Name, issuer, client ID and client secret are all required.");
+  const submit = async () => {
+    if (!name.trim() || !issuer.trim() || !clientId.trim()) {
+      setError("Name, issuer and client ID are all required.");
       return;
     }
 
-    onCreate({
-      providerId: `idp_${Date.now().toString(36)}`,
-      name: name.trim(),
-      type,
-      scope,
-      // A provider only becomes active once the browser sign-in flow exists.
-      active: false,
-    });
+    if (!editingExisting && !clientSecret) {
+      setError("A client secret is required when registering a provider.");
+      return;
+    }
+
+    const config: Record<string, string> = {
+      [DISPLAY_NAME_KEY]: name.trim(),
+      [ISSUER_KEY]: issuer.trim(),
+      [CLIENT_ID_KEY]: clientId.trim(),
+    };
+
+    // Only send a secret that was actually typed. The server keeps the stored
+    // one for any secret key this request does not name, so an untouched field
+    // leaves the credential alone instead of blanking it.
+    if (clientSecret) config[CLIENT_SECRET_KEY] = clientSecret;
+
+    setSaving(true);
+    setError(null);
+
+    try {
+      if (provider) {
+        await api.oauth.providers.update(provider.providerId, {
+          provider_name: type,
+          config,
+        });
+        await onSaved(`${name.trim()} updated`);
+      } else {
+        await api.oauth.providers.create({ provider_name: type, config });
+        await onSaved(`${name.trim()} created`);
+      }
+    } catch (failure) {
+      setError(
+        describeFailure(failure, editingExisting ? "update the provider" : "create the provider"),
+      );
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent title="Add identity provider">
+      <SheetContent title={editingExisting ? `Edit ${provider.name}` : "Add identity provider"}>
         <div className="flex flex-col gap-3.5 px-5 py-4">
           {error ? <InlineAlert>{error}</InlineAlert> : null}
 
@@ -319,7 +451,7 @@ function CreateProviderSheet({
                 <SelectContent>
                   {IDENTITY_PROVIDER_TYPES.map((option) => (
                     <SelectItem key={option} value={option}>
-                      {option}
+                      {providerTypeLabel(option)}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -364,6 +496,7 @@ function CreateProviderSheet({
                   type={revealSecret ? "text" : "password"}
                   value={clientSecret}
                   onChange={(event) => setClientSecret(event.target.value)}
+                  placeholder={secretStored ? "Stored — leave blank to keep" : ""}
                   className="pr-8 font-mono"
                 />
                 <button
@@ -380,7 +513,9 @@ function CreateProviderSheet({
                 </button>
               </div>
               <span className="text-[11px] text-muted-foreground">
-                Write-only. Never shown again after save.
+                {secretStored
+                  ? "A secret is stored. The server never returns it — leave this blank to keep it."
+                  : "Write-only. The server never returns it after save."}
               </span>
             </div>
           </div>
@@ -393,7 +528,8 @@ function CreateProviderSheet({
               className="w-full justify-between bg-muted px-2.5 py-[7px]"
             />
             <span className="text-[11px] text-muted-foreground">
-              Register this exact URL with the provider.
+              The URL a browser flow would use. PlainQ does not serve it yet, so registering it
+              with the provider prepares for that flow rather than enabling one.
             </span>
           </div>
 
@@ -401,7 +537,9 @@ function CreateProviderSheet({
             <Button variant="outline" onClick={() => onOpenChange(false)}>
               Cancel
             </Button>
-            <Button onClick={submit}>Create provider</Button>
+            <Button loading={saving} onClick={() => void submit()}>
+              {editingExisting ? "Save provider" : "Create provider"}
+            </Button>
           </div>
         </div>
       </SheetContent>

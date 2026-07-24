@@ -2,6 +2,7 @@ package rbac
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/marsolab/plainq/internal/server/config"
+	"github.com/marsolab/plainq/internal/server/middleware"
 )
 
 // Storage encapsulates interaction with RBAC storage.
@@ -24,10 +26,15 @@ type Storage interface {
 	DeleteRole(ctx context.Context, roleID string) error
 
 	// User role management.
+
+	// AssignRoleToUser grants a role. It reports ErrRoleAlreadyAssigned when
+	// the user already holds it, so a caller can tell a change from a no-op.
 	AssignRoleToUser(ctx context.Context, userID, roleID string) error
 	RemoveRoleFromUser(ctx context.Context, userID, roleID string) error
 	GetUserRoles(ctx context.Context, userID string) ([]Role, error)
 	GetUsersWithRole(ctx context.Context, roleID string) ([]string, error)
+	CountUsersWithRole(ctx context.Context, roleID string) (int64, error)
+	CountUsersPerRole(ctx context.Context) (map[string]int64, error)
 
 	// Permission management.
 	CreateQueuePermission(ctx context.Context, permission QueuePermission) error
@@ -36,9 +43,26 @@ type Storage interface {
 	UpdateQueuePermission(ctx context.Context, permission QueuePermission) error
 	DeleteQueuePermission(ctx context.Context, queueID, roleID string) error
 
+	// ReplaceRoleQueuePermissions stores exactly the given grants for the role
+	// and removes every other grant it held, in one transaction. A permission
+	// matrix is saved as a whole, so a partly applied one — a role that can
+	// receive but, for one failed row, can no longer send — must not be
+	// reachable.
+	ReplaceRoleQueuePermissions(ctx context.Context, roleID string, permissions []QueuePermission) error
+
 	// User permission checking.
 	HasQueuePermission(ctx context.Context, userID, queueID string, permission PermissionType) (bool, error)
 }
+
+// AdminRoleName is the role the authorization middleware checks for. It is
+// named here because several guards exist only to keep it reachable: the last
+// account holding it cannot lose it, and the role itself cannot be deleted.
+const AdminRoleName = "admin"
+
+// ErrRoleAlreadyAssigned reports that a user already holds the role, so the
+// assignment changed nothing. It is distinct from success because a caller
+// showing "role added" for a no-op is describing a change that did not happen.
+var ErrRoleAlreadyAssigned = errors.New("role already assigned to user")
 
 // Role represents a role in the system.
 type Role struct {
@@ -93,22 +117,40 @@ func NewService(cfg *config.Config, logger *slog.Logger, storage Storage) *Servi
 		storage: storage,
 	}
 
+	// Reading the authorization model is available to any authenticated caller
+	// so an operator console can show a truthful read-only view; changing it is
+	// an administrator's operation. Without this gate any account could grant
+	// itself the admin role, which is the whole model in one request.
+	admin := func(r chi.Router) {
+		if cfg.AuthEnable {
+			r.Use(middleware.RequireAdmin())
+		}
+	}
+
 	// Setup routes.
 	s.router.Route("/", func(r chi.Router) {
 		// Role management routes.
 		r.Route("/roles", func(r chi.Router) {
 			r.Get("/", s.listRolesHandler)
-			r.Post("/", s.createRoleHandler)
 			r.Get("/{roleID}", s.getRoleHandler)
-			r.Put("/{roleID}", s.updateRoleHandler)
-			r.Delete("/{roleID}", s.deleteRoleHandler)
+
+			r.Group(func(r chi.Router) {
+				admin(r)
+				r.Post("/", s.createRoleHandler)
+				r.Put("/{roleID}", s.updateRoleHandler)
+				r.Delete("/{roleID}", s.deleteRoleHandler)
+			})
 		})
 
 		// User role assignment routes.
 		r.Route("/users/{userID}/roles", func(r chi.Router) {
 			r.Get("/", s.getUserRolesHandler)
-			r.Post("/{roleID}", s.assignRoleToUserHandler)
-			r.Delete("/{roleID}", s.removeRoleFromUserHandler)
+
+			r.Group(func(r chi.Router) {
+				admin(r)
+				r.Post("/{roleID}", s.assignRoleToUserHandler)
+				r.Delete("/{roleID}", s.removeRoleFromUserHandler)
+			})
 		})
 
 		// Queue permission routes.
@@ -117,8 +159,23 @@ func NewService(cfg *config.Config, logger *slog.Logger, storage Storage) *Servi
 				r.Get("/", s.getQueuePermissionsHandler)
 				r.Route("/roles/{roleID}", func(r chi.Router) {
 					r.Get("/", s.getQueueRolePermissionHandler)
-					r.Put("/", s.updateQueuePermissionHandler)
-					r.Delete("/", s.deleteQueuePermissionHandler)
+
+					r.Group(func(r chi.Router) {
+						admin(r)
+						r.Put("/", s.updateQueuePermissionHandler)
+						r.Delete("/", s.deleteQueuePermissionHandler)
+					})
+				})
+			})
+
+			// A role's whole matrix, which is how an operator edits it: one
+			// read of every grant the role holds and one atomic write back.
+			r.Route("/roles/{roleID}", func(r chi.Router) {
+				r.Get("/", s.getRolePermissionsHandler)
+
+				r.Group(func(r chi.Router) {
+					admin(r)
+					r.Put("/", s.replaceRolePermissionsHandler)
 				})
 			})
 		})

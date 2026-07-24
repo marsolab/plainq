@@ -9,9 +9,10 @@ WHERE provider_name = ? AND (org_id = ? OR (org_id IS NULL AND ? = ''));
 
 -- name: UpdateOAuthProvider :execrows
 UPDATE oauth_providers
-SET config_json = ?,
-    is_active   = ?,
-    updated_at  = ?
+SET provider_name = ?,
+    config_json   = ?,
+    is_active     = ?,
+    updated_at    = ?
 WHERE provider_id = ?;
 
 -- name: DeleteOAuthProvider :execrows
@@ -21,7 +22,8 @@ WHERE provider_id = ?;
 -- name: ListOAuthProvidersByOrg :many
 SELECT provider_id, provider_name, org_id, config_json, is_active, created_at, updated_at
 FROM oauth_providers
-WHERE org_id = ?;
+WHERE coalesce(org_id, '') = cast(sqlc.arg('org_id') AS text)
+ORDER BY provider_name;
 
 -- name: GetUserByOAuthSub :one
 SELECT user_id, email, org_id, oauth_provider, oauth_sub, is_oauth_user, last_sync_at, created_at, updated_at
@@ -85,3 +87,37 @@ SELECT t.team_id, t.org_id, t.team_name, t.team_code, t.description, t.is_active
 FROM teams t
          INNER JOIN user_teams ut ON t.team_id = ut.team_id
 WHERE ut.user_id = ?;
+
+-- name: GetOAuthProviderByID :one
+SELECT provider_id, provider_name, org_id, config_json, is_active, created_at, updated_at
+FROM oauth_providers
+WHERE provider_id = ?;
+
+-- name: ListOrganizations :many
+SELECT org_id, org_code, org_name, org_domain, is_active, created_at, updated_at
+FROM organizations
+WHERE is_active = TRUE
+ORDER BY org_name;
+
+-- name: GetUserOrgID :one
+SELECT coalesce(org_id, '') AS org_id
+FROM users
+WHERE user_id = ?;
+
+-- name: GetUserSyncStatus :one
+SELECT coalesce(oauth_provider, '') AS provider_name, is_oauth_user, last_sync_at
+FROM users
+WHERE user_id = ?;
+
+-- name: ListProviderSyncStats :many
+SELECT coalesce(u.oauth_provider, '') AS provider_name,
+       count(*)                       AS user_count,
+       (SELECT u2.last_sync_at
+        FROM users u2
+        WHERE u2.oauth_provider = u.oauth_provider
+          AND u2.last_sync_at IS NOT NULL
+        ORDER BY u2.last_sync_at DESC
+        LIMIT 1)                      AS last_sync_at
+FROM users u
+WHERE u.is_oauth_user = TRUE
+GROUP BY u.oauth_provider;

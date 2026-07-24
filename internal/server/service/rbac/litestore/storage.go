@@ -153,12 +153,20 @@ func (s *Storage) DeleteRole(ctx context.Context, roleID string) error {
 }
 
 func (s *Storage) AssignRoleToUser(ctx context.Context, userID, roleID string) error {
-	if err := s.queries.AssignRoleToUser(ctx, sqlcgen.AssignRoleToUserParams{
+	rows, err := s.queries.AssignRoleToUser(ctx, sqlcgen.AssignRoleToUserParams{
 		UserID:    userID,
 		RoleID:    roleID,
 		CreatedAt: time.Now(),
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("assign role to user: %w", err)
+	}
+
+	// The insert ignores conflicts, so no affected row means the assignment
+	// already existed. Reporting it as success would claim a change that never
+	// happened.
+	if rows == 0 {
+		return rbac.ErrRoleAlreadyAssigned
 	}
 
 	return nil

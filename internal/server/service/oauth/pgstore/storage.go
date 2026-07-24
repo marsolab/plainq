@@ -103,10 +103,11 @@ func (s *Storage) UpdateProvider(ctx context.Context, p oauth.Provider) error {
 	}
 
 	rows, err := s.queries.UpdateOAuthProvider(ctx, sqlcgen.UpdateOAuthProviderParams{
-		ConfigJson: string(configJSON),
-		IsActive:   p.IsActive,
-		UpdatedAt:  toTimestamptz(time.Now()),
-		ProviderID: p.ProviderID,
+		ProviderName: p.ProviderName,
+		ConfigJson:   string(configJSON),
+		IsActive:     p.IsActive,
+		UpdatedAt:    toTimestamptz(time.Now()),
+		ProviderID:   p.ProviderID,
 	})
 	if err != nil {
 		return fmt.Errorf("update oauth provider: %w", err)
@@ -133,7 +134,7 @@ func (s *Storage) DeleteProvider(ctx context.Context, providerID string) error {
 }
 
 func (s *Storage) ListProviders(ctx context.Context, orgID string) ([]oauth.Provider, error) {
-	rows, err := s.queries.ListOAuthProvidersByOrg(ctx, toPgText(orgID))
+	rows, err := s.queries.ListOAuthProvidersByOrg(ctx, orgID)
 	if err != nil {
 		return nil, fmt.Errorf("list oauth providers: %w", err)
 	}
