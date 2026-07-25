@@ -3,12 +3,12 @@
 import * as React from "react";
 import { Info } from "lucide-react";
 
-import { api } from "@/lib/api-client";
+import { ApiRequestError, api } from "@/lib/api-client";
 import { formatClock } from "@/lib/format";
 import { AppShell, type ServiceHealth } from "@/components/layout/app-shell";
 import { ScopeBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Banner } from "@/components/ui/feedback";
+import { Banner, InlineAlert } from "@/components/ui/feedback";
 import { PageHeader } from "@/components/ui/page-header";
 import { Panel, PanelFooter, PanelTitleBar } from "@/components/ui/panel";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -16,7 +16,7 @@ import { Micro, MonoValue } from "@/components/ui/value";
 import type { StatusTone } from "@/components/ui/status";
 
 import { FactRow, HealthRow } from "./fact-row";
-import { STARTUP_CONFIG } from "./mock-data";
+import { toConfigGroups, type ConfigGroup } from "./config";
 import { ConnectionLostStrip } from "./error-state";
 
 /** The reconnect cadence a lost connection retries on. */
@@ -95,11 +95,68 @@ function shellHealthFor(snapshot: HealthSnapshot | null, failing: boolean): Serv
   return "unknown";
 }
 
+/**
+ * What the configuration read established. `forbidden` is its own outcome:
+ * the endpoint is administrator-only, and an operator who may not read it has
+ * not hit an error — they have hit the policy.
+ */
+interface ConfigState {
+  groups: ConfigGroup[];
+  readAt: Date | null;
+  loading: boolean;
+  forbidden: boolean;
+  error: string | null;
+}
+
+const CONFIG_LOADING: ConfigState = {
+  groups: [],
+  readAt: null,
+  loading: true,
+  forbidden: false,
+  error: null,
+};
+
 export function SystemPage() {
   const [snapshot, setSnapshot] = React.useState<HealthSnapshot | null>(null);
   const [failure, setFailure] = React.useState<ProbeFailure | null>(null);
   const [loading, setLoading] = React.useState(true);
   const [checking, setChecking] = React.useState(false);
+  const [config, setConfig] = React.useState<ConfigState>(CONFIG_LOADING);
+
+  const readConfig = React.useCallback(async () => {
+    setConfig((current) => ({ ...current, loading: true }));
+
+    try {
+      const response = await api.system.config();
+
+      setConfig({
+        groups: toConfigGroups(response),
+        readAt: new Date(response.read_at),
+        loading: false,
+        forbidden: false,
+        error: null,
+      });
+    } catch (error) {
+      const forbidden = error instanceof ApiRequestError && error.status === 403;
+
+      // A failed refresh keeps the panels it already read: the settings did
+      // not change because one request did.
+      setConfig((current) => ({
+        ...current,
+        loading: false,
+        forbidden,
+        error: forbidden
+          ? null
+          : error instanceof Error
+            ? error.message
+            : "The configuration could not be read.",
+      }));
+    }
+  }, []);
+
+  React.useEffect(() => {
+    void readConfig();
+  }, [readConfig]);
 
   const check = React.useCallback(async () => {
     setChecking(true);
@@ -146,6 +203,7 @@ export function SystemPage() {
   const lostConnection = failure?.transport ? failure : null;
   const refusedCheck = failure && !failure.transport ? failure : null;
   const stale = failure !== null && snapshot?.outcome === "reachable";
+  const configStale = config.error !== null && config.groups.length > 0;
   const components = snapshot ? componentsFor(snapshot.outcome) : [];
 
   return (
@@ -154,17 +212,39 @@ export function SystemPage() {
       title="System"
       health={shellHealthFor(snapshot, failure !== null)}
       updatedAt={snapshot?.checkedAt ?? null}
-      onRefresh={() => void check()}
-      refreshing={checking}
+      onRefresh={() => {
+        void check();
+        void readConfig();
+      }}
+      refreshing={checking || config.loading}
     >
       <div className="flex flex-col gap-4">
         <PageHeader title="System" className="mb-0" />
 
-        <Banner tone="warning">
-          Startup configuration is not readable from the server: PlainQ exposes no sanitized
-          configuration endpoint. The panels below describe the shape of a PlainQ configuration,
-          not this instance's settings.
-        </Banner>
+        {config.forbidden ? (
+          <Banner tone="warning">
+            Startup configuration is administrator-only, and this session does not hold that role.
+            The server refused the read; nothing about the instance's settings is shown below.
+          </Banner>
+        ) : null}
+
+        {config.error ? (
+          <InlineAlert
+            action={
+              <Button
+                variant="ghost"
+                size="sm"
+                loading={config.loading}
+                onClick={() => void readConfig()}
+              >
+                Retry
+              </Button>
+            }
+          >
+            {config.error}
+            {config.groups.length > 0 ? " Showing the last response that succeeded." : ""}
+          </InlineAlert>
+        ) : null}
 
         {lostConnection ? (
           <ConnectionLostStrip
@@ -183,6 +263,9 @@ export function SystemPage() {
             Configuration is managed at startup. Change flags or environment variables and restart
             PlainQ to apply updates.
           </span>
+          {config.readAt ? (
+            <Micro className="ml-auto shrink-0">read {formatClock(config.readAt)}</Micro>
+          ) : null}
         </div>
 
         <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-2">
@@ -237,22 +320,46 @@ export function SystemPage() {
             </PanelFooter>
           </Panel>
 
-          {STARTUP_CONFIG.map((group) => (
-            <Panel key={group.title}>
-              <PanelTitleBar
-                title={group.title}
-                className={PANEL_HEADER}
-                action={<ScopeBadge>Not live</ScopeBadge>}
-              />
-              <div className="py-1">
-                {group.facts.map((fact) => (
-                  <FactRow key={fact.label} label={fact.label} subdued={fact.withheld}>
-                    {fact.value}
-                  </FactRow>
-                ))}
-              </div>
-            </Panel>
-          ))}
+          {config.loading && config.groups.length === 0 && !config.forbidden
+            ? [0, 1].map((panel) => (
+                <Panel key={panel}>
+                  <PanelTitleBar title="Configuration" className={PANEL_HEADER} />
+                  <div className="py-1">
+                    {[0, 1, 2].map((row) => (
+                      <div
+                        key={row}
+                        className="flex items-center justify-between gap-4 border-t border-muted px-4 py-2 first:border-t-0"
+                      >
+                        <Skeleton className="h-3.5 w-24" />
+                        <Skeleton className="h-3.5 w-20" />
+                      </div>
+                    ))}
+                  </div>
+                </Panel>
+              ))
+            : config.groups.map((group) => (
+                <Panel key={group.title}>
+                  <PanelTitleBar
+                    title={group.title}
+                    className={PANEL_HEADER}
+                    action={
+                      configStale ? <ScopeBadge>Stale</ScopeBadge> : null
+                    }
+                  />
+                  <div className="py-1">
+                    {group.facts.map((fact) => (
+                      <FactRow
+                        key={fact.label}
+                        label={fact.label}
+                        subdued={fact.withheld}
+                        title={fact.note}
+                      >
+                        {fact.value}
+                      </FactRow>
+                    ))}
+                  </div>
+                </Panel>
+              ))}
         </div>
       </div>
     </AppShell>

@@ -1,17 +1,29 @@
 import { API_BASE } from "./constants";
 import type {
   ApiError,
+  ConfigResponseDTO,
   DashboardOverviewResponse,
   DeleteResponse,
+  DirectoryPageDTO,
   InFlightMetricsResponse,
   MultiMetricsChartResponse,
+  OrganizationsResponse,
   PeekResponse,
+  ProviderDTO,
+  ProviderInput,
+  ProviderListResponse,
   PublishResponse,
   Queue,
+  QueueGrantInput,
   QueueListResponse,
   QueueMetricsSummary,
+  QueueRolePermissionDTO,
   ReceiveResponse,
+  RoleDTO,
+  RolePermissionsDTO,
+  RoleWithUsageDTO,
   SendResponse,
+  TeamDTO,
   TopicListResponse,
   TopicMetricsOverview,
   TopicMetricsSummary,
@@ -143,6 +155,81 @@ export function hasSession(): boolean {
   return false;
 }
 
+/**
+ * Reads the roles the server signed into the access token.
+ *
+ * These are the server's own claim about the operator, not a guess: it puts
+ * them in the token at sign-in and the same list is what its authorization
+ * middleware checks. Reading them lets the UI show a blocked control with its
+ * reason instead of offering a write that will come back 403. It is never the
+ * enforcement — the server rejects the request regardless.
+ *
+ * Returns null when nothing can be established: no session, or a token whose
+ * payload will not decode. Null means "unknown", never "denied".
+ */
+export function sessionRoles(): string[] | null {
+  const session = getSession();
+  if (!session?.accessToken) return null;
+
+  const payload = session.accessToken.split(".")[1];
+  if (!payload) return null;
+
+  try {
+    // JWT payloads are base64url; atob wants base64, and padding is optional
+    // in the encoding but not in the decoder.
+    const base64 = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), "=");
+    const claims = JSON.parse(base64ToUtf8(padded)) as Record<string, unknown>;
+
+    // The server signs its identity claims into the token's `meta` object —
+    // that is the shape its own middleware reads back. The top-level form is
+    // accepted too so a token minted by a different issuer still resolves.
+    const meta = claims.meta;
+    const roles =
+      typeof meta === "object" && meta !== null
+        ? ((meta as Record<string, unknown>).roles ?? claims.roles)
+        : claims.roles;
+
+    if (!Array.isArray(roles)) return null;
+
+    return roles.filter((role): role is string => typeof role === "string");
+  } catch {
+    return null;
+  }
+}
+
+/** The role name the server's authorization middleware checks for. */
+export const ADMIN_ROLE = "admin";
+
+/**
+ * Whether the held session may change access configuration. Null when the
+ * token says nothing — with authentication disabled there is no token at all,
+ * and pre-blocking every control on that basis would hide working ones.
+ */
+export function isAdministrator(): boolean | null {
+  const roles = sessionRoles();
+  if (roles === null) return null;
+
+  return roles.includes(ADMIN_ROLE);
+}
+
+/**
+ * A failed request, carrying the status the server answered with.
+ *
+ * The server's error bodies are status text — it deliberately does not return
+ * internal error strings — so the status code is the whole of what it said.
+ * Callers that want to explain a refusal have to key off this, not off prose.
+ */
+export class ApiRequestError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = status;
+  }
+}
+
 /** One refresh attempt against the token the browser holds. Never loops. */
 async function refreshSession(): Promise<boolean> {
   const session = getSession();
@@ -205,14 +292,17 @@ async function apiFetch<T>(
     clearSession();
     redirectToSignIn();
 
-    throw new Error("Session expired");
+    throw new ApiRequestError(response.status, "Session expired");
   }
 
   if (!response.ok) {
     const error: ApiError = await response
       .json()
       .catch(() => ({ message: response.statusText }));
-    throw new Error(`${response.status}: ${error.message || response.statusText}`);
+    throw new ApiRequestError(
+      response.status,
+      `${response.status}: ${error.message || response.statusText}`,
+    );
   }
 
   // Not every success carries JSON: signup answers 201 with an empty body, and
@@ -375,6 +465,122 @@ export const api = {
       apiFetch<TopicMetricsSummary>(`/metrics/topic/${id}?range=${range}`),
     topicRates: (id: string, range = "1h") =>
       apiFetch<MultiMetricsChartResponse>(`/metrics/topic/${id}/rates?range=${range}`),
+  },
+  /**
+   * The account directory. Reads only: PlainQ has no invite, suspend, delete
+   * or password-reset API, and the client does not pretend otherwise.
+   */
+  directory: {
+    users: (params: { limit?: number; cursor?: string; search?: string } = {}) => {
+      const query = new URLSearchParams();
+      if (params.limit !== undefined) query.set("limit", String(params.limit));
+      if (params.cursor) query.set("cursor", params.cursor);
+      if (params.search) query.set("search", params.search);
+
+      const suffix = query.toString();
+
+      return apiFetch<DirectoryPageDTO>(`/directory/users${suffix ? `?${suffix}` : ""}`);
+    },
+  },
+  rbac: {
+    roles: {
+      list: () => apiFetch<RoleWithUsageDTO[]>("/rbac/roles"),
+      create: (roleName: string) =>
+        apiFetch<RoleDTO>("/rbac/roles", {
+          method: "POST",
+          body: JSON.stringify({ role_name: roleName }),
+        }),
+      rename: (roleId: string, roleName: string) =>
+        apiFetch<RoleDTO>(`/rbac/roles/${encodeURIComponent(roleId)}`, {
+          method: "PUT",
+          body: JSON.stringify({ role_name: roleName }),
+        }),
+      delete: (roleId: string) =>
+        apiFetch<void>(`/rbac/roles/${encodeURIComponent(roleId)}`, { method: "DELETE" }),
+    },
+    userRoles: {
+      list: (userId: string) =>
+        apiFetch<RoleDTO[]>(`/rbac/users/${encodeURIComponent(userId)}/roles`),
+      assign: (userId: string, roleId: string) =>
+        apiFetch<void>(
+          `/rbac/users/${encodeURIComponent(userId)}/roles/${encodeURIComponent(roleId)}`,
+          { method: "POST" },
+        ),
+      remove: (userId: string, roleId: string) =>
+        apiFetch<void>(
+          `/rbac/users/${encodeURIComponent(userId)}/roles/${encodeURIComponent(roleId)}`,
+          { method: "DELETE" },
+        ),
+    },
+    permissions: {
+      /** One queue's grants across every role — the per-queue Access matrix. */
+      forQueue: (queueId: string) =>
+        apiFetch<QueueRolePermissionDTO[]>(
+          `/rbac/permissions/queues/${encodeURIComponent(queueId)}`,
+        ),
+      /** One role's whole grant set — the role editor's matrix. */
+      forRole: (roleId: string) =>
+        apiFetch<RolePermissionsDTO>(`/rbac/permissions/roles/${encodeURIComponent(roleId)}`),
+      /**
+       * Stores a role's grants as a whole. The server applies them in one
+       * transaction and answers with what it stored, so the response is what a
+       * reload will show rather than an echo of the request.
+       */
+      replaceForRole: (roleId: string, grants: QueueGrantInput[]) =>
+        apiFetch<RolePermissionsDTO>(`/rbac/permissions/roles/${encodeURIComponent(roleId)}`, {
+          method: "PUT",
+          body: JSON.stringify({ grants }),
+        }),
+    },
+  },
+  oauth: {
+    providers: {
+      list: () => apiFetch<ProviderListResponse>("/oauth/providers"),
+      get: (providerId: string) =>
+        apiFetch<ProviderDTO>(`/oauth/providers/${encodeURIComponent(providerId)}`),
+      create: (input: ProviderInput) =>
+        apiFetch<ProviderDTO>("/oauth/providers", {
+          method: "POST",
+          body: JSON.stringify(input),
+        }),
+      /**
+       * Secrets the server withheld cannot be sent back, so a key it reports
+       * as redacted keeps its stored value unless this request names it. That
+       * is the server's rule; the client only has to avoid sending blanks.
+       */
+      update: (providerId: string, input: Partial<ProviderInput>) =>
+        apiFetch<ProviderDTO>(`/oauth/providers/${encodeURIComponent(providerId)}`, {
+          method: "PUT",
+          body: JSON.stringify(input),
+        }),
+      delete: (providerId: string) =>
+        apiFetch<void>(`/oauth/providers/${encodeURIComponent(providerId)}`, {
+          method: "DELETE",
+        }),
+    },
+    organizations: {
+      list: () => apiFetch<OrganizationsResponse>("/oauth/organizations"),
+      teams: (orgId: string) =>
+        apiFetch<TeamDTO[]>(`/oauth/organizations/${encodeURIComponent(orgId)}/teams`),
+    },
+    userTeams: {
+      list: (userId: string) =>
+        apiFetch<TeamDTO[]>(`/oauth/users/${encodeURIComponent(userId)}/teams`),
+      add: (userId: string, teamId: string) =>
+        apiFetch<void>(
+          `/oauth/users/${encodeURIComponent(userId)}/teams/${encodeURIComponent(teamId)}`,
+          { method: "POST" },
+        ),
+      remove: (userId: string, teamId: string) =>
+        apiFetch<void>(
+          `/oauth/users/${encodeURIComponent(userId)}/teams/${encodeURIComponent(teamId)}`,
+          { method: "DELETE" },
+        ),
+    },
+  },
+  system: {
+    /** The running instance's sanitized configuration. Administrator-only. */
+    config: () => apiFetch<ConfigResponseDTO>("/system/config"),
   },
   auth: {
     // Sign-in and sign-up only count as succeeding once the session they

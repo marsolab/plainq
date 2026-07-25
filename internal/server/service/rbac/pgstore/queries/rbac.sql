@@ -26,9 +26,10 @@ WHERE role_id = $2;
 DELETE FROM roles
 WHERE role_id = $1;
 
--- name: AssignRoleToUser :exec
+-- name: AssignRoleToUser :execrows
 INSERT INTO user_roles (user_id, role_id, created_at)
-VALUES ($1, $2, $3);
+VALUES ($1, $2, $3)
+ON CONFLICT DO NOTHING;
 
 -- name: RemoveRoleFromUser :execrows
 DELETE FROM user_roles
@@ -96,3 +97,23 @@ SELECT COUNT(*)
 FROM queue_permissions qp
          INNER JOIN user_roles ur ON qp.role_id = ur.role_id
 WHERE ur.user_id = $1 AND qp.queue_id = $2 AND qp.can_delete = TRUE;
+
+-- name: CountUsersPerRole :many
+SELECT role_id, count(*)::bigint AS user_count
+FROM user_roles
+GROUP BY role_id;
+
+-- name: CountUsersWithRole :one
+SELECT count(*)
+FROM user_roles
+WHERE role_id = $1;
+
+-- name: DeleteRoleQueuePermissions :execrows
+DELETE FROM queue_permissions
+WHERE role_id = $1;
+
+-- name: RemoveRoleFromUserUnlessLastHolder :execrows
+DELETE FROM user_roles
+WHERE user_roles.user_id = $1
+  AND user_roles.role_id = $2
+  AND (SELECT count(*) FROM user_roles other WHERE other.role_id = $2) > 1;

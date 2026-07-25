@@ -66,6 +66,16 @@ type Storage interface {
 
 	// GetUserRoles gets all roles for a user by user ID.
 	GetUserRoles(ctx context.Context, userID string) ([]string, error)
+
+	// GetAccountOrgID returns the organization the account belongs to, or an
+	// empty string when it belongs to none. The directory uses it to scope a
+	// listing to the caller's own tenant.
+	GetAccountOrgID(ctx context.Context, userID string) (string, error)
+
+	// ListDirectory returns one page of the account directory. Implementations
+	// must return only the fields DirectoryEntry declares — never a password
+	// hash — and must clamp the page size with ClampDirectoryLimit.
+	ListDirectory(ctx context.Context, query DirectoryQuery) (*DirectoryPage, error)
 }
 
 // Account represents user account with all its properties.

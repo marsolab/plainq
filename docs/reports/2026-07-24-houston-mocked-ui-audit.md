@@ -5,6 +5,12 @@
 and the HTTP routes mounted by `internal/server`. This is a source-level audit; it
 does not claim that a particular deployment has a given feature flag or data set.
 
+> **Status: remediated.** The findings below describe the code as it stood on the
+> audit date. Every capability classified as mocked has since been implemented
+> against real endpoints; see [Remediation](#remediation-2026-07-24) at the end of
+> this document for what was built, what is deliberately still absent, and which
+> statements below no longer describe the code.
+
 ## Executive summary
 
 Houston has two surfaces that render server-shaped data without reading it:
@@ -162,3 +168,84 @@ These elements should **not** be reported as mocked:
 * Every displayed System configuration fact is either returned by the sanitized
   runtime endpoint with redaction metadata or remains explicitly labeled example
   data. No redacted secret is copyable.
+
+## Remediation (2026-07-24)
+
+Every capability the table above classifies as **mocked** now reads and writes
+real server state. What follows records what was added, what deliberately was
+not, and the two claims in this report that the change makes obsolete.
+
+### New server capability
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/v1/directory/users` | Paginated account directory: keyset cursor, server-side email search, a real `count(*)` total, and each account's roles, teams and organization. Built from an explicit safe-column list, so no password hash or OAuth subject can reach it. |
+| `GET /api/v1/rbac/permissions/roles/{roleID}` | One role's whole grant set. |
+| `PUT /api/v1/rbac/permissions/roles/{roleID}` | Replaces that grant set in one transaction, so a half-applied permission matrix is never observable. Answers with what was stored, not with what was sent. |
+| `GET /api/v1/oauth/providers/{providerID}` | Implemented; previously answered "not implemented yet". |
+| `PUT /api/v1/oauth/providers/{providerID}` | Implemented, with the merge rule below for secrets. |
+| `GET /api/v1/oauth/organizations` | Returns the organizations the server actually stores; previously a placeholder empty list. |
+| `GET /api/v1/oauth/sync/user/{userID}` | Returns the recorded synchronization state; previously a hard-coded `is_synced: false`. |
+| `GET /api/v1/system/config` | Sanitized, administrator-only view of the effective runtime configuration, with explicit redaction metadata. |
+
+### Authorization
+
+Reading the authorization model is open to any authenticated caller — that is
+what makes a truthful read-only view possible — while every RBAC and OAuth write
+now requires the `admin` role. Before this change any authenticated account could
+call `POST /api/v1/rbac/users/{self}/roles/{admin}` and grant itself the whole
+model; that is now `403`.
+
+Four guards are enforced server-side rather than described in the UI:
+
+* the last account holding `admin` cannot lose it (`409`);
+* the `admin` role cannot be deleted or renamed (`400`) — authorization resolves
+  it by name;
+* a role still held by accounts cannot be deleted (`409`);
+* a duplicate role assignment answers `409` rather than reporting a change that
+  did not happen.
+
+### Secrets
+
+Providers are returned through one projection that drops credential material and
+names what it withheld in `redacted_keys`. A redacted value is *absent*, never
+masked into a lookalike string. An update that does not mention a secret key
+keeps the stored value, so an edit form that cannot display a secret cannot erase
+one either; sending the key with an empty value is how a caller clears it
+deliberately.
+
+The configuration endpoint reports secrets as `set` / `not set` with
+`redacted: true`, and returns database DSNs with the credentials removed rather
+than masked.
+
+### Houston
+
+`access/mock-data.ts` and `system/mock-data.ts` are deleted. The Access screens,
+the per-queue Access panel and the System configuration panels now issue
+requests through typed `api.directory`, `api.rbac`, `api.oauth` and `api.system`
+clients, with real loading, empty, error and stale states and a refetch after
+every mutation. The `?scenario=` switch is gone: loading, empty and stale are
+what the transport does, and read-only is derived from the roles the server
+signed into the access token — a signal the server itself enforces.
+
+### Deliberately still absent
+
+* **No browser OAuth sign-in flow.** There is no authorization-code redirect and
+  no callback route, so provider configuration serves the synchronization API and
+  nothing else. The Identity providers screen says exactly that.
+* **Queue grants are not enforced.** `middleware.RequireQueuePermission` exists
+  but is not mounted on the queue routes. Mounting it would deny every queue
+  operation on deployments that have configured no grants, so it stays a
+  deliberate decision rather than a side effect of this work. Both the role
+  editor and the per-queue panel state that grants are stored but not consulted.
+* **No account lifecycle.** Invite, suspend, delete and password reset still have
+  no API, and Houston still offers no control for them.
+* **Organizations and teams remain read-only.** Membership is writable; create,
+  rename and delete have no API.
+
+### Statements above that no longer hold
+
+* "OAuth ... `GET`/`PUT /oauth/providers/{providerID}` intentionally return 'not
+  implemented yet'" and "`GET /oauth/organizations` ... returns an empty list" —
+  both are implemented.
+* "The account service has no list-users method or route" — it has both.

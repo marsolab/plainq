@@ -131,6 +131,15 @@ func NewServer(
 				}
 			}
 
+			// admin narrows a subtree further, to accounts holding the admin
+			// role. It only applies on top of protect: without authentication
+			// there is no identity to check a role against.
+			admin := func(r chi.Router) {
+				if cfg.AuthEnable {
+					r.Use(middleware.RequireAdmin())
+				}
+			}
+
 			// Queue related routes.
 			v1.Route("/queue", func(queue chi.Router) {
 				protect(queue)
@@ -145,6 +154,23 @@ func NewServer(
 			v1.Route("/oauth", func(r chi.Router) {
 				protect(r)
 				r.Mount("/", pq.oauth)
+			})
+
+			// The account directory is mounted apart from /account because that
+			// subtree has to stay public — it is how a client signs in. Reading
+			// who has an account is not part of that bargain.
+			v1.Route("/directory", func(r chi.Router) {
+				protect(r)
+				r.Mount("/", pq.account.Directory())
+			})
+
+			// Effective configuration names the database host, the listen
+			// addresses and which secrets are set. It is read-only and
+			// administrator-only; no secret value is ever in the response.
+			v1.Route("/system", func(r chi.Router) {
+				protect(r)
+				admin(r)
+				r.Get("/config", NewSystemHandler(cfg).GetConfig)
 			})
 
 			// Metrics API routes for dashboard.

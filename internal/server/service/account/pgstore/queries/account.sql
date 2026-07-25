@@ -60,3 +60,48 @@ FROM roles r
          INNER JOIN user_roles ur ON r.role_id = ur.role_id
 WHERE ur.user_id = $1
 ORDER BY r.role_name;
+
+-- name: ListDirectoryAccounts :many
+SELECT u.user_id,
+       u.email,
+       u.verified,
+       u.created_at,
+       u.updated_at,
+       u.org_id,
+       u.oauth_provider,
+       u.is_oauth_user,
+       u.last_sync_at,
+       o.org_code,
+       o.org_name
+FROM users u
+         LEFT JOIN organizations o ON o.org_id = u.org_id
+WHERE (@search::text = '' OR lower(u.email) LIKE '%' || lower(@search::text) || '%')
+  AND (NOT @scope_org::boolean OR coalesce(u.org_id, '') = @org_id::text)
+  AND (@cursor::text = '' OR u.user_id > @cursor::text)
+ORDER BY u.user_id
+LIMIT @page_limit::bigint;
+
+-- name: CountDirectoryAccounts :one
+SELECT count(*)
+FROM users u
+WHERE (@search::text = '' OR lower(u.email) LIKE '%' || lower(@search::text) || '%')
+  AND (NOT @scope_org::boolean OR coalesce(u.org_id, '') = @org_id::text);
+
+-- name: ListRolesForAccounts :many
+SELECT ur.user_id, r.role_id, r.role_name
+FROM user_roles ur
+         INNER JOIN roles r ON r.role_id = ur.role_id
+WHERE ur.user_id = ANY (@user_ids::text[])
+ORDER BY ur.user_id, r.role_name;
+
+-- name: ListTeamsForAccounts :many
+SELECT ut.user_id, t.team_id, t.org_id, t.team_name, t.team_code
+FROM user_teams ut
+         INNER JOIN teams t ON t.team_id = ut.team_id
+WHERE ut.user_id = ANY (@user_ids::text[])
+ORDER BY ut.user_id, t.team_name;
+
+-- name: GetAccountOrgID :one
+SELECT coalesce(org_id, '')::text AS org_id
+FROM users
+WHERE user_id = $1;

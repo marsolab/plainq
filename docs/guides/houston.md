@@ -13,11 +13,23 @@ when you run `plainq serve`, Houston is already there.
 ## What it does
 
 - **Queues** — browse queues, inspect settings, and view per-queue metrics.
-- **Accounts** — manage users and the onboarding flow.
+- **Accounts** — browse the account directory and run the onboarding flow.
 - **RBAC** — create roles, assign them, and set per-queue permissions.
 - **OAuth** — configure external identity providers and organizations/teams.
 - **Metrics** — charts and rate/in-flight views backed by the
   [telemetry subsystem](observability.md#telemetry--houston-dashboards).
+- **System** — the running instance's sanitized configuration, with secrets
+  named and withheld rather than shown.
+
+Two limits are worth knowing before you rely on the Access screens:
+
+- Reading the authorization model needs only a session; **every change to it
+  needs the `admin` role**. A non-admin sees the same screens with the controls
+  blocked and the reason attached.
+- Queue grants are **stored but not enforced**. PlainQ ships a queue-permission
+  middleware and does not mount it on the queue routes, so a grant records intent
+  and does not yet restrict who can send, receive, purge or delete. Houston says
+  so on both screens that show grants.
 
 ## First run: onboarding
 
@@ -51,9 +63,9 @@ through the RBAC screens afterward. For the full account/role model see
 
 Houston is a single-page app served from an embedded filesystem with SPA
 fallback: unknown paths resolve to the app's `index.html` so client-side routing
-works on refresh and deep links. The API routes it calls (account, RBAC, OAuth,
-onboarding, metrics) are served by the same HTTP listener, with **CORS** enabled
-for those routes (toggle with `--cors`).
+works on refresh and deep links. The API routes it calls (account, directory,
+RBAC, OAuth, onboarding, metrics, system) are served by the same HTTP listener,
+with **CORS** enabled for those routes (toggle with `--cors`).
 
 ## Building Houston
 

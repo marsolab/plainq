@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/marsolab/plainq/internal/server/config"
+	"github.com/marsolab/plainq/internal/server/middleware"
 )
 
 // Provider represents an OAuth provider configuration.
@@ -42,23 +43,63 @@ type Storage interface {
 	// OAuth provider management.
 	CreateProvider(ctx context.Context, provider Provider) error
 	GetProvider(ctx context.Context, providerName, orgID string) (*Provider, error)
+	GetProviderByID(ctx context.Context, providerID string) (*Provider, error)
 	UpdateProvider(ctx context.Context, provider Provider) error
 	DeleteProvider(ctx context.Context, providerID string) error
+
+	// ListProviders returns the providers registered for exactly one scope:
+	// orgID "" is the global scope, any other value an organization's own.
 	ListProviders(ctx context.Context, orgID string) ([]Provider, error)
 
 	// User synchronization.
 	SyncOAuthUser(ctx context.Context, user OAuthUser, providerName, orgID string) error
 	GetUserByOAuthSub(ctx context.Context, providerName, subject string) (*SyncedUser, error)
 	UpdateUserLastSync(ctx context.Context, userID string) error
+	GetUserSyncStatus(ctx context.Context, userID string) (*UserSyncStatus, error)
+
+	// ListProviderSyncStats counts the accounts each provider has synchronized.
+	// The query carries the same scope as the provider list it accompanies:
+	// stats keyed by provider name alone would combine two tenants that happen
+	// to use the same provider type.
+	ListProviderSyncStats(ctx context.Context, query SyncStatsQuery) ([]ProviderSyncStat, error)
 
 	// Organization and team management.
+	ListOrganizations(ctx context.Context) ([]Organization, error)
 	GetOrganizationByCode(ctx context.Context, orgCode string) (*Organization, error)
 	GetOrganizationByDomain(ctx context.Context, domain string) (*Organization, error)
+	GetUserOrgID(ctx context.Context, userID string) (string, error)
 	GetTeamsByOrg(ctx context.Context, orgID string) ([]Team, error)
 	GetTeamByCode(ctx context.Context, orgID, teamCode string) (*Team, error)
 	AssignUserToTeam(ctx context.Context, userID, teamID string) error
 	RemoveUserFromTeam(ctx context.Context, userID, teamID string) error
 	GetUserTeams(ctx context.Context, userID string) ([]Team, error)
+}
+
+// UserSyncStatus reports what the server actually recorded about an account's
+// last synchronization. Absent values stay absent — an account that never
+// synchronized has no timestamp rather than a zero one.
+type UserSyncStatus struct {
+	UserID     string     `json:"user_id"`
+	IsSynced   bool       `json:"is_synced"`
+	Provider   string     `json:"provider,omitempty"`
+	LastSyncAt *time.Time `json:"last_sync_at,omitempty"`
+}
+
+// SyncStatsQuery selects which accounts the synchronization counts cover.
+//
+// ScopeOrg is a separate flag because an empty OrgID is a real scope — the
+// accounts belonging to no organization — and not the same as "count everyone".
+type SyncStatsQuery struct {
+	ScopeOrg bool
+	OrgID    string
+}
+
+// ProviderSyncStat is what a provider has actually synchronized, keyed by the
+// provider name stored on each account.
+type ProviderSyncStat struct {
+	ProviderName string     `json:"provider_name"`
+	UserCount    int64      `json:"user_count"`
+	LastSyncAt   *time.Time `json:"last_sync_at,omitempty"`
 }
 
 // SyncedUser represents a synchronized OAuth user.
@@ -115,21 +156,40 @@ func NewService(cfg *config.Config, logger *slog.Logger, storage Storage) *Servi
 		storage: storage,
 	}
 
+	// Reading identity configuration is available to any authenticated caller —
+	// that is what lets an operator console show a truthful read-only view —
+	// while changing it is an administrator's operation. With authentication
+	// disabled the guard is a no-op, so the server stays open by deliberate
+	// configuration rather than by an accident of routing.
+	admin := func(r chi.Router) {
+		if cfg.AuthEnable {
+			r.Use(middleware.RequireAdmin())
+		}
+	}
+
 	// Setup routes.
 	s.router.Route("/", func(r chi.Router) {
 		// OAuth provider management.
 		r.Route("/providers", func(r chi.Router) {
 			r.Get("/", s.listProvidersHandler)
-			r.Post("/", s.createProviderHandler)
 			r.Get("/{providerID}", s.getProviderHandler)
-			r.Put("/{providerID}", s.updateProviderHandler)
-			r.Delete("/{providerID}", s.deleteProviderHandler)
+
+			r.Group(func(r chi.Router) {
+				admin(r)
+				r.Post("/", s.createProviderHandler)
+				r.Put("/{providerID}", s.updateProviderHandler)
+				r.Delete("/{providerID}", s.deleteProviderHandler)
+			})
 		})
 
 		// User synchronization endpoints.
 		r.Route("/sync", func(r chi.Router) {
-			r.Post("/user", s.syncUserHandler)
 			r.Get("/user/{userID}", s.getUserSyncStatusHandler)
+
+			r.Group(func(r chi.Router) {
+				admin(r)
+				r.Post("/user", s.syncUserHandler)
+			})
 		})
 
 		// Organization and team management.
@@ -141,8 +201,12 @@ func NewService(cfg *config.Config, logger *slog.Logger, storage Storage) *Servi
 		// Team management for users.
 		r.Route("/users/{userID}/teams", func(r chi.Router) {
 			r.Get("/", s.getUserTeamsHandler)
-			r.Post("/{teamID}", s.assignUserToTeamHandler)
-			r.Delete("/{teamID}", s.removeUserFromTeamHandler)
+
+			r.Group(func(r chi.Router) {
+				admin(r)
+				r.Post("/{teamID}", s.assignUserToTeamHandler)
+				r.Delete("/{teamID}", s.removeUserFromTeamHandler)
+			})
 		})
 	})
 

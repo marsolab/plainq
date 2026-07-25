@@ -7,8 +7,32 @@ package sqlcgen
 
 import (
 	"context"
+	"database/sql"
+	"strings"
 	"time"
 )
+
+const countDirectoryAccounts = `-- name: CountDirectoryAccounts :one
+SELECT count(*)
+FROM users u
+WHERE (cast(?1 AS text) = ''
+    OR lower(u.email) LIKE '%' || lower(cast(?1 AS text)) || '%')
+  AND (cast(?2 AS boolean) = FALSE
+    OR coalesce(u.org_id, '') = cast(?3 AS text))
+`
+
+type CountDirectoryAccountsParams struct {
+	Search   string
+	ScopeOrg bool
+	OrgID    string
+}
+
+func (q *Queries) CountDirectoryAccounts(ctx context.Context, arg CountDirectoryAccountsParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countDirectoryAccounts, arg.Search, arg.ScopeOrg, arg.OrgID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
 
 const createAccount = `-- name: CreateAccount :exec
 INSERT INTO users (user_id, email, password, verified, created_at, updated_at)
@@ -169,6 +193,19 @@ func (q *Queries) GetAccountByID(ctx context.Context, userID string) (GetAccount
 	return i, err
 }
 
+const getAccountOrgID = `-- name: GetAccountOrgID :one
+SELECT coalesce(org_id, '') AS org_id
+FROM users
+WHERE user_id = ?
+`
+
+func (q *Queries) GetAccountOrgID(ctx context.Context, userID string) (string, error) {
+	row := q.db.QueryRowContext(ctx, getAccountOrgID, userID)
+	var org_id string
+	err := row.Scan(&org_id)
+	return org_id, err
+}
+
 const getUserRoles = `-- name: GetUserRoles :many
 SELECT r.role_name
 FROM roles r
@@ -217,6 +254,194 @@ func (q *Queries) IsAccessTokenDenied(ctx context.Context, arg IsAccessTokenDeni
 	var count int64
 	err := row.Scan(&count)
 	return count, err
+}
+
+const listDirectoryAccounts = `-- name: ListDirectoryAccounts :many
+SELECT u.user_id,
+       u.email,
+       u.verified,
+       u.created_at,
+       u.updated_at,
+       u.org_id,
+       u.oauth_provider,
+       u.is_oauth_user,
+       u.last_sync_at,
+       o.org_code,
+       o.org_name
+FROM users u
+         LEFT JOIN organizations o ON o.org_id = u.org_id
+WHERE (cast(?1 AS text) = ''
+    OR lower(u.email) LIKE '%' || lower(cast(?1 AS text)) || '%')
+  AND (cast(?2 AS boolean) = FALSE
+    OR coalesce(u.org_id, '') = cast(?3 AS text))
+  AND (cast(?4 AS text) = '' OR u.user_id > cast(?4 AS text))
+ORDER BY u.user_id
+LIMIT cast(?5 AS integer)
+`
+
+type ListDirectoryAccountsParams struct {
+	Search    string
+	ScopeOrg  bool
+	OrgID     string
+	Cursor    string
+	PageLimit int64
+}
+
+type ListDirectoryAccountsRow struct {
+	UserID        string
+	Email         string
+	Verified      bool
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+	OrgID         sql.NullString
+	OauthProvider sql.NullString
+	IsOauthUser   bool
+	LastSyncAt    sql.NullTime
+	OrgCode       sql.NullString
+	OrgName       sql.NullString
+}
+
+func (q *Queries) ListDirectoryAccounts(ctx context.Context, arg ListDirectoryAccountsParams) ([]ListDirectoryAccountsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listDirectoryAccounts,
+		arg.Search,
+		arg.ScopeOrg,
+		arg.OrgID,
+		arg.Cursor,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListDirectoryAccountsRow{}
+	for rows.Next() {
+		var i ListDirectoryAccountsRow
+		if err := rows.Scan(
+			&i.UserID,
+			&i.Email,
+			&i.Verified,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.OrgID,
+			&i.OauthProvider,
+			&i.IsOauthUser,
+			&i.LastSyncAt,
+			&i.OrgCode,
+			&i.OrgName,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listRolesForAccounts = `-- name: ListRolesForAccounts :many
+SELECT ur.user_id, r.role_id, r.role_name
+FROM user_roles ur
+         INNER JOIN roles r ON r.role_id = ur.role_id
+WHERE ur.user_id IN (/*SLICE:user_ids*/?)
+ORDER BY ur.user_id, r.role_name
+`
+
+type ListRolesForAccountsRow struct {
+	UserID   string
+	RoleID   string
+	RoleName string
+}
+
+func (q *Queries) ListRolesForAccounts(ctx context.Context, userIds []string) ([]ListRolesForAccountsRow, error) {
+	query := listRolesForAccounts
+	var queryParams []interface{}
+	if len(userIds) > 0 {
+		for _, v := range userIds {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:user_ids*/?", strings.Repeat(",?", len(userIds))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:user_ids*/?", "NULL", 1)
+	}
+	rows, err := q.db.QueryContext(ctx, query, queryParams...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListRolesForAccountsRow{}
+	for rows.Next() {
+		var i ListRolesForAccountsRow
+		if err := rows.Scan(&i.UserID, &i.RoleID, &i.RoleName); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listTeamsForAccounts = `-- name: ListTeamsForAccounts :many
+SELECT ut.user_id, t.team_id, t.org_id, t.team_name, t.team_code
+FROM user_teams ut
+         INNER JOIN teams t ON t.team_id = ut.team_id
+WHERE ut.user_id IN (/*SLICE:user_ids*/?)
+ORDER BY ut.user_id, t.team_name
+`
+
+type ListTeamsForAccountsRow struct {
+	UserID   string
+	TeamID   string
+	OrgID    string
+	TeamName string
+	TeamCode string
+}
+
+func (q *Queries) ListTeamsForAccounts(ctx context.Context, userIds []string) ([]ListTeamsForAccountsRow, error) {
+	query := listTeamsForAccounts
+	var queryParams []interface{}
+	if len(userIds) > 0 {
+		for _, v := range userIds {
+			queryParams = append(queryParams, v)
+		}
+		query = strings.Replace(query, "/*SLICE:user_ids*/?", strings.Repeat(",?", len(userIds))[1:], 1)
+	} else {
+		query = strings.Replace(query, "/*SLICE:user_ids*/?", "NULL", 1)
+	}
+	rows, err := q.db.QueryContext(ctx, query, queryParams...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListTeamsForAccountsRow{}
+	for rows.Next() {
+		var i ListTeamsForAccountsRow
+		if err := rows.Scan(
+			&i.UserID,
+			&i.TeamID,
+			&i.OrgID,
+			&i.TeamName,
+			&i.TeamCode,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const purgeRefreshTokens = `-- name: PurgeRefreshTokens :exec

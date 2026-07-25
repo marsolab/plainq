@@ -10,9 +10,10 @@ import (
 	"time"
 )
 
-const assignRoleToUser = `-- name: AssignRoleToUser :exec
+const assignRoleToUser = `-- name: AssignRoleToUser :execrows
 INSERT INTO user_roles (user_id, role_id, created_at)
 VALUES (?, ?, ?)
+ON CONFLICT DO NOTHING
 `
 
 type AssignRoleToUserParams struct {
@@ -21,9 +22,59 @@ type AssignRoleToUserParams struct {
 	CreatedAt time.Time
 }
 
-func (q *Queries) AssignRoleToUser(ctx context.Context, arg AssignRoleToUserParams) error {
-	_, err := q.db.ExecContext(ctx, assignRoleToUser, arg.UserID, arg.RoleID, arg.CreatedAt)
-	return err
+func (q *Queries) AssignRoleToUser(ctx context.Context, arg AssignRoleToUserParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, assignRoleToUser, arg.UserID, arg.RoleID, arg.CreatedAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const countUsersPerRole = `-- name: CountUsersPerRole :many
+SELECT role_id, count(*) AS user_count
+FROM user_roles
+GROUP BY role_id
+`
+
+type CountUsersPerRoleRow struct {
+	RoleID    string
+	UserCount int64
+}
+
+func (q *Queries) CountUsersPerRole(ctx context.Context) ([]CountUsersPerRoleRow, error) {
+	rows, err := q.db.QueryContext(ctx, countUsersPerRole)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []CountUsersPerRoleRow{}
+	for rows.Next() {
+		var i CountUsersPerRoleRow
+		if err := rows.Scan(&i.RoleID, &i.UserCount); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const countUsersWithRole = `-- name: CountUsersWithRole :one
+SELECT count(*)
+FROM user_roles
+WHERE role_id = ?
+`
+
+func (q *Queries) CountUsersWithRole(ctx context.Context, roleID string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countUsersWithRole, roleID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
 }
 
 const createQueuePermission = `-- name: CreateQueuePermission :exec
@@ -97,6 +148,19 @@ WHERE role_id = ?
 
 func (q *Queries) DeleteRole(ctx context.Context, roleID string) (int64, error) {
 	result, err := q.db.ExecContext(ctx, deleteRole, roleID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const deleteRoleQueuePermissions = `-- name: DeleteRoleQueuePermissions :execrows
+DELETE FROM queue_permissions
+WHERE role_id = ?
+`
+
+func (q *Queries) DeleteRoleQueuePermissions(ctx context.Context, roleID string) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteRoleQueuePermissions, roleID)
 	if err != nil {
 		return 0, err
 	}
@@ -371,6 +435,27 @@ type RemoveRoleFromUserParams struct {
 
 func (q *Queries) RemoveRoleFromUser(ctx context.Context, arg RemoveRoleFromUserParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, removeRoleFromUser, arg.UserID, arg.RoleID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const removeRoleFromUserUnlessLastHolder = `-- name: RemoveRoleFromUserUnlessLastHolder :execrows
+DELETE FROM user_roles
+WHERE user_roles.user_id = ?
+  AND user_roles.role_id = ?
+  AND (SELECT count(*) FROM user_roles other WHERE other.role_id = ?) > 1
+`
+
+type RemoveRoleFromUserUnlessLastHolderParams struct {
+	UserID   string
+	RoleID   string
+	RoleID_2 string
+}
+
+func (q *Queries) RemoveRoleFromUserUnlessLastHolder(ctx context.Context, arg RemoveRoleFromUserUnlessLastHolderParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, removeRoleFromUserUnlessLastHolder, arg.UserID, arg.RoleID, arg.RoleID_2)
 	if err != nil {
 		return 0, err
 	}

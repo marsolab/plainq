@@ -2,27 +2,16 @@
 
 import * as React from "react";
 
+import { api, isAdministrator } from "@/lib/api-client";
 import { PageHeader } from "@/components/ui/page-header";
+import { Banner } from "@/components/ui/feedback";
 import { cn } from "@/lib/utils";
 
 import { UsersSection } from "./users-section";
 import { RolesSection } from "./roles-section";
 import { OrgsTeamsSection } from "./orgs-teams-section";
 import { IdentityProvidersSection } from "./identity-providers-section";
-import {
-  MOCK_IDENTITY_PROVIDERS,
-  MOCK_ORGANIZATIONS,
-  MOCK_ROLES,
-  MOCK_USERS,
-  loadDirectory,
-  readScenario,
-  type AccessOrganization,
-  type AccessRole,
-  type AccessScenario,
-  type AccessUser,
-  type DirectoryStatus,
-  type IdentityProvider,
-} from "./mock-data";
+import { describeFailure, toRole, toUser, type AccessRole, type AccessUser } from "./model";
 
 const SECTIONS = [
   { id: "users", label: "Users" },
@@ -33,69 +22,135 @@ const SECTIONS = [
 
 type SectionId = (typeof SECTIONS)[number]["id"];
 
-const READ_ONLY_REASON = "Your role can read access configuration but not change it.";
+/** Accounts per directory request. The server caps a page at 200. */
+const PAGE_SIZE = 50;
+
+const READ_ONLY_REASON =
+  "Your role can read access configuration but not change it — the server refuses these writes.";
 
 function readSection(search: string): SectionId {
   const raw = new URLSearchParams(search).get("section");
   return SECTIONS.find((section) => section.id === raw)?.id ?? "users";
 }
 
+/**
+ * The directory as one request's worth of state. Keeping the error beside the
+ * rows is what lets a failed refresh keep the last good page on screen instead
+ * of blanking a table it has just labelled stale.
+ */
+export interface DirectoryState {
+  users: AccessUser[];
+  total: number;
+  nextCursor: string;
+  hasMore: boolean;
+  loading: boolean;
+  error: string | null;
+}
+
+const EMPTY_DIRECTORY: DirectoryState = {
+  users: [],
+  total: 0,
+  nextCursor: "",
+  hasMore: false,
+  loading: true,
+  error: null,
+};
+
 export function AccessPage() {
   const [section, setSection] = React.useState<SectionId>("users");
-  const [scenario, setScenario] = React.useState<AccessScenario>("ok");
 
   // Sections are addressable (/access?section=roles), so the URL is the source
   // of truth for which one is open — including after Back and Forward.
   React.useEffect(() => {
-    const sync = () => {
-      setSection(readSection(window.location.search));
-      setScenario(readScenario(window.location.search));
-    };
+    const sync = () => setSection(readSection(window.location.search));
     sync();
     window.addEventListener("popstate", sync);
     return () => window.removeEventListener("popstate", sync);
   }, []);
 
-  const [roles, setRoles] = React.useState<AccessRole[]>(MOCK_ROLES);
-  const [organizations, setOrganizations] =
-    React.useState<AccessOrganization[]>(MOCK_ORGANIZATIONS);
-  const [providers, setProviders] =
-    React.useState<IdentityProvider[]>(MOCK_IDENTITY_PROVIDERS);
-
   /**
-   * The directory lives here beside roles and organizations, not inside the
-   * Users section: a sub-tab unmounts its section, and a role or team change
-   * made in the user sheet must still be there after a trip to Roles.
+   * Whether this operator may write. The token the server issued carries the
+   * roles it will check, so a control can be blocked with its reason instead of
+   * failing with a 403 after the fact. It is not the enforcement — every write
+   * below is refused server-side regardless — and an unreadable token means
+   * "unknown", which blocks nothing.
    */
-  const [users, setUsers] = React.useState<AccessUser[]>([]);
-  const [directoryStatus, setDirectoryStatus] = React.useState<DirectoryStatus>("ok");
-  const [directoryError, setDirectoryError] = React.useState<string | null>(null);
-  const [directoryLoading, setDirectoryLoading] = React.useState(true);
+  const [administrator, setAdministrator] = React.useState<boolean | null>(null);
 
-  const fetchDirectory = React.useCallback(async (target: AccessScenario) => {
-    setDirectoryLoading(true);
-    const result = await loadDirectory(target);
-    setDirectoryStatus(result.status);
-    setDirectoryError(result.error ?? null);
-    // A failed refresh keeps the last good rows rather than blanking the table.
-    if (result.status === "ok" || result.users.length > 0) {
-      setUsers(result.users);
+  React.useEffect(() => setAdministrator(isAdministrator()), []);
+
+  const blockedReason = administrator === false ? READ_ONLY_REASON : undefined;
+
+  const [directory, setDirectory] = React.useState<DirectoryState>(EMPTY_DIRECTORY);
+  const [search, setSearch] = React.useState("");
+  /** Cursors already consumed, so Previous is a real position, not a re-scan. */
+  const [cursors, setCursors] = React.useState<string[]>([]);
+
+  const [roles, setRoles] = React.useState<AccessRole[]>([]);
+  const [rolesError, setRolesError] = React.useState<string | null>(null);
+  const [rolesLoading, setRolesLoading] = React.useState(true);
+
+  const cursor = cursors[cursors.length - 1] ?? "";
+
+  const loadDirectory = React.useCallback(async (params: { cursor: string; search: string }) => {
+    setDirectory((current) => ({ ...current, loading: true }));
+
+    try {
+      const page = await api.directory.users({
+        limit: PAGE_SIZE,
+        cursor: params.cursor || undefined,
+        search: params.search || undefined,
+      });
+
+      setDirectory({
+        users: (page.users ?? []).map(toUser),
+        total: page.total,
+        nextCursor: page.next_cursor,
+        hasMore: page.has_more,
+        loading: false,
+        error: null,
+      });
+    } catch (error) {
+      // Keep whatever rows are on screen: a refresh that failed says nothing
+      // about the accounts the last successful read returned.
+      setDirectory((current) => ({
+        ...current,
+        loading: false,
+        error: describeFailure(error, "read the account directory"),
+      }));
     }
-    setDirectoryLoading(false);
+  }, []);
+
+  const loadRoles = React.useCallback(async () => {
+    setRolesLoading(true);
+
+    try {
+      setRoles((await api.rbac.roles.list()).map(toRole));
+      setRolesError(null);
+    } catch (error) {
+      setRolesError(describeFailure(error, "read the roles"));
+    } finally {
+      setRolesLoading(false);
+    }
   }, []);
 
   React.useEffect(() => {
-    void fetchDirectory(scenario);
-  }, [fetchDirectory, scenario]);
+    void loadDirectory({ cursor, search });
+  }, [loadDirectory, cursor, search]);
 
-  const applyUserChange = React.useCallback((next: AccessUser) => {
-    setUsers((current) =>
-      current.map((user) => (user.userId === next.userId ? next : user)),
-    );
-  }, []);
+  React.useEffect(() => {
+    void loadRoles();
+  }, [loadRoles]);
 
-  const blockedReason = scenario === "read-only" ? READ_ONLY_REASON : undefined;
-  const organizationName = organizations[0]?.name ?? "default";
+  const refreshDirectory = React.useCallback(
+    () => loadDirectory({ cursor, search }),
+    [loadDirectory, cursor, search],
+  );
+
+  /** A membership or role change moves a user's counts, so both are refetched. */
+  const refreshAll = React.useCallback(async () => {
+    await Promise.all([refreshDirectory(), loadRoles()]);
+  }, [refreshDirectory, loadRoles]);
 
   const open = (next: SectionId) => {
     const params = new URLSearchParams(window.location.search);
@@ -111,18 +166,21 @@ export function AccessPage() {
         description="Users, roles, and how queue permissions are granted."
       />
 
+      {blockedReason ? (
+        <Banner className="mb-4">
+          You are signed in without the administrator role. Everything on this page is readable;
+          nothing on it can be changed.
+        </Banner>
+      ) : null}
+
       <div className="mb-5 flex gap-5 border-b border-border">
         {SECTIONS.map((item) => {
           const active = item.id === section;
-          const href =
-            scenario === "ok"
-              ? `/access?section=${item.id}`
-              : `/access?section=${item.id}&scenario=${scenario}`;
 
           return (
             <a
               key={item.id}
-              href={href}
+              href={`/access?section=${item.id}`}
               aria-current={active ? "page" : undefined}
               onClick={(event) => {
                 if (event.metaKey || event.ctrlKey || event.shiftKey) return;
@@ -144,51 +202,50 @@ export function AccessPage() {
 
       {section === "users" ? (
         <UsersSection
-          users={users}
-          loading={directoryLoading}
-          status={directoryStatus}
-          error={directoryError}
+          directory={directory}
           roles={roles}
-          organizations={organizations}
+          search={search}
+          hasPrevious={cursors.length > 0}
+          pageSize={PAGE_SIZE}
           blockedReason={blockedReason}
-          onRetry={() => void fetchDirectory("ok")}
-          onUserChange={applyUserChange}
-          onOrganizationsChange={setOrganizations}
+          onSearchChange={(next) => {
+            // A new filter is a new scan, so the cursor stack cannot carry over.
+            setCursors([]);
+            setSearch(next);
+          }}
+          onNextPage={() =>
+            setCursors((current) =>
+              directory.nextCursor ? [...current, directory.nextCursor] : current,
+            )
+          }
+          onPreviousPage={() => setCursors((current) => current.slice(0, -1))}
+          onRetry={() => void refreshDirectory()}
+          onChanged={() => void refreshAll()}
         />
       ) : null}
 
-      {/*
-        Roles and Organizations read the seeded account list, not the fetched
-        directory: they stand in for their own endpoints, and the `?scenario=`
-        switch only models what list-users answers. Showing "0 users assigned"
-        because that one call failed would be asserting something we don't know.
-      */}
       {section === "roles" ? (
         <RolesSection
           roles={roles}
-          users={MOCK_USERS}
-          onRolesChange={setRoles}
+          loading={rolesLoading}
+          error={rolesError}
           blockedReason={blockedReason}
+          onRetry={() => void loadRoles()}
+          onRolesChanged={() => void loadRoles()}
         />
       ) : null}
 
       {section === "organizations" ? (
         <OrgsTeamsSection
-          organizations={organizations}
-          roles={roles}
-          users={MOCK_USERS}
-          onOrganizationsChange={setOrganizations}
+          users={directory.users}
+          usersLoading={directory.loading}
           blockedReason={blockedReason}
+          onMembershipChanged={() => void refreshDirectory()}
         />
       ) : null}
 
       {section === "providers" ? (
-        <IdentityProvidersSection
-          providers={providers}
-          organizationName={organizationName}
-          onProvidersChange={setProviders}
-          blockedReason={blockedReason}
-        />
+        <IdentityProvidersSection blockedReason={blockedReason} />
       ) : null}
     </div>
   );

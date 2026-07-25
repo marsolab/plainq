@@ -3,11 +3,14 @@
 import * as React from "react";
 import { toast } from "sonner";
 
+import { api } from "@/lib/api-client";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { EmptyState } from "@/components/ui/empty-state";
 import { InlineAlert } from "@/components/ui/feedback";
 import { Panel } from "@/components/ui/panel";
+import { Skeleton } from "@/components/ui/skeleton";
 import { Status } from "@/components/ui/status";
 import {
   Select,
@@ -27,75 +30,162 @@ import {
 import { cn } from "@/lib/utils";
 
 import {
-  MOCK_QUEUES,
   PERMISSION_KEYS,
   PERMISSION_LABELS,
   countGrants,
+  describeFailure,
   emptyPermissions,
-  usersWithRole,
+  grantsOf,
+  sameGrants,
   type AccessRole,
-  type AccessUser,
   type PermissionKey,
   type QueueGrant,
-} from "./mock-data";
+} from "./model";
 
-const BYPASS_REASON =
-  "Administrator bypasses per-queue checks in the server. Its grants can't be edited until the bypass becomes a real grant set.";
+/**
+ * Grants are stored by the server but not yet consulted on queue operations:
+ * the permission middleware exists and is not mounted on the queue routes. The
+ * matrix is therefore a real, persisted configuration that governs nothing
+ * yet — and the screen has to say so rather than imply enforcement.
+ */
+const NOT_ENFORCED =
+  "Grants are stored and read back by the server, but queue operations don't consult them yet — PlainQ doesn't mount its queue-permission middleware. Configure them now; they take effect when it does.";
+
+interface QueueRef {
+  queueId: string;
+  queueName: string;
+}
 
 interface RolesSectionProps {
   roles: AccessRole[];
-  users: AccessUser[];
-  onRolesChange: (roles: AccessRole[]) => void;
+  loading: boolean;
+  error: string | null;
   blockedReason?: string;
+  onRetry: () => void;
+  /** Role counts move when grants change nothing, but roles can be added. */
+  onRolesChanged: () => void;
 }
 
 function cloneGrants(grants: QueueGrant[]): QueueGrant[] {
   return grants.map((grant) => ({ ...grant, permissions: { ...grant.permissions } }));
 }
 
-function sameGrants(a: QueueGrant[], b: QueueGrant[]): boolean {
-  if (a.length !== b.length) return false;
-  return a.every((grant, index) => {
-    const other = b[index];
-    if (!other || other.queueId !== grant.queueId) return false;
-    return PERMISSION_KEYS.every((key) => grant.permissions[key] === other.permissions[key]);
-  });
-}
-
 export function RolesSection({
   roles,
-  users,
-  onRolesChange,
+  loading,
+  error,
   blockedReason,
+  onRetry,
+  onRolesChanged,
 }: RolesSectionProps) {
-  const [selectedRoleId, setSelectedRoleId] = React.useState(
-    roles.find((role) => role.kind === "custom")?.roleId ?? roles[0]?.roleId ?? "",
-  );
-  /**
-   * Matrix edits stage per role rather than auto-saving each cell — a role can
-   * carry dozens of grants and a half-applied permission set is a hazard. The
-   * draft is keyed by role so switching rows never silently discards work.
-   */
-  const [drafts, setDrafts] = React.useState<Record<string, QueueGrant[]>>({});
+  const [selectedRoleId, setSelectedRoleId] = React.useState("");
+  const [saved, setSaved] = React.useState<QueueGrant[] | null>(null);
+  const [draft, setDraft] = React.useState<QueueGrant[] | null>(null);
+  const [grantsError, setGrantsError] = React.useState<string | null>(null);
+  const [grantsLoading, setGrantsLoading] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
+  const [saveError, setSaveError] = React.useState<string | null>(null);
   const [addQueueId, setAddQueueId] = React.useState("");
+  const [queues, setQueues] = React.useState<QueueRef[]>([]);
+  const [queuesError, setQueuesError] = React.useState<string | null>(null);
 
-  const role = roles.find((candidate) => candidate.roleId === selectedRoleId);
-  if (!role) return null;
+  const role = roles.find((candidate) => candidate.roleId === selectedRoleId) ?? roles[0] ?? null;
+  const roleId = role?.roleId ?? "";
 
-  const grants = drafts[role.roleId] ?? role.grants;
-  const dirty = Boolean(drafts[role.roleId]) && !sameGrants(grants, role.grants);
-  const assigned = usersWithRole(users, role.roleId);
-  const locked = Boolean(role.bypass);
-  const editBlocked = locked ? BYPASS_REASON : blockedReason;
+  // Queue names come from the queue list; a grant whose queue is missing keeps
+  // its ID rather than disappearing from the matrix.
+  React.useEffect(() => {
+    let cancelled = false;
 
-  const ungranted = MOCK_QUEUES.filter(
+    void (async () => {
+      try {
+        const response = await api.queues.list({ limit: 100 });
+        if (!cancelled) {
+          setQueues(
+            (response.queues ?? []).map((queue) => ({
+              queueId: queue.queueId,
+              queueName: queue.queueName,
+            })),
+          );
+          setQueuesError(null);
+        }
+      } catch (failure) {
+        if (!cancelled) setQueuesError(describeFailure(failure, "read the queue list"));
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const loadGrants = React.useCallback(
+    async (targetRoleId: string, targetQueues: QueueRef[]) => {
+      if (!targetRoleId) return;
+
+      setGrantsLoading(true);
+
+      try {
+        const response = await api.rbac.permissions.forRole(targetRoleId);
+        setSaved(grantsOf(response.grants ?? [], targetQueues));
+        setDraft(null);
+        setGrantsError(null);
+      } catch (failure) {
+        setSaved(null);
+        setGrantsError(describeFailure(failure, "read this role's grants"));
+      } finally {
+        setGrantsLoading(false);
+      }
+    },
+    [],
+  );
+
+  React.useEffect(() => {
+    void loadGrants(roleId, queues);
+  }, [loadGrants, roleId, queues]);
+
+  if (loading && roles.length === 0) {
+    return (
+      <Panel className="p-4">
+        <Skeleton className="h-4 w-40" />
+      </Panel>
+    );
+  }
+
+  if (error && roles.length === 0) {
+    return (
+      <Panel className="max-w-[640px]">
+        <EmptyState
+          title="Roles could not be read"
+          description={error}
+          action={
+            <Button variant="outline" onClick={onRetry}>
+              Try again
+            </Button>
+          }
+        />
+      </Panel>
+    );
+  }
+
+  if (!role) {
+    return (
+      <Panel className="max-w-[640px]">
+        <EmptyState
+          title="No roles defined"
+          description="A role is what a queue grant attaches to. Create one on the server to start granting permissions."
+        />
+      </Panel>
+    );
+  }
+
+  const grants = draft ?? saved ?? [];
+  const dirty = draft !== null && saved !== null && !sameGrants(draft, saved);
+  const ungranted = queues.filter(
     (queue) => !grants.some((grant) => grant.queueId === queue.queueId),
   );
 
-  const stage = (next: QueueGrant[]) => {
-    setDrafts((current) => ({ ...current, [role.roleId]: next }));
-  };
+  const stage = (next: QueueGrant[]) => setDraft(next);
 
   const toggle = (queueId: string, key: PermissionKey) => {
     stage(
@@ -111,217 +201,281 @@ export function RolesSection({
   };
 
   const addQueue = (queueId: string) => {
-    const queue = MOCK_QUEUES.find((candidate) => candidate.queueId === queueId);
+    const queue = queues.find((candidate) => candidate.queueId === queueId);
     if (!queue) return;
+
     stage([...cloneGrants(grants), { ...queue, permissions: emptyPermissions() }]);
     setAddQueueId("");
   };
 
   const cancel = () => {
-    setDrafts((current) => {
-      const next = { ...current };
-      delete next[role.roleId];
-      return next;
-    });
+    setDraft(null);
+    setSaveError(null);
   };
 
   const save = async () => {
     setSaving(true);
-    // Grants have no endpoint yet; the delay stands in for the round-trip so
-    // the staged state behaves the way it will once one exists.
-    await new Promise((resolve) => window.setTimeout(resolve, 400));
-    onRolesChange(
-      roles.map((candidate) =>
-        candidate.roleId === role.roleId
-          ? { ...candidate, grants: cloneGrants(grants) }
-          : candidate,
-      ),
-    );
-    cancel();
-    setSaving(false);
-    toast.success(`${role.name} grants saved`);
+    setSaveError(null);
+
+    try {
+      // The server applies the whole matrix in one transaction and answers
+      // with what it stored, so the rows below become the stored values rather
+      // than the ones that were staged.
+      const response = await api.rbac.permissions.replaceForRole(
+        role.roleId,
+        grants.map((grant) => ({
+          queue_id: grant.queueId,
+          can_send: grant.permissions.send,
+          can_receive: grant.permissions.receive,
+          can_purge: grant.permissions.purge,
+          can_delete: grant.permissions.delete,
+        })),
+      );
+
+      setSaved(grantsOf(response.grants ?? [], queues));
+      setDraft(null);
+      onRolesChanged();
+      toast.success(`${role.name} grants saved`);
+    } catch (failure) {
+      setSaveError(describeFailure(failure, `save the ${role.name} grants`));
+    } finally {
+      setSaving(false);
+    }
   };
 
   const changed = (queueId: string, key: PermissionKey): boolean => {
-    const saved = role.grants.find((grant) => grant.queueId === queueId);
-    const staged = grants.find((grant) => grant.queueId === queueId);
+    if (!saved || !draft) return false;
+
+    const stored = saved.find((grant) => grant.queueId === queueId);
+    const staged = draft.find((grant) => grant.queueId === queueId);
     if (!staged) return false;
-    if (!saved) return staged.permissions[key];
-    return saved.permissions[key] !== staged.permissions[key];
+    if (!stored) return staged.permissions[key];
+
+    return stored.permissions[key] !== staged.permissions[key];
   };
 
   return (
-    <Panel>
-      <div className="flex items-center justify-between gap-4 border-b border-border px-4 py-3">
-        <div className="flex items-center gap-2.5">
-          <span className="text-sm font-semibold">{role.name}</span>
-          <Badge>{role.kind === "built-in" ? "Built-in" : "Custom"}</Badge>
-          <span className="text-xs text-muted-foreground">
-            {assigned.length} {assigned.length === 1 ? "user" : "users"} assigned
-          </span>
-        </div>
-        <div className="flex items-center gap-2">
-          {dirty ? (
-            <Status tone="warning" markerClassName="size-[7px]">
-              Unsaved changes
-            </Status>
-          ) : null}
-          <Button variant="outline" size="sm" disabled={!dirty || saving} onClick={cancel}>
-            Cancel
-          </Button>
-          <Button
-            size="sm"
-            loading={saving}
-            disabled={!dirty}
-            blockedReason={editBlocked}
-            onClick={() => void save()}
-          >
-            Save changes
-          </Button>
-        </div>
-      </div>
+    <div className="flex flex-col gap-3">
+      <InlineAlert tone="warning" className="items-start">
+        {NOT_ENFORCED}
+      </InlineAlert>
 
-      {locked ? (
-        <div className="border-b border-border p-4">
-          <InlineAlert tone="warning" className="items-start">
-            {BYPASS_REASON}
-          </InlineAlert>
-        </div>
+      {queuesError ? (
+        <InlineAlert className="items-start">
+          {queuesError} Grants still load and save; rows show queue IDs instead of names.
+        </InlineAlert>
       ) : null}
 
-      <Table>
-        <TableHeader>
-          <TableRow>
-            <TableHead>Queue</TableHead>
-            {PERMISSION_KEYS.map((key) => (
-              <TableHead key={key} className="w-[110px] text-center">
-                {PERMISSION_LABELS[key]}
-              </TableHead>
-            ))}
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {grants.map((grant) => (
-            <TableRow key={grant.queueId}>
-              <TableCell className="py-2.5">
-                <span className="block text-[13px] leading-[17px] font-semibold">
-                  {grant.queueName}
-                </span>
-                <span className="block font-mono text-[10px] text-muted-foreground">
-                  {grant.queueId}
-                </span>
-              </TableCell>
-              {PERMISSION_KEYS.map((key) => (
-                <TableCell
-                  key={key}
-                  className={cn(
-                    "py-2.5 text-center",
-                    changed(grant.queueId, key) && "bg-warning-surface",
-                  )}
+      {saveError ? <InlineAlert className="items-start">{saveError}</InlineAlert> : null}
+
+      <Panel>
+        <div className="flex items-center justify-between gap-4 border-b border-border px-4 py-3">
+          <div className="flex items-center gap-2.5">
+            <span className="text-sm font-semibold">{role.name}</span>
+            {role.isAdmin ? <Badge>Authorization role</Badge> : null}
+            <span className="text-xs text-muted-foreground">
+              {role.userCount} {role.userCount === 1 ? "account" : "accounts"} assigned
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            {dirty ? (
+              <Status tone="warning" markerClassName="size-[7px]">
+                Unsaved changes
+              </Status>
+            ) : null}
+            <Button variant="outline" size="sm" disabled={!dirty || saving} onClick={cancel}>
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              loading={saving}
+              disabled={!dirty}
+              blockedReason={blockedReason}
+              onClick={() => void save()}
+            >
+              Save changes
+            </Button>
+          </div>
+        </div>
+
+        {role.isAdmin ? (
+          <div className="border-b border-border p-4">
+            <InlineAlert tone="warning" className="items-start">
+              Accounts with this role pass PlainQ's queue-permission check without consulting the
+              grants below — that is what the check does when it is mounted. The rows are still
+              stored, and still shown, rather than being rewritten into an implied "all".
+            </InlineAlert>
+          </div>
+        ) : null}
+
+        {grantsError ? (
+          <div className="p-4">
+            <InlineAlert
+              className="items-start"
+              action={
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => void loadGrants(role.roleId, queues)}
                 >
-                  <span className="inline-flex">
-                    <Checkbox
-                      checked={grant.permissions[key]}
-                      disabled={Boolean(editBlocked)}
-                      title={editBlocked}
-                      onCheckedChange={() => toggle(grant.queueId, key)}
-                      aria-label={`${PERMISSION_LABELS[key]} on ${grant.queueName}`}
-                    />
+                  Retry
+                </Button>
+              }
+            >
+              {grantsError}
+            </InlineAlert>
+          </div>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Queue</TableHead>
+                {PERMISSION_KEYS.map((key) => (
+                  <TableHead key={key} className="w-[110px] text-center">
+                    {PERMISSION_LABELS[key]}
+                  </TableHead>
+                ))}
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {grantsLoading && saved === null ? (
+                <TableRow>
+                  <TableCell colSpan={PERMISSION_KEYS.length + 1} className="py-2.5">
+                    <Skeleton className="h-[13px] w-40" />
+                  </TableCell>
+                </TableRow>
+              ) : (
+                grants.map((grant) => (
+                  <TableRow key={grant.queueId}>
+                    <TableCell className="py-2.5">
+                      <span className="block text-[13px] leading-[17px] font-semibold">
+                        {grant.queueName || (
+                          <span className="text-muted-foreground">
+                            Queue not in the current list
+                          </span>
+                        )}
+                      </span>
+                      <span className="block font-mono text-[10px] text-muted-foreground">
+                        {grant.queueId}
+                      </span>
+                    </TableCell>
+                    {PERMISSION_KEYS.map((key) => (
+                      <TableCell
+                        key={key}
+                        className={cn(
+                          "py-2.5 text-center",
+                          changed(grant.queueId, key) && "bg-warning-surface",
+                        )}
+                      >
+                        <span className="inline-flex">
+                          <Checkbox
+                            checked={grant.permissions[key]}
+                            disabled={Boolean(blockedReason)}
+                            title={blockedReason}
+                            onCheckedChange={() => toggle(grant.queueId, key)}
+                            aria-label={`${PERMISSION_LABELS[key]} on ${grant.queueName || grant.queueId}`}
+                          />
+                        </span>
+                      </TableCell>
+                    ))}
+                  </TableRow>
+                ))
+              )}
+
+              <TableRow>
+                <TableCell className="py-2.5">
+                  <Select
+                    value={addQueueId}
+                    onValueChange={addQueue}
+                    disabled={Boolean(blockedReason) || ungranted.length === 0}
+                  >
+                    <SelectTrigger size="sm" aria-label="Add queue permission">
+                      <SelectValue placeholder="+ Add queue permission" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {ungranted.map((queue) => (
+                        <SelectItem key={queue.queueId} value={queue.queueId}>
+                          {queue.queueName}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </TableCell>
+                <TableCell
+                  colSpan={PERMISSION_KEYS.length}
+                  className="py-2.5 whitespace-normal"
+                >
+                  <span className="text-xs text-muted-foreground">
+                    {queues.length === 0
+                      ? "No queues to grant on yet."
+                      : ungranted.length === 0
+                        ? "Every queue in the list already has a row for this role."
+                        : "Queues without a row for this role. A new row starts with nothing granted."}
                   </span>
                 </TableCell>
-              ))}
-            </TableRow>
-          ))}
+              </TableRow>
+            </TableBody>
+          </Table>
+        )}
 
-          <TableRow>
-            <TableCell className="py-2.5">
-              <Select
-                value={addQueueId}
-                onValueChange={addQueue}
-                disabled={Boolean(editBlocked) || ungranted.length === 0}
-              >
-                <SelectTrigger size="sm" aria-label="Add queue permission">
-                  <SelectValue placeholder="+ Add queue permission" />
-                </SelectTrigger>
-                <SelectContent>
-                  {ungranted.map((queue) => (
-                    <SelectItem key={queue.queueId} value={queue.queueId}>
-                      {queue.queueName}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </TableCell>
-            <TableCell colSpan={PERMISSION_KEYS.length} className="py-2.5 whitespace-normal">
-              <span className="text-xs text-muted-foreground">
-                {ungranted.length === 0
-                  ? "Every known queue already has a grant for this role."
-                  : "Queues without grants for this role. A new row starts with nothing granted."}
-              </span>
-            </TableCell>
-          </TableRow>
-        </TableBody>
-      </Table>
+        <div className="grid grid-cols-1 border-t border-border md:grid-cols-2">
+          <div className="border-b border-border px-4 py-3 md:border-r md:border-b-0">
+            <div className="caption mb-2">Role list — actual grants, not names</div>
+            <div className="flex flex-col gap-1.5">
+              {roles.map((candidate) => {
+                const selected = candidate.roleId === role.roleId;
+                const total = selected ? countGrants(grants) : null;
 
-      <div className="grid grid-cols-1 border-t border-border md:grid-cols-2">
-        <div className="border-b border-border px-4 py-3 md:border-r md:border-b-0">
-          <div className="caption mb-2">Role list — actual grants, not names</div>
-          <div className="flex flex-col gap-1.5">
-            {roles.map((candidate) => {
-              const total = countGrants(candidate);
-              const editing = Boolean(
-                drafts[candidate.roleId] &&
-                  !sameGrants(drafts[candidate.roleId]!, candidate.grants),
-              );
-
-              return (
-                <button
-                  key={candidate.roleId}
-                  type="button"
-                  onClick={() => setSelectedRoleId(candidate.roleId)}
-                  aria-label={`Edit ${candidate.name} grants`}
-                  aria-current={candidate.roleId === role.roleId ? "true" : undefined}
-                  className={cn(
-                    "flex cursor-pointer items-baseline justify-between gap-4 px-1 py-0.5 text-left text-xs",
-                    candidate.roleId === role.roleId ? "bg-muted" : "hover:bg-muted",
-                  )}
-                >
-                  <span className="font-medium">
-                    {candidate.name}{" "}
-                    <span className="text-subtle">
-                      · {candidate.kind}
-                      {candidate.bypass ? " · locked" : ""}
+                return (
+                  <button
+                    key={candidate.roleId}
+                    type="button"
+                    onClick={() => setSelectedRoleId(candidate.roleId)}
+                    aria-label={`Edit ${candidate.name} grants`}
+                    aria-current={selected ? "true" : undefined}
+                    className={cn(
+                      "flex cursor-pointer items-baseline justify-between gap-4 px-1 py-0.5 text-left text-xs",
+                      selected ? "bg-muted" : "hover:bg-muted",
+                    )}
+                  >
+                    <span className="font-medium">
+                      {candidate.name}{" "}
+                      <span className="text-subtle">
+                        · {candidate.userCount}{" "}
+                        {candidate.userCount === 1 ? "account" : "accounts"}
+                      </span>
                     </span>
-                  </span>
-                  <span className="shrink-0 font-mono text-muted-foreground">
-                    {candidate.bypass
-                      ? "bypass (integration target)"
-                      : total === 0
-                        ? "0 grants configured"
-                        : `${total} ${total === 1 ? "grant" : "grants"}`}
-                    {editing ? " · editing" : ""}
-                  </span>
-                </button>
-              );
-            })}
+                    <span className="shrink-0 font-mono text-muted-foreground">
+                      {/*
+                        Only the open role's grants have been read. Printing a
+                        count for the others would be a number nobody fetched.
+                      */}
+                      {total === null
+                        ? "grants not read"
+                        : total === 0
+                          ? "0 grants configured"
+                          : `${total} ${total === 1 ? "grant" : "grants"}`}
+                      {selected && dirty ? " · editing" : ""}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
           </div>
-        </div>
 
-        <div className="px-4 py-3">
-          <div className="caption mb-2">Guards</div>
-          <div className="flex flex-col gap-1.5 text-xs leading-normal text-strong">
-            <span>
-              {assigned.length > 0
-                ? `Role in use can't be deleted — reassign its ${assigned.length} ${
-                    assigned.length === 1 ? "user" : "users"
-                  } first.`
-                : "No users hold this role, so it can be deleted without reassignment."}
-            </span>
-            <span>Concurrent change → reload or review server values; no silent overwrite.</span>
-            <span>No queues yet → role persists; grants can be added later.</span>
+          <div className="px-4 py-3">
+            <div className="caption mb-2">Guards the server enforces</div>
+            <div className="flex flex-col gap-1.5 text-xs leading-normal text-strong">
+              <span>A role still held by an account can't be deleted — the server answers 409.</span>
+              <span>
+                The last account holding <span className="font-mono">admin</span> can't lose it,
+                and that role can't be renamed or deleted.
+              </span>
+              <span>Saving replaces the whole matrix in one transaction — no partial writes.</span>
+            </div>
           </div>
         </div>
-      </div>
-    </Panel>
+      </Panel>
+    </div>
   );
 }

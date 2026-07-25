@@ -69,6 +69,27 @@ func (q *Queries) DeleteOAuthProvider(ctx context.Context, providerID string) (i
 	return result.RowsAffected()
 }
 
+const getOAuthProviderByID = `-- name: GetOAuthProviderByID :one
+SELECT provider_id, provider_name, org_id, config_json, is_active, created_at, updated_at
+FROM oauth_providers
+WHERE provider_id = ?
+`
+
+func (q *Queries) GetOAuthProviderByID(ctx context.Context, providerID string) (OauthProvider, error) {
+	row := q.db.QueryRowContext(ctx, getOAuthProviderByID, providerID)
+	var i OauthProvider
+	err := row.Scan(
+		&i.ProviderID,
+		&i.ProviderName,
+		&i.OrgID,
+		&i.ConfigJson,
+		&i.IsActive,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getOAuthProviderByName = `-- name: GetOAuthProviderByName :one
 SELECT provider_id, provider_name, org_id, config_json, is_active, created_at, updated_at
 FROM oauth_providers
@@ -223,6 +244,38 @@ func (q *Queries) GetUserIDByOAuthSub(ctx context.Context, arg GetUserIDByOAuthS
 	return user_id, err
 }
 
+const getUserOrgID = `-- name: GetUserOrgID :one
+SELECT coalesce(org_id, '') AS org_id
+FROM users
+WHERE user_id = ?
+`
+
+func (q *Queries) GetUserOrgID(ctx context.Context, userID string) (string, error) {
+	row := q.db.QueryRowContext(ctx, getUserOrgID, userID)
+	var org_id string
+	err := row.Scan(&org_id)
+	return org_id, err
+}
+
+const getUserSyncStatus = `-- name: GetUserSyncStatus :one
+SELECT coalesce(oauth_provider, '') AS provider_name, is_oauth_user, last_sync_at
+FROM users
+WHERE user_id = ?
+`
+
+type GetUserSyncStatusRow struct {
+	ProviderName string
+	IsOauthUser  bool
+	LastSyncAt   sql.NullTime
+}
+
+func (q *Queries) GetUserSyncStatus(ctx context.Context, userID string) (GetUserSyncStatusRow, error) {
+	row := q.db.QueryRowContext(ctx, getUserSyncStatus, userID)
+	var i GetUserSyncStatusRow
+	err := row.Scan(&i.ProviderName, &i.IsOauthUser, &i.LastSyncAt)
+	return i, err
+}
+
 const insertOAuthUser = `-- name: InsertOAuthUser :exec
 INSERT INTO users (user_id, email, password, verified, org_id, oauth_provider, oauth_sub, is_oauth_user, last_sync_at, created_at, updated_at)
 VALUES (?, ?, '', TRUE, ?, ?, ?, TRUE, ?, ?, ?)
@@ -256,10 +309,11 @@ func (q *Queries) InsertOAuthUser(ctx context.Context, arg InsertOAuthUserParams
 const listOAuthProvidersByOrg = `-- name: ListOAuthProvidersByOrg :many
 SELECT provider_id, provider_name, org_id, config_json, is_active, created_at, updated_at
 FROM oauth_providers
-WHERE org_id = ?
+WHERE coalesce(org_id, '') = cast(?1 AS text)
+ORDER BY provider_name
 `
 
-func (q *Queries) ListOAuthProvidersByOrg(ctx context.Context, orgID sql.NullString) ([]OauthProvider, error) {
+func (q *Queries) ListOAuthProvidersByOrg(ctx context.Context, orgID string) ([]OauthProvider, error) {
 	rows, err := q.db.QueryContext(ctx, listOAuthProvidersByOrg, orgID)
 	if err != nil {
 		return nil, err
@@ -277,6 +331,96 @@ func (q *Queries) ListOAuthProvidersByOrg(ctx context.Context, orgID sql.NullStr
 			&i.CreatedAt,
 			&i.UpdatedAt,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listOrganizations = `-- name: ListOrganizations :many
+SELECT org_id, org_code, org_name, org_domain, is_active, created_at, updated_at
+FROM organizations
+WHERE is_active = TRUE
+ORDER BY org_name
+`
+
+func (q *Queries) ListOrganizations(ctx context.Context) ([]Organization, error) {
+	rows, err := q.db.QueryContext(ctx, listOrganizations)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Organization{}
+	for rows.Next() {
+		var i Organization
+		if err := rows.Scan(
+			&i.OrgID,
+			&i.OrgCode,
+			&i.OrgName,
+			&i.OrgDomain,
+			&i.IsActive,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listProviderSyncStats = `-- name: ListProviderSyncStats :many
+SELECT coalesce(u.oauth_provider, '') AS provider_name,
+       count(*)                       AS user_count,
+       (SELECT u2.last_sync_at
+        FROM users u2
+        WHERE u2.oauth_provider = u.oauth_provider
+          AND u2.last_sync_at IS NOT NULL
+          AND (cast(?1 AS boolean) = FALSE
+            OR coalesce(u2.org_id, '') = cast(?2 AS text))
+        ORDER BY u2.last_sync_at DESC
+        LIMIT 1)                      AS last_sync_at
+FROM users u
+WHERE u.is_oauth_user = TRUE
+  AND (cast(?1 AS boolean) = FALSE
+    OR coalesce(u.org_id, '') = cast(?2 AS text))
+GROUP BY u.oauth_provider
+`
+
+type ListProviderSyncStatsParams struct {
+	ScopeOrg bool
+	OrgID    string
+}
+
+type ListProviderSyncStatsRow struct {
+	ProviderName string
+	UserCount    int64
+	LastSyncAt   sql.NullTime
+}
+
+func (q *Queries) ListProviderSyncStats(ctx context.Context, arg ListProviderSyncStatsParams) ([]ListProviderSyncStatsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listProviderSyncStats, arg.ScopeOrg, arg.OrgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListProviderSyncStatsRow{}
+	for rows.Next() {
+		var i ListProviderSyncStatsRow
+		if err := rows.Scan(&i.ProviderName, &i.UserCount, &i.LastSyncAt); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -384,21 +528,24 @@ func (q *Queries) RemoveUserFromTeam(ctx context.Context, arg RemoveUserFromTeam
 
 const updateOAuthProvider = `-- name: UpdateOAuthProvider :execrows
 UPDATE oauth_providers
-SET config_json = ?,
-    is_active   = ?,
-    updated_at  = ?
+SET provider_name = ?,
+    config_json   = ?,
+    is_active     = ?,
+    updated_at    = ?
 WHERE provider_id = ?
 `
 
 type UpdateOAuthProviderParams struct {
-	ConfigJson string
-	IsActive   bool
-	UpdatedAt  time.Time
-	ProviderID string
+	ProviderName string
+	ConfigJson   string
+	IsActive     bool
+	UpdatedAt    time.Time
+	ProviderID   string
 }
 
 func (q *Queries) UpdateOAuthProvider(ctx context.Context, arg UpdateOAuthProviderParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, updateOAuthProvider,
+		arg.ProviderName,
 		arg.ConfigJson,
 		arg.IsActive,
 		arg.UpdatedAt,
