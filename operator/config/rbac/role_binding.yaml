@@ -1,0 +1,43 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: plainq-operator
+  labels:
+    app.kubernetes.io/name: plainq-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: plainq-operator
+subjects:
+  - kind: ServiceAccount
+    name: plainq-operator
+    namespace: plainq-system
+---
+# Leader election needs a Lease in the operator's own namespace, and nothing
+# wider than that.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: plainq-operator-leader-election
+  namespace: plainq-system
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: plainq-operator-leader-election
+  namespace: plainq-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: plainq-operator-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: plainq-operator
+    namespace: plainq-system

@@ -1,0 +1,647 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.19.0
+  name: plainqbackups.plainq.dev
+spec:
+  group: plainq.dev
+  names:
+    categories:
+    - plainq
+    kind: PlainQBackup
+    listKind: PlainQBackupList
+    plural: plainqbackups
+    shortNames:
+    - pqb
+    singular: plainqbackup
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.engine
+      name: Engine
+      type: string
+    - jsonPath: .status.compressedSize
+      name: Size
+      type: string
+    - jsonPath: .status.duration
+      name: Duration
+      type: string
+    - jsonPath: .status.verification.result
+      name: Verified
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: PlainQBackup is one backup run and the record of how to read
+          it back.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              PlainQBackupSpec is one backup run: created by a policy's CronJob, or by
+              hand for an ad-hoc backup before an upgrade.
+            properties:
+              compression:
+                description: Compression overrides the policy's compression.
+                enum:
+                - none
+                - gzip
+                - zstd
+                type: string
+              deletionPolicy:
+                default: Delete
+                description: |-
+                  DeletionPolicy decides whether deleting this object deletes the
+                  artifact at the destination.
+                enum:
+                - Retain
+                - Delete
+                type: string
+              destination:
+                description: Destination overrides the policy's destination.
+                properties:
+                  filesystem:
+                    description: Filesystem writes to a PersistentVolume.
+                    properties:
+                      claimTemplate:
+                        description: ClaimTemplate creates the claim instead of adopting
+                          one.
+                        properties:
+                          accessModes:
+                            description: AccessModes for the claim.
+                            items:
+                              type: string
+                            type: array
+                          annotations:
+                            additionalProperties:
+                              type: string
+                            description: Annotations added to the claim.
+                            type: object
+                          size:
+                            default: 8Gi
+                            description: Size of the volume.
+                            type: string
+                          storageClassName:
+                            description: StorageClassName selects the class. Empty
+                              uses the cluster default.
+                            type: string
+                        type: object
+                      existingClaim:
+                        description: |-
+                          ExistingClaim names a PersistentVolumeClaim to write into. Prefer
+                          ReadWriteMany so restore Jobs can be scheduled anywhere.
+                        type: string
+                      path:
+                        description: Path is the directory prefix within the volume.
+                        type: string
+                    type: object
+                  s3:
+                    description: S3 writes to S3-compatible object storage.
+                    properties:
+                      bucket:
+                        description: Bucket that holds the artifacts.
+                        type: string
+                      caBundleSecretRef:
+                        description: CABundleSecretRef holds a CA bundle for a private-CA
+                          endpoint.
+                        properties:
+                          key:
+                            description: Key within the Secret.
+                            type: string
+                          name:
+                            description: Name of the Secret.
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                      credentialsSecretRef:
+                        description: |-
+                          CredentialsSecretRef holds static credentials. Omit it to use the
+                          pod's ambient identity (IRSA, workload identity, instance role).
+                        properties:
+                          accessKeyIDKey:
+                            default: access-key-id
+                            description: AccessKeyIDKey is the key holding the access
+                              key ID.
+                            type: string
+                          name:
+                            description: Name of the Secret.
+                            type: string
+                          secretAccessKeyKey:
+                            default: secret-access-key
+                            description: SecretAccessKeyKey is the key holding the
+                              secret access key.
+                            type: string
+                          sessionTokenKey:
+                            description: SessionTokenKey is the key holding an optional
+                              session token.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                      endpoint:
+                        description: |-
+                          Endpoint is the S3 API endpoint. Empty means the AWS endpoint derived
+                          from Region.
+                        type: string
+                      forcePathStyle:
+                        description: |-
+                          ForcePathStyle addresses the bucket as a path segment rather than a
+                          virtual host. MinIO and most self-hosted gateways need it.
+                        type: boolean
+                      insecureSkipVerify:
+                        description: |-
+                          InsecureSkipVerify disables TLS verification. It exists for lab
+                          clusters; it should never be set against anything that matters.
+                        type: boolean
+                      kmsKeyID:
+                        description: KMSKeyID names the key when ServerSideEncryption
+                          is aws:kms.
+                        type: string
+                      prefix:
+                        description: Prefix is the key prefix within the bucket.
+                        type: string
+                      region:
+                        description: Region of the bucket.
+                        type: string
+                      serverSideEncryption:
+                        description: ServerSideEncryption requests SSE, for example
+                          AES256 or aws:kms.
+                        type: string
+                      storageClass:
+                        description: StorageClass for uploaded objects, for example
+                          STANDARD_IA.
+                        type: string
+                    required:
+                    - bucket
+                    type: object
+                type: object
+              encryption:
+                description: Encryption overrides the policy's encryption.
+                properties:
+                  enabled:
+                    description: Enabled turns on encryption.
+                    type: boolean
+                  secretRef:
+                    description: SecretRef holds the age identity used to encrypt
+                      and decrypt.
+                    properties:
+                      key:
+                        description: Key within the Secret.
+                        type: string
+                      name:
+                        description: Name of the Secret.
+                        type: string
+                    required:
+                    - key
+                    - name
+                    type: object
+                type: object
+              engine:
+                description: Engine overrides the policy's engine for this run.
+                enum:
+                - Online
+                - VolumeSnapshot
+                - PostgresDump
+                - Litestream
+                type: string
+              policyRef:
+                description: PolicyRef seeds the effective configuration from a policy.
+                properties:
+                  name:
+                    description: Name of the referenced object.
+                    type: string
+                required:
+                - name
+                type: object
+              serverRef:
+                description: ServerRef points at the instance to back up.
+                properties:
+                  credentialsSecretRef:
+                    description: |-
+                      CredentialsSecretRef holds admin credentials for Endpoint. Ignored when
+                      Name is set, because the operator already holds that instance's
+                      bootstrap credentials.
+                    properties:
+                      emailKey:
+                        default: email
+                        description: EmailKey is the key holding the account email.
+                        type: string
+                      name:
+                        description: Name of the Secret.
+                        type: string
+                      passwordKey:
+                        default: password
+                        description: PasswordKey is the key holding the account password.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  endpoint:
+                    description: |-
+                      Endpoint is the base URL of a PlainQ HTTP listener the operator does
+                      not manage, for example http://plainq.other.svc:8081.
+                    type: string
+                  name:
+                    description: Name of a PlainQ object in the same namespace.
+                    type: string
+                type: object
+              ttl:
+                description: |-
+                  TTL after which this object is garbage collected. Empty leaves it to
+                  the policy's retention.
+                type: string
+            required:
+            - serverRef
+            type: object
+          status:
+            description: PlainQBackupStatus is the observed state of one backup run.
+            properties:
+              checksum:
+                description: Checksum of the stored artifact.
+                properties:
+                  algorithm:
+                    description: Algorithm used, always sha256 today.
+                    type: string
+                  value:
+                    description: Value is the hex-encoded digest.
+                    type: string
+                type: object
+              completedAt:
+                description: CompletedAt timestamp.
+                format: date-time
+                type: string
+              compressedSize:
+                description: CompressedSize of the stored artifact.
+                type: string
+              conditions:
+                description: Conditions follow the Kubernetes convention.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              consensus:
+                description: Consensus records how current the copy was, in log terms.
+                properties:
+                  leaderCommitIndex:
+                    description: LeaderCommitIndex captured before the copy began.
+                    format: int64
+                    type: integer
+                  sourceAppliedIndex:
+                    description: |-
+                      SourceAppliedIndex the source node had reached when it was copied.
+                      Equal to or greater than LeaderCommitIndex on a correct run.
+                    format: int64
+                    type: integer
+                type: object
+              duration:
+                description: Duration of the run.
+                type: string
+              effectiveConfig:
+                description: |-
+                  EffectiveConfig is everything needed to read this artifact back,
+                  frozen before the run started and never updated afterwards.
+
+                  A run that remembered only PolicyRef would stop being restorable the
+                  moment that policy was edited or deleted: a later restore would
+                  resolve today's bucket, endpoint, encryption identity and compression
+                  rather than the ones the artifact was written with. Rotating an S3
+                  endpoint would quietly invalidate every historical backup.
+
+                  Secret references are frozen, not secret values.
+                properties:
+                  compression:
+                    description: Compression applied.
+                    enum:
+                    - none
+                    - gzip
+                    - zstd
+                    type: string
+                  destination:
+                    description: Destination the artifact was written to.
+                    properties:
+                      filesystem:
+                        description: Filesystem writes to a PersistentVolume.
+                        properties:
+                          claimTemplate:
+                            description: ClaimTemplate creates the claim instead of
+                              adopting one.
+                            properties:
+                              accessModes:
+                                description: AccessModes for the claim.
+                                items:
+                                  type: string
+                                type: array
+                              annotations:
+                                additionalProperties:
+                                  type: string
+                                description: Annotations added to the claim.
+                                type: object
+                              size:
+                                default: 8Gi
+                                description: Size of the volume.
+                                type: string
+                              storageClassName:
+                                description: StorageClassName selects the class. Empty
+                                  uses the cluster default.
+                                type: string
+                            type: object
+                          existingClaim:
+                            description: |-
+                              ExistingClaim names a PersistentVolumeClaim to write into. Prefer
+                              ReadWriteMany so restore Jobs can be scheduled anywhere.
+                            type: string
+                          path:
+                            description: Path is the directory prefix within the volume.
+                            type: string
+                        type: object
+                      s3:
+                        description: S3 writes to S3-compatible object storage.
+                        properties:
+                          bucket:
+                            description: Bucket that holds the artifacts.
+                            type: string
+                          caBundleSecretRef:
+                            description: CABundleSecretRef holds a CA bundle for a
+                              private-CA endpoint.
+                            properties:
+                              key:
+                                description: Key within the Secret.
+                                type: string
+                              name:
+                                description: Name of the Secret.
+                                type: string
+                            required:
+                            - key
+                            - name
+                            type: object
+                          credentialsSecretRef:
+                            description: |-
+                              CredentialsSecretRef holds static credentials. Omit it to use the
+                              pod's ambient identity (IRSA, workload identity, instance role).
+                            properties:
+                              accessKeyIDKey:
+                                default: access-key-id
+                                description: AccessKeyIDKey is the key holding the
+                                  access key ID.
+                                type: string
+                              name:
+                                description: Name of the Secret.
+                                type: string
+                              secretAccessKeyKey:
+                                default: secret-access-key
+                                description: SecretAccessKeyKey is the key holding
+                                  the secret access key.
+                                type: string
+                              sessionTokenKey:
+                                description: SessionTokenKey is the key holding an
+                                  optional session token.
+                                type: string
+                            required:
+                            - name
+                            type: object
+                          endpoint:
+                            description: |-
+                              Endpoint is the S3 API endpoint. Empty means the AWS endpoint derived
+                              from Region.
+                            type: string
+                          forcePathStyle:
+                            description: |-
+                              ForcePathStyle addresses the bucket as a path segment rather than a
+                              virtual host. MinIO and most self-hosted gateways need it.
+                            type: boolean
+                          insecureSkipVerify:
+                            description: |-
+                              InsecureSkipVerify disables TLS verification. It exists for lab
+                              clusters; it should never be set against anything that matters.
+                            type: boolean
+                          kmsKeyID:
+                            description: KMSKeyID names the key when ServerSideEncryption
+                              is aws:kms.
+                            type: string
+                          prefix:
+                            description: Prefix is the key prefix within the bucket.
+                            type: string
+                          region:
+                            description: Region of the bucket.
+                            type: string
+                          serverSideEncryption:
+                            description: ServerSideEncryption requests SSE, for example
+                              AES256 or aws:kms.
+                            type: string
+                          storageClass:
+                            description: StorageClass for uploaded objects, for example
+                              STANDARD_IA.
+                            type: string
+                        required:
+                        - bucket
+                        type: object
+                    type: object
+                  encryption:
+                    description: Encryption applied, by reference.
+                    properties:
+                      enabled:
+                        description: Enabled turns on encryption.
+                        type: boolean
+                      secretRef:
+                        description: SecretRef holds the age identity used to encrypt
+                          and decrypt.
+                        properties:
+                          key:
+                            description: Key within the Secret.
+                            type: string
+                          name:
+                            description: Name of the Secret.
+                            type: string
+                        required:
+                        - key
+                        - name
+                        type: object
+                    type: object
+                  engine:
+                    description: Engine used.
+                    enum:
+                    - Online
+                    - VolumeSnapshot
+                    - PostgresDump
+                    - Litestream
+                    type: string
+                  source:
+                    description: |-
+                      Source describes the instance shape, so a restore can stand an
+                      instance up from the artifact alone.
+                    properties:
+                      cluster:
+                        description: Cluster shape of the source.
+                        properties:
+                          enabled:
+                            description: Enabled reports whether the source was clustered.
+                            type: boolean
+                          replicas:
+                            description: Replicas the source ran.
+                            format: int32
+                            type: integer
+                        type: object
+                      serverVersion:
+                        description: ServerVersion of the source.
+                        type: string
+                      sqlitePath:
+                        description: SQLitePath inside the container.
+                        type: string
+                      storageDriver:
+                        description: StorageDriver of the source.
+                        enum:
+                        - sqlite
+                        - postgres
+                        type: string
+                      volumeSize:
+                        description: VolumeSize of the source's data volume.
+                        type: string
+                    type: object
+                type: object
+              engine:
+                description: Engine that produced the artifact.
+                enum:
+                - Online
+                - VolumeSnapshot
+                - PostgresDump
+                - Litestream
+                type: string
+              location:
+                description: Location is the artifact URI.
+                type: string
+              message:
+                description: Message explains a failure.
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the spec generation this status
+                  reflects.
+                format: int64
+                type: integer
+              phase:
+                description: Phase of the run.
+                enum:
+                - Pending
+                - Running
+                - Succeeded
+                - Failed
+                - Deleting
+                type: string
+              serverVersion:
+                description: ServerVersion that produced the database.
+                type: string
+              size:
+                description: Size of the database before compression.
+                type: string
+              sourceNode:
+                description: SourceNode the artifact was copied from.
+                type: string
+              startedAt:
+                description: StartedAt timestamp.
+                format: date-time
+                type: string
+              storageDriver:
+                description: StorageDriver of the source instance.
+                enum:
+                - sqlite
+                - postgres
+                type: string
+              verification:
+                description: Verification result.
+                properties:
+                  at:
+                    description: At is when verification ran.
+                    format: date-time
+                    type: string
+                  message:
+                    description: Message explains a failure.
+                    type: string
+                  result:
+                    description: Result is Passed, Failed or Skipped.
+                    type: string
+                type: object
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

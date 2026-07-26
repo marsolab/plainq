@@ -1,7 +1,11 @@
 # PlainQ Kubernetes operator — implementation
 
 Plan for [the operator design](../specs/2026-07-26-kubernetes-operator-design.md).
-Status: proposed.
+Status: in progress — steps 1–9 and 14 are built and tested in
+[`operator/`](../../../operator); steps 10–13 (backup and restore controllers,
+the agent sidecar) are API-only so far. See the
+[operator README](../../../deploy/operator/README.md) for the current
+capability table.
 
 ## Shape of the change
 

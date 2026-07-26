@@ -1,0 +1,152 @@
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: mutating-webhook-configuration
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /mutate-plainq-dev-v1alpha1-plainq
+  failurePolicy: Fail
+  name: mplainq.plainq.dev
+  rules:
+  - apiGroups:
+    - plainq.dev
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - plainqs
+  sideEffects: None
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: validating-webhook-configuration
+webhooks:
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-plainq-dev-v1alpha1-plainq
+  failurePolicy: Fail
+  name: vplainq.plainq.dev
+  rules:
+  - apiGroups:
+    - plainq.dev
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - plainqs
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-plainq-dev-v1alpha1-plainqaccount
+  failurePolicy: Fail
+  name: vplainqaccount.plainq.dev
+  rules:
+  - apiGroups:
+    - plainq.dev
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - plainqaccounts
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-plainq-dev-v1alpha1-plainqbackuppolicy
+  failurePolicy: Fail
+  name: vplainqbackuppolicy.plainq.dev
+  rules:
+  - apiGroups:
+    - plainq.dev
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - plainqbackuppolicies
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-plainq-dev-v1alpha1-plainqqueue
+  failurePolicy: Fail
+  name: vplainqqueue.plainq.dev
+  rules:
+  - apiGroups:
+    - plainq.dev
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - plainqqueues
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-plainq-dev-v1alpha1-plainqrestore
+  failurePolicy: Fail
+  name: vplainqrestore.plainq.dev
+  rules:
+  - apiGroups:
+    - plainq.dev
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - plainqrestores
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
+      path: /validate-plainq-dev-v1alpha1-plainqtopic
+  failurePolicy: Fail
+  name: vplainqtopic.plainq.dev
+  rules:
+  - apiGroups:
+    - plainq.dev
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - plainqtopics
+  sideEffects: None

@@ -1,16 +1,38 @@
 # PlainQ Kubernetes operator
 
-A design for a controller that turns the whole PlainQ surface — servers,
-clusters, queues, topics, accounts, backups, restores — into Kubernetes objects
-and keeps reality matching them.
+A controller that turns the PlainQ surface — servers, clusters, queues, topics,
+accounts — into Kubernetes objects and keeps reality matching them.
 
+- **Source:** [`operator/`](../../operator) (a separate Go module)
 - **Design:** [`docs/superpowers/specs/2026-07-26-kubernetes-operator-design.md`](../../docs/superpowers/specs/2026-07-26-kubernetes-operator-design.md)
 - **Implementation plan:** [`docs/superpowers/plans/2026-07-26-kubernetes-operator-implementation.md`](../../docs/superpowers/plans/2026-07-26-kubernetes-operator-implementation.md)
 
-> **Status: proposed.** The manifests in [`samples/`](samples) are the design's
-> API surface written out as YAML. There is no controller yet — applying them
-> today will fail because the CRDs do not exist. They are here so the API can be
-> reviewed as something you would actually type.
+## What works today
+
+The provisioning operator — steps 1–9 of the plan, which that plan calls out as
+independently shippable.
+
+| Capability | State |
+| --- | --- |
+| All seven CRDs, with validation, printer columns and status | ✅ |
+| Provision single-node SQLite, Postgres-backed, and Raft clusters | ✅ |
+| Every `serve` flag reachable, plus `extraArgs` | ✅ |
+| Bootstrap the first admin without a browser | ✅ |
+| Declarative queues, with dead-letter ordering and drift reporting | ✅ |
+| Declarative topics and subscriptions | ✅ |
+| Accounts, with the registration constraint enforced at admission | ✅ |
+| Supervised cluster scale-in (voter removed before pod) | ✅ |
+| Quorum-derived PodDisruptionBudget, NetworkPolicy, Ingress, HPA | ✅ |
+| Cutover alias Service | ✅ |
+| Admission webhooks (defaulting + validation) | ✅ |
+| **Backups** — `PlainQBackupPolicy`, `PlainQBackup` | ⏳ API only, no controller |
+| **Restores** — `PlainQRestore` | ⏳ API only, no controller |
+| Backup agent sidecar (`cmd/agent`) | ⏳ not started |
+
+The backup and restore CRDs install and validate, so manifests written against
+them are correct — but nothing reconciles them yet. Do not rely on them for
+data protection; keep using [Litestream](../../docs/guides/deployment.md) until
+the controllers land.
 
 ## Operator or Helm chart?
 
@@ -21,15 +43,33 @@ Both ship. They answer different questions.
 | Install one PlainQ | ✅ one command | ✅ one `PlainQ` object |
 | Provision queues and topics | ❌ manual | ✅ `PlainQQueue`, `PlainQTopic` |
 | First admin account | ❌ browser onboarding | ✅ `spec.bootstrap` |
-| Scheduled backups to S3 / filesystem | ❌ | ✅ `PlainQBackupPolicy` |
-| Continuous replication | ❌ run Litestream yourself | ✅ `continuous.enabled` |
-| Restore | ❌ manual `litestream restore` | ✅ `PlainQRestore` |
 | Safe cluster scale-in | ❌ `kubectl scale` can break quorum | ✅ supervised drain |
-| Quorum-aware rolling upgrades | ❌ | ✅ |
+| Backups and restores | ❌ | ⏳ designed, not built |
 | Needs cluster-wide CRDs | no | yes |
 
-Start with the chart. Move to the operator when you have more than one instance,
-or when you need backups you can restore from.
+Start with the chart. Move to the operator when you have more than one
+instance, or when you want queues under version control.
+
+## Install
+
+```shell
+cd operator
+
+make install                      # CRDs only
+make deploy IMAGE=... VERSION=...  # CRDs, RBAC and the manager
+
+# Or run it locally against your current kubecontext:
+make run
+```
+
+`make run` disables leader election and the webhooks, because the webhooks need
+a serving certificate. Validation still runs — the rules live in
+`internal/validation` and the reconcilers re-check the ones that depend on live
+cluster state — but rejections arrive as conditions rather than at admission.
+
+Migrating from the chart is a `PlainQ` with
+`storage.sqlite.persistence.existingClaim` pointing at the chart's PVC and
+`auth.jwtSecretRef` at its Secret: same volume, same secret, no data movement.
 
 ## Samples
 
@@ -42,3 +82,10 @@ or when you need backups you can restore from.
 | [`05-backup-s3.yaml`](samples/05-backup-s3.yaml) | Continuous replication plus a nightly verified backup to S3-compatible storage. |
 | [`06-backup-filesystem.yaml`](samples/06-backup-filesystem.yaml) | Scheduled backups to an NFS/CephFS volume, for on-prem and air-gapped clusters. |
 | [`07-restore.yaml`](samples/07-restore.yaml) | Restore into a fresh instance, and point-in-time restore in place. |
+
+Samples 05–07 describe the backup and restore API, which installs but does not
+reconcile yet.
+
+These are not decoration: `operator/internal/manifests` decodes every one of
+them strictly against the Go types on each `make test`, so a misspelled or
+removed field fails in CI rather than at someone's `kubectl apply`.
