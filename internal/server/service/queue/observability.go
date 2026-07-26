@@ -129,13 +129,19 @@ func (s *ObservedStorage) Send(ctx context.Context, input *v1.SendRequest) (*v1.
 	// Sizes are recorded per message and the total once, because the two
 	// answer different questions: the histogram says what a typical message
 	// looks like, the counter says how much traffic the queue is carrying.
+	//
+	// The histogram is resolved once for the batch. A Send may carry two
+	// thousand messages, and looking the same handle up by label on each of
+	// them is work the hot path should not be doing.
 	var bytes uint64
+
+	sizes := s.observer.MessageSizes(queueID)
 
 	for _, message := range input.GetMessages() {
 		size := len(message.GetBody())
 		bytes += uint64(size)
 
-		s.observer.MessageSize(queueID, size)
+		sizes.Update(float64(size))
 	}
 
 	s.observer.Sent(queueID, uint64(len(out.GetMessageIds())), bytes)

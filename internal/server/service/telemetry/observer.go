@@ -118,9 +118,10 @@ func (o *Observer) Sent(queueID string, count, bytes uint64) {
 	}
 }
 
-// MessageSize records one message body size.
-func (o *Observer) MessageSize(queueID string, size int) {
-	metrics.RecordMessageSize(queueID, size)
+// MessageSizes returns the recorder for a queue's message body sizes,
+// resolved once for a whole batch rather than per message.
+func (o *Observer) MessageSizes(queueID string) *metrics.Histogram {
+	return metrics.MessageSizes(queueID)
 }
 
 // Received records messages handed to a consumer. A zero count is an empty

@@ -177,6 +177,14 @@ func RecordMessageSize(queueID string, size int) {
 	messageSize.Observe(float64(size), queueID)
 }
 
+// MessageSizes returns a queue's body-size histogram.
+//
+// A Send carrying two thousand messages measures two thousand bodies, and
+// resolving the histogram by label on each one would put a map lookup on the
+// hot path per message to reach a handle that never changes. Batched writers
+// take it once and update it directly.
+func MessageSizes(queueID string) *Histogram { return messageSize.With(queueID) }
+
 // RecordReceive records a receive. An empty receive is counted separately
 // rather than as a zero-count receive: the two mean different things, and
 // conflating them hides idle-polling consumers.
