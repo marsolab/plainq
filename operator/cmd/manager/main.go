@@ -93,12 +93,11 @@ func run() error {
 
 	clients := controller.NewClientFactory(mgr.GetClient())
 
-	// GetEventRecorderFor is deprecated in favor of GetEventRecorder, which
-	// returns the newer events.EventRecorder. That interface takes an extra
-	// "action" argument on every call and would reshape each reconciler's
-	// event sites for no behavioral gain; migrating it is tracked as
-	// follow-up work rather than folded in here.
-	recorderFor := mgr.GetEventRecorderFor
+	// controller.NewRecorder adapts the events/v1 recorder the manager hands
+	// out, so the reconcilers keep a two-argument Event surface.
+	recorderFor := func(name string) controller.Recorder {
+		return controller.NewRecorder(mgr.GetEventRecorder(name))
+	}
 
 	reconcilers := []interface{ SetupWithManager(mgr ctrl.Manager) error }{
 		&controller.PlainQReconciler{
