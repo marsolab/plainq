@@ -1,6 +1,7 @@
 package validation
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -71,7 +72,7 @@ func validateCronField(expr string, f cronField) error {
 
 func validateCronItem(item string, f cronField) error {
 	if item == "" {
-		return fmt.Errorf("empty value")
+		return errors.New("empty value")
 	}
 
 	// Step: <range>/<n>.

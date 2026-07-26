@@ -211,7 +211,3 @@ type PlainQRestoreList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []PlainQRestore `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&PlainQRestore{}, &PlainQRestoreList{})
-}

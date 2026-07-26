@@ -15,6 +15,8 @@ import (
 )
 
 // ValidatePlainQ checks a PlainQ on create.
+//
+//nolint:gocyclo,cyclop // One branch per rule; the list is the specification.
 func ValidatePlainQ(pq *plainqv1alpha1.PlainQ) field.ErrorList {
 	var errs field.ErrorList
 
@@ -162,6 +164,8 @@ func ValidateScaleIn(currentVoters, healthyVoters, target int32) error {
 }
 
 // ValidatePlainQQueue checks a queue.
+//
+//nolint:cyclop // One branch per rule.
 func ValidatePlainQQueue(q *plainqv1alpha1.PlainQQueue) field.ErrorList {
 	var errs field.ErrorList
 

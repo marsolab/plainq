@@ -77,7 +77,7 @@ const (
 )
 
 // PlainQSpec is the desired state of a PlainQ server. Every field maps onto
-// one or more `plainq serve` flags; anything not modelled is reachable
+// one or more `plainq serve` flags; anything not modeled is reachable
 // through ExtraArgs.
 type PlainQSpec struct {
 	// Version selects the server image tag when Image.Tag is empty.
@@ -790,7 +790,7 @@ type ServiceMonitorSpec struct {
 }
 
 // RelabelConfig is the subset of Prometheus relabeling the operator renders.
-// It is modelled here rather than imported so the operator does not depend on
+// It is modeled here rather than imported so the operator does not depend on
 // the Prometheus Operator's Go module to compile.
 type RelabelConfig struct {
 	// SourceLabels feeding the rule.
@@ -1300,7 +1300,7 @@ type PlainQStatus struct {
 	// +optional
 	Bootstrap *BootstrapStatus `json:"bootstrap,omitempty"`
 
-	// LastBackup summarises the most recent backup of this instance.
+	// LastBackup summarizes the most recent backup of this instance.
 	//
 	// +optional
 	LastBackup *LastBackupStatus `json:"lastBackup,omitempty"`
@@ -1400,7 +1400,7 @@ type BootstrapStatus struct {
 	AdminSecret string `json:"adminSecret,omitempty"`
 }
 
-// LastBackupStatus summarises the most recent backup.
+// LastBackupStatus summarizes the most recent backup.
 type LastBackupStatus struct {
 	// Name of the PlainQBackup.
 	//
@@ -1445,8 +1445,4 @@ type PlainQList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []PlainQ `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(&PlainQ{}, &PlainQList{})
 }

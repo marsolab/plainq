@@ -39,8 +39,6 @@ func BoolValue(v *bool, fallback bool) bool {
 
 // ApplyDefaults fills empty fields with their documented defaults. It is
 // idempotent, so calling it in the webhook and again at render time is safe.
-//
-//nolint:cyclop,gocyclo // A defaulting function is a flat list of fallbacks.
 func (s *PlainQSpec) ApplyDefaults() {
 	if s.Image.Repository == "" {
 		s.Image.Repository = DefaultImageRepository
@@ -127,6 +125,7 @@ func (s *PlainQSpec) defaultAuth() {
 	}
 }
 
+//nolint:cyclop // A defaulting function is a flat list of fallbacks.
 func (s *PlainQSpec) defaultCluster() {
 	if !s.Cluster.Enabled {
 		return

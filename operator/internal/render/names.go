@@ -30,6 +30,8 @@ const (
 	AnnotationRestoredFrom = "plainq.dev/restored-from"
 
 	// AnnotationSecretChecksum rolls pods when a referenced Secret changes.
+	//
+	//nolint:gosec // G101: an annotation key, not a credential.
 	AnnotationSecretChecksum = "plainq.dev/secret-checksum"
 
 	// ManagedBy identifies the operator as the field manager.

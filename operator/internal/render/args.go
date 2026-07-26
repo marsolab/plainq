@@ -11,6 +11,10 @@ import (
 )
 
 // Environment variable names used for the $(VAR) indirection below.
+//
+// they carry come from Secrets at run time and never appear in this package.
+//
+//nolint:gosec // G101: these are variable names, not credentials. The values
 const (
 	EnvJWTSecret     = "PLAINQ_JWT_SECRET"
 	EnvPostgresDSN   = "PLAINQ_POSTGRES_DSN"
@@ -29,8 +33,6 @@ const (
 // references in container args itself — a kubelet feature, not a shell one,
 // so it works on a distroless image with no shell. The expanded value never
 // appears in the rendered manifest, only the reference does.
-//
-//nolint:cyclop,funlen // A flag builder is a flat list of conditionals.
 func ServeArgs(pq *plainqv1alpha1.PlainQ) []string {
 	spec := pq.Spec
 
@@ -210,7 +212,7 @@ func telemetryArgs(spec plainqv1alpha1.PlainQSpec) []string {
 // Discovery answers with gossip addresses; a peer's consensus address is part
 // of what it gossips, so only one port has to be discoverable.
 //
-//nolint:cyclop,funlen // A flag builder is a flat list of conditionals.
+//nolint:cyclop // A flag builder is a flat list of conditionals.
 func ClusterArgs(pq *plainqv1alpha1.PlainQ) []string {
 	c := pq.Spec.Cluster
 

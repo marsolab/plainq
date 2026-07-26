@@ -64,7 +64,7 @@ spec:
           spec:
             description: |-
               PlainQSpec is the desired state of a PlainQ server. Every field maps onto
-              one or more `plainq serve` flags; anything not modelled is reachable
+              one or more `plainq serve` flags; anything not modeled is reachable
               through ExtraArgs.
             properties:
               auth:
@@ -780,7 +780,7 @@ spec:
                         items:
                           description: |-
                             RelabelConfig is the subset of Prometheus relabeling the operator renders.
-                            It is modelled here rather than imported so the operator does not depend on
+                            It is modeled here rather than imported so the operator does not depend on
                             the Prometheus Operator's Go module to compile.
                           properties:
                             action:
@@ -817,7 +817,7 @@ spec:
                         items:
                           description: |-
                             RelabelConfig is the subset of Prometheus relabeling the operator renders.
-                            It is modelled here rather than imported so the operator does not depend on
+                            It is modeled here rather than imported so the operator does not depend on
                             the Prometheus Operator's Go module to compile.
                           properties:
                             action:
@@ -8513,7 +8513,7 @@ spec:
                 description: HTTPEndpoint is the base URL of the HTTP surface.
                 type: string
               lastBackup:
-                description: LastBackup summarises the most recent backup of this
+                description: LastBackup summarizes the most recent backup of this
                   instance.
                 properties:
                   name:

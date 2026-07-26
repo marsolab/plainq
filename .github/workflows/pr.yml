@@ -45,6 +45,36 @@ jobs:
           version: latest
           args: --timeout=3m
 
+  # The operator is a separate Go module, so the jobs above do not reach it:
+  # `go test ./...` and golangci-lint both operate on one module at a time.
+  operator:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '^1.26'
+
+      # Regenerates deepcopy and the CRD, RBAC and webhook manifests, so a
+      # forgotten `make manifests` shows up as a diff rather than as drift
+      # between the Go types and the manifests people install.
+      - name: check generated manifests are current
+        working-directory: operator
+        run: |
+          make generate manifests
+          git diff --exit-code -- api config
+
+      - name: go test
+        working-directory: operator
+        run: go test -race -cover ./...
+
+      - name: golangci-lint run
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: latest
+          working-directory: operator
+          args: --timeout=5m
+
   houston:
     runs-on: ubuntu-latest
     steps:

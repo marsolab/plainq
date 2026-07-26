@@ -18,7 +18,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlbuilder "sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/webhook"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 )
 
@@ -27,7 +26,9 @@ func SetupAll(mgr ctrl.Manager) error {
 	kube := mgr.GetClient()
 
 	setups := []func() error{
-		func() error { return setup(mgr, &plainqv1alpha1.PlainQ{}, &PlainQWebhook{Client: kube}) },
+		func() error {
+			return setupWithDefaulter(mgr, &plainqv1alpha1.PlainQ{}, &PlainQWebhook{Client: kube})
+		},
 		func() error { return setup(mgr, &plainqv1alpha1.PlainQQueue{}, &QueueWebhook{}) },
 		func() error { return setup(mgr, &plainqv1alpha1.PlainQTopic{}, &TopicWebhook{}) },
 		func() error { return setup(mgr, &plainqv1alpha1.PlainQAccount{}, &AccountWebhook{Client: kube}) },
@@ -46,17 +47,29 @@ func SetupAll(mgr ctrl.Manager) error {
 	return nil
 }
 
-// setup registers one kind's webhooks. Only the handlers that also implement
-// CustomDefaulter get a mutating webhook, which is why the assertion is a
-// comma-ok rather than a second parameter.
-func setup[T runtime.Object](mgr ctrl.Manager, obj T, handler admission.CustomValidator) error {
-	builder := ctrlbuilder.WebhookManagedBy(mgr, obj).WithCustomValidator(handler)
-
-	if defaulter, ok := handler.(admission.CustomDefaulter); ok {
-		builder = builder.WithCustomDefaulter(defaulter)
+// setup registers a validating webhook for one kind.
+func setup[T runtime.Object](mgr ctrl.Manager, obj T, validator admission.Validator[T]) error {
+	if err := ctrlbuilder.WebhookManagedBy(mgr, obj).WithValidator(validator).Complete(); err != nil {
+		return fmt.Errorf("register webhook for %T: %w", obj, err)
 	}
 
-	if err := builder.Complete(); err != nil {
+	return nil
+}
+
+// setupWithDefaulter registers both a mutating and a validating webhook.
+func setupWithDefaulter[T runtime.Object](
+	mgr ctrl.Manager,
+	obj T,
+	handler interface {
+		admission.Validator[T]
+		admission.Defaulter[T]
+	},
+) error {
+	err := ctrlbuilder.WebhookManagedBy(mgr, obj).
+		WithValidator(handler).
+		WithDefaulter(handler).
+		Complete()
+	if err != nil {
 		return fmt.Errorf("register webhook for %T: %w", obj, err)
 	}
 
@@ -72,53 +85,36 @@ type PlainQWebhook struct {
 }
 
 var (
-	_ admission.CustomDefaulter = &PlainQWebhook{}
-	_ admission.CustomValidator = &PlainQWebhook{}
+	_ admission.Defaulter[*plainqv1alpha1.PlainQ] = &PlainQWebhook{}
+	_ admission.Validator[*plainqv1alpha1.PlainQ] = &PlainQWebhook{}
 )
 
 // Default fills empty fields.
-func (w *PlainQWebhook) Default(_ context.Context, obj runtime.Object) error {
-	pq, ok := obj.(*plainqv1alpha1.PlainQ)
-	if !ok {
-		return fmt.Errorf("expected a PlainQ, got %T", obj)
-	}
-
+func (w *PlainQWebhook) Default(_ context.Context, pq *plainqv1alpha1.PlainQ) error {
 	pq.Spec.ApplyDefaults()
 
 	return nil
 }
 
 // ValidateCreate checks a new instance.
-func (w *PlainQWebhook) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
-	pq, ok := obj.(*plainqv1alpha1.PlainQ)
-	if !ok {
-		return nil, fmt.Errorf("expected a PlainQ, got %T", obj)
-	}
-
+func (w *PlainQWebhook) ValidateCreate(
+	ctx context.Context,
+	pq *plainqv1alpha1.PlainQ,
+) (admission.Warnings, error) {
 	errs := validation.ValidatePlainQ(pq)
 
 	if err := w.validateAlias(ctx, pq); err != nil {
 		errs = append(errs, err)
 	}
 
-	return warnings(pq), invalid(pq, errs)
+	return warnings(pq), invalid(pq, "PlainQ", errs)
 }
 
 // ValidateUpdate additionally checks immutability and quorum.
 func (w *PlainQWebhook) ValidateUpdate(
 	ctx context.Context,
-	oldObj, newObj runtime.Object,
+	old, updated *plainqv1alpha1.PlainQ,
 ) (admission.Warnings, error) {
-	old, ok := oldObj.(*plainqv1alpha1.PlainQ)
-	if !ok {
-		return nil, fmt.Errorf("expected a PlainQ, got %T", oldObj)
-	}
-
-	updated, ok := newObj.(*plainqv1alpha1.PlainQ)
-	if !ok {
-		return nil, fmt.Errorf("expected a PlainQ, got %T", newObj)
-	}
-
 	errs := validation.ValidatePlainQUpdate(old, updated)
 
 	if err := w.validateAlias(ctx, updated); err != nil {
@@ -134,11 +130,14 @@ func (w *PlainQWebhook) ValidateUpdate(
 			"a cluster cannot scale below one node"))
 	}
 
-	return warnings(updated), invalid(updated, errs)
+	return warnings(updated), invalid(updated, "PlainQ", errs)
 }
 
 // ValidateDelete allows deletion.
-func (w *PlainQWebhook) ValidateDelete(_ context.Context, _ runtime.Object) (admission.Warnings, error) {
+func (w *PlainQWebhook) ValidateDelete(
+	_ context.Context,
+	_ *plainqv1alpha1.PlainQ,
+) (admission.Warnings, error) {
 	return nil, nil
 }
 
@@ -149,6 +148,11 @@ func (w *PlainQWebhook) validateAlias(ctx context.Context, pq *plainqv1alpha1.Pl
 	}
 
 	var siblings plainqv1alpha1.PlainQList
+
+	// A failure to list is not a reason to refuse the write: admission
+	// should not become a second availability dependency. The reconciler
+	// re-checks the claim and reports a conflict as a condition.
+	//nolint:nilerr // Deliberate: an unreadable cache must not block admission.
 	if err := w.Client.List(ctx, &siblings, client.InNamespace(pq.Namespace)); err != nil {
 		return nil
 	}
@@ -195,38 +199,29 @@ func warnings(pq *plainqv1alpha1.PlainQ) admission.Warnings {
 // QueueWebhook validates queues.
 type QueueWebhook struct{}
 
-var _ admission.CustomValidator = &QueueWebhook{}
+var _ admission.Validator[*plainqv1alpha1.PlainQQueue] = &QueueWebhook{}
 
 // ValidateCreate checks a new queue.
-func (w *QueueWebhook) ValidateCreate(_ context.Context, obj runtime.Object) (admission.Warnings, error) {
-	queue, ok := obj.(*plainqv1alpha1.PlainQQueue)
-	if !ok {
-		return nil, fmt.Errorf("expected a PlainQQueue, got %T", obj)
-	}
-
-	return nil, invalid(queue, validation.ValidatePlainQQueue(queue))
+func (w *QueueWebhook) ValidateCreate(
+	_ context.Context,
+	queue *plainqv1alpha1.PlainQQueue,
+) (admission.Warnings, error) {
+	return nil, invalid(queue, "PlainQQueue", validation.ValidatePlainQQueue(queue))
 }
 
 // ValidateUpdate additionally rejects a rename.
 func (w *QueueWebhook) ValidateUpdate(
 	_ context.Context,
-	oldObj, newObj runtime.Object,
+	old, updated *plainqv1alpha1.PlainQQueue,
 ) (admission.Warnings, error) {
-	old, ok := oldObj.(*plainqv1alpha1.PlainQQueue)
-	if !ok {
-		return nil, fmt.Errorf("expected a PlainQQueue, got %T", oldObj)
-	}
-
-	updated, ok := newObj.(*plainqv1alpha1.PlainQQueue)
-	if !ok {
-		return nil, fmt.Errorf("expected a PlainQQueue, got %T", newObj)
-	}
-
-	return nil, invalid(updated, validation.ValidatePlainQQueueUpdate(old, updated))
+	return nil, invalid(updated, "PlainQQueue", validation.ValidatePlainQQueueUpdate(old, updated))
 }
 
 // ValidateDelete allows deletion.
-func (w *QueueWebhook) ValidateDelete(_ context.Context, _ runtime.Object) (admission.Warnings, error) {
+func (w *QueueWebhook) ValidateDelete(
+	_ context.Context,
+	_ *plainqv1alpha1.PlainQQueue,
+) (admission.Warnings, error) {
 	return nil, nil
 }
 
@@ -235,28 +230,29 @@ func (w *QueueWebhook) ValidateDelete(_ context.Context, _ runtime.Object) (admi
 // TopicWebhook validates topics.
 type TopicWebhook struct{}
 
-var _ admission.CustomValidator = &TopicWebhook{}
+var _ admission.Validator[*plainqv1alpha1.PlainQTopic] = &TopicWebhook{}
 
 // ValidateCreate checks a new topic.
-func (w *TopicWebhook) ValidateCreate(_ context.Context, obj runtime.Object) (admission.Warnings, error) {
-	topic, ok := obj.(*plainqv1alpha1.PlainQTopic)
-	if !ok {
-		return nil, fmt.Errorf("expected a PlainQTopic, got %T", obj)
-	}
-
-	return nil, invalid(topic, validation.ValidatePlainQTopic(topic))
+func (w *TopicWebhook) ValidateCreate(
+	_ context.Context,
+	topic *plainqv1alpha1.PlainQTopic,
+) (admission.Warnings, error) {
+	return nil, invalid(topic, "PlainQTopic", validation.ValidatePlainQTopic(topic))
 }
 
 // ValidateUpdate checks an updated topic.
 func (w *TopicWebhook) ValidateUpdate(
 	ctx context.Context,
-	_, newObj runtime.Object,
+	_, updated *plainqv1alpha1.PlainQTopic,
 ) (admission.Warnings, error) {
-	return w.ValidateCreate(ctx, newObj)
+	return w.ValidateCreate(ctx, updated)
 }
 
 // ValidateDelete allows deletion.
-func (w *TopicWebhook) ValidateDelete(_ context.Context, _ runtime.Object) (admission.Warnings, error) {
+func (w *TopicWebhook) ValidateDelete(
+	_ context.Context,
+	_ *plainqv1alpha1.PlainQTopic,
+) (admission.Warnings, error) {
 	return nil, nil
 }
 
@@ -267,19 +263,17 @@ type AccountWebhook struct {
 	Client client.Client
 }
 
-var _ admission.CustomValidator = &AccountWebhook{}
+var _ admission.Validator[*plainqv1alpha1.PlainQAccount] = &AccountWebhook{}
 
 // ValidateCreate checks a new account.
 //
 // The interesting rule needs the target instance: a non-bootstrap account can
 // only be created while self-registration is enabled, because signup is the
 // only creation route the server has.
-func (w *AccountWebhook) ValidateCreate(ctx context.Context, obj runtime.Object) (admission.Warnings, error) {
-	account, ok := obj.(*plainqv1alpha1.PlainQAccount)
-	if !ok {
-		return nil, fmt.Errorf("expected a PlainQAccount, got %T", obj)
-	}
-
+func (w *AccountWebhook) ValidateCreate(
+	ctx context.Context,
+	account *plainqv1alpha1.PlainQAccount,
+) (admission.Warnings, error) {
 	// Default to permitting when the target cannot be inspected — an
 	// external endpoint, or an instance not created yet. The reconciler
 	// reports the refusal in that case.
@@ -294,19 +288,23 @@ func (w *AccountWebhook) ValidateCreate(ctx context.Context, obj runtime.Object)
 		}
 	}
 
-	return nil, invalid(account, validation.ValidatePlainQAccount(account, registration))
+	return nil, invalid(account, "PlainQAccount",
+		validation.ValidatePlainQAccount(account, registration))
 }
 
 // ValidateUpdate checks an updated account.
 func (w *AccountWebhook) ValidateUpdate(
 	ctx context.Context,
-	_, newObj runtime.Object,
+	_, updated *plainqv1alpha1.PlainQAccount,
 ) (admission.Warnings, error) {
-	return w.ValidateCreate(ctx, newObj)
+	return w.ValidateCreate(ctx, updated)
 }
 
 // ValidateDelete allows deletion.
-func (w *AccountWebhook) ValidateDelete(_ context.Context, _ runtime.Object) (admission.Warnings, error) {
+func (w *AccountWebhook) ValidateDelete(
+	_ context.Context,
+	_ *plainqv1alpha1.PlainQAccount,
+) (admission.Warnings, error) {
 	return nil, nil
 }
 
@@ -317,18 +315,13 @@ type BackupPolicyWebhook struct {
 	Client client.Client
 }
 
-var _ admission.CustomValidator = &BackupPolicyWebhook{}
+var _ admission.Validator[*plainqv1alpha1.PlainQBackupPolicy] = &BackupPolicyWebhook{}
 
 // ValidateCreate checks a new policy against the target's storage driver.
 func (w *BackupPolicyWebhook) ValidateCreate(
 	ctx context.Context,
-	obj runtime.Object,
+	policy *plainqv1alpha1.PlainQBackupPolicy,
 ) (admission.Warnings, error) {
-	policy, ok := obj.(*plainqv1alpha1.PlainQBackupPolicy)
-	if !ok {
-		return nil, fmt.Errorf("expected a PlainQBackupPolicy, got %T", obj)
-	}
-
 	var driver plainqv1alpha1.StorageDriver
 
 	if name := policy.Spec.ServerRef.Name; name != "" && w.Client != nil {
@@ -340,21 +333,22 @@ func (w *BackupPolicyWebhook) ValidateCreate(
 		}
 	}
 
-	return nil, invalid(policy, validation.ValidatePlainQBackupPolicy(policy, driver))
+	return nil, invalid(policy, "PlainQBackupPolicy",
+		validation.ValidatePlainQBackupPolicy(policy, driver))
 }
 
 // ValidateUpdate checks an updated policy.
 func (w *BackupPolicyWebhook) ValidateUpdate(
 	ctx context.Context,
-	_, newObj runtime.Object,
+	_, updated *plainqv1alpha1.PlainQBackupPolicy,
 ) (admission.Warnings, error) {
-	return w.ValidateCreate(ctx, newObj)
+	return w.ValidateCreate(ctx, updated)
 }
 
 // ValidateDelete allows deletion.
 func (w *BackupPolicyWebhook) ValidateDelete(
 	_ context.Context,
-	_ runtime.Object,
+	_ *plainqv1alpha1.PlainQBackupPolicy,
 ) (admission.Warnings, error) {
 	return nil, nil
 }
@@ -364,43 +358,43 @@ func (w *BackupPolicyWebhook) ValidateDelete(
 // RestoreWebhook validates restores.
 type RestoreWebhook struct{}
 
-var _ admission.CustomValidator = &RestoreWebhook{}
+var _ admission.Validator[*plainqv1alpha1.PlainQRestore] = &RestoreWebhook{}
 
 // ValidateCreate checks a new restore.
-func (w *RestoreWebhook) ValidateCreate(_ context.Context, obj runtime.Object) (admission.Warnings, error) {
-	restore, ok := obj.(*plainqv1alpha1.PlainQRestore)
-	if !ok {
-		return nil, fmt.Errorf("expected a PlainQRestore, got %T", obj)
-	}
-
-	return nil, invalid(restore, validation.ValidatePlainQRestore(restore))
+func (w *RestoreWebhook) ValidateCreate(
+	_ context.Context,
+	restore *plainqv1alpha1.PlainQRestore,
+) (admission.Warnings, error) {
+	return nil, invalid(restore, "PlainQRestore", validation.ValidatePlainQRestore(restore))
 }
 
 // ValidateUpdate checks an updated restore.
 func (w *RestoreWebhook) ValidateUpdate(
 	ctx context.Context,
-	_, newObj runtime.Object,
+	_, updated *plainqv1alpha1.PlainQRestore,
 ) (admission.Warnings, error) {
-	return w.ValidateCreate(ctx, newObj)
+	return w.ValidateCreate(ctx, updated)
 }
 
 // ValidateDelete allows deletion.
-func (w *RestoreWebhook) ValidateDelete(_ context.Context, _ runtime.Object) (admission.Warnings, error) {
+func (w *RestoreWebhook) ValidateDelete(
+	_ context.Context,
+	_ *plainqv1alpha1.PlainQRestore,
+) (admission.Warnings, error) {
 	return nil, nil
 }
 
 // invalid turns a field error list into an admission rejection.
-func invalid(obj client.Object, errs field.ErrorList) error {
+//
+// The kind is passed explicitly: a typed object carries no TypeMeta when it
+// arrives through the generic decoder, so reading it back off the object
+// would produce an empty kind in the message.
+func invalid(obj client.Object, kind string, errs field.ErrorList) error {
 	if len(errs) == 0 {
 		return nil
 	}
 
-	gvk := obj.GetObjectKind().GroupVersionKind()
-
 	return apierrors.NewInvalid(
-		schema.GroupKind{Group: plainqv1alpha1.GroupVersion.Group, Kind: gvk.Kind},
+		schema.GroupKind{Group: plainqv1alpha1.GroupVersion.Group, Kind: kind},
 		obj.GetName(), errs)
 }
-
-// Ensure the package compiles against the webhook interfaces it claims.
-var _ webhook.CustomValidator = &PlainQWebhook{}

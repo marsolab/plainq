@@ -497,7 +497,7 @@ spec:
                     type: string
                 type: object
               lastBackup:
-                description: LastBackup summarises the most recent run, successful
+                description: LastBackup summarizes the most recent run, successful
                   or not.
                 properties:
                   name:

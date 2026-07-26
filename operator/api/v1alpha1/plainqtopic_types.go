@@ -122,7 +122,3 @@ type PlainQTopicList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []PlainQTopic `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&PlainQTopic{}, &PlainQTopicList{})
-}

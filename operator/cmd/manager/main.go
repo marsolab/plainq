@@ -43,15 +43,19 @@ type config struct {
 
 func main() {
 	if err := run(); err != nil {
+		//nolint:errcheck // Failing to report a failure changes nothing.
 		fmt.Fprintf(os.Stderr, "plainq-operator: %v\n", err)
+
 		os.Exit(1)
 	}
 }
 
+//nolint:cyclop // Wiring: one branch per optional subsystem.
 func run() error {
 	cfg := parseFlags()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&cfg.zapOptions)))
+
 	logger := ctrl.Log.WithName("setup")
 
 	options := ctrl.Options{
@@ -89,29 +93,36 @@ func run() error {
 
 	clients := controller.NewClientFactory(mgr.GetClient())
 
-	reconcilers := []interface{ SetupWithManager(ctrl.Manager) error }{
+	// GetEventRecorderFor is deprecated in favor of GetEventRecorder, which
+	// returns the newer events.EventRecorder. That interface takes an extra
+	// "action" argument on every call and would reshape each reconciler's
+	// event sites for no behavioral gain; migrating it is tracked as
+	// follow-up work rather than folded in here.
+	recorderFor := mgr.GetEventRecorderFor
+
+	reconcilers := []interface{ SetupWithManager(mgr ctrl.Manager) error }{
 		&controller.PlainQReconciler{
 			Client:   mgr.GetClient(),
 			Scheme:   mgr.GetScheme(),
-			Recorder: mgr.GetEventRecorderFor("plainq"),
+			Recorder: recorderFor("plainq"),
 			Clients:  clients,
 		},
 		&controller.PlainQQueueReconciler{
 			Client:   mgr.GetClient(),
 			Scheme:   mgr.GetScheme(),
-			Recorder: mgr.GetEventRecorderFor("plainqqueue"),
+			Recorder: recorderFor("plainqqueue"),
 			Clients:  clients,
 		},
 		&controller.PlainQTopicReconciler{
 			Client:   mgr.GetClient(),
 			Scheme:   mgr.GetScheme(),
-			Recorder: mgr.GetEventRecorderFor("plainqtopic"),
+			Recorder: recorderFor("plainqtopic"),
 			Clients:  clients,
 		},
 		&controller.PlainQAccountReconciler{
 			Client:   mgr.GetClient(),
 			Scheme:   mgr.GetScheme(),
-			Recorder: mgr.GetEventRecorderFor("plainqaccount"),
+			Recorder: recorderFor("plainqaccount"),
 			Clients:  clients,
 		},
 	}

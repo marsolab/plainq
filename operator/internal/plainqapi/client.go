@@ -150,7 +150,7 @@ type request struct {
 	path   string
 	query  url.Values
 
-	// body is marshalled as JSON when non-nil.
+	// body is marshaled as JSON when non-nil.
 	body any
 
 	// out receives the decoded response when non-nil.
@@ -180,6 +180,7 @@ func (c *Client) do(ctx context.Context, req request) error {
 	return nil
 }
 
+//nolint:cyclop // A request builder is a flat list of optional headers and bodies.
 func (c *Client) execute(ctx context.Context, req request, forceAuth bool) error {
 	var bodyReader io.Reader
 
@@ -224,7 +225,9 @@ func (c *Client) execute(ctx context.Context, req request, forceAuth bool) error
 		return fmt.Errorf("plainqapi: %s %s: %w", req.method, req.path, err)
 	}
 
-	defer func() { _ = resp.Body.Close() }()
+	// The response body is drained or abandoned below; a close failure has
+	// nothing left to affect.
+	defer func() { _ = resp.Body.Close() }() //nolint:errcheck
 
 	if resp.StatusCode >= http.StatusBadRequest {
 		return classify(resp, req)
@@ -247,7 +250,8 @@ const maxErrorBody = 2048
 
 // classify maps a failing response onto a sentinel error where one fits.
 func classify(resp *http.Response, req request) error {
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
+	// A body we cannot read still leaves a usable status code.
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody)) //nolint:errcheck
 	body := strings.TrimSpace(string(raw))
 
 	switch resp.StatusCode {
@@ -330,7 +334,7 @@ func (c *Client) signIn(ctx context.Context) (*session, error) {
 	err := c.execute(ctx, request{
 		method:    http.MethodPost,
 		path:      "/api/v1/account/signin",
-		body:      map[string]string{"email": c.creds.Email, "password": c.creds.Password},
+		body:      map[string]string{fieldEmail: c.creds.Email, fieldPassword: c.creds.Password},
 		out:       &resp,
 		anonymous: true,
 	}, false)

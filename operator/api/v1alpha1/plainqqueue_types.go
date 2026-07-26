@@ -168,7 +168,3 @@ type PlainQQueueList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []PlainQQueue `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&PlainQQueue{}, &PlainQQueueList{})
-}

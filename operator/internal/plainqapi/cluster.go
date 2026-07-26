@@ -189,6 +189,8 @@ func (c *Client) WaitForApplied(ctx context.Context, targetIndex uint64) (uint64
 // quorum path at all; a follower is next.
 //
 // prefer is one of "NonVoter", "Follower" or "Any".
+//
+//nolint:gocyclo,cyclop // A preference table; the branches are the specification.
 func SelectBackupSource(members []ClusterMember, prefer string) (ClusterMember, bool) {
 	var nonVoter, follower, leader *ClusterMember
 

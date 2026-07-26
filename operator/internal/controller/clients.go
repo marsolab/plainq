@@ -6,6 +6,8 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"net"
+	"strconv"
 	"sync"
 
 	plainqv1alpha1 "github.com/marsolab/plainq/operator/api/v1alpha1"
@@ -101,7 +103,8 @@ func (f *ClientFactory) resolve(
 
 	pq.Spec.ApplyDefaults()
 
-	endpoint := fmt.Sprintf("http://%s:%d", render.NamesFor(&pq).ServiceFQDN(), pq.Spec.Listeners.HTTP.Port)
+	endpoint := "http://" + net.JoinHostPort(render.NamesFor(&pq).ServiceFQDN(),
+		strconv.Itoa(int(pq.Spec.Listeners.HTTP.Port)))
 
 	// With auth disabled the server ignores the header, so an empty
 	// credential is correct rather than an omission.
@@ -138,7 +141,7 @@ func (f *ClientFactory) credentials(
 
 	if email == "" || password == "" {
 		return plainqapi.Credentials{}, fmt.Errorf(
-			"Secret %s/%s is missing %q or %q", namespace, ref.Name, emailKey, passwordKey)
+			"secret %s/%s is missing %q or %q", namespace, ref.Name, emailKey, passwordKey)
 	}
 
 	return plainqapi.Credentials{Email: email, Password: password}, nil
@@ -205,7 +208,7 @@ func ensureSecret(
 
 // randomHex returns a cryptographically random hex string of n bytes.
 func randomHex(n int) (string, error) {
-	buf := make([]byte, n)
+	buf := make([]byte, n) //nolint:makezero // Filled by rand.Read, never appended to.
 
 	if _, err := rand.Read(buf); err != nil {
 		return "", fmt.Errorf("read random bytes: %w", err)
@@ -217,7 +220,7 @@ func randomHex(n int) (string, error) {
 // randomBase64 returns a cryptographically random base64 string of n bytes.
 // The gossip key must be base64 of exactly 16, 24 or 32 bytes.
 func randomBase64(n int) (string, error) {
-	buf := make([]byte, n)
+	buf := make([]byte, n) //nolint:makezero // Filled by rand.Read, never appended to.
 
 	if _, err := rand.Read(buf); err != nil {
 		return "", fmt.Errorf("read random bytes: %w", err)

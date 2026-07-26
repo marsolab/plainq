@@ -6,6 +6,12 @@ import (
 	"net/http"
 )
 
+// JSON keys the account endpoints use.
+const (
+	fieldEmail    = "email"
+	fieldPassword = "password"
+)
+
 // OnboardingStatus reports whether the instance still needs its first admin.
 type OnboardingStatus struct {
 	NeedsOnboarding bool `json:"needsOnboarding"`
@@ -45,7 +51,7 @@ func (c *Client) OnboardingStatus(ctx context.Context) (*OnboardingStatus, error
 // admin exists, so calling it twice is safe — the second call is refused, and
 // callers treat "already onboarded" as success.
 func (c *Client) CompleteOnboarding(ctx context.Context, email, password, name string) error {
-	body := map[string]string{"email": email, "password": password}
+	body := map[string]string{fieldEmail: email, fieldPassword: password}
 
 	if name != "" {
 		body["name"] = name
@@ -73,7 +79,7 @@ func (c *Client) CompleteOnboarding(ctx context.Context, email, password, name s
 // ErrRegistrationDisabled distinctly — it is a configuration problem to
 // report, not a transient failure to retry.
 func (c *Client) SignUp(ctx context.Context, email, password, name string) error {
-	body := map[string]string{"email": email, "password": password}
+	body := map[string]string{fieldEmail: email, fieldPassword: password}
 
 	if name != "" {
 		body["name"] = name

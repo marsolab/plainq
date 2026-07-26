@@ -144,11 +144,15 @@ func (c Compression) Extension() string {
 	switch c {
 	case CompressionGzip:
 		return ".gz"
+
 	case CompressionZstd:
 		return ".zst"
-	default:
+
+	case CompressionNone:
 		return ""
 	}
+
+	return ""
 }
 
 // EncryptionSpec configures at-rest encryption of backup artifacts.

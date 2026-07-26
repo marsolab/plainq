@@ -295,7 +295,3 @@ type PlainQBackupList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []PlainQBackup `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&PlainQBackup{}, &PlainQBackupList{})
-}

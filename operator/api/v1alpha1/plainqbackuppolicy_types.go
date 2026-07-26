@@ -296,7 +296,7 @@ type PlainQBackupPolicyStatus struct {
 	// +optional
 	LastSuccessfulBackup *metav1.Time `json:"lastSuccessfulBackup,omitempty"`
 
-	// LastBackup summarises the most recent run, successful or not.
+	// LastBackup summarizes the most recent run, successful or not.
 	//
 	// +optional
 	LastBackup *LastBackupStatus `json:"lastBackup,omitempty"`
@@ -368,8 +368,4 @@ type PlainQBackupPolicyList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []PlainQBackupPolicy `json:"items"`
-}
-
-func init() {
-	SchemeBuilder.Register(&PlainQBackupPolicy{}, &PlainQBackupPolicyList{})
 }

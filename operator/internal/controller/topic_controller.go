@@ -31,10 +31,12 @@ type PlainQTopicReconciler struct {
 // +kubebuilder:rbac:groups=plainq.dev,resources=plainqtopics/finalizers,verbs=update
 
 // Reconcile creates the topic and converges its subscriptions.
+//
+//nolint:cyclop // A reconcile loop is a sequence of guarded phases.
 func (r *PlainQTopicReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var topic plainqv1alpha1.PlainQTopic
 	if err := r.Get(ctx, req.NamespacedName, &topic); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+		return ctrl.Result{}, fmt.Errorf("get PlainQTopic: %w", client.IgnoreNotFound(err))
 	}
 
 	api, err := r.Clients.For(ctx, topic.Namespace, topic.Spec.ServerRef)
@@ -124,7 +126,7 @@ func (r *PlainQTopicReconciler) reconcileSubscriptions(
 		if !ok {
 			subscriptionID, err = api.Subscribe(ctx, existing.TopicID, want.queueID)
 			if err != nil {
-				return err
+				return fmt.Errorf("subscribe: %w", err)
 			}
 
 			r.Recorder.Eventf(topic, corev1.EventTypeNormal, "Subscribed",
@@ -144,7 +146,7 @@ func (r *PlainQTopicReconciler) reconcileSubscriptions(
 	// Whatever is left was removed from spec.
 	for queueID, subscriptionID := range current {
 		if err := api.Unsubscribe(ctx, existing.TopicID, subscriptionID); err != nil {
-			return err
+			return fmt.Errorf("unsubscribe: %w", err)
 		}
 
 		r.Recorder.Eventf(topic, corev1.EventTypeNormal, "Unsubscribed",
@@ -213,7 +215,7 @@ func (r *PlainQTopicReconciler) finalize(
 
 	if topic.Spec.DeletionPolicy == plainqv1alpha1.DeletionDelete && topic.Status.TopicID != "" {
 		if err := api.DeleteTopic(ctx, topic.Status.TopicID); err != nil {
-			return ctrl.Result{}, err
+			return ctrl.Result{}, fmt.Errorf("delete topic: %w", err)
 		}
 
 		r.Recorder.Eventf(topic, corev1.EventTypeNormal, "TopicDeleted",

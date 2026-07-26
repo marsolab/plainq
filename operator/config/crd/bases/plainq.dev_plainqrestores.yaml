@@ -1044,7 +1044,7 @@ spec:
                                     items:
                                       description: |-
                                         RelabelConfig is the subset of Prometheus relabeling the operator renders.
-                                        It is modelled here rather than imported so the operator does not depend on
+                                        It is modeled here rather than imported so the operator does not depend on
                                         the Prometheus Operator's Go module to compile.
                                       properties:
                                         action:
@@ -1082,7 +1082,7 @@ spec:
                                     items:
                                       description: |-
                                         RelabelConfig is the subset of Prometheus relabeling the operator renders.
-                                        It is modelled here rather than imported so the operator does not depend on
+                                        It is modeled here rather than imported so the operator does not depend on
                                         the Prometheus Operator's Go module to compile.
                                       properties:
                                         action:

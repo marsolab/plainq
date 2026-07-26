@@ -31,7 +31,7 @@ type PlainQAccountReconciler struct {
 func (r *PlainQAccountReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var account plainqv1alpha1.PlainQAccount
 	if err := r.Get(ctx, req.NamespacedName, &account); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+		return ctrl.Result{}, fmt.Errorf("get PlainQAccount: %w", client.IgnoreNotFound(err))
 	}
 
 	if !account.DeletionTimestamp.IsZero() {
@@ -199,7 +199,7 @@ func (r *PlainQAccountReconciler) ensurePassword(
 
 	stored := string(data[passwordKey])
 	if stored == "" {
-		return "", fmt.Errorf("Secret %s has no %q", ref.Name, passwordKey)
+		return "", fmt.Errorf("secret %s has no %q", ref.Name, passwordKey)
 	}
 
 	return stored, nil

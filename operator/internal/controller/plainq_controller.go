@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"strconv"
 	"time"
 
 	plainqv1alpha1 "github.com/marsolab/plainq/operator/api/v1alpha1"
@@ -56,12 +58,14 @@ type PlainQReconciler struct {
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses;networkpolicies,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile drives one instance toward its spec.
+//
+//nolint:cyclop // A reconcile loop is a sequence of guarded phases.
 func (r *PlainQReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	logger := log.FromContext(ctx)
 
 	var pq plainqv1alpha1.PlainQ
 	if err := r.Get(ctx, req.NamespacedName, &pq); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+		return ctrl.Result{}, fmt.Errorf("get PlainQ: %w", client.IgnoreNotFound(err))
 	}
 
 	if !pq.DeletionTimestamp.IsZero() {
@@ -137,6 +141,8 @@ func (r *PlainQReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 }
 
 // applyResources renders and applies every object the instance needs.
+//
+//nolint:gocyclo,cyclop // One conditional per optional resource; splitting it would only scatter the list.
 func (r *PlainQReconciler) applyResources(
 	ctx context.Context,
 	pq *plainqv1alpha1.PlainQ,
@@ -238,6 +244,8 @@ func (r *PlainQReconciler) applyWorkload(
 
 // ensureSecrets generates the secrets the instance needs and returns the
 // references the rendered pod reads them through.
+//
+//nolint:cyclop // A flat sequence of "supplied or generated?" decisions.
 func (r *PlainQReconciler) ensureSecrets(
 	ctx context.Context,
 	pq *plainqv1alpha1.PlainQ,
@@ -385,7 +393,7 @@ func (r *PlainQReconciler) reconcileBootstrap(ctx context.Context, pq *plainqv1a
 		setCondition(&pq.Status.Conditions, plainqv1alpha1.ConditionBootstrapped,
 			metav1.ConditionFalse, plainqv1alpha1.ReasonServerUnreachable, err.Error(), pq.Generation)
 
-		return err
+		return fmt.Errorf("onboarding status: %w", err)
 	}
 
 	if !status.NeedsOnboarding {
@@ -403,7 +411,7 @@ func (r *PlainQReconciler) reconcileBootstrap(ctx context.Context, pq *plainqv1a
 		setCondition(&pq.Status.Conditions, plainqv1alpha1.ConditionBootstrapped,
 			metav1.ConditionFalse, plainqv1alpha1.ReasonNotBootstrapped, err.Error(), pq.Generation)
 
-		return err
+		return fmt.Errorf("complete onboarding: %w", err)
 	}
 
 	r.Recorder.Eventf(pq, corev1.EventTypeNormal, "Bootstrapped",
@@ -431,6 +439,8 @@ func defaultAdminEmail(pq *plainqv1alpha1.PlainQ) string {
 // against the final replica count: quorum is recomputed after every committed
 // change, so 3 -> 2 -> 1 is safe step by step even though 1 is below the
 // quorum of 2 the cluster started with.
+//
+//nolint:cyclop // A linear drain sequence; each guard is a distinct precondition.
 func (r *PlainQReconciler) reconcileScaleIn(ctx context.Context, pq *plainqv1alpha1.PlainQ) (bool, error) {
 	if !pq.Spec.Cluster.Enabled {
 		return false, nil
@@ -469,12 +479,12 @@ func (r *PlainQReconciler) reconcileScaleIn(ctx context.Context, pq *plainqv1alp
 		return false, fmt.Errorf("read membership before draining: %w", err)
 	}
 
-	voters, healthy := countVoters(members)
+	counts := countVoters(members)
 
 	// One step at a time: this pass removes exactly one member.
 	step := current - 1
-	if err := validation.ValidateScaleIn(voters, healthy, step); err != nil {
-		return false, err
+	if err := validation.ValidateScaleIn(counts.total, counts.healthy, step); err != nil {
+		return false, fmt.Errorf("validate scale-in step: %w", err)
 	}
 
 	// Highest ordinal first, which is the pod the StatefulSet would remove.
@@ -496,20 +506,30 @@ func (r *PlainQReconciler) reconcileScaleIn(ctx context.Context, pq *plainqv1alp
 	return true, nil
 }
 
-func countVoters(members []plainqapi.ClusterMember) (total, healthy int32) {
+// voterCounts is how many voters the configuration holds and how many of
+// them gossip can currently see. The gap between the two is what decides
+// whether a membership change can commit.
+type voterCounts struct {
+	total   int32
+	healthy int32
+}
+
+func countVoters(members []plainqapi.ClusterMember) voterCounts {
+	var counts voterCounts
+
 	for _, m := range members {
 		if !m.IsVoter() {
 			continue
 		}
 
-		total++
+		counts.total++
 
 		if m.Reachable {
-			healthy++
+			counts.healthy++
 		}
 	}
 
-	return total, healthy
+	return counts
 }
 
 func memberPresent(members []plainqapi.ClusterMember, id string) bool {
@@ -560,8 +580,10 @@ func (r *PlainQReconciler) observe(ctx context.Context, pq *plainqv1alpha1.Plain
 	pq.Status.Version = pq.Spec.Version
 	pq.Status.Replicas = pq.Spec.DesiredReplicas()
 	pq.Status.Endpoint = names.ServiceFQDN()
-	pq.Status.GRPCEndpoint = fmt.Sprintf("%s:%d", names.ServiceFQDN(), pq.Spec.Listeners.GRPC.Port)
-	pq.Status.HTTPEndpoint = fmt.Sprintf("http://%s:%d", names.ServiceFQDN(), pq.Spec.Listeners.HTTP.Port)
+	pq.Status.GRPCEndpoint = net.JoinHostPort(names.ServiceFQDN(),
+		strconv.Itoa(int(pq.Spec.Listeners.GRPC.Port)))
+	pq.Status.HTTPEndpoint = "http://" + net.JoinHostPort(names.ServiceFQDN(),
+		strconv.Itoa(int(pq.Spec.Listeners.HTTP.Port)))
 	pq.Status.Storage = &plainqv1alpha1.StorageStatus{Driver: pq.Spec.Storage.Driver}
 
 	pq.Status.ReadyReplicas = r.readyReplicas(ctx, pq)
@@ -613,6 +635,7 @@ func (r *PlainQReconciler) observeCluster(ctx context.Context, pq *plainqv1alpha
 	clusterStatus := &plainqv1alpha1.ClusterStatus{
 		Formed: status.Healthy && status.LeaderID != "",
 		Leader: status.LeaderID,
+		//nolint:gosec // A quorum is bounded by the member count; it cannot overflow int32.
 		Quorum: int32(status.Quorum),
 	}
 

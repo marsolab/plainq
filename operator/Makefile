@@ -42,7 +42,7 @@ vet: ## Run go vet.
 
 .PHONY: lint
 lint: ## Run golangci-lint using the repository configuration.
-	golangci-lint run --config ../.golangci.yml ./...
+	golangci-lint run ./...
 
 .PHONY: test
 test: generate manifests ## Run the unit tests with the race detector.

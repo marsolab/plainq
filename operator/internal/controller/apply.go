@@ -28,7 +28,7 @@ type applier struct {
 // apply sets the owner reference and applies the object. Passing owner as nil
 // applies it unowned, which is deliberate for objects that must outlive the
 // resource that created them.
-func (a applier) apply(ctx context.Context, obj client.Object, owner client.Object) error {
+func (a applier) apply(ctx context.Context, obj, owner client.Object) error {
 	if owner != nil {
 		if err := controllerutil.SetControllerReference(owner, obj, a.scheme); err != nil {
 			return fmt.Errorf("set owner reference on %s: %w", describe(obj), err)
@@ -43,6 +43,11 @@ func (a applier) apply(ctx context.Context, obj client.Object, owner client.Obje
 
 	obj.GetObjectKind().SetGroupVersionKind(gvk)
 
+	// client.Apply as a patch type is deprecated in favor of Client.Apply,
+	// which takes a generated ApplyConfiguration. Generating those for the
+	// CRDs is a separate piece of work; the patch form is still supported and
+	// is what every controller-gen project uses today.
+	//nolint:staticcheck // SA1019: pending applyconfiguration-gen for our types.
 	if err := a.client.Patch(ctx, obj, client.Apply, fieldOwner, client.ForceOwnership); err != nil {
 		return fmt.Errorf("apply %s: %w", describe(obj), err)
 	}

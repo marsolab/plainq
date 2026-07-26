@@ -92,7 +92,3 @@ type PlainQAccountList struct {
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []PlainQAccount `json:"items"`
 }
-
-func init() {
-	SchemeBuilder.Register(&PlainQAccount{}, &PlainQAccountList{})
-}

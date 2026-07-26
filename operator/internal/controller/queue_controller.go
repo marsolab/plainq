@@ -17,7 +17,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// queueFinalizer honours the deletion policy before the object disappears.
+// queueFinalizer honors the deletion policy before the object disappears.
 const queueFinalizer = "plainq.dev/queue-finalizer"
 
 // PlainQQueueReconciler keeps queues on a server matching their objects.
@@ -37,7 +37,7 @@ type PlainQQueueReconciler struct {
 func (r *PlainQQueueReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	var queue plainqv1alpha1.PlainQQueue
 	if err := r.Get(ctx, req.NamespacedName, &queue); err != nil {
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+		return ctrl.Result{}, fmt.Errorf("get PlainQQueue: %w", client.IgnoreNotFound(err))
 	}
 
 	api, err := r.Clients.For(ctx, queue.Namespace, queue.Spec.ServerRef)
@@ -95,7 +95,7 @@ func (r *PlainQQueueReconciler) find(
 		}
 
 		if !errors.Is(err, plainqapi.ErrNotFound) {
-			return nil, err
+			return nil, fmt.Errorf("describe queue: %w", err)
 		}
 		// The cached ID is stale — the instance was restored, or the queue
 		// was deleted out of band. Fall through to a name lookup.
@@ -107,7 +107,7 @@ func (r *PlainQQueueReconciler) find(
 	}
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("resolve queue by name: %w", err)
 	}
 
 	return found, nil
@@ -189,6 +189,8 @@ func (r *PlainQQueueReconciler) reconcileDrift(
 // driftedFields names the settings that differ. Zero values in spec mean
 // "unset", which the server fills with its own defaults, so they are not
 // drift.
+//
+//nolint:cyclop // One comparison per queue setting.
 func driftedFields(queue *plainqv1alpha1.PlainQQueue, existing *plainqapi.Queue, deadLetterID string) []string {
 	var drift []string
 
@@ -285,7 +287,7 @@ func (r *PlainQQueueReconciler) finalize(
 	}
 
 	if err := api.DeleteQueue(ctx, queue.Status.QueueID); err != nil {
-		return ctrl.Result{}, err
+		return ctrl.Result{}, fmt.Errorf("delete queue: %w", err)
 	}
 
 	r.Recorder.Eventf(queue, corev1.EventTypeNormal, "QueueDeleted",
