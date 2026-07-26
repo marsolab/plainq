@@ -82,11 +82,14 @@ func Test_messageBatchQueries_roundTrip(t *testing.T) {
 
 	for rows.Next() {
 		var (
-			id   string
-			body []byte
+			id      string
+			body    []byte
+			retries int64
 		)
 
-		td.Require(t).CmpNoError(rows.Scan(&id, &body), "scan message")
+		td.Require(t).CmpNoError(rows.Scan(&id, &body, &retries), "scan message")
+
+		td.Cmp(t, retries, int64(0), "a first delivery is not a redelivery")
 
 		ids = append(ids, id)
 	}
@@ -204,11 +207,12 @@ func Test_queryPeekMessages_browsesWithoutConsuming(t *testing.T) {
 
 	for rows.Next() {
 		var (
-			id   string
-			body []byte
+			id      string
+			body    []byte
+			retries int64
 		)
 
-		td.Require(t).CmpNoError(rows.Scan(&id, &body), "scan receivable")
+		td.Require(t).CmpNoError(rows.Scan(&id, &body, &retries), "scan receivable")
 
 		receivable = append(receivable, id)
 	}

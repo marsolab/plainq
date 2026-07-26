@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/marsolab/plainq/internal/metrics"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/service/queue"
 	"github.com/marsolab/plainq/internal/server/service/queue/pgstore/sqlcgen"
@@ -56,6 +57,19 @@ func WithGCTimeout(to time.Duration) Option { return func(s *Storage) { s.gcTime
 // WithLogger sets the logger.
 func WithLogger(logger *slog.Logger) Option { return func(s *Storage) { s.logger = logger } }
 
+// WithObserver hands the store the observer it records through.
+//
+// It exists so the server can give one observer to the storage layer and to
+// the telemetry collector: Prometheus and Houston then describe the same
+// events rather than two independently-wired approximations of them.
+func WithObserver(observer *telemetry.Observer) Option {
+	return func(o *Storage) {
+		if observer != nil {
+			o.observer = observer
+		}
+	}
+}
+
 // Storage is the PostgreSQL-backed implementation of queue.Storage. It
 // mirrors litestore: sqlc-generated code handles queue_properties CRUD, while
 // per-queue message tables are managed via hand-written SQL (sqlc cannot
@@ -69,7 +83,7 @@ type Storage struct {
 	cacheFillingTimeout time.Duration
 
 	gcTimeout time.Duration
-	observer  telemetry.Observer
+	observer  *telemetry.Observer
 	stop      func()
 }
 
@@ -89,7 +103,7 @@ func New(pool *pgxpool.Pool, options ...Option) (*Storage, error) {
 		cacheFillingTimeout: queuePropsCacheFillingTimeout,
 
 		gcTimeout: gcTimeout,
-		observer:  telemetry.NewObserver(),
+		observer:  telemetry.NewObserver(metrics.BackendPostgres),
 	}
 
 	for _, option := range options {
@@ -104,9 +118,7 @@ func New(pool *pgxpool.Pool, options ...Option) (*Storage, error) {
 		return nil, fmt.Errorf("count existing queues: %w", countErr)
 	}
 
-	if s.observer.QueuesExist().Get() <= 0 {
-		s.observer.QueuesExist().Add(count)
-	}
+	s.observer.SetQueues(count)
 
 	if err := s.fillCache(prepareCtx, ""); err != nil {
 		return nil, fmt.Errorf("filling cache: %w", err)
@@ -116,6 +128,11 @@ func New(pool *pgxpool.Pool, options ...Option) (*Storage, error) {
 	s.stop = stop
 
 	go s.gc(ctx)
+
+	// Correct the delta-tracked gauges against what is actually on disk. A
+	// process restarting onto a database full of messages would otherwise
+	// report a depth of zero until the next write.
+	go s.sampleAllQueues(ctx)
 
 	return &s, nil
 }
@@ -176,7 +193,7 @@ func (s *Storage) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest)
 		DeadLetterQueueID:        input.DeadLetterQueueId,
 	})
 
-	s.observer.QueuesExist().Inc()
+	s.observer.QueueCreated()
 
 	return &v1.CreateQueueResponse{QueueId: queueID}, nil
 }
@@ -319,7 +336,7 @@ func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest)
 
 	s.cache.delete(props.ID, props.Name)
 
-	s.observer.QueuesExist().Dec()
+	s.observer.QueueDeleted(queueID)
 
 	return &v1.DeleteQueueResponse{}, nil
 }
@@ -355,9 +372,6 @@ func (s *Storage) Send(ctx context.Context, input *v1.SendRequest) (*v1.SendResp
 	if err := s.insertMessages(ctx, queueID, len(messages), args); err != nil {
 		return nil, err
 	}
-
-	s.observer.MessagesSentBytes(queueID).Add(sentBytes)
-	s.observer.MessagesSent(queueID).Add(uint64(len(output.MessageIds)))
 
 	return &output, nil
 }
@@ -430,11 +444,22 @@ func (s *Storage) Receive(ctx context.Context, input *v1.ReceiveRequest) (*v1.Re
 		Messages: make([]*v1.ReceiveMessage, 0, limit),
 	}
 
-	for rows.Next() {
-		var m v1.ReceiveMessage
+	var redelivered uint64
 
-		if err := rows.Scan(&m.Id, &m.Body); err != nil {
+	for rows.Next() {
+		var (
+			m       v1.ReceiveMessage
+			retries int64
+		)
+
+		if err := rows.Scan(&m.Id, &m.Body, &retries); err != nil {
 			return nil, fmt.Errorf("scan message record: %w", err)
+		}
+
+		// retries comes back after the increment this claim applied, so
+		// anything above one means the message had been delivered before.
+		if retries > 1 {
+			redelivered++
 		}
 
 		output.Messages = append(output.Messages, &m)
@@ -444,11 +469,7 @@ func (s *Storage) Receive(ctx context.Context, input *v1.ReceiveRequest) (*v1.Re
 		return nil, fmt.Errorf("iterate messages: %w", err)
 	}
 
-	if len(output.Messages) == 0 {
-		s.observer.EmptyReceives(queueID).Inc()
-	}
-
-	s.observer.MessagesReceived(queueID).Add(uint64(len(output.Messages)))
+	s.observer.Redelivered(queueID, redelivered)
 
 	return &output, nil
 }
@@ -508,8 +529,6 @@ func (s *Storage) Delete(ctx context.Context, input *v1.DeleteRequest) (*v1.Dele
 
 		output.Successful = append(output.Successful, id)
 	}
-
-	s.observer.MessagesDeleted(queueID).Add(uint64(len(output.Successful)))
 
 	return &output, nil
 }
@@ -582,9 +601,9 @@ func (s *Storage) Peek(ctx context.Context, input *queue.PeekRequest) (*queue.Pe
 // timestamp embedded in its ULID id as the enqueue instant. A message id that
 // fails to parse is skipped rather than fatal: the metric is best-effort and
 // must never take the server down on delete.
-func recordTimeInQueue(observer telemetry.Observer, queueID, msgID string) {
+func recordTimeInQueue(observer *telemetry.Observer, queueID, msgID string) {
 	if u, err := ulid.Parse(msgID); err == nil {
-		observer.TimeInQueue(queueID).Dur(ulid.Time(u.Time()))
+		observer.TimeInQueue(queueID, time.Since(ulid.Time(u.Time())))
 	}
 }
 

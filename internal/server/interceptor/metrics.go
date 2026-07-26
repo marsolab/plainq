@@ -2,44 +2,42 @@ package interceptor
 
 import (
 	"context"
-	"strconv"
 	"time"
 
-	"github.com/VictoriaMetrics/metrics"
+	"github.com/marsolab/plainq/internal/metrics"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
+// Metrics records every unary gRPC call: its status code, its latency, and
+// how many are in flight.
+//
+// The code label is the gRPC status *name* rather than its number, because
+// `code="NotFound"` is a metric an operator can read and `code="5"` is one
+// they have to look up.
 func Metrics() grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		start := time.Now()
-		code := 0
+
+		metrics.RequestStarted(metrics.ProtocolGRPC)
+		defer metrics.RequestFinished(metrics.ProtocolGRPC)
 
 		resp, err := handler(ctx, req)
-		if err != nil {
-			if s, ok := status.FromError(err); ok {
-				code = int(s.Code())
-			}
-		}
 
-		statusCode := strconv.Itoa(code)
-		httpReqTotal := grpcReqTotalStr(info.FullMethod, statusCode)
-		grpcReqDur := grpcReqDurationStr(info.FullMethod, statusCode)
-
-		metrics.GetOrCreateCounter(httpReqTotal).
-			Inc()
-
-		metrics.GetOrCreateSummaryExt(grpcReqDur, 5*time.Minute, []float64{0.95, 0.99}).
-			UpdateDuration(start)
+		metrics.RecordGRPCRequest(info.FullMethod, statusCode(err), start)
 
 		return resp, err
 	}
 }
 
-func grpcReqDurationStr(route, code string) string {
-	return `grpc_request_duration{route="` + route + `", code="` + code + `"}`
-}
+// statusCode maps a handler's error to the gRPC status name it will be sent
+// as. An error carrying no gRPC status is reported as Unknown, which is
+// exactly what the client will see.
+func statusCode(err error) string {
+	if err == nil {
+		return codes.OK.String()
+	}
 
-func grpcReqTotalStr(route, code string) string {
-	return `grpc_requests_total{route="` + route + `", code="` + code + `"}`
+	return status.Code(err).String()
 }

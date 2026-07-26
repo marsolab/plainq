@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/marsolab/plainq/internal/metrics"
 	"github.com/marsolab/plainq/internal/server/service/telemetry/collector"
 	"github.com/marsolab/servekit/httpkit"
 )
@@ -235,13 +236,20 @@ type MultiMetricsChartResponse struct {
 func (h *MetricsHandler) GetDashboardOverview(w http.ResponseWriter, r *http.Request) {
 	// Get system rates.
 	sysRates := h.collector.GetSystemRates()
+	sysCounters := h.collector.GetSystemCounters()
 
-	// Build system metrics.
+	// Build system metrics. The totals were declared on the response from the
+	// start and never filled in, so the overview's top row read as a server
+	// that had never handled a message.
 	systemMetrics := SystemMetricsData{
+		QueuesExist:   sysCounters.QueuesExist,
 		TotalInFlight: h.collector.GetSystemInFlightCount(),
 		SendRate:      sysRates.SendRate,
 		ReceiveRate:   sysRates.ReceiveRate,
 		DeleteRate:    sysRates.DeleteRate,
+		TotalSent:     sysCounters.TotalSent,
+		TotalReceived: sysCounters.TotalReceived,
+		TotalDeleted:  sysCounters.TotalDeleted,
 	}
 
 	// Build per-queue metrics.
@@ -636,7 +644,7 @@ func (h *MetricsHandler) GetInFlightMetrics(w http.ResponseWriter, r *http.Reque
 
 // GetAvailableMetrics returns list of available metrics.
 func (*MetricsHandler) GetAvailableMetrics(w http.ResponseWriter, r *http.Request) {
-	metrics := []struct {
+	available := []struct {
 		Name        string `json:"name"`
 		Type        string `json:"type"`
 		Description string `json:"description"`
@@ -668,7 +676,49 @@ func (*MetricsHandler) GetAvailableMetrics(w http.ResponseWriter, r *http.Reques
 		{collector.MetricTopicSubscriptionsDeletedTotal, metricTypeCounter, "Total topic subscriptions deleted"},
 	}
 
-	httpkit.JSON(w, r, metrics)
+	httpkit.JSON(w, r, available)
+}
+
+// PrometheusMetricDescription documents one metric family on the /metrics
+// endpoint.
+type PrometheusMetricDescription struct {
+	Name   string   `json:"name"`
+	Type   string   `json:"type"`
+	Help   string   `json:"help"`
+	Labels []string `json:"labels,omitempty"`
+}
+
+// GetPrometheusCatalog lists every metric family the Prometheus endpoint can
+// expose.
+//
+// It is a package-level handler rather than a method because it reads the
+// process-wide metric registry and nothing else. Hanging it off the metrics
+// handler would have tied it to the telemetry store, and a server running
+// with `--telemetry.enable=false` still has a /metrics endpoint worth
+// documenting.
+//
+// The exposition format the metrics library writes carries a metric's type but
+// not its description, so a `/metrics` page is a list of names with no
+// explanation attached. This is where the explanation lives, and because both
+// come from the same declaration they cannot drift apart.
+//
+// It answers what the binary is *able* to emit, not what it has emitted so
+// far: a counter that has never been incremented has no series yet, but an
+// operator building a dashboard still needs to know it exists.
+func GetPrometheusCatalog(w http.ResponseWriter, r *http.Request) {
+	catalog := metrics.Catalog()
+	out := make([]PrometheusMetricDescription, 0, len(catalog))
+
+	for _, def := range catalog {
+		out = append(out, PrometheusMetricDescription{
+			Name:   def.Name,
+			Type:   string(def.Kind),
+			Help:   def.Help,
+			Labels: def.Labels,
+		})
+	}
+
+	httpkit.JSON(w, r, out)
 }
 
 // GetTimeRangePresets returns available time range presets.

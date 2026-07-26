@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/marsolab/plainq/internal/metrics"
 	"github.com/marsolab/servekit/httpkit"
 )
 
@@ -34,12 +35,15 @@ func RequireOnboarding(checker OnboardingChecker) func(next http.Handler) http.H
 
 			needsOnboarding, err := checker.NeedsOnboarding(r.Context())
 			if err != nil {
+				metrics.RecordOnboardingCheck(metrics.OnboardingError)
 				httpkit.ErrorHTTP(w, r, err)
 
 				return
 			}
 
 			if needsOnboarding {
+				metrics.RecordOnboardingCheck(metrics.OnboardingRequired)
+
 				// Return a specific error indicating onboarding is needed.
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusPreconditionRequired) // 428 status code.
@@ -54,6 +58,8 @@ func RequireOnboarding(checker OnboardingChecker) func(next http.Handler) http.H
 
 				return
 			}
+
+			metrics.RecordOnboardingCheck(metrics.OnboardingSatisfied)
 
 			next.ServeHTTP(w, r)
 		})

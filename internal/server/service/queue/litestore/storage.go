@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/heartwilltell/hc"
+	"github.com/marsolab/plainq/internal/metrics"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/service/queue"
 	"github.com/marsolab/plainq/internal/server/service/queue/litestore/sqlcgen"
@@ -90,6 +91,19 @@ func WithoutGC() Option {
 	return func(o *Storage) { o.gcDisabled = true }
 }
 
+// WithObserver hands the store the observer it records through.
+//
+// It exists so the server can give one observer to the storage layer and to
+// the telemetry collector: Prometheus and Houston then describe the same
+// events rather than two independently-wired approximations of them.
+func WithObserver(observer *telemetry.Observer) Option {
+	return func(o *Storage) {
+		if observer != nil {
+			o.observer = observer
+		}
+	}
+}
+
 // Storage represents a storage system.
 // This struct holds the necessary configurations and dependencies for the storage.
 type Storage struct {
@@ -112,7 +126,7 @@ type Storage struct {
 	gcDisabled bool
 
 	// observer is responsible for observing certain events and transform them to metrics.
-	observer telemetry.Observer
+	observer *telemetry.Observer
 
 	// stop is a function that can be called to stop the telemetry and garbage collection processes.
 	stop func()
@@ -133,7 +147,7 @@ func New(db *litekit.Conn, options ...Option) (*Storage, error) {
 
 		gcTimeout: gcTimeout,
 
-		observer: telemetry.NewObserver(),
+		observer: telemetry.NewObserver(metrics.BackendSQLite),
 
 		stop: nil,
 	}
@@ -150,9 +164,7 @@ func New(db *litekit.Conn, options ...Option) (*Storage, error) {
 		return nil, fmt.Errorf("count existing queues: %w", countErr)
 	}
 
-	if s.observer.QueuesExist().Get() <= 0 {
-		s.observer.QueuesExist().Add(count)
-	}
+	s.observer.SetQueues(count)
 
 	if err := s.fillCache(prepareCtx, ""); err != nil {
 		return nil, fmt.Errorf("filling cache: %w", err)
@@ -162,6 +174,12 @@ func New(db *litekit.Conn, options ...Option) (*Storage, error) {
 	s.stop = stop
 
 	go s.gc(ctx)
+
+	// Correct the delta-tracked gauges against what is actually on disk. A
+	// process restarting onto a database full of messages would otherwise
+	// report a depth of zero until the next write, and a delete before then
+	// would drive it negative.
+	go s.sampleAllQueues(ctx)
 
 	return &s, nil
 }
@@ -260,7 +278,7 @@ func (s *Storage) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest)
 		QueueId: queueID,
 	}
 
-	s.observer.QueuesExist().Inc()
+	s.observer.QueueCreated()
 
 	return &output, nil
 }
@@ -429,7 +447,7 @@ func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest)
 
 	output := v1.DeleteQueueResponse{}
 
-	s.observer.QueuesExist().Dec()
+	s.observer.QueueDeleted(queueID)
 
 	return &output, nil
 }
@@ -456,7 +474,7 @@ func (s *Storage) Send(ctx context.Context, input *v1.SendRequest) (_ *v1.SendRe
 	stamped := queue.Replicated(ctx)
 	columns := sendInsertColumnsFor(stamped)
 
-	args, ids, sentBytes := buildSendArgs(ctx, messages, stamped)
+	args, ids := buildSendArgs(ctx, messages, stamped)
 	output.MessageIds = ids
 
 	tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
@@ -487,9 +505,6 @@ func (s *Storage) Send(ctx context.Context, input *v1.SendRequest) (_ *v1.SendRe
 		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
 
-	s.observer.MessagesSentBytes(queueID).Add(sentBytes)
-	s.observer.MessagesSent(queueID).Add(uint64(len(output.MessageIds)))
-
 	return &output, nil
 }
 
@@ -518,7 +533,7 @@ func (s *Storage) Receive(ctx context.Context, input *v1.ReceiveRequest) (_ *v1.
 	// different messages for the same Receive.
 	now := queue.WriteTime(ctx)
 
-	messages, selectErr := selectVisibleMessages(ctx, tx, queueID, now, info.MaxReceiveAttempts, input.BatchSize)
+	messages, redelivered, selectErr := selectVisibleMessages(ctx, tx, queueID, now, info.MaxReceiveAttempts, input.BatchSize)
 	if selectErr != nil {
 		return nil, selectErr
 	}
@@ -534,11 +549,10 @@ func (s *Storage) Receive(ctx context.Context, input *v1.ReceiveRequest) (_ *v1.
 		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
 
-	if len(messages) == 0 {
-		s.observer.EmptyReceives(queueID).Inc()
-	}
-
-	s.observer.MessagesReceived(queueID).Add(uint64(len(messages)))
+	// A message whose retry count was already above zero is being handed out
+	// again after a visibility timeout expired, which is the one signal that
+	// separates "consumers are busy" from "consumers are failing".
+	s.observer.Redelivered(queueID, redelivered)
 
 	return &v1.ReceiveResponse{Messages: messages}, nil
 }
@@ -559,12 +573,12 @@ func sendInsertColumnsFor(stamped bool) int {
 // created_at, so the identifier is what orders them, and a consumer should see
 // them in the order the client sent them.
 //
-//nolint:nonamedreturns // three results of unrelated types; the names are the documentation.
+//nolint:nonamedreturns // two same-shaped-looking results; the names are the documentation.
 func buildSendArgs(
 	ctx context.Context,
 	messages []*v1.SendMessage,
 	stamped bool,
-) (args []any, ids []string, sentBytes uint64) {
+) (args []any, ids []string) {
 	var (
 		enqueuedAt = writeTime(ctx)
 		nextID     = queue.NewBatchIDs(queue.WriteTime(ctx))
@@ -582,11 +596,9 @@ func buildSendArgs(
 		}
 
 		ids = append(ids, msgID)
-
-		sentBytes += uint64(len(m.Body))
 	}
 
-	return args, ids, sentBytes
+	return args, ids
 }
 
 // selectVisibleMessages reads up to limit visible, under-attempt-limit messages
@@ -600,7 +612,7 @@ func selectVisibleMessages(
 	queueID string,
 	now time.Time,
 	maxReceiveAttempts, batchSize uint32,
-) (_ []*v1.ReceiveMessage, err error) {
+) (_ []*v1.ReceiveMessage, _ uint64, err error) {
 	limit := batchSize
 	if limit == 0 {
 		limit = 1
@@ -608,7 +620,7 @@ func selectVisibleMessages(
 
 	rows, queryErr := tx.QueryContext(ctx, querySelectMessages(queueID), sqliteTime(now), maxReceiveAttempts, limit)
 	if queryErr != nil {
-		return nil, fmt.Errorf("select query: %w", queryErr)
+		return nil, 0, fmt.Errorf("select query: %w", queryErr)
 	}
 
 	defer func() {
@@ -619,21 +631,30 @@ func selectVisibleMessages(
 
 	messages := make([]*v1.ReceiveMessage, 0, limit)
 
-	for rows.Next() {
-		var m v1.ReceiveMessage
+	var redelivered uint64
 
-		if scanErr := rows.Scan(&m.Id, &m.Body); scanErr != nil {
-			return nil, fmt.Errorf("scan message record: %w", scanErr)
+	for rows.Next() {
+		var (
+			m       v1.ReceiveMessage
+			retries int64
+		)
+
+		if scanErr := rows.Scan(&m.Id, &m.Body, &retries); scanErr != nil {
+			return nil, 0, fmt.Errorf("scan message record: %w", scanErr)
+		}
+
+		if retries > 0 {
+			redelivered++
 		}
 
 		messages = append(messages, &m)
 	}
 
 	if rowsErr := rows.Err(); rowsErr != nil {
-		return nil, fmt.Errorf("iterate message rows: %w", rowsErr)
+		return nil, 0, fmt.Errorf("iterate message rows: %w", rowsErr)
 	}
 
-	return messages, nil
+	return messages, redelivered, nil
 }
 
 // bumpVisibility hides a freshly-received batch until visibleAt and increments
@@ -701,8 +722,6 @@ func (s *Storage) Delete(ctx context.Context, input *v1.DeleteRequest) (*v1.Dele
 
 		output.Successful = append(output.Successful, id)
 	}
-
-	s.observer.MessagesDeleted(queueID).Add(uint64(len(output.Successful)))
 
 	return &output, nil
 }
@@ -823,9 +842,9 @@ func collectReturnedIDs(rows *sql.Rows) (_ map[string]struct{}, err error) {
 // timestamp embedded in its ULID id as the enqueue instant. A message id that
 // fails to parse is skipped rather than fatal: the metric is best-effort and
 // must never take the server down on delete.
-func recordTimeInQueue(observer telemetry.Observer, queueID, msgID string) {
+func recordTimeInQueue(observer *telemetry.Observer, queueID, msgID string) {
 	if u, err := ulid.Parse(msgID); err == nil {
-		observer.TimeInQueue(queueID).Dur(ulid.Time(u.Time()))
+		observer.TimeInQueue(queueID, time.Since(ulid.Time(u.Time())))
 	}
 }
 

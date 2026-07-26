@@ -35,9 +35,9 @@ const (
 	retention1h  = 30 * 24 * time.Hour
 	retention1d  = 365 * 24 * time.Hour
 
-	// Default slice capacities for histogram accumulators.
-	defaultSliceCapLarge = 1000
-	defaultSliceCapSmall = 100
+	// rateWindowSeconds is the window a persisted rate snapshot covers. Rates
+	// are computed per collection tick, which is one second.
+	rateWindowSeconds = 1
 
 	// Bucket sizes in milliseconds for time-series aggregation.
 	bucketSize1m = 60000    // 1 minute in ms.
@@ -137,13 +137,6 @@ type QueueMetrics struct {
 	sendRate    atomic.Uint64 // Stored as float64 bits.
 	receiveRate atomic.Uint64
 	deleteRate  atomic.Uint64
-
-	// Histogram accumulators (simplified - use summary stats).
-	processingDurations []float64
-	dwellTimes          []float64
-	batchSizes          []int
-	messageSizes        []int
-	histogramMu         sync.Mutex
 }
 
 // TopicMetrics holds metrics for a specific topic.
@@ -389,12 +382,7 @@ func (c *Collector) getOrCreateQueueMetrics(queueID string) *QueueMetrics {
 		return m
 	}
 
-	m = &QueueMetrics{
-		processingDurations: make([]float64, 0, defaultSliceCapLarge),
-		dwellTimes:          make([]float64, 0, defaultSliceCapLarge),
-		batchSizes:          make([]int, 0, defaultSliceCapSmall),
-		messageSizes:        make([]int, 0, defaultSliceCapLarge),
-	}
+	m = &QueueMetrics{}
 	c.queueMetrics[queueID] = m
 
 	return m
@@ -656,18 +644,11 @@ func (c *Collector) RecordReceive(queueID string, count uint64, isEmpty bool) {
 }
 
 // RecordDelete records a delete operation.
-func (c *Collector) RecordDelete(queueID string, count uint64, dwellTimeSeconds float64) {
+func (c *Collector) RecordDelete(queueID string, count uint64) {
 	m := c.getOrCreateQueueMetrics(queueID)
 	m.messagesDeleted.Add(count)
 	m.messagesInFlight.Add(-int64(count)) //nolint:gosec // count is a message count that will never approach int64 max
 	c.system.totalDeleted.Add(count)
-
-	// Record dwell time.
-	if dwellTimeSeconds > 0 {
-		m.histogramMu.Lock()
-		m.dwellTimes = append(m.dwellTimes, dwellTimeSeconds)
-		m.histogramMu.Unlock()
-	}
 
 	// Update in-flight count in store.
 	if c.store != nil {
@@ -676,9 +657,14 @@ func (c *Collector) RecordDelete(queueID string, count uint64, dwellTimeSeconds 
 }
 
 // RecordRedelivery records a message redelivery.
+//
+// The redelivered messages come back out of the in-flight count for the same
+// reason they do on the Prometheus side: the receive that carried them already
+// counted them, and they were counted once already on their first delivery.
 func (c *Collector) RecordRedelivery(queueID string, count uint64) {
 	m := c.getOrCreateQueueMetrics(queueID)
 	m.messagesRedelivered.Add(count)
+	m.messagesInFlight.Add(-int64(count)) //nolint:gosec // a redelivery count cannot approach int64 max.
 }
 
 // RecordDrop records dropped messages.
@@ -693,29 +679,13 @@ func (c *Collector) RecordDLQ(queueID string, count uint64) {
 	m.messagesToDLQ.Add(count)
 }
 
-// RecordBatchSize records a batch operation size.
-func (c *Collector) RecordBatchSize(queueID string, size int, _ string) {
-	m := c.getOrCreateQueueMetrics(queueID)
-	m.histogramMu.Lock()
-	m.batchSizes = append(m.batchSizes, size)
-	m.histogramMu.Unlock()
-}
-
-// RecordMessageSize records message body size.
-func (c *Collector) RecordMessageSize(queueID string, sizeBytes int) {
-	m := c.getOrCreateQueueMetrics(queueID)
-	m.histogramMu.Lock()
-	m.messageSizes = append(m.messageSizes, sizeBytes)
-	m.histogramMu.Unlock()
-}
-
-// RecordProcessingDuration records message processing duration.
-func (c *Collector) RecordProcessingDuration(queueID string, durationSeconds float64) {
-	m := c.getOrCreateQueueMetrics(queueID)
-	m.histogramMu.Lock()
-	m.processingDurations = append(m.processingDurations, durationSeconds)
-	m.histogramMu.Unlock()
-}
+// The collector used to accumulate batch sizes, message sizes, processing
+// durations and dwell times into per-queue slices. Nothing ever read them and
+// nothing ever truncated them, so they were an append-only allocation for
+// every message the server handled — dormant only because the methods that
+// appended to them were never called. Those distributions are now real
+// Prometheus histograms with bounded memory; the collector keeps the counters
+// and rates its own dashboards draw.
 
 // SetQueuesExist sets the current queue count.
 func (c *Collector) SetQueuesExist(count int64) {
@@ -779,6 +749,24 @@ func (c *Collector) GetSystemRates() Rates {
 	}
 }
 
+// SystemCounters holds the cluster-wide queue totals.
+type SystemCounters struct {
+	QueuesExist   int64
+	TotalSent     uint64
+	TotalReceived uint64
+	TotalDeleted  uint64
+}
+
+// GetSystemCounters returns the system-wide queue totals.
+func (c *Collector) GetSystemCounters() SystemCounters {
+	return SystemCounters{
+		QueuesExist:   c.system.queuesExist.Load(),
+		TotalSent:     c.system.totalSent.Load(),
+		TotalReceived: c.system.totalReceived.Load(),
+		TotalDeleted:  c.system.totalDeleted.Load(),
+	}
+}
+
 // GetCounters returns current counter values for a queue.
 func (c *Collector) GetCounters(queueID string) map[string]uint64 {
 	m := c.getOrCreateQueueMetrics(queueID)
@@ -829,7 +817,10 @@ func (c *Collector) rateCalculationWorker(ctx context.Context) {
 
 // calculateRates calculates rates for all queues.
 func (c *Collector) calculateRates(ctx context.Context) {
-	now := time.Now().UnixMilli()
+	start := time.Now()
+	defer func() { c.observeCollection(start) }()
+
+	now := start.UnixMilli()
 
 	c.queueMu.RLock()
 	defer c.queueMu.RUnlock()
@@ -854,23 +845,15 @@ func (c *Collector) calculateRates(ctx context.Context) {
 		m.prevReceived = currentReceived
 		m.prevDeleted = currentDeleted
 
-		// Persist rates to store (best-effort, errors are non-fatal).
-		if c.store != nil {
-			//nolint:errcheck // best-effort metrics persistence
-			_ = c.store.SaveRateSnapshot(ctx, now, queueID, MetricSendRate, sendRate, 1)
-			//nolint:errcheck // best-effort metrics persistence
-			_ = c.store.SaveRateSnapshot(ctx, now, queueID, MetricReceiveRate, receiveRate, 1)
-			//nolint:errcheck // best-effort metrics persistence
-			_ = c.store.SaveRateSnapshot(ctx, now, queueID, MetricDeleteRate, deleteRate, 1)
-			//nolint:errcheck // best-effort metrics persistence
-			_ = c.store.SaveRawMetric(ctx, now, queueID, MetricMessagesSentTotal, float64(currentSent), "")
-			//nolint:errcheck // best-effort metrics persistence
-			_ = c.store.SaveRawMetric(ctx, now, queueID, MetricMessagesReceivedTotal, float64(currentReceived), "")
-			//nolint:errcheck // best-effort metrics persistence
-			_ = c.store.SaveRawMetric(ctx, now, queueID, MetricMessagesDeletedTotal, float64(currentDeleted), "")
-			//nolint:errcheck // best-effort metrics persistence
-			_ = c.store.SaveRawMetric(ctx, now, queueID, MetricMessagesInFlight, float64(m.messagesInFlight.Load()), "")
-		}
+		// Persist rates to the telemetry store. Failures are recorded rather
+		// than returned: telemetry must never fail a queue operation.
+		c.saveRate(ctx, now, queueID, MetricSendRate, sendRate)
+		c.saveRate(ctx, now, queueID, MetricReceiveRate, receiveRate)
+		c.saveRate(ctx, now, queueID, MetricDeleteRate, deleteRate)
+		c.saveRaw(ctx, now, queueID, MetricMessagesSentTotal, float64(currentSent))
+		c.saveRaw(ctx, now, queueID, MetricMessagesReceivedTotal, float64(currentReceived))
+		c.saveRaw(ctx, now, queueID, MetricMessagesDeletedTotal, float64(currentDeleted))
+		c.saveRaw(ctx, now, queueID, MetricMessagesInFlight, float64(m.messagesInFlight.Load()))
 	}
 
 	c.calculateTopicRates(ctx, now)
@@ -892,17 +875,11 @@ func (c *Collector) calculateRates(ctx context.Context) {
 	c.system.prevTotalReceived = currentTotalReceived
 	c.system.prevTotalDeleted = currentTotalDeleted
 
-	// Persist system-wide metrics (best-effort, errors are non-fatal).
-	if c.store != nil {
-		//nolint:errcheck // best-effort metrics persistence
-		_ = c.store.SaveRateSnapshot(ctx, now, "", MetricSendRate, systemSendRate, 1)
-		//nolint:errcheck // best-effort metrics persistence
-		_ = c.store.SaveRateSnapshot(ctx, now, "", MetricReceiveRate, systemReceiveRate, 1)
-		//nolint:errcheck // best-effort metrics persistence
-		_ = c.store.SaveRateSnapshot(ctx, now, "", MetricDeleteRate, systemDeleteRate, 1)
-		//nolint:errcheck // best-effort metrics persistence
-		_ = c.store.SaveRawMetric(ctx, now, "", MetricQueuesExist, float64(c.system.queuesExist.Load()), "")
-	}
+	// Persist system-wide metrics, on the same terms.
+	c.saveRate(ctx, now, "", MetricSendRate, systemSendRate)
+	c.saveRate(ctx, now, "", MetricReceiveRate, systemReceiveRate)
+	c.saveRate(ctx, now, "", MetricDeleteRate, systemDeleteRate)
+	c.saveRaw(ctx, now, "", MetricQueuesExist, float64(c.system.queuesExist.Load()))
 }
 
 func (c *Collector) calculateTopicRates(ctx context.Context, now int64) {
@@ -921,24 +898,20 @@ func (c *Collector) calculateTopicRates(ctx context.Context, now int64) {
 		m.prevMessagesPublished = currentPublished
 		m.prevDeliveries = currentDeliveries
 
-		if c.store != nil {
-			//nolint:errcheck // best-effort metrics persistence
-			_ = c.store.SaveRateSnapshot(ctx, now, topicID, MetricTopicPublishRate, publishRate, 1)
-			//nolint:errcheck // best-effort metrics persistence
-			_ = c.store.SaveRateSnapshot(ctx, now, topicID, MetricTopicDeliveryRate, deliveryRate, 1)
-			//nolint:errcheck // best-effort metrics persistence
-			_ = c.store.SaveRawMetric(ctx, now, topicID, MetricTopicMessagesPublishedTotal, float64(currentPublished), "")
-			//nolint:errcheck // best-effort metrics persistence
-			_ = c.store.SaveRawMetric(ctx, now, topicID, MetricTopicDeliveriesTotal, float64(currentDeliveries), "")
-			if m.subscriptionsKnown.Load() {
-				//nolint:errcheck // best-effort metrics persistence
-				_ = c.store.SaveRawMetric(ctx, now, topicID, MetricTopicSubscriptionsCurrent, float64(m.subscriptionsCurrent.Load()), "")
-			}
-			//nolint:errcheck // best-effort metrics persistence
-			_ = c.store.SaveRawMetric(ctx, now, topicID, MetricTopicSubscriptionsCreatedTotal, float64(m.subscriptionsCreated.Load()), "")
-			//nolint:errcheck // best-effort metrics persistence
-			_ = c.store.SaveRawMetric(ctx, now, topicID, MetricTopicSubscriptionsDeletedTotal, float64(m.subscriptionsDeleted.Load()), "")
+		c.saveRate(ctx, now, topicID, MetricTopicPublishRate, publishRate)
+		c.saveRate(ctx, now, topicID, MetricTopicDeliveryRate, deliveryRate)
+		c.saveRaw(ctx, now, topicID, MetricTopicMessagesPublishedTotal, float64(currentPublished))
+		c.saveRaw(ctx, now, topicID, MetricTopicDeliveriesTotal, float64(currentDeliveries))
+
+		// A subscription count is only written once it has been reconciled
+		// from the store: writing a zero we have not yet confirmed would draw a
+		// cliff on the dashboard where there was only a restart.
+		if m.subscriptionsKnown.Load() {
+			c.saveRaw(ctx, now, topicID, MetricTopicSubscriptionsCurrent, float64(m.subscriptionsCurrent.Load()))
 		}
+
+		c.saveRaw(ctx, now, topicID, MetricTopicSubscriptionsCreatedTotal, float64(m.subscriptionsCreated.Load()))
+		c.saveRaw(ctx, now, topicID, MetricTopicSubscriptionsDeletedTotal, float64(m.subscriptionsDeleted.Load()))
 	}
 
 	currentSystemPublished := c.topicSystem.totalMessagesPublished.Load()
@@ -952,38 +925,17 @@ func (c *Collector) calculateTopicRates(ctx context.Context, now int64) {
 	c.topicSystem.prevTotalMessagesPublished = currentSystemPublished
 	c.topicSystem.prevTotalDeliveries = currentSystemDeliveries
 
-	if c.store != nil {
-		//nolint:errcheck // best-effort metrics persistence
-		_ = c.store.SaveRateSnapshot(ctx, now, "", MetricTopicPublishRate, systemPublishRate, 1)
-		//nolint:errcheck // best-effort metrics persistence
-		_ = c.store.SaveRateSnapshot(ctx, now, "", MetricTopicDeliveryRate, systemDeliveryRate, 1)
-		//nolint:errcheck // best-effort metrics persistence
-		_ = c.store.SaveRawMetric(ctx, now, "", MetricTopicMessagesPublishedTotal, float64(currentSystemPublished), "")
-		//nolint:errcheck // best-effort metrics persistence
-		_ = c.store.SaveRawMetric(ctx, now, "", MetricTopicDeliveriesTotal, float64(currentSystemDeliveries), "")
-		if c.topicSystem.subscriptionsKnown.Load() {
-			//nolint:errcheck // best-effort metrics persistence
-			_ = c.store.SaveRawMetric(ctx, now, "", MetricTopicSubscriptionsCurrent, float64(c.topicSystem.subscriptionsCurrent.Load()), "")
-		}
-		//nolint:errcheck // best-effort metrics persistence
-		_ = c.store.SaveRawMetric(
-			ctx,
-			now,
-			"",
-			MetricTopicSubscriptionsCreatedTotal,
-			float64(c.topicSystem.totalSubscriptionsCreated.Load()),
-			"",
-		)
-		//nolint:errcheck // best-effort metrics persistence
-		_ = c.store.SaveRawMetric(
-			ctx,
-			now,
-			"",
-			MetricTopicSubscriptionsDeletedTotal,
-			float64(c.topicSystem.totalSubscriptionsDeleted.Load()),
-			"",
-		)
+	c.saveRate(ctx, now, "", MetricTopicPublishRate, systemPublishRate)
+	c.saveRate(ctx, now, "", MetricTopicDeliveryRate, systemDeliveryRate)
+	c.saveRaw(ctx, now, "", MetricTopicMessagesPublishedTotal, float64(currentSystemPublished))
+	c.saveRaw(ctx, now, "", MetricTopicDeliveriesTotal, float64(currentSystemDeliveries))
+
+	if c.topicSystem.subscriptionsKnown.Load() {
+		c.saveRaw(ctx, now, "", MetricTopicSubscriptionsCurrent, float64(c.topicSystem.subscriptionsCurrent.Load()))
 	}
+
+	c.saveRaw(ctx, now, "", MetricTopicSubscriptionsCreatedTotal, float64(c.topicSystem.totalSubscriptionsCreated.Load()))
+	c.saveRaw(ctx, now, "", MetricTopicSubscriptionsDeletedTotal, float64(c.topicSystem.totalSubscriptionsDeleted.Load()))
 }
 
 // aggregationWorker runs periodic aggregation.
@@ -1003,7 +955,12 @@ func (c *Collector) aggregationWorker(ctx context.Context, interval time.Duratio
 		case <-c.stop:
 			return
 		case <-ticker.C:
-			if err := aggregateFn(ctx); err != nil {
+			start := time.Now()
+			err := aggregateFn(ctx)
+
+			c.observeAggregation(name, start, err)
+
+			if err != nil {
 				c.logger.Error("Aggregation failed",
 					slog.String("interval", name),
 					slog.String("error", err.Error()),
@@ -1080,6 +1037,9 @@ func (c *Collector) cleanupWorker(ctx context.Context) {
 					now-retention1h.Milliseconds(),
 					now-retention1d.Milliseconds(),
 				)
+
+				c.observeCleanup(err)
+
 				if err != nil {
 					c.logger.Error("Metrics cleanup failed", slog.String("error", err.Error()))
 				}

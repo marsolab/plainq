@@ -12,6 +12,7 @@ import (
 	"time"
 
 	hraft "github.com/hashicorp/raft"
+	"github.com/marsolab/plainq/internal/metrics"
 	"github.com/marsolab/plainq/internal/server/service/queue"
 )
 
@@ -84,10 +85,15 @@ type snapshot struct {
 }
 
 // Persist implements raft.FSMSnapshot.
-func (s *snapshot) Persist(sink hraft.SnapshotSink) error {
+//
+//nolint:nonamedreturns // the deferred recorder has to know whether the snapshot failed.
+func (s *snapshot) Persist(sink hraft.SnapshotSink) (pErr error) {
 	started := time.Now()
 
 	writer := newSnapshotWriter(sink)
+
+	//nolint:gosec // a snapshot cannot reach the sign bit of an int64.
+	defer func() { metrics.RecordSnapshot(started, int64(writer.written), pErr) }()
 
 	if err := writer.header(); err != nil {
 		cancelSink(sink, s.logger)
@@ -116,6 +122,8 @@ func (s *snapshot) Persist(sink hraft.SnapshotSink) error {
 	if err := sink.Close(); err != nil {
 		return fmt.Errorf("close snapshot sink: %w", err)
 	}
+
+	metrics.RecordSnapshotRecords(writer.queues, writer.messages, writer.topics, writer.subscriptions)
 
 	s.logger.Info("Wrote cluster state snapshot",
 		slog.String("id", sink.ID()),
@@ -162,6 +170,8 @@ func (f *FSM) Restore(reader io.ReadCloser) (rErr error) {
 
 	started := time.Now()
 
+	defer func() { metrics.RecordRestore(started, rErr) }()
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
 	defer cancel()
 
@@ -192,6 +202,8 @@ func (f *FSM) Restore(reader io.ReadCloser) (rErr error) {
 	if err := f.storage.CommitRestore(ctx); err != nil {
 		return fmt.Errorf("commit state restore: %w", err)
 	}
+
+	metrics.RecordRestoreRecords(stats.queues, stats.messages, stats.topics, stats.subscriptions)
 
 	f.logger.Info("Restored cluster state from snapshot",
 		slog.Uint64("queues", stats.queues),
@@ -359,8 +371,14 @@ func (f *FSM) readSnapshot(ctx context.Context, source io.Reader) (snapshotStats
 type snapshotWriter struct {
 	out *bufio.Writer
 
-	queues   uint64
-	messages uint64
+	queues        uint64
+	messages      uint64
+	topics        uint64
+	subscriptions uint64
+
+	// written counts the bytes handed to the sink, which is the size of the
+	// snapshot a joining node will have to pull over the network.
+	written uint64
 }
 
 // Compilation time check that snapshotWriter can receive a snapshot.
@@ -418,11 +436,15 @@ func (w *snapshotWriter) Message(state queue.MessageState) error {
 
 // Topic implements queue.StateSink.
 func (w *snapshotWriter) Topic(state queue.TopicState) error {
+	w.topics++
+
 	return w.writeJSON(recordTopic, state)
 }
 
 // Subscription implements queue.StateSink.
 func (w *snapshotWriter) Subscription(state queue.SubscriptionState) error {
+	w.subscriptions++
+
 	return w.writeJSON(recordSubscription, state)
 }
 
@@ -443,6 +465,9 @@ func (w *snapshotWriter) writeRecord(kind recordType, payload []byte) error {
 	var length [binary.MaxVarintLen64]byte
 
 	n := binary.PutUvarint(length[:], uint64(len(payload)))
+
+	//nolint:gosec // a record length is a non-negative int; the sum cannot be negative.
+	w.written += uint64(1 + n + len(payload))
 
 	if _, err := w.out.Write(length[:n]); err != nil {
 		return fmt.Errorf("write snapshot record: %w", err)

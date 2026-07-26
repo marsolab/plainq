@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/marsolab/plainq/internal/metrics"
 	"github.com/marsolab/servekit/authkit/jwtkit"
 	"github.com/marsolab/servekit/errkit"
 	"github.com/marsolab/servekit/httpkit"
@@ -44,6 +45,7 @@ func AuthenticateJWT(tokenManager jwtkit.TokenManager, denylist TokenDenylist) f
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			authHeader := r.Header.Get("Authorization")
 			if authHeader == "" {
+				metrics.RecordAuthentication(metrics.SchemeJWT, metrics.AuthMissingCredentials)
 				httpkit.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
 
 				return
@@ -52,6 +54,7 @@ func AuthenticateJWT(tokenManager jwtkit.TokenManager, denylist TokenDenylist) f
 			// Remove "Bearer " prefix.
 			tokenString := strings.TrimPrefix(authHeader, "Bearer ")
 			if tokenString == authHeader {
+				metrics.RecordAuthentication(metrics.SchemeJWT, metrics.AuthMalformedHeader)
 				httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: invalid authorization header format", errkit.ErrUnauthenticated))
 
 				return
@@ -60,6 +63,7 @@ func AuthenticateJWT(tokenManager jwtkit.TokenManager, denylist TokenDenylist) f
 			// Parse and verify the token.
 			token, err := tokenManager.ParseVerify(tokenString)
 			if err != nil {
+				metrics.RecordAuthentication(metrics.SchemeJWT, metrics.AuthInvalidToken)
 				httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: invalid token: %s", errkit.ErrUnauthenticated, err.Error()))
 
 				return
@@ -72,12 +76,14 @@ func AuthenticateJWT(tokenManager jwtkit.TokenManager, denylist TokenDenylist) f
 			if denylist != nil {
 				denied, denyErr := denylist.IsAccessTokenDenied(r.Context(), tokenString)
 				if denyErr != nil {
+					metrics.RecordAuthentication(metrics.SchemeJWT, metrics.AuthDenylistUnavailable)
 					httpkit.ErrorHTTP(w, r, fmt.Errorf("check token denylist: %w", denyErr))
 
 					return
 				}
 
 				if denied {
+					metrics.RecordAuthentication(metrics.SchemeJWT, metrics.AuthRevokedToken)
 					httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: token has been revoked", errkit.ErrUnauthenticated))
 
 					return
@@ -86,10 +92,13 @@ func AuthenticateJWT(tokenManager jwtkit.TokenManager, denylist TokenDenylist) f
 
 			userInfo, err := userInfoFromToken(token)
 			if err != nil {
+				metrics.RecordAuthentication(metrics.SchemeJWT, metrics.AuthIncompleteClaims)
 				httpkit.ErrorHTTP(w, r, err)
 
 				return
 			}
+
+			metrics.RecordAuthentication(metrics.SchemeJWT, metrics.AuthOK)
 
 			ctx := context.WithValue(r.Context(), UserContextKey, userInfo)
 			next.ServeHTTP(w, r.WithContext(ctx))
@@ -134,8 +143,14 @@ func userInfoFromToken(token *jwtkit.Token) (UserInfo, error) {
 func RequireRoles(requiredRoles ...string) func(next http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// The check is labeled with the roles it demanded, not the roles
+			// the caller had: the first is a fixed set defined by the routing
+			// table, the second is unbounded user data.
+			required := strings.Join(requiredRoles, "|")
+
 			userInfo, ok := GetUserFromContext(r.Context())
 			if !ok {
+				metrics.RecordAuthorization(metrics.CheckRole, required, metrics.DecisionError)
 				httpkit.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
 
 				return
@@ -159,10 +174,13 @@ func RequireRoles(requiredRoles ...string) func(next http.Handler) http.Handler 
 			}
 
 			if !hasRole {
+				metrics.RecordAuthorization(metrics.CheckRole, required, metrics.DecisionDeny)
 				httpkit.ErrorHTTP(w, r, errkit.ErrUnauthorized)
 
 				return
 			}
+
+			metrics.RecordAuthorization(metrics.CheckRole, required, metrics.DecisionAllow)
 
 			next.ServeHTTP(w, r)
 		})

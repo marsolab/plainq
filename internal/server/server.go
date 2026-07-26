@@ -13,6 +13,7 @@ import (
 	"github.com/heartwilltell/hc"
 	"github.com/marsolab/plainq/internal/houston"
 	"github.com/marsolab/plainq/internal/server/config"
+	"github.com/marsolab/plainq/internal/server/interceptor"
 	"github.com/marsolab/plainq/internal/server/middleware"
 	"github.com/marsolab/plainq/internal/server/service/account"
 	"github.com/marsolab/plainq/internal/server/service/oauth"
@@ -38,7 +39,7 @@ type PlainQ struct {
 	onboarding   *onboarding.Service
 	rbac         *rbac.Service
 	oauth        *oauth.Service
-	observer     telemetry.Observer
+	observer     *telemetry.Observer
 	tokenManager jwtkit.TokenManager
 
 	// Telemetry components.
@@ -77,7 +78,6 @@ func NewServer(
 		onboarding:   onboardingSvc,
 		rbac:         rbacSvc,
 		oauth:        oauthSvc,
-		observer:     telemetry.NewObserver(),
 		tokenManager: tokenManager,
 	}
 
@@ -96,6 +96,16 @@ func NewServer(
 		pq.queue.SetTopicMetricsRecorder(pq.metricsCollector)
 		pq.metricsHandler = NewMetricsHandler(pq.metricsCollector, pq.metricsStore)
 
+		// The storage observer already emits every queue event to Prometheus.
+		// Attaching the collector to the same observer means Houston's
+		// dashboards are fed from that one stream rather than a second,
+		// separately-wired one that can silently drift out of agreement with it.
+		if pq.observer != nil {
+			pq.observer.SetRecorder(pq.metricsCollector)
+		}
+
+		pq.metricsCollector.RegisterMetrics()
+
 		// Start the collector in background.
 		go pq.metricsCollector.Start(context.Background())
 
@@ -110,6 +120,10 @@ func NewServer(
 
 	// Initialize and mount the HTTP API routes.
 	httpListener.MountGroup("/api", func(api chi.Router) {
+		// Metrics go on before anything else so the timer covers the whole
+		// chain — including the auth middleware, which is exactly where a
+		// request gets slow when the token store is struggling.
+		api.Use(middleware.Metrics())
 		api.Use(middleware.Logging(logger))
 		api.Use(cors.AllowAll().Handler)
 
@@ -198,52 +212,62 @@ func NewServer(
 				r.Get("/config", NewSystemHandler(cfg).GetConfig)
 			})
 
-			// Metrics API routes for dashboard.
-			if pq.metricsHandler != nil {
-				v1.Route("/metrics", func(metrics chi.Router) {
-					protect(metrics)
+			v1.Route("/metrics", func(metrics chi.Router) {
+				protect(metrics)
 
-					// Overview dashboard data.
-					metrics.Get("/overview", pq.metricsHandler.GetDashboardOverview)
-					metrics.Get("/topics/overview", pq.metricsHandler.GetTopicDashboardOverview)
+				// What the Prometheus endpoint can expose, with the help text
+				// the exposition format has nowhere to carry. It reads the
+				// process registry, so unlike the dashboard routes it does not
+				// depend on the telemetry store being open.
+				metrics.Get("/catalog", GetPrometheusCatalog)
 
-					// Time-series chart data.
-					metrics.Get("/chart", pq.metricsHandler.GetMetricsChart)
+				// Metrics API routes for dashboard.
+				if pq.metricsHandler == nil {
+					return
+				}
 
-					// System-wide rates.
-					metrics.Get("/rates", pq.metricsHandler.GetRatesChart)
+				// Overview dashboard data.
+				metrics.Get("/overview", pq.metricsHandler.GetDashboardOverview)
+				metrics.Get("/topics/overview", pq.metricsHandler.GetTopicDashboardOverview)
 
-					// In-flight metrics.
-					metrics.Get("/inflight", pq.metricsHandler.GetInFlightMetrics)
+				// Time-series chart data.
+				metrics.Get("/chart", pq.metricsHandler.GetMetricsChart)
 
-					// Available metrics list.
-					metrics.Get("/available", pq.metricsHandler.GetAvailableMetrics)
+				// System-wide rates.
+				metrics.Get("/rates", pq.metricsHandler.GetRatesChart)
 
-					// Time range presets.
-					metrics.Get("/time-ranges", pq.metricsHandler.GetTimeRangePresets)
+				// In-flight metrics.
+				metrics.Get("/inflight", pq.metricsHandler.GetInFlightMetrics)
 
-					// Export metrics (for Metabase/custom charts).
-					metrics.Get("/export", pq.metricsHandler.ExportMetrics)
+				// Available metrics list.
+				metrics.Get("/available", pq.metricsHandler.GetAvailableMetrics)
 
-					// Queue-specific metrics.
-					metrics.Route("/queue/{id}", func(queueMetrics chi.Router) {
-						queueMetrics.Get("/", pq.metricsHandler.GetQueueMetrics)
-						queueMetrics.Get("/rates", pq.metricsHandler.GetRatesChart)
-						queueMetrics.Get("/inflight", pq.metricsHandler.GetInFlightMetrics)
-					})
+				// Time range presets.
+				metrics.Get("/time-ranges", pq.metricsHandler.GetTimeRangePresets)
 
-					metrics.Route("/topic/{id}", func(topicMetrics chi.Router) {
-						topicMetrics.Get("/", pq.metricsHandler.GetTopicMetrics)
-						topicMetrics.Get("/rates", pq.metricsHandler.GetTopicRatesChart)
-					})
+				// Export metrics (for Metabase/custom charts).
+				metrics.Get("/export", pq.metricsHandler.ExportMetrics)
+
+				// Queue-specific metrics.
+				metrics.Route("/queue/{id}", func(queueMetrics chi.Router) {
+					queueMetrics.Get("/", pq.metricsHandler.GetQueueMetrics)
+					queueMetrics.Get("/rates", pq.metricsHandler.GetRatesChart)
+					queueMetrics.Get("/inflight", pq.metricsHandler.GetInFlightMetrics)
 				})
-			}
+
+				metrics.Route("/topic/{id}", func(topicMetrics chi.Router) {
+					topicMetrics.Get("/", pq.metricsHandler.GetTopicMetrics)
+					topicMetrics.Get("/rates", pq.metricsHandler.GetTopicRatesChart)
+				})
+			})
 		})
 	})
 
 	// Initialize and mount the Houston UI related routes.
 	// There are routes responsible for static assets.
 	httpListener.MountGroup("/", func(ui chi.Router) {
+		ui.Use(middleware.Metrics())
+
 		// Static assets.
 		ui.Get("/*", pq.houstonStaticHandler)
 	})
@@ -251,7 +275,9 @@ func NewServer(
 	// Register the HTTP listener with a server.
 	server.RegisterListener("HTTP", httpListener)
 
-	grpcListener, grpcListenerErr := grpckit.NewListenerGRPC(cfg.GRPCAddr)
+	grpcListener, grpcListenerErr := grpckit.NewListenerGRPC(cfg.GRPCAddr,
+		grpckit.WithUnaryInterceptors(interceptor.Metrics()),
+	)
 	if grpcListenerErr != nil {
 		return nil, fmt.Errorf("create gRPC listener: %w", grpcListenerErr)
 	}
@@ -405,6 +431,13 @@ func WithMetricsStore(db *litekit.Conn) Option {
 // membership.
 func WithClusterNode(node ClusterNode) Option {
 	return func(pq *PlainQ) { pq.clusterNode = node }
+}
+
+// WithObserver hands the server the observer the storage layer records
+// through, so the telemetry collector — created here, once the telemetry
+// store is open — can be attached to the same event stream.
+func WithObserver(observer *telemetry.Observer) Option {
+	return func(pq *PlainQ) { pq.observer = observer }
 }
 
 // GetMetricsCollector returns the metrics collector for external use.

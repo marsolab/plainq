@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/marsolab/plainq/internal/metrics"
 	"github.com/marsolab/servekit/errkit"
 	"github.com/marsolab/servekit/httpkit"
 )
@@ -32,6 +33,7 @@ func RequireQueuePermission(permissionChecker PermissionChecker, permission Perm
 			// Get user from context.
 			userInfo, ok := GetUserFromContext(r.Context())
 			if !ok {
+				metrics.RecordAuthorization(metrics.CheckQueuePermission, string(permission), metrics.DecisionError)
 				httpkit.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
 
 				return
@@ -40,6 +42,7 @@ func RequireQueuePermission(permissionChecker PermissionChecker, permission Perm
 			// Admin users have all permissions.
 			for _, role := range userInfo.Roles {
 				if role == "admin" {
+					metrics.RecordAuthorization(metrics.CheckQueuePermission, string(permission), metrics.DecisionAllow)
 					next.ServeHTTP(w, r)
 
 					return
@@ -62,16 +65,20 @@ func RequireQueuePermission(permissionChecker PermissionChecker, permission Perm
 			// Check if user has the required permission.
 			hasPermission, err := permissionChecker.HasQueuePermission(r.Context(), userInfo.UserID, queueID, permission)
 			if err != nil {
+				metrics.RecordAuthorization(metrics.CheckQueuePermission, string(permission), metrics.DecisionError)
 				httpkit.ErrorHTTP(w, r, fmt.Errorf("check permission: %w", err))
 
 				return
 			}
 
 			if !hasPermission {
+				metrics.RecordAuthorization(metrics.CheckQueuePermission, string(permission), metrics.DecisionDeny)
 				httpkit.ErrorHTTP(w, r, errkit.ErrUnauthorized)
 
 				return
 			}
+
+			metrics.RecordAuthorization(metrics.CheckQueuePermission, string(permission), metrics.DecisionAllow)
 
 			next.ServeHTTP(w, r)
 		})
@@ -105,6 +112,7 @@ func RequireAdminOrPermission(permissionChecker PermissionChecker, permission Pe
 			// Get user from context.
 			userInfo, ok := GetUserFromContext(r.Context())
 			if !ok {
+				metrics.RecordAuthorization(metrics.CheckQueuePermission, string(permission), metrics.DecisionError)
 				httpkit.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
 
 				return
@@ -113,6 +121,7 @@ func RequireAdminOrPermission(permissionChecker PermissionChecker, permission Pe
 			// Check if user is admin.
 			for _, role := range userInfo.Roles {
 				if role == "admin" {
+					metrics.RecordAuthorization(metrics.CheckQueuePermission, string(permission), metrics.DecisionAllow)
 					next.ServeHTTP(w, r)
 
 					return
@@ -134,16 +143,20 @@ func RequireAdminOrPermission(permissionChecker PermissionChecker, permission Pe
 			// Check if user has the required permission.
 			hasPermission, err := permissionChecker.HasQueuePermission(r.Context(), userInfo.UserID, queueID, permission)
 			if err != nil {
+				metrics.RecordAuthorization(metrics.CheckQueuePermission, string(permission), metrics.DecisionError)
 				httpkit.ErrorHTTP(w, r, fmt.Errorf("check permission: %w", err))
 
 				return
 			}
 
 			if !hasPermission {
+				metrics.RecordAuthorization(metrics.CheckQueuePermission, string(permission), metrics.DecisionDeny)
 				httpkit.ErrorHTTP(w, r, errkit.ErrUnauthorized)
 
 				return
 			}
+
+			metrics.RecordAuthorization(metrics.CheckQueuePermission, string(permission), metrics.DecisionAllow)
 
 			next.ServeHTTP(w, r)
 		})

@@ -102,9 +102,14 @@ func queryStampQueueGCAt() string {
 // Receive selects the same rows on every node, and the tie-break on msg_id
 // makes the order total — ordering by created_at alone leaves rows written in
 // the same millisecond to the storage engine's discretion.
+//
+// retries comes back with the row because a non-zero count means this delivery
+// is a redelivery — a message whose previous consumer never acknowledged it.
+// That is the difference between consumers being busy and consumers being
+// broken, and it is not visible anywhere else.
 // Placeholders: now, max retries, limit.
 func querySelectMessages(queueID string) string {
-	return `select msg_id, msg_body from ` + queueID +
+	return `select msg_id, msg_body, retries from ` + queueID +
 		` where visible_at <= ? and retries <= ? order by created_at, msg_id limit ?;`
 }
 
@@ -150,6 +155,16 @@ func queryPurgeQueue(queueID string) string {
 
 func queryCountMessages(queueID string) string {
 	return `select count(*) from ` + queueID + `;`
+}
+
+// queryQueueStats counts a queue's messages and how many of them are claimed
+// but not yet visible again. Placeholder: now.
+//
+// One pass for both, because the pair is only meaningful read together: a
+// depth of a thousand means something different when all of it is in flight.
+// The in-flight half is an index range on visible_at.
+func queryQueueStats(queueID string) string {
+	return `select count(*), coalesce(sum(case when visible_at > ? then 1 else 0 end), 0) from ` + queueID + `;`
 }
 
 // queryDropMessages evicts messages that exhausted their retries or outlived

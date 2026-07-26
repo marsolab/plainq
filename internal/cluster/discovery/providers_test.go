@@ -661,7 +661,7 @@ func TestConsulSpecParsing(t *testing.T) {
 	discoverer, buildErr := Parse(spec.Raw)
 	td.Require(t).CmpNoError(buildErr)
 
-	consul, ok := discoverer.(*Consul)
+	consul, ok := Unwrap(discoverer).(*Consul)
 	td.Require(t).Cmp(ok, true)
 
 	td.Cmp(t, consul.address, "http://127.0.0.1:8500")

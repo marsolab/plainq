@@ -85,6 +85,9 @@ func queryDeleteQueueTable(queueID string) string {
 // has no defined row order — without it a batch could surface newer messages
 // before older ones.
 //
+// retries comes back post-increment, so a value above one means the message
+// had been delivered before and this is a redelivery.
+//
 // $1 = new visible_at, $2 = max_receive_attempts, $3 = batch size.
 func queryReceiveMessages(queueID string) string {
 	ident := quoteIdent(queueID)
@@ -100,9 +103,9 @@ func queryReceiveMessages(queueID string) string {
 		updated AS (
 			UPDATE %[1]s SET visible_at = $1, retries = retries + 1
 			WHERE msg_id IN (SELECT msg_id FROM claimed)
-			RETURNING msg_id, msg_body, created_at
+			RETURNING msg_id, msg_body, created_at, retries
 		)
-		SELECT msg_id, msg_body FROM updated ORDER BY created_at;
+		SELECT msg_id, msg_body, retries FROM updated ORDER BY created_at;
 	`, ident)
 }
 
@@ -188,5 +191,18 @@ func queryListQueues(pageSize int32, cursor string, orderBy v1.ListQueuesRequest
 		        visibility_timeout_seconds, max_receive_attempts, drop_policy, dead_letter_queue_id
 		   FROM queue_properties %s ORDER BY %s %s LIMIT %d;`,
 		where, orderByStr, sortByStr, pageSize,
+	)
+}
+
+// queryQueueStats counts a queue's messages and how many of them are claimed
+// but not yet visible again.
+//
+// One pass for both, because the pair is only meaningful read together: a
+// depth of a thousand means something different when all of it is in flight.
+// The in-flight half is an index range on visible_at.
+func queryQueueStats(queueID string) string {
+	return fmt.Sprintf(
+		`SELECT count(*), count(*) FILTER (WHERE visible_at > now()) FROM %s;`,
+		quoteIdent(queueID),
 	)
 }

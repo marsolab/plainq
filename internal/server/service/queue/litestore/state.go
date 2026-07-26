@@ -570,13 +570,7 @@ func (s *Storage) CommitRestore(ctx context.Context) error {
 		return fmt.Errorf("count queues after restore: %w", countErr)
 	}
 
-	// The gauge only moves by deltas, so it is walked to the new value rather
-	// than assigned one.
-	if existing := s.observer.QueuesExist().Get(); existing > count {
-		s.observer.QueuesExist().Sub(existing - count)
-	} else if existing < count {
-		s.observer.QueuesExist().Add(count - existing)
-	}
+	s.observer.SetQueues(count)
 
 	if err := s.fillCache(ctx, ""); err != nil {
 		return fmt.Errorf("refill queue cache after restore: %w", err)

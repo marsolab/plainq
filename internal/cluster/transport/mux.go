@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/marsolab/plainq/internal/metrics"
 	"github.com/marsolab/servekit/logkit"
 )
 
@@ -33,6 +34,22 @@ const (
 	// ProtoPeer carries internal peer RPC — write forwarding, join, status.
 	ProtoPeer Protocol = 2
 )
+
+// String names a protocol for logs and metric labels. An unrecognized byte is
+// reported as "unknown" rather than its number, because the number is what an
+// unrelated client happened to send first.
+func (p Protocol) String() string {
+	switch p {
+	case ProtoRaft:
+		return "raft"
+
+	case ProtoPeer:
+		return "peer"
+
+	default:
+		return "unknown"
+	}
+}
 
 // handshakeTimeout bounds how long a connection may take to declare itself.
 // A connection that opens and says nothing is a port scan or a stuck peer;
@@ -192,6 +209,8 @@ func (m *Mux) Dial(proto Protocol, addr string, timeout time.Duration) (net.Conn
 		return nil, fmt.Errorf("write protocol header to peer %q: %w", addr, err)
 	}
 
+	metrics.RecordTransportConnection(proto.String(), metrics.DirectionOutbound)
+
 	if timeout > 0 {
 		if err := conn.SetWriteDeadline(time.Time{}); err != nil {
 			_ = conn.Close()
@@ -284,6 +303,8 @@ func (m *Mux) route(conn net.Conn) {
 		cancelHandshake()
 
 		if err != nil {
+			metrics.RecordTransportHandshakeFailure()
+
 			m.logger.Debug("Cluster TLS handshake failed",
 				slog.String("remote", conn.RemoteAddr().String()),
 				slog.String("error", err.Error()),
@@ -306,6 +327,8 @@ func (m *Mux) route(conn net.Conn) {
 	var header [1]byte
 
 	if _, err := io.ReadFull(conn, header[:]); err != nil {
+		metrics.RecordTransportHandshakeFailure()
+
 		m.logger.Debug("Cluster connection closed before declaring a protocol",
 			slog.String("remote", conn.RemoteAddr().String()),
 			slog.String("error", err.Error()),
@@ -324,11 +347,15 @@ func (m *Mux) route(conn net.Conn) {
 
 	proto := Protocol(header[0])
 
+	metrics.RecordTransportConnection(proto.String(), metrics.DirectionInbound)
+
 	m.subMu.RLock()
 	sub, ok := m.sub[proto]
 	m.subMu.RUnlock()
 
 	if !ok {
+		metrics.RecordTransportHandshakeFailure()
+
 		m.logger.Warn("Cluster connection named an unhandled protocol",
 			slog.String("remote", conn.RemoteAddr().String()),
 			slog.Int("protocol", int(header[0])),

@@ -129,6 +129,23 @@ func (c *QueuePropsCache) list() []QueueProps {
 	return props
 }
 
+// ids returns the identifiers of every cached queue.
+//
+// It copies under the read lock rather than handing back the list, so a caller
+// walking it — the statistics sampler runs a query per entry — does not hold
+// the cache against every reader for the duration.
+func (c *QueuePropsCache) ids() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	ids := make([]string, 0, len(c.byID))
+	for id := range c.byID {
+		ids = append(ids, id)
+	}
+
+	return ids
+}
+
 func (c *QueuePropsCache) put(props QueueProps) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

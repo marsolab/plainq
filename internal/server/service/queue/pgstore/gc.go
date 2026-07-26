@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/marsolab/plainq/internal/metrics"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/service/queue/pgstore/sqlcgen"
 )
@@ -37,43 +38,61 @@ func (s *Storage) gc(ctx context.Context) {
 			return
 
 		case <-timer.C:
-			start := time.Now()
-
-			if s.observer.QueuesExist().Get() == 0 {
+			if s.observer.Queues() == 0 {
 				continue
 			}
 
-			s.observer.GCSchedules().Inc()
-
-			queues, queuesErr := s.queuesForGC(ctx)
-			if queuesErr != nil {
-				panic(fmt.Sprintf("get queue IDs for GC: %v", queuesErr))
-			}
-
-			for _, queueID := range queues {
-				s.logger.Debug("Running garbage collection for queue",
-					slog.String("queue_id", queueID),
-				)
-
-				result, sweepErr := s.sweep(ctx, queueID)
-				if sweepErr != nil {
-					panic(fmt.Errorf("sweep queue (id: %q): %s", queueID, sweepErr.Error()))
-				}
-
-				s.logger.Debug("Garbage collection",
-					slog.String("queue_id", queueID),
-					slog.String("duration", result.Duration.String()),
-					slog.Uint64("messages_dropped", result.MessagesDropped),
-				)
-			}
-
-			s.observer.GCDuration().Dur(start)
+			s.collect(ctx)
 		}
 	}
 }
 
+// collect runs one full sweep and records how it went. It mirrors the SQLite
+// backend: the failure paths still panic, but the outcome is recorded on the
+// way out, so the error result is reachable for exactly the failures an
+// operator needs to see.
+func (s *Storage) collect(ctx context.Context) {
+	var (
+		start = time.Now()
+		cErr  error
+	)
+
+	defer func() { s.observer.GC(metrics.GCScopeAll, start, cErr) }()
+
+	queues, queuesErr := s.queuesForGC(ctx)
+	if queuesErr != nil {
+		cErr = queuesErr
+
+		panic(fmt.Sprintf("get queue IDs for GC: %v", queuesErr))
+	}
+
+	for _, queueID := range queues {
+		s.logger.Debug("Running garbage collection for queue",
+			slog.String("queue_id", queueID),
+		)
+
+		result, sweepErr := s.sweep(ctx, queueID)
+		if sweepErr != nil {
+			cErr = sweepErr
+
+			panic(fmt.Errorf("sweep queue (id: %q): %s", queueID, sweepErr.Error()))
+		}
+
+		// A sweep is the one moment the store already knows a queue changed
+		// size, so it is where the delta-tracked gauges are corrected against
+		// an exact count.
+		s.sampleQueue(ctx, queueID)
+
+		s.logger.Debug("Garbage collection",
+			slog.String("queue_id", queueID),
+			slog.String("duration", result.Duration.String()),
+			slog.Uint64("messages_dropped", result.MessagesDropped),
+		)
+	}
+}
+
 func (s *Storage) queuesForGC(ctx context.Context) (_ []string, sErr error) {
-	limit := s.observer.QueuesExist().Get()
+	limit := s.observer.Queues()
 	offset := uint64(0)
 	cutoff := time.Now().Add(-s.gcTimeout)
 	queues := make([]string, 0, limit)
@@ -111,6 +130,21 @@ func (s *Storage) queuesForGC(ctx context.Context) (_ []string, sErr error) {
 	}
 
 	return queues, nil
+}
+
+// recordEviction reports what a sweep removed.
+//
+// A dead-lettered message is not gone, it moved — counting it only as a drop
+// would hide the one queue state that reliably needs a human.
+func (s *Storage) recordEviction(queueID string, evictionPolicy uint32, dropped uint64) {
+	//nolint:gosec // EvictionPolicy enum is non-negative.
+	policy := v1.EvictionPolicy(evictionPolicy)
+
+	s.observer.Dropped(queueID, policy, dropped)
+
+	if policy == v1.EvictionPolicy_EVICTION_POLICY_DEAD_LETTER {
+		s.observer.DeadLettered(queueID, dropped)
+	}
 }
 
 func (s *Storage) sweep(ctx context.Context, queueID string) (_ *sweepResult, sErr error) {
@@ -159,8 +193,7 @@ func (s *Storage) sweep(ctx context.Context, queueID string) (_ *sweepResult, sE
 		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
 
-	//nolint:gosec // EvictionPolicy enum is non-negative.
-	s.observer.MessageDropped(queueID, v1.EvictionPolicy(props.EvictionPolicy)).Add(messagesDropped)
+	s.recordEviction(queueID, props.EvictionPolicy, messagesDropped)
 
 	return &sweepResult{
 		Duration:        time.Since(start),
