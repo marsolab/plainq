@@ -82,3 +82,15 @@ Resolve the name of the Secret holding the Postgres DSN.
 {{- printf "%s-postgres" (include "plainq.fullname" .) }}
 {{- end }}
 {{- end }}
+
+{{/*
+plainq.clusterSecretName resolves the Secret holding the cluster's gossip key
+and peer-RPC secret, preferring one the operator created themselves.
+*/}}
+{{- define "plainq.clusterSecretName" -}}
+{{- if .Values.cluster.existingSecret -}}
+{{ .Values.cluster.existingSecret }}
+{{- else -}}
+{{ printf "%s-cluster" (include "plainq.fullname" .) }}
+{{- end -}}
+{{- end }}

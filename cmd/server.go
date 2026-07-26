@@ -15,6 +15,7 @@ import (
 	"github.com/heartwilltell/hc"
 	"github.com/heartwilltell/scotty"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/marsolab/plainq/internal/cluster"
 	"github.com/marsolab/plainq/internal/server"
 	"github.com/marsolab/plainq/internal/server/config"
 	"github.com/marsolab/plainq/internal/server/mutations"
@@ -75,7 +76,11 @@ func (b *storageBackend) Close() error {
 
 //nolint:cyclop,gocognit,funlen // CLI server setup wires the full dependency graph in one place.
 func serverCommand() *scotty.Command {
-	var cfg config.Config
+	var (
+		cfg              config.Config
+		clusterCfg       cluster.Config
+		clusterDiscovery string
+	)
 
 	cmd := scotty.Command{
 		Name:  "serve",
@@ -257,6 +262,10 @@ func serverCommand() *scotty.Command {
 			f.BoolVar(&cfg.ProfilerEnabled, "profiler", false,
 				"enable the profiler endpoint",
 			)
+
+			// Cluster.
+
+			setClusterFlags(f, &clusterCfg, &clusterDiscovery)
 		},
 
 		Run: func(_ *scotty.Command, _ []string) error {
@@ -279,6 +288,27 @@ func serverCommand() *scotty.Command {
 
 			// Storage initialization.
 
+			// A cluster member takes long-running read transactions to
+			// snapshot its state. In rollback-journal mode those block every
+			// writer for the duration; in WAL mode they do not. Cluster mode
+			// therefore needs WAL, and asking for anything else is a
+			// configuration error rather than something to quietly override.
+			if clusterCfg.Enabled {
+				switch strings.ToLower(cfg.StorageJournalMode) {
+				case "":
+					cfg.StorageJournalMode = "wal"
+
+				case "wal":
+
+				default:
+					return fmt.Errorf(
+						"cluster mode needs storage.journal-mode=wal, not %q: snapshots take long read "+
+							"transactions, and outside WAL those stall every write",
+						cfg.StorageJournalMode,
+					)
+				}
+			}
+
 			backend, backendErr := initStorageBackend(&cfg, logger)
 			if backendErr != nil {
 				return backendErr
@@ -292,7 +322,7 @@ func serverCommand() *scotty.Command {
 				}
 			}()
 
-			queueStorage, queueClose, queueStorageInitErr := initQueueStorage(&cfg, logger, backend)
+			queueStorage, queueClose, queueStorageInitErr := initQueueStorage(&cfg, &clusterCfg, logger, backend)
 			if queueStorageInitErr != nil {
 				return queueStorageInitErr
 			}
@@ -304,6 +334,33 @@ func serverCommand() *scotty.Command {
 					)
 				}
 			}()
+
+			// In a cluster the queue service talks to the replicated store
+			// instead of the local one. Everything above this line is
+			// unchanged: the service does not know which it got.
+			var clusterNode *cluster.Node
+
+			if clusterCfg.Enabled {
+				node, nodeErr := initClusterNode(&cfg, &clusterCfg, clusterDiscovery, logger, queueStorage)
+				if nodeErr != nil {
+					return nodeErr
+				}
+
+				clusterNode = node
+				queueStorage = node.Store()
+
+				defer func() {
+					if err := clusterNode.Close(); err != nil {
+						logger.Error("Failed to stop the cluster node",
+							slog.String("error", err.Error()),
+						)
+					}
+				}()
+
+				if err := clusterNode.Start(ctx); err != nil {
+					return fmt.Errorf("start cluster node: %w", err)
+				}
+			}
 
 			queueService := queue.NewService(&cfg, logger, queueStorage)
 
@@ -344,6 +401,10 @@ func serverCommand() *scotty.Command {
 
 			// Initialize telemetry database if enabled.
 			var serverOpts []server.Option
+
+			if clusterNode != nil {
+				serverOpts = append(serverOpts, server.WithClusterNode(clusterNode))
+			}
 
 			if cfg.TelemetryEnabled {
 				telemetryDB, telemetryErr := initTelemetryDB(&cfg, logger)
@@ -528,9 +589,22 @@ func initPostgresBackend(cfg *config.Config, logger *slog.Logger) (*pgxpool.Pool
 // initQueueStorage returns a queue.Storage along with a shutdown function
 // that stops any background goroutines owned by the store (GC sweeper).
 // The returned close fn is safe to call exactly once.
-func initQueueStorage(cfg *config.Config, logger *slog.Logger, backend *storageBackend) (queue.Storage, func() error, error) {
+func initQueueStorage(
+	cfg *config.Config,
+	clusterCfg *cluster.Config,
+	logger *slog.Logger,
+	backend *storageBackend,
+) (queue.Storage, func() error, error) {
 	switch backend.driver {
 	case storageDriverPostgres:
+		if clusterCfg.Enabled {
+			return nil, nil, errors.New(
+				"cluster mode replicates the embedded store, so it needs storage.driver=sqlite. " +
+					"With Postgres the database is already shared between nodes and replicating it " +
+					"would write every message twice",
+			)
+		}
+
 		opts := make([]queuepg.Option, 0, 2)
 
 		if cfg.StorageLogEnable {
@@ -549,7 +623,7 @@ func initQueueStorage(cfg *config.Config, logger *slog.Logger, backend *storageB
 		return store, store.Close, nil
 
 	default:
-		opts := make([]queuestore.Option, 0, 2)
+		opts := make([]queuestore.Option, 0, 3)
 
 		if cfg.StorageLogEnable {
 			opts = append(opts, queuestore.WithLogger(logger))
@@ -559,6 +633,13 @@ func initQueueStorage(cfg *config.Config, logger *slog.Logger, backend *storageB
 			opts = append(opts, queuestore.WithGCTimeout(cfg.StorageGCTimeout))
 		}
 
+		// A cluster member does not sweep on its own schedule — the leader
+		// proposes eviction through the consensus log so every replica drops
+		// the same rows.
+		if clusterCfg.Enabled {
+			opts = append(opts, queuestore.WithoutGC())
+		}
+
 		store, err := queuestore.New(backend.sqlite, opts...)
 		if err != nil {
 			return nil, nil, fmt.Errorf("create sqlite queue storage: %w", err)
@@ -566,6 +647,41 @@ func initQueueStorage(cfg *config.Config, logger *slog.Logger, backend *storageB
 
 		return store, store.Close, nil
 	}
+}
+
+// initClusterNode assembles the cluster layer around the local store.
+func initClusterNode(
+	cfg *config.Config,
+	clusterCfg *cluster.Config,
+	discovery string,
+	logger *slog.Logger,
+	local queue.Storage,
+) (*cluster.Node, error) {
+	replicated, ok := local.(queue.ReplicatedStorage)
+	if !ok {
+		return nil, fmt.Errorf(
+			"storage backend %T cannot be replicated: it does not support snapshot and restore", local,
+		)
+	}
+
+	if discovery != "" {
+		clusterCfg.Discovery = append(clusterCfg.Discovery, discovery)
+	}
+
+	if clusterCfg.DataDir == "" {
+		clusterCfg.DataDir = filepath.Join(filepath.Dir(cfg.StorageDBPath), "cluster")
+	}
+
+	if clusterCfg.Version == "" {
+		clusterCfg.Version = Commit
+	}
+
+	node, err := cluster.NewNode(*clusterCfg, replicated, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	return node, nil
 }
 
 func initAccountStorage(cfg *config.Config, logger *slog.Logger, backend *storageBackend) (account.Storage, error) {

@@ -40,11 +40,14 @@ const (
 	// maxReceiveAttempts represents the maximum number of receive attempts for a message.
 	maxReceiveAttempts = 5
 
+	// sendInsertColumns is how many parameters each message binds in the
+	// multi-row INSERT: id, body, created_at, visible_at.
+	sendInsertColumns = 4
+
 	// maxSendInsertBatch caps how many messages go into a single multi-row
-	// INSERT. Each message binds two parameters, so a batch must stay under
-	// SQLite's bind-parameter limit; larger Send batches are split into this
-	// many messages per statement.
-	maxSendInsertBatch = 5000
+	// INSERT, so the statement stays well under SQLite's bind-parameter limit;
+	// larger Send batches are split into this many messages per statement.
+	maxSendInsertBatch = 2500
 
 	// queuePropsCacheSize represents the size of the queue properties cache.
 	queuePropsCacheSize = 1000
@@ -74,6 +77,15 @@ func WithLogger(logger *slog.Logger) Option {
 	return func(o *Storage) { o.logger = logger }
 }
 
+// WithoutGC stops the store from sweeping on its own schedule.
+//
+// It exists for cluster members: eviction changes replicated state, so it has
+// to be proposed through the consensus log by the leader rather than decided
+// independently by each node.
+func WithoutGC() Option {
+	return func(o *Storage) { o.gcDisabled = true }
+}
+
 // Storage represents a storage system.
 // This struct holds the necessary configurations and dependencies for the storage.
 type Storage struct {
@@ -91,11 +103,18 @@ type Storage struct {
 	// gcTimeout represents timeout duration between the garbage collection schedules.
 	gcTimeout time.Duration
 
+	// gcDisabled turns off the local sweeper. Set on cluster members, where
+	// the leader proposes eviction through the consensus log instead.
+	gcDisabled bool
+
 	// observer is responsible for observing certain events and transform them to metrics.
 	observer telemetry.Observer
 
 	// stop is a function that can be called to stop the telemetry and garbage collection processes.
 	stop func()
+
+	// restore holds the in-flight snapshot restore, if any.
+	restore restoreState
 }
 
 // New returns a pointer to a new instance of Storage with a pointer to sql.DB struct.
@@ -145,7 +164,11 @@ func New(db *litekit.Conn, options ...Option) (*Storage, error) {
 
 //nolint:cyclop // Complex queue creation with validation and initialization.
 func (s *Storage) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest) (_ *v1.CreateQueueResponse, sErr error) {
-	queueID := idkit.XID()
+	// Under replication the leader has already chosen the id and the creation
+	// instant; a replica that minted its own would name the same queue
+	// differently on every node.
+	queueID := queue.NextID(ctx, idkit.XID)
+	createdAt := queue.WriteTime(ctx)
 
 	if input.QueueName == "" {
 		return nil, fmt.Errorf("%w: queue name is empty", errkit.ErrInvalidArgument)
@@ -190,6 +213,18 @@ func (s *Storage) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest)
 		return nil, fmt.Errorf("create queue table: execute query: %w", err)
 	}
 
+	// created_at and gc_at come from column defaults, which read the node's
+	// own clock. Under replication that is a divergence, so overwrite them
+	// with the leader's stamp. A standalone write skips the statement and
+	// keeps the defaults.
+	if queue.Replicated(ctx) {
+		stamp := sqliteTime(createdAt)
+
+		if _, err := tx.ExecContext(ctx, queryStampQueueTimestamps(), stamp, stamp, queueID); err != nil {
+			return nil, fmt.Errorf("stamp queue timestamps: execute query: %w", err)
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
@@ -207,7 +242,7 @@ func (s *Storage) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest)
 	props := QueueProps{
 		ID:                       queueID,
 		Name:                     input.QueueName,
-		CreatedAt:                time.Now().UTC(),
+		CreatedAt:                createdAt,
 		RetentionPeriodSeconds:   input.RetentionPeriodSeconds,
 		VisibilityTimeoutSeconds: input.VisibilityTimeoutSeconds,
 		MaxReceiveAttempts:       input.MaxReceiveAttempts,
@@ -409,15 +444,18 @@ func (s *Storage) Send(ctx context.Context, input *v1.SendRequest) (_ *v1.SendRe
 	}
 
 	// Pre-generate IDs (response order matches request order) and flatten the
-	// batch into one (msg_id, msg_body, …) argument slice for multi-row INSERT.
-	args := make([]any, 0, len(messages)*2)
+	// batch into one (msg_id, msg_body, created_at, visible_at) argument slice
+	// for multi-row INSERT. Under replication the ids and the timestamp come
+	// from the leader instead of from this node.
+	args := make([]any, 0, len(messages)*sendInsertColumns)
+	enqueuedAt := writeTime(ctx)
 
 	var sentBytes uint64
 
 	for _, m := range messages {
-		msgID := idkit.ULID()
+		msgID := queue.NextID(ctx, idkit.ULID)
 
-		args = append(args, msgID, m.Body)
+		args = append(args, msgID, m.Body, enqueuedAt, enqueuedAt)
 		output.MessageIds = append(output.MessageIds, msgID)
 
 		sentBytes += uint64(len(m.Body))
@@ -440,7 +478,9 @@ func (s *Storage) Send(ctx context.Context, input *v1.SendRequest) (_ *v1.SendRe
 	for start := 0; start < len(messages); start += maxSendInsertBatch {
 		end := min(start+maxSendInsertBatch, len(messages))
 
-		if _, err := tx.ExecContext(ctx, queryInsertMessagesBatch(queueID, end-start), args[start*2:end*2]...); err != nil {
+		chunk := args[start*sendInsertColumns : end*sendInsertColumns]
+
+		if _, err := tx.ExecContext(ctx, queryInsertMessagesBatch(queueID, end-start), chunk...); err != nil {
 			return nil, fmt.Errorf("insert messages: %w", err)
 		}
 	}
@@ -474,13 +514,19 @@ func (s *Storage) Receive(ctx context.Context, input *v1.ReceiveRequest) (_ *v1.
 		}
 	}()
 
-	messages, selectErr := selectVisibleMessages(ctx, tx, queueID, info.MaxReceiveAttempts, input.BatchSize)
+	// Both the visibility predicate and the new deadline are anchored to one
+	// instant, taken from the command under replication. Reading the clock
+	// twice — or letting SQLite read its own — would have two replicas claim
+	// different messages for the same Receive.
+	now := queue.WriteTime(ctx)
+
+	messages, selectErr := selectVisibleMessages(ctx, tx, queueID, now, info.MaxReceiveAttempts, input.BatchSize)
 	if selectErr != nil {
 		return nil, selectErr
 	}
 
 	//nolint:gosec // VisibilityTimeoutSeconds is bounded by validation; conversion to int64 is safe.
-	visibleAt := time.Now().UTC().Add(time.Duration(info.VisibilityTimeoutSeconds) * time.Second)
+	visibleAt := now.Add(time.Duration(info.VisibilityTimeoutSeconds) * time.Second)
 
 	if err := bumpVisibility(ctx, tx, queueID, messages, visibleAt); err != nil {
 		return nil, err
@@ -508,6 +554,7 @@ func selectVisibleMessages(
 	ctx context.Context,
 	tx *sql.Tx,
 	queueID string,
+	now time.Time,
 	maxReceiveAttempts, batchSize uint32,
 ) (_ []*v1.ReceiveMessage, err error) {
 	limit := batchSize
@@ -515,7 +562,7 @@ func selectVisibleMessages(
 		limit = 1
 	}
 
-	rows, queryErr := tx.QueryContext(ctx, querySelectMessages(queueID), maxReceiveAttempts, limit)
+	rows, queryErr := tx.QueryContext(ctx, querySelectMessages(queueID), sqliteTime(now), maxReceiveAttempts, limit)
 	if queryErr != nil {
 		return nil, fmt.Errorf("select query: %w", queryErr)
 	}
@@ -553,7 +600,7 @@ func bumpVisibility(ctx context.Context, tx *sql.Tx, queueID string, messages []
 	}
 
 	args := make([]any, 0, len(messages)+1)
-	args = append(args, visibleAt)
+	args = append(args, sqliteTime(visibleAt))
 
 	for _, m := range messages {
 		args = append(args, m.Id)

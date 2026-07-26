@@ -6,9 +6,21 @@ metadata:
   labels:
     {{- include "plainq.labels" . | nindent 4 }}
 spec:
+  {{- if .Values.cluster.enabled }}
+  # In a cluster each pod owns its own SQLite database and the nodes replicate
+  # between themselves, so the single-writer constraint no longer caps the
+  # deployment at one pod.
+  replicas: {{ .Values.cluster.replicas }}
+  # Pods come up together rather than one at a time: bootstrap-expect waits for
+  # all of them to be visible before forming the cluster, and OrderedReady
+  # would deadlock waiting for a readiness that cannot arrive until they are.
+  podManagementPolicy: Parallel
+  serviceName: {{ printf "%s-headless" (include "plainq.fullname" .) }}
+  {{- else }}
   # SQLite is single-writer: pin to one replica regardless of replicaCount.
   replicas: 1
   serviceName: {{ include "plainq.fullname" . }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "plainq.selectorLabels" . | nindent 6 }}
@@ -37,7 +49,7 @@ spec:
         {{- include "plainq.containerSpec" . | nindent 8 }}
       volumes:
         {{- include "plainq.volumes" . | nindent 8 }}
-        {{- if .Values.storage.sqlite.persistence.enabled }}
+        {{- if and .Values.storage.sqlite.persistence.enabled (not .Values.cluster.enabled) }}
         # Mounts the PersistentVolumeClaim defined in templates/pvc.yaml.
         - name: data
           persistentVolumeClaim:
@@ -55,4 +67,26 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+{{- if and .Values.cluster.enabled .Values.storage.sqlite.persistence.enabled }}
+  # Each node keeps its own replica of the queue and its own consensus log, so
+  # the volume is per-pod rather than shared. A shared volume would have every
+  # node writing the same SQLite file and lose the isolation replication is
+  # built on.
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        {{- with .Values.storage.sqlite.persistence.annotations }}
+        annotations:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      spec:
+        accessModes:
+          - {{ .Values.storage.sqlite.persistence.accessMode | quote }}
+        {{- if .Values.storage.sqlite.persistence.storageClass }}
+        storageClassName: {{ .Values.storage.sqlite.persistence.storageClass | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.storage.sqlite.persistence.size | quote }}
+{{- end }}
 {{- end }}

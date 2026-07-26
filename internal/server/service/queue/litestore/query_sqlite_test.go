@@ -3,9 +3,17 @@ package litestore
 import (
 	"database/sql"
 	"testing"
+	"time"
 
 	"github.com/maxatome/go-testdeep/td"
 )
+
+// testNow is the instant the SQL tests write and query against. Timestamps are
+// explicit everywhere in these queries — that is the point of the change that
+// made replication possible — so the tests supply them too.
+// It is deliberately in the past, so a row written with it reads as visible
+// against SQLite's own current_timestamp wherever a query still uses one.
+var testNow = time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 
 // openTestDB opens a shared in-memory SQLite database. The sqlite3 driver is
 // registered transitively through litekit (imported by the package under
@@ -35,7 +43,9 @@ func Test_queryCreateQueueTable_executes(t *testing.T) {
 	_, err := db.Exec(queryCreateQueueTable("qtable"))
 	td.Require(t).CmpNoError(err, "create queue table")
 
-	_, err = db.Exec(queryInsertMessagesBatch("qtable", 1), "id1", []byte("body"))
+	stamp := sqliteTime(testNow)
+
+	_, err = db.Exec(queryInsertMessagesBatch("qtable", 1), "id1", []byte("body"), stamp, stamp)
 	td.Require(t).CmpNoError(err, "insert message")
 
 	_, err = db.Exec(queryUpdateMessagesVisibility("qtable", 1), 1, "id1")
@@ -53,16 +63,19 @@ func Test_messageBatchQueries_roundTrip(t *testing.T) {
 	_, err := db.Exec(queryCreateQueueTable(queueID))
 	td.Require(t).CmpNoError(err, "create queue table")
 
-	// Send: one multi-row INSERT for three messages.
+	// Send: one multi-row INSERT for three messages. They share a timestamp,
+	// so the msg_id tie-break in the SELECT is what fixes their order.
+	stamp := sqliteTime(testNow)
+
 	_, err = db.Exec(queryInsertMessagesBatch(queueID, 3),
-		"m1", []byte("a"),
-		"m2", []byte("b"),
-		"m3", []byte("c"),
+		"m1", []byte("a"), stamp, stamp,
+		"m2", []byte("b"), stamp, stamp,
+		"m3", []byte("c"), stamp, stamp,
 	)
 	td.Require(t).CmpNoError(err, "batch insert")
 
 	// Receive: ordered SELECT then a single batched visibility UPDATE.
-	rows, err := db.Query(querySelectMessages(queueID), maxReceiveAttempts, 10)
+	rows, err := db.Query(querySelectMessages(queueID), sqliteTime(testNow), maxReceiveAttempts, 10)
 	td.Require(t).CmpNoError(err, "select messages")
 
 	var ids []string
@@ -81,7 +94,8 @@ func Test_messageBatchQueries_roundTrip(t *testing.T) {
 	td.Require(t).CmpNoError(rows.Err())
 	td.Require(t).CmpNoError(rows.Close())
 
-	// The ordered SELECT must preserve insertion (created_at) order.
+	// The ordered SELECT must return a total, reproducible order — the same
+	// one on every replica, which is why the tie-break on msg_id exists.
 	td.Cmp(t, ids, []string{"m1", "m2", "m3"})
 
 	args := []any{42}
@@ -123,10 +137,12 @@ func Test_queryPeekMessages_browsesWithoutConsuming(t *testing.T) {
 	_, err := db.Exec(queryCreateQueueTable(queueID))
 	td.Require(t).CmpNoError(err, "create queue table")
 
+	stamp := sqliteTime(testNow)
+
 	_, err = db.Exec(queryInsertMessagesBatch(queueID, 3),
-		"m1", []byte("a"),
-		"m2", []byte("b"),
-		"m3", []byte("c"),
+		"m1", []byte("a"), stamp, stamp,
+		"m2", []byte("b"), stamp, stamp,
+		"m3", []byte("c"), stamp, stamp,
 	)
 	td.Require(t).CmpNoError(err, "batch insert")
 
@@ -181,7 +197,7 @@ func Test_queryPeekMessages_browsesWithoutConsuming(t *testing.T) {
 
 	// A peek must not consume: every row's retry count is still zero and the
 	// not-hidden rows are still visible to a real Receive.
-	rows, err := db.Query(querySelectMessages(queueID), maxReceiveAttempts, 10)
+	rows, err := db.Query(querySelectMessages(queueID), sqliteTime(testNow.Add(time.Minute)), maxReceiveAttempts, 10)
 	td.Require(t).CmpNoError(err, "post-peek receive select")
 
 	var receivable []string

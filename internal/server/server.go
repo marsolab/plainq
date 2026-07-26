@@ -45,6 +45,10 @@ type PlainQ struct {
 	metricsCollector *collector.Collector
 	metricsStore     *collector.SQLiteStore
 	metricsHandler   *MetricsHandler
+
+	// clusterNode is set when this server is a cluster member.
+	clusterNode    ClusterNode
+	clusterHandler *ClusterHandler
 }
 
 // NewServer returns a pointer to a new instance of the PlainQ.
@@ -80,6 +84,10 @@ func NewServer(
 	// Apply server options.
 	for _, opt := range opts {
 		opt(&pq)
+	}
+
+	if pq.clusterNode != nil {
+		pq.clusterHandler = NewClusterHandler(pq.clusterNode, logger)
 	}
 
 	// Initialize metrics collector if telemetry database is provided.
@@ -162,6 +170,23 @@ func NewServer(
 			v1.Route("/directory", func(r chi.Router) {
 				protect(r)
 				r.Mount("/", pq.account.Directory())
+			})
+
+			// Cluster topology is administrator-only: it names every node's
+			// address, which is exactly the map an attacker would want. It is
+			// mounted whether or not clustering is on, so a dashboard can ask
+			// and get an honest "not enabled" instead of a 404.
+			v1.Route("/cluster", func(r chi.Router) {
+				protect(r)
+				admin(r)
+
+				if pq.clusterHandler != nil {
+					pq.clusterHandler.Routes(r)
+
+					return
+				}
+
+				r.Get("/", disabledClusterHandler)
 			})
 
 			// Effective configuration names the database host, the listen
@@ -374,6 +399,12 @@ func WithMetricsStore(db *litekit.Conn) Option {
 	return func(pq *PlainQ) {
 		pq.metricsStore = collector.NewSQLiteStore(db)
 	}
+}
+
+// WithClusterNode makes the server report on, and administer, its cluster
+// membership.
+func WithClusterNode(node ClusterNode) Option {
+	return func(pq *PlainQ) { pq.clusterNode = node }
 }
 
 // GetMetricsCollector returns the metrics collector for external use.

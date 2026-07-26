@@ -155,6 +155,63 @@ The `release` label must match your operator's `serviceMonitorSelector` (for
 the kube-prometheus-stack chart that is the release name). Without the operator
 CRDs installed the template is skipped.
 
+## Clustering
+
+`cluster.enabled=true` turns the single-replica StatefulSet into a Raft cluster:
+several pods, each with its own volume and its own replica of the queue, that
+find each other through the Kubernetes API.
+
+```sh
+helm install plainq ./deploy/helm/plainq \
+  --set cluster.enabled=true \
+  --set cluster.replicas=3 \
+  --set cluster.gossipSecret="$(openssl rand -base64 32)" \
+  --set cluster.secret="$(openssl rand -hex 32)" \
+  --set auth.jwtSecret="$(openssl rand -hex 32)"
+```
+
+| Value                       | Default      | Purpose                                                     |
+| --------------------------- | ------------ | ----------------------------------------------------------- |
+| `cluster.enabled`           | `false`      | Deploy a cluster instead of a single node.                   |
+| `cluster.replicas`          | `3`          | Number of nodes. **Use an odd number.**                      |
+| `cluster.clusterPort`       | `8082`       | Consensus + peer RPC.                                        |
+| `cluster.gossipPort`        | `8083`       | Membership gossip (TCP and UDP).                             |
+| `cluster.discovery`         | `kubernetes` | `kubernetes` (API) or `dns` (headless service).              |
+| `cluster.discoveryOverride` | `""`         | A discovery spec replacing the generated one.                |
+| `cluster.consistency`       | `local`      | `local` or `strong` reads.                                   |
+| `cluster.autoRemove`        | `false`      | Let the leader remove long-unreachable members.              |
+| `cluster.removeTimeout`     | `5m`         | How long "unreachable" must last first.                      |
+| `cluster.gossipSecret`      | `""`         | Base64 16/24/32-byte gossip key.                             |
+| `cluster.secret`            | `""`         | Shared secret for internal peer RPC.                         |
+| `cluster.existingSecret`    | `""`         | A pre-created Secret holding both.                           |
+| `cluster.rbac.create`       | `true`       | Role + RoleBinding for Kubernetes discovery.                 |
+| `cluster.extraArgs`         | `[]`         | Extra `-cluster.*` flags.                                    |
+
+What the chart does differently in cluster mode:
+
+- `replicas: cluster.replicas` and `podManagementPolicy: Parallel`, so the pods
+  start together — `bootstrap-expect` waits for all of them, and `OrderedReady`
+  would deadlock waiting for a readiness that cannot arrive until they have
+  found each other.
+- `volumeClaimTemplates` instead of a single shared PVC: each node keeps its own
+  replica and its own consensus log.
+- A headless service with `publishNotReadyAddresses: true`, since a PlainQ pod
+  is not ready until it has joined a cluster.
+- A namespaced, read-only Role for `pods` and `endpoints` (skipped when
+  `cluster.discovery=dns`).
+- Each pod's name as its node id, and its pod IP as its advertised address.
+
+Use an odd `cluster.replicas`. A cluster of four tolerates the same single
+failure as a cluster of three; `cluster.replicas=2` is rejected at startup
+because it tolerates none at all.
+
+Scaling down with `kubectl scale` does not remove nodes from the consensus
+configuration — run `plainq cluster leave -node-id=<pod-name>` or set
+`cluster.autoRemove=true`.
+
+Clustering requires `storage.driver=sqlite`. With Postgres the database is
+already shared, so run several stateless nodes against one Postgres instead.
+
 ## Upgrade notes
 
 - Changing the JWT or Postgres secret content rolls the pods automatically (a
@@ -171,4 +228,5 @@ CRDs installed the template is skipped.
 helm lint ./deploy/helm/plainq
 helm template ./deploy/helm/plainq --set auth.jwtSecret=dev
 helm template ./deploy/helm/plainq --set storage.driver=postgres --set storage.postgres.dsn=postgres://x --set auth.jwtSecret=dev
+helm template ./deploy/helm/plainq --set auth.jwtSecret=dev --set cluster.enabled=true --set cluster.gossipSecret="$(openssl rand -base64 32)" --set cluster.secret=dev
 ```

@@ -21,6 +21,11 @@ need to scale out.
   (distroless, static binary) and a production [Helm chart](deploy/helm/plainq).
 - **Pick your storage.** Embedded SQLite (default) for local and Litestream-friendly
   deployments, or PostgreSQL when you want a shared backend.
+- **Cluster when you need to.** Turn on `-cluster.enable` and several nodes
+  agree on queue state through Raft, track each other with a gossip protocol,
+  and find each other on Kubernetes, Docker, AWS, GCP, Azure, Consul or DNS.
+  Lose a minority of nodes and the queue keeps serving. See the
+  [clustering guide](docs/guides/clustering.md).
 - **Auth that's actually built in.** JWT sessions, refresh tokens, RBAC, and
   OAuth/OIDC hooks (Kinde, Auth0, Okta, WorkOS) ship with the server — not as
   an afterthought.
@@ -43,6 +48,7 @@ Full documentation lives in [`docs/`](docs/README.md):
   [Configuration](docs/guides/configuration.md) ·
   [Advanced topics](docs/guides/advanced.md) ·
   [Deployment](docs/guides/deployment.md) ·
+  [Clustering](docs/guides/clustering.md) ·
   [Observability](docs/guides/observability.md) ·
   [Houston](docs/guides/houston.md) ·
   [Troubleshooting & FAQ](docs/guides/troubleshooting.md)
@@ -163,6 +169,11 @@ for machine-readable output. **Flags go before the positional queue id**
 | `plainq delete-message <queue-id> <id>...` | Acknowledge (delete) messages by ID.       |
 | `plainq tui`                     | Launch the interactive terminal UI.                  |
 | `plainq schema`                  | Print the gRPC API surface (text or `-json`).        |
+| `plainq cluster status`          | Show this node's view of the cluster.                |
+| `plainq cluster members`         | List cluster members.                                |
+| `plainq cluster join`            | Add a node to the cluster (`-node-id`, `-addr`).     |
+| `plainq cluster leave`           | Remove a node from the cluster (`-node-id`).         |
+| `plainq cluster snapshot`        | Force a state snapshot, compacting the consensus log. |
 
 Run any command with `-h` for its full flag list.
 

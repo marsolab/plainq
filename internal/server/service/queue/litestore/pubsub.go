@@ -51,7 +51,7 @@ func (s *Storage) CreateTopic(ctx context.Context, input *queue.CreateTopicReque
 		return nil, fmt.Errorf("%w: topic name is empty", errkit.ErrInvalidArgument)
 	}
 
-	id := idkit.XID()
+	id := queue.NextID(ctx, idkit.XID)
 	if _, err := s.db.ExecContext(
 		ctx,
 		`INSERT INTO topic_properties (topic_id, topic_name) VALUES (?, ?);`,
@@ -87,7 +87,7 @@ func (s *Storage) Subscribe(ctx context.Context, topicID string, input *queue.Su
 		return nil, fmt.Errorf("describe subscription queue: %w", err)
 	}
 
-	id := idkit.XID()
+	id := queue.NextID(ctx, idkit.XID)
 	if _, err := s.db.ExecContext(
 		ctx,
 		`INSERT INTO topic_subscriptions (subscription_id, topic_id, queue_id) VALUES (?, ?, ?);`,

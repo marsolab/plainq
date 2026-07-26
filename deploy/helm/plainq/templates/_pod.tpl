@@ -28,6 +28,9 @@ appears in the rendered manifest, only the variable reference does.
 - -log.level={{ .Values.config.logLevel }}
 - -health.route={{ .Values.config.healthRoute }}
 - -metrics.route={{ .Values.config.metricsRoute }}
+{{- if .Values.cluster.enabled }}
+{{- include "plainq.clusterArgs" . | nindent 0 }}
+{{- end }}
 {{- with .Values.extraArgs }}
 {{- toYaml . | nindent 0 }}
 {{- end }}
@@ -52,9 +55,88 @@ $(VAR) expansion above, plus any user-supplied env.
       name: {{ include "plainq.postgresSecretName" . }}
       key: {{ .Values.storage.postgres.secretKey }}
 {{- end }}
+{{- if .Values.cluster.enabled }}
+# The node id must be stable across restarts — the consensus log is keyed on
+# it — and unique in the cluster. A StatefulSet pod name is both.
+- name: PLAINQ_NODE_ID
+  valueFrom:
+    fieldRef:
+      fieldPath: metadata.name
+# Peers dial this pod by IP: the pod binds 0.0.0.0 and advertises this.
+- name: PLAINQ_POD_IP
+  valueFrom:
+    fieldRef:
+      fieldPath: status.podIP
+- name: PLAINQ_NAMESPACE
+  valueFrom:
+    fieldRef:
+      fieldPath: metadata.namespace
+{{- if .Values.cluster.gossipSecret }}
+- name: PLAINQ_GOSSIP_SECRET
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "plainq.clusterSecretName" . }}
+      key: {{ .Values.cluster.gossipSecretKey }}
+{{- end }}
+{{- if .Values.cluster.secret }}
+- name: PLAINQ_CLUSTER_SECRET
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "plainq.clusterSecretName" . }}
+      key: {{ .Values.cluster.secretKey }}
+{{- end }}
+{{- end }}
 {{- with .Values.env }}
 {{- toYaml . | nindent 0 }}
 {{- end }}
+{{- end }}
+
+{{/*
+plainq.clusterArgs builds the -cluster.* flags.
+
+Discovery answers with gossip addresses; a peer's consensus address is part of
+what it gossips, so only one port has to be discoverable.
+*/}}
+{{- define "plainq.clusterArgs" -}}
+- -cluster.enable=true
+- -cluster.node-id=$(PLAINQ_NODE_ID)
+- -cluster.bind.addr=0.0.0.0:{{ .Values.cluster.clusterPort }}
+- -cluster.advertise.addr=$(PLAINQ_POD_IP):{{ .Values.cluster.clusterPort }}
+- -cluster.gossip.addr=0.0.0.0:{{ .Values.cluster.gossipPort }}
+- -cluster.gossip.advertise.addr=$(PLAINQ_POD_IP):{{ .Values.cluster.gossipPort }}
+- -cluster.bootstrap-expect={{ .Values.cluster.replicas }}
+- -cluster.consistency={{ .Values.cluster.consistency }}
+- -cluster.discovery={{ include "plainq.discoverySpec" . }}
+- -cluster.auto-remove={{ .Values.cluster.autoRemove }}
+- -cluster.remove.timeout={{ .Values.cluster.removeTimeout }}
+{{- if .Values.cluster.gossipSecret }}
+- -cluster.gossip.secret=$(PLAINQ_GOSSIP_SECRET)
+{{- end }}
+{{- if .Values.cluster.secret }}
+- -cluster.secret=$(PLAINQ_CLUSTER_SECRET)
+{{- end }}
+{{- with .Values.cluster.extraArgs }}
+{{- toYaml . | nindent 0 }}
+{{- end }}
+{{- end }}
+
+{{/*
+plainq.discoverySpec renders the discovery spec.
+
+The Kubernetes provider is the default because it sees pods that are not ready
+yet — and no PlainQ pod is ready until it has joined a cluster, which it cannot
+do without seeing its peers. DNS discovery avoids the RBAC grant but only
+resolves ready endpoints, so it suits adding nodes to a cluster that already
+exists rather than forming one.
+*/}}
+{{- define "plainq.discoverySpec" -}}
+{{- if .Values.cluster.discoveryOverride -}}
+{{ .Values.cluster.discoveryOverride }}
+{{- else if eq .Values.cluster.discovery "dns" -}}
+dns://{{ include "plainq.fullname" . }}-headless.$(PLAINQ_NAMESPACE).svc.cluster.local?port={{ .Values.cluster.gossipPort }}
+{{- else -}}
+kubernetes://?namespace=$(PLAINQ_NAMESPACE)&selector=app.kubernetes.io%2Fname%3D{{ include "plainq.name" . }}%2Capp.kubernetes.io%2Finstance%3D{{ .Release.Name }}&port={{ .Values.cluster.gossipPort }}
+{{- end -}}
 {{- end }}
 
 {{/*
@@ -82,6 +164,17 @@ StatefulSet (sqlite) and the Deployment (postgres).
     - name: http
       containerPort: {{ .Values.service.httpPort }}
       protocol: TCP
+    {{- if .Values.cluster.enabled }}
+    - name: cluster
+      containerPort: {{ .Values.cluster.clusterPort }}
+      protocol: TCP
+    - name: gossip-tcp
+      containerPort: {{ .Values.cluster.gossipPort }}
+      protocol: TCP
+    - name: gossip-udp
+      containerPort: {{ .Values.cluster.gossipPort }}
+      protocol: UDP
+    {{- end }}
   livenessProbe:
     {{- toYaml .Values.livenessProbe | nindent 4 }}
   readinessProbe:

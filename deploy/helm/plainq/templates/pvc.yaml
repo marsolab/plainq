@@ -1,4 +1,8 @@
-{{- if and (eq .Values.storage.driver "sqlite") .Values.storage.sqlite.persistence.enabled -}}
+{{/*
+In cluster mode the StatefulSet's volumeClaimTemplates create one volume per
+pod instead, so this shared claim is deliberately not rendered.
+*/}}
+{{- if and (eq .Values.storage.driver "sqlite") .Values.storage.sqlite.persistence.enabled (not .Values.cluster.enabled) -}}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
