@@ -142,6 +142,21 @@ func (c *QueuePropsCache) put(props QueueProps) {
 	c.byName[props.Name] = entry
 }
 
+// reset empties the cache.
+//
+// A snapshot restore replaces every queue the node holds, so the cached
+// properties no longer describe anything real. Dropping them wholesale is the
+// only honest move: evicting entry by entry would leave whatever the snapshot
+// did not mention behind, still answering reads.
+func (c *QueuePropsCache) reset() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.byID = make(map[string]*list.Element, int(c.size))   //nolint:gosec // cache size is a bounded configuration value.
+	c.byName = make(map[string]*list.Element, int(c.size)) //nolint:gosec // same.
+	c.props = list.New()
+}
+
 func (c *QueuePropsCache) delete(id, name string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()

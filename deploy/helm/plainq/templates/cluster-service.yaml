@@ -1,0 +1,42 @@
+{{- if .Values.cluster.enabled -}}
+{{/*
+A headless service gives each pod a stable DNS name and lets a client resolve
+every pod at once. Cluster traffic goes pod-to-pod by IP, so this service
+exists for discovery and for addressing individual nodes, not for load
+balancing — hence clusterIP: None and publishNotReadyAddresses: true, since a
+PlainQ pod is not ready until it has joined a cluster it cannot join without
+seeing its peers.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ printf "%s-headless" (include "plainq.fullname" .) }}
+  labels:
+    {{- include "plainq.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  ports:
+    - name: grpc
+      port: {{ .Values.service.grpcPort }}
+      targetPort: grpc
+      protocol: TCP
+    - name: http
+      port: {{ .Values.service.httpPort }}
+      targetPort: http
+      protocol: TCP
+    - name: cluster
+      port: {{ .Values.cluster.clusterPort }}
+      targetPort: cluster
+      protocol: TCP
+    - name: gossip-tcp
+      port: {{ .Values.cluster.gossipPort }}
+      targetPort: gossip-tcp
+      protocol: TCP
+    - name: gossip-udp
+      port: {{ .Values.cluster.gossipPort }}
+      targetPort: gossip-udp
+      protocol: UDP
+  selector:
+    {{- include "plainq.selectorLabels" . | nindent 4 }}
+{{- end }}

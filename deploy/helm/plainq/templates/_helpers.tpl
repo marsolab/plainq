@@ -82,3 +82,27 @@ Resolve the name of the Secret holding the Postgres DSN.
 {{- printf "%s-postgres" (include "plainq.fullname" .) }}
 {{- end }}
 {{- end }}
+
+{{/*
+plainq.clusterSecretName resolves the Secret holding the cluster's gossip key
+and peer-RPC secret, preferring one the operator created themselves.
+*/}}
+{{- define "plainq.clusterSecretName" -}}
+{{- if .Values.cluster.existingSecret -}}
+{{ .Values.cluster.existingSecret }}
+{{- else -}}
+{{ printf "%s-cluster" (include "plainq.fullname" .) }}
+{{- end -}}
+{{- end }}
+
+{{/*
+plainq.needsServiceAccountToken reports whether the pods have to talk to the
+Kubernetes API — which is true exactly when clustering uses Kubernetes
+discovery. It renders a non-empty string for true and nothing for false, which
+is how a Helm template says "yes".
+*/}}
+{{- define "plainq.needsServiceAccountToken" -}}
+{{- if and .Values.cluster.enabled (not .Values.cluster.discoveryOverride) (eq .Values.cluster.discovery "kubernetes") -}}
+true
+{{- end -}}
+{{- end }}

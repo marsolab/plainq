@@ -1,0 +1,32 @@
+{{- if and .Values.cluster.enabled .Values.cluster.rbac.create (eq .Values.cluster.discovery "kubernetes") (not .Values.cluster.discoveryOverride) -}}
+{{/*
+Kubernetes discovery reads pods and endpoints in this namespace to find peers.
+It is scoped to a Role rather than a ClusterRole, and to reads rather than
+writes: a queue server has no business changing anything in the API.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ printf "%s-discovery" (include "plainq.fullname" .) }}
+  labels:
+    {{- include "plainq.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "endpoints"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ printf "%s-discovery" (include "plainq.fullname" .) }}
+  labels:
+    {{- include "plainq.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ printf "%s-discovery" (include "plainq.fullname" .) }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "plainq.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

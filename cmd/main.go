@@ -47,6 +47,9 @@ func main() {
 		receiveCommand(),
 		deleteMessageCommand(),
 
+		// Cluster administration.
+		clusterCommand(),
+
 		// Interactive and introspection commands.
 		tuiCommand(),
 		schemaCommand(),

@@ -161,6 +161,68 @@ storage:
     # -- Key within existingSecret that holds the DSN.
     secretKey: dsn
 
+
+# Clustering. Off by default: a single PlainQ is a complete PlainQ, and turning
+# this on changes the storage requirements, the port surface and the failure
+# modes all at once.
+#
+# With it enabled the chart deploys `cluster.replicas` StatefulSet pods, each
+# with its own volume, that find each other through the Kubernetes API and
+# form a Raft cluster. Every node holds a full copy of the queue.
+cluster:
+  enabled: false
+
+  # How many nodes to run. Use an odd number: a cluster of 2N tolerates the
+  # same N-1 failures as a cluster of 2N-1, so the extra node buys nothing but
+  # cost. 3 tolerates one failure, 5 tolerates two.
+  replicas: 3
+
+  # Ports. The consensus port carries Raft and internal peer RPC, muxed; the
+  # gossip port carries membership over both TCP and UDP.
+  clusterPort: 8082
+  gossipPort: 8083
+
+  # How nodes find each other. "kubernetes" queries the API for pods carrying
+  # this release's labels — it works before any pod is ready, which is what a
+  # cluster forming for the first time needs. "dns" uses the headless service
+  # instead and needs no RBAC, but only sees pods that are already ready.
+  discovery: kubernetes
+
+  # A spec string that replaces the generated one entirely, for the cases the
+  # two built-ins do not cover.
+  discoveryOverride: ""
+
+  # Where reads are served: "local" (fast, may lag by milliseconds) or
+  # "strong" (leader-only, linearizable).
+  consistency: local
+
+  # Let the leader remove members that stay unreachable past removeTimeout.
+  # Off by default: shrinking a cluster changes quorum, and in Kubernetes a
+  # pod being rescheduled looks exactly like a pod that failed.
+  autoRemove: false
+  removeTimeout: 5m
+
+  # Gossip encryption key: base64 of 16, 24 or 32 bytes.
+  # Generate one with: openssl rand -base64 32
+  gossipSecret: ""
+
+  # Shared secret authenticating internal peer RPC.
+  # Generate one with: openssl rand -hex 32
+  secret: ""
+
+  # A pre-created Secret holding both, instead of the values above.
+  existingSecret: ""
+  gossipSecretKey: gossip-secret
+  secretKey: cluster-secret
+
+  # RBAC for Kubernetes discovery: a Role allowing this release's service
+  # account to list pods and endpoints in its own namespace.
+  rbac:
+    create: true
+
+  # Extra -cluster.* flags.
+  extraArgs: []
+
 auth:
   # -- Enable authentication. When true a JWT secret MUST be provided via
   # auth.jwtSecret or auth.existingSecret, otherwise rendering fails.
