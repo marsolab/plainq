@@ -1,0 +1,124 @@
+# Restores.
+#
+# The default strategy is NewInstance, and it is the one to reach for when
+# something has gone wrong: it leaves the damaged instance untouched, so you
+# can compare the two and cut over with a Service edit rather than betting the
+# only copy of your data on a command working the first time.
+---
+apiVersion: plainq.dev/v1alpha1
+kind: PlainQRestore
+metadata:
+  name: orders-recovery
+  namespace: plainq
+spec:
+  source:
+    backupRef:
+      name: orders-20260725-0300
+
+  target:
+    strategy: NewInstance
+    newInstance:
+      name: orders-restored
+      # An overlay. The base comes from the backup's frozen
+      # status.effectiveConfig.source — driver, server version, volume size,
+      # cluster shape — so only the differences belong here. A smaller
+      # allocation for a verification run, say.
+      spec:
+        pod:
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+
+  # Re-apply the PlainQQueue and PlainQTopic objects against the restored
+  # instance once it is serving. A restored instance mints new queue IDs; this
+  # is why references are by object name.
+  recreateResources: true
+
+# The restored instance is NOT owned by this object: it carries a
+# plainq.dev/restored-from annotation and no owner reference, so deleting this
+# restore record once you have read it never cascades into the instance.
+#
+# To cut over, move the alias rather than editing a Service — Services are
+# owned by their PlainQ and server-side apply will revert a hand-edit on the
+# next reconcile. Set networking.alias.name: orders-rw on orders-restored and
+# clear it on orders; exactly one instance may hold an alias at a time, so the
+# switch is atomic and reversible.
+---
+# Point-in-time restore, in place, from a policy with continuous replication.
+#
+# InPlace overwrites a live database. It requires allowDataLoss and it should
+# be a deliberate decision, not a reflex: the operator scales the instance to
+# zero, replaces the database, wipes the consensus data directory so a stale
+# Raft log cannot resurrect old state, brings one node up with bootstrap, and
+# lets the rest rejoin and pull a fresh snapshot.
+apiVersion: plainq.dev/v1alpha1
+kind: PlainQRestore
+metadata:
+  name: orders-pitr
+  namespace: plainq
+spec:
+  source:
+    policyRef:
+      name: orders-backups
+    pointInTime: "2026-07-25T14:32:00Z"
+
+  target:
+    strategy: InPlace
+    inPlace:
+      plainqRef:
+        name: orders
+
+  allowDataLoss: true
+  recreateResources: false
+---
+# Restoring an artifact the operator did not create — a file copied in from
+# another cluster, or one whose PlainQBackup object has been garbage collected.
+#
+# There is nothing to inherit a spec from here: no PlainQBackup, maybe no
+# policy, maybe no surviving source instance. The operator cannot infer the
+# storage driver, a compatible server version, the cluster shape, or the volume
+# size from a blob in a bucket, and guessing produces an instance that will not
+# start or opens a database it cannot read. So newInstance.spec must be
+# complete for a raw location — the webhook rejects a partial one and names
+# what is missing.
+apiVersion: plainq.dev/v1alpha1
+kind: PlainQRestore
+metadata:
+  name: orders-import
+  namespace: plainq
+spec:
+  source:
+    location: s3://plainq-backups/prod/orders/2026/07/20/orders-20260720-0300.db.zst
+    compression: zstd              # cannot be inferred from the artifact
+    # encryption: {secretRef: {name: backup-age, key: age.key}}
+    destination:
+      s3:
+        endpoint: https://s3.us-east-1.amazonaws.com
+        region: us-east-1
+        bucket: plainq-backups
+        credentialsSecretRef:
+          name: backup-s3
+          accessKeyIDKey: access-key-id
+          secretAccessKeyKey: secret-access-key
+  target:
+    strategy: NewInstance
+    newInstance:
+      name: orders-imported
+      spec:
+        version: "1.4.0"           # must be able to open this database
+        storage:
+          driver: sqlite
+          sqlite:
+            path: /data/plainq.db
+            persistence:
+              enabled: true
+              size: 20Gi           # at least as large as the restored database
+              storageClassName: fast-ssd
+        auth:
+          enabled: true
+        pod:
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi

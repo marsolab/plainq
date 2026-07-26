@@ -1,0 +1,108 @@
+# Backups to S3-compatible storage: continuous replication for a seconds-level
+# RPO, plus a nightly point-in-time backup that is verified by actually reading
+# it back.
+#
+# Works against AWS S3, MinIO, Cloudflare R2, Ceph RGW, Wasabi — anything that
+# speaks the S3 API. Set forcePathStyle for the ones that do not do
+# virtual-host addressing.
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: backup-s3
+  namespace: plainq
+type: Opaque
+stringData:
+  access-key-id: REPLACE_ME
+  secret-access-key: REPLACE_ME
+---
+apiVersion: plainq.dev/v1alpha1
+kind: PlainQBackupPolicy
+metadata:
+  name: orders-backups
+  namespace: plainq
+spec:
+  serverRef:
+    name: orders
+
+  # WAL shipping through a Litestream sidecar. Recovery to any point in the
+  # retained window, at the cost of one small sidecar per pod.
+  continuous:
+    enabled: true
+    syncInterval: 10s
+    snapshotInterval: 1h
+
+  # A whole-database copy every night. "Online" runs VACUUM INTO through the
+  # backup agent sidecar: consistent, does not block writers, needs no CSI
+  # snapshot support.
+  schedule:
+    enabled: true
+    cron: "0 3 * * *"
+    timeZone: UTC
+    engine: Online              # Online | VolumeSnapshot | PostgresDump
+    concurrencyPolicy: Forbid
+    startingDeadlineSeconds: 600
+    timeout: 1h
+    # How long to wait for the chosen source node to catch up to the leader's
+    # commit index before copying. A reachable follower can lag while the
+    # cluster still reports healthy; copying it then would silently omit
+    # acknowledged writes.
+    sourceSyncTimeout: 2m
+
+  destination:
+    s3:
+      endpoint: https://s3.us-east-1.amazonaws.com
+      region: us-east-1
+      bucket: plainq-backups
+      prefix: prod/orders
+      forcePathStyle: false     # true for MinIO and most self-hosted gateways
+      credentialsSecretRef:     # omit entirely to use IRSA / workload identity
+        name: backup-s3
+        accessKeyIDKey: access-key-id
+        secretAccessKeyKey: secret-access-key
+      serverSideEncryption: AES256
+
+  compression: zstd
+  encryption:
+    enabled: false
+    # secretRef: {name: backup-age, key: age.key}
+
+  # Grandfather-father-son: an aggressive keepLast cannot delete the only
+  # monthly you have.
+  retention:
+    keepLast: 7
+    keepDaily: 7
+    keepWeekly: 4
+    keepMonthly: 6
+    maxAge: 365d
+
+  # "Restore" pulls each artifact back down into a throwaway Job and runs
+  # PRAGMA integrity_check on it. A backup nobody has ever read is a hypothesis.
+  verify: Restore
+
+  # In a cluster, back up from a node that is not carrying the writes. The
+  # operator compacts that node's consensus log before copying.
+  source:
+    prefer: NonVoter
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+---
+# An ad-hoc backup, inheriting the policy's destination and settings. Worth
+# creating by hand before an upgrade or a risky migration.
+apiVersion: plainq.dev/v1alpha1
+kind: PlainQBackup
+metadata:
+  name: orders-pre-upgrade
+  namespace: plainq
+spec:
+  serverRef:
+    name: orders
+  policyRef:
+    name: orders-backups
+  ttl: 720h

@@ -145,6 +145,11 @@ It deploys a StatefulSet + PVC for SQLite (or a Deployment + HPA when
 See the [chart README](deploy/helm/plainq/README.md) and the
 [Deployment guide](docs/guides/deployment.md).
 
+A [Kubernetes operator](deploy/operator/README.md) — declarative servers,
+clusters, queues, topics, backups, and restores — is
+[designed](docs/superpowers/specs/2026-07-26-kubernetes-operator-design.md) and
+not yet built. The chart remains the supported install path.
+
 ## Usage
 
 ### CLI

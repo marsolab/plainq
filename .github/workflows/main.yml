@@ -47,3 +47,29 @@ jobs:
         with:
           version: latest
           args: --timeout=3m
+
+  # The operator is a separate Go module, so the jobs above do not reach it:
+  # `go test ./...` and golangci-lint both operate on one module at a time.
+  operator:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '^1.26'
+
+      - name: check generated manifests are current
+        working-directory: operator
+        run: |
+          make generate manifests
+          git diff --exit-code -- api config
+
+      - name: go tests
+        working-directory: operator
+        run: go test -cover ./...
+
+      - uses: golangci/golangci-lint-action@v7
+        with:
+          version: latest
+          working-directory: operator
+          args: --timeout=5m

@@ -1,0 +1,120 @@
+# Queues and topics as objects.
+#
+# References are by object name, never by the server-assigned queue ID. The
+# operator resolves names to IDs and records them in status, so these manifests
+# keep working unchanged after a restore into a fresh instance — which mints
+# entirely new IDs.
+#
+# Order does not matter. The inbound queue below names a dead-letter queue
+# declared after it; the operator waits for the DLQ to report an ID before
+# creating the queue that points at it.
+---
+apiVersion: plainq.dev/v1alpha1
+kind: PlainQQueue
+metadata:
+  name: orders-inbound
+  namespace: plainq
+spec:
+  serverRef:
+    name: orders
+  retentionPeriod: 336h          # 14 days
+  visibilityTimeout: 30s         # how long a received message stays invisible
+  maxReceiveAttempts: 5          # retry budget before eviction
+  evictionPolicy: DeadLetter     # Drop | DeadLetter | Reorder
+  deadLetterQueueRef:
+    name: orders-dlq
+
+  # Queue settings are create-only on the server: there is no UpdateQueue RPC.
+  # "Reject" reports drift as a condition and leaves the queue serving with its
+  # original settings. "Recreate" would delete and recreate it — every message
+  # gone — and requires allowDataLoss: true.
+  updatePolicy: Reject
+
+  # Deleting this object does not delete the queue. Set "Delete" to make it do
+  # so; it still refuses while the queue holds messages unless allowDataLoss.
+  deletionPolicy: Retain
+---
+apiVersion: plainq.dev/v1alpha1
+kind: PlainQQueue
+metadata:
+  name: orders-dlq
+  namespace: plainq
+spec:
+  serverRef:
+    name: orders
+  retentionPeriod: 720h          # keep failures long enough to investigate them
+  visibilityTimeout: 60s
+  maxReceiveAttempts: 3
+  evictionPolicy: Drop           # the end of the line; nowhere further to go
+  deletionPolicy: Retain
+---
+apiVersion: plainq.dev/v1alpha1
+kind: PlainQQueue
+metadata:
+  name: billing-inbound
+  namespace: plainq
+spec:
+  serverRef:
+    name: orders
+  retentionPeriod: 168h
+  visibilityTimeout: 120s        # billing work is slow; do not redeliver early
+  maxReceiveAttempts: 10
+  evictionPolicy: DeadLetter
+  deadLetterQueueRef:
+    name: orders-dlq
+---
+apiVersion: plainq.dev/v1alpha1
+kind: PlainQQueue
+metadata:
+  name: analytics-inbound
+  namespace: plainq
+spec:
+  serverRef:
+    name: orders
+  retentionPeriod: 24h           # analytics can miss a day; it cannot store one
+  visibilityTimeout: 30s
+  maxReceiveAttempts: 3
+  evictionPolicy: Drop
+---
+# Fan-out: one publish reaches every subscribed queue.
+apiVersion: plainq.dev/v1alpha1
+kind: PlainQTopic
+metadata:
+  name: order-events
+  namespace: plainq
+spec:
+  serverRef:
+    name: orders
+  subscriptions:
+    - queueRef:
+        name: billing-inbound
+    - queueRef:
+        name: analytics-inbound
+  # Subscriptions reconcile as a set: removing an entry here unsubscribes it on
+  # the server on the next pass.
+  deletionPolicy: Retain
+---
+# An account for a service, created without anyone opening Houston. The
+# password is generated into the referenced Secret when it does not exist.
+#
+# NOTE: a non-bootstrap account requires the target PlainQ to have
+# auth.registration: true. POST /api/v1/account/signup is the only route that
+# creates an account after the first, and it refuses when self-registration is
+# disabled — an admin token does not exempt it. The single-node sample (01)
+# turns registration off, so this object would be rejected by the webhook
+# against that instance. Until the server grows an admin-only creation
+# endpoint, choose one or the other deliberately.
+apiVersion: plainq.dev/v1alpha1
+kind: PlainQAccount
+metadata:
+  name: ci-publisher
+  namespace: plainq
+spec:
+  serverRef:
+    name: orders
+  email: ci@example.com
+  role: user
+  credentialsSecretRef:
+    name: plainq-ci-publisher
+    passwordKey: password
+  deletionPolicy: Retain
