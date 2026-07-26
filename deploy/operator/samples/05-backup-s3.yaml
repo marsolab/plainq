@@ -43,6 +43,11 @@ spec:
     concurrencyPolicy: Forbid
     startingDeadlineSeconds: 600
     timeout: 1h
+    # How long to wait for the chosen source node to catch up to the leader's
+    # commit index before copying. A reachable follower can lag while the
+    # cluster still reports healthy; copying it then would silently omit
+    # acknowledged writes.
+    sourceSyncTimeout: 2m
 
   destination:
     s3:

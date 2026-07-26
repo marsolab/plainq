@@ -48,6 +48,13 @@ New packages, bottom-up:
    said no". Tested against an `httptest` fake implementing the same routes as
    `internal/server/service/queue` and friends.
 
+   Two REST shapes to get right here, because both are worked around rather
+   than used directly: `ResolveQueueByName` pages
+   `GET /api/v1/queue?prefix=<name>` and matches exactly, since
+   `GET /api/v1/queue/{id}` only accepts an ID; and `WaitForApplied(nodeAddr,
+   index)` polls a node's `appliedIndex` against a leader commit index captured
+   beforehand.
+
 4. **`render`.** Port `deploy/helm/plainq/templates/_pod.tpl` into Go: args
    builder, env builder (`$(VAR)` secret references), cluster args, discovery
    spec, container spec, volumes. Then the workload selector — StatefulSet for
@@ -62,11 +69,22 @@ New packages, bottom-up:
    `observedGeneration`. Server-side apply with a field manager so hand-edits to
    owned objects are reverted deliberately rather than fought over.
 
+   Because that revert is deliberate, the alias Service is the *one* thing the
+   operator manages without tying it to a `PlainQ` owner: it is how a cutover
+   survives the next reconcile. Claim tracking (one holder per alias name, with
+   webhook enforcement) belongs here, not in the restore controller.
+
 6. **Bootstrap + `PlainQAccount`.** `GET /api/v1/onboarding/status`, then
    `POST /api/v1/onboarding/complete` with credentials generated into the admin
    Secret. Once complete, the reconciler can authenticate, which unblocks
-   everything downstream. `PlainQAccount` for non-bootstrap accounts, with
-   role assignment through `/api/v1/rbac`.
+   everything downstream.
+
+   `PlainQAccount` for non-bootstrap accounts goes through
+   `POST /api/v1/account/signup` plus role assignment via `/api/v1/rbac` — and
+   that route refuses whenever the target instance has registration disabled.
+   Implement the webhook rejection for that combination *before* the
+   reconciler, so the failure is an admission error naming the cause rather
+   than a 401 loop in a controller log.
 
 7. **Cluster status and formation.** Poll `/api/v1/cluster` and
    `/api/v1/cluster/members`, project into `status.cluster`, set `ClusterFormed`
@@ -74,8 +92,9 @@ New packages, bottom-up:
    sees when the timeout expires.
 
 8. **`PlainQQueue` and `PlainQTopic`.** Create/describe/delete, name→ID
-   resolution, `deadLetterQueueRef` dependency ordering with backoff, drift
-   detection with the `Reject`/`Recreate` update policy, finalizers with
+   resolution through the prefix scan from step 3 with the result cached in
+   `status.queueID`, `deadLetterQueueRef` dependency ordering with backoff,
+   drift detection with the `Reject`/`Recreate` update policy, finalizers with
    `Retain`/`Delete`. Topics reconcile subscriptions as a set.
 
 9. **Webhooks.** Defaulting and the validation table from the design. Cert
@@ -95,21 +114,45 @@ New packages, bottom-up:
 
 12. **`PlainQBackupPolicy` + `PlainQBackup`.** CronJob owned by the policy, each
     firing creating a `PlainQBackup`; the backup reconciler runs the engine and
-    fills status. Source selection in a cluster: non-voter, else follower, never
-    the leader; `POST /api/v1/cluster/snapshot` on the chosen node first.
-    Retention with grandfather-father-son semantics pruning both artifacts and
-    CRs. `verify: Restore` as a throwaway Job running `PRAGMA integrity_check`.
+    fills status. Retention with grandfather-father-son semantics pruning both
+    artifacts and CRs. `verify: Restore` as a throwaway Job running
+    `PRAGMA integrity_check`.
 
-13. **`PlainQRestore`.** `NewInstance` first — an owned `PlainQ` with a restore
-    init container — because it is the default and the non-destructive one.
+    Two invariants to build in from the start, because retrofitting either one
+    invalidates every backup taken before it:
+
+    - **Freeze `status.effectiveConfig` before execution.** Destination,
+      endpoint, credential and encryption *references*, compression, engine,
+      and the source instance's shape. A run that only remembers `policyRef`
+      stops being restorable the moment the policy is edited.
+    - **Prove the source is caught up.** Select non-voter, else follower, never
+      the leader — then capture the leader's `commitIndex`, wait for the source
+      node's `appliedIndex` to reach it (bounded by `sourceSyncTimeout`), and
+      only then `POST /api/v1/cluster/snapshot` and copy. `Healthy` on a
+      cluster does not imply a given follower has applied everything committed.
+
+13. **`PlainQRestore`.** `NewInstance` first — a `PlainQ` with a restore init
+    container — because it is the default and the non-destructive one. It is
+    created with a `plainq.dev/restored-from` annotation and **no owner
+    reference**: deleting a completed restore record must never cascade into
+    the instance it produced. Spec inheritance comes from the backup's frozen
+    `effectiveConfig.source`; raw-location sources inherit nothing and require a
+    complete `newInstance.spec`, enforced at admission.
+
     Then `InPlace`: scale to zero, restore Job, cluster data-dir wipe,
     single-node `-cluster.bootstrap` bring-up, peers rejoin. Then
-    `recreateResources` re-applying queues and topics against the target.
+    `recreateResources` re-applying queues and topics against the target, and
+    the alias move from step 5 as the documented cutover.
 
-14. **Cluster scale-in and quorum-aware upgrades.** The supervised drain:
-    quorum check → `DELETE /api/v1/cluster/members/{id}` → wait for the member
-    to disappear → scale down one → optional PVC reclaim → repeat. Then the
-    `OnDelete`-driven rolling upgrade, leader last.
+14. **Cluster scale-in and quorum-aware upgrades.** The supervised drain, one
+    node at a time: check that *this* removal can commit against the current
+    configuration → `DELETE /api/v1/cluster/members/{id}` → wait for the member
+    to disappear and a leader to be reported under the new quorum → scale down
+    one → optional PVC reclaim → repeat. Quorum is recomputed after each
+    committed change, so 3→2→1 is safe step by step even though 1 is below the
+    quorum the cluster started with; the check must never compare the final
+    target against the original quorum. Then the `OnDelete`-driven rolling
+    upgrade, leader last.
 
 15. **Observability.** Operator metrics, events on every consequential action,
     the `PrometheusRule` alert set, the Grafana dashboard ConfigMap.
@@ -132,9 +175,16 @@ New packages, bottom-up:
 - Envtest for every reconciler: creation, drift, finalizer, ordering,
   immutable-field rejection, webhook admission.
 - A fake PlainQ REST server exercising success, conflict, 5xx, and timeout.
-- kind e2e: single node, Postgres, 3-node cluster; scale 3→5→3; backup to MinIO
-  and restore asserting message-level round-trip; rolling upgrade under load
-  asserting zero loss.
+- kind e2e: single node, Postgres, 3-node cluster; scale 3→5→3 *and* a full
+  3→2→1 drain, asserting each step commits; backup to MinIO and restore
+  asserting message-level round-trip; rolling upgrade under load asserting zero
+  loss.
+- Regression tests for the four invariants that are silent when broken: a
+  backup taken from a deliberately lagged follower must not complete until the
+  follower catches up; a backup must restore after its policy has been edited
+  *and* after it has been deleted; deleting a completed `PlainQRestore` must
+  leave the restored instance running; and an alias move must survive the
+  previous owner's next reconcile.
 - Chaos: leader killed mid-backup, operator killed mid-restore, S3 credential
   revoked mid-upload. Each must land in a status a human can act on.
 
@@ -145,6 +195,13 @@ they already replace the chart for fleet use. Steps 10–13 are the backup and
 restore story, which is the reason most people will adopt it. Step 14 is the
 cluster-lifecycle safety net. 15–17 are release quality.
 
-The server-side gaps listed in the design (`UpdateQueue`, leadership transfer)
-are separate work. `UpdateQueue` should be scheduled alongside step 8, because
-until it exists `updatePolicy` has no good default.
+The server-side gaps listed in the design are separate work, and three of them
+have workarounds baked into the steps above that should not become permanent:
+
+- **`UpdateQueue`** alongside step 8 — until it exists `updatePolicy` has no
+  good default.
+- **An admin-only account-creation endpoint** alongside step 6 — until it
+  exists, non-bootstrap `PlainQAccount` is rejected against any instance with
+  self-registration disabled, which is most production instances.
+- **A name-capable queue lookup** alongside step 3 — until it exists, every
+  first resolution is a paged scan.

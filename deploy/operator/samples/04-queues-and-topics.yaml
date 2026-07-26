@@ -96,6 +96,14 @@ spec:
 ---
 # An account for a service, created without anyone opening Houston. The
 # password is generated into the referenced Secret when it does not exist.
+#
+# NOTE: a non-bootstrap account requires the target PlainQ to have
+# auth.registration: true. POST /api/v1/account/signup is the only route that
+# creates an account after the first, and it refuses when self-registration is
+# disabled — an admin token does not exempt it. The single-node sample (01)
+# turns registration off, so this object would be rejected by the webhook
+# against that instance. Until the server grows an admin-only creation
+# endpoint, choose one or the other deliberately.
 apiVersion: plainq.dev/v1alpha1
 kind: PlainQAccount
 metadata:

@@ -308,6 +308,11 @@ spec:
       type: ClusterIP
       annotations: {}
       labels: {}
+    # A stable name that clients connect to, decoupled from this instance's own
+    # Service. Exactly one PlainQ may claim a given alias at a time, so moving
+    # it is an atomic, reversible cutover — see Restores.
+    alias:
+      name: ""
     ingress:
       enabled: false
       className: ""
@@ -433,12 +438,19 @@ to report the new node before considering the change complete.
 `cluster.replicas` runs a supervised drain, one node at a time, highest ordinal
 first:
 
-1. Refuse outright if the target count would break quorum against the *current*
-   healthy member count. The validating webhook rejects the edit; the
-   reconciler re-checks at apply time in case health changed in between.
+1. Check that *this one removal* can commit: quorum is recomputed after every
+   committed membership change, so the test is against the configuration as it
+   stands now, not against the final replica count. A healthy 3-node cluster
+   has a quorum of 2 and can safely drop to 2 (quorum 2), and from there to 1
+   (quorum 1) — a rule that compared the target of 1 against the original
+   quorum of 2 would reject a drain that is safe at every step. The webhook
+   rejects only counts that cannot be reached by any safe sequence (a target
+   below 1, or any target while the cluster is already short of quorum); the
+   reconciler re-checks each individual step at apply time.
 2. `DELETE /api/v1/cluster/members/{nodeID}` on the leader, removing the voter
    from the Raft configuration.
-3. Wait for the member to disappear from `GET /api/v1/cluster/members`.
+3. Wait for the member to disappear from `GET /api/v1/cluster/members` and for
+   the remaining members to report a leader under the new quorum.
 4. Scale the StatefulSet down by one.
 5. Delete the orphaned PVC if `cluster.reclaimVolumes: Delete` (default
    `Retain` — a volume that still holds a queue replica is not garbage).
@@ -484,9 +496,20 @@ status:
   conditions: [{type: Ready, status: "True"}, {type: Synced, status: "True"}]
 ```
 
-**Reconciliation.** Look up the queue by name (`DescribeQueue` accepts a name).
+**Reconciliation.** Resolve the name to an ID, then create or compare.
+
+Resolution is the awkward part. `DescribeQueueRequest` carries a `queue_name`
+field, but the REST route does not expose it: `GET /api/v1/queue/{id}` validates
+its path parameter as a queue ID and only ever builds
+`DescribeQueueRequest{QueueId: id}`. A REST-only operator therefore cannot look
+a queue up by name directly. It uses the list endpoint instead —
+`GET /api/v1/queue?prefix=<queueName>`, paging until it finds an exact
+(not prefix) name match — and caches the resulting ID in `status.queueID`, so
+the scan happens once per queue rather than once per reconcile.
+
 Absent → create it and record `status.queueID`. Present → compare the returned
-settings against spec.
+settings against spec. A name-capable REST route would remove the scan; it is
+listed in [Server-side gaps](#server-side-gaps).
 
 **Queue settings are create-only on the server.** There is no `UpdateQueue` RPC
 and no `PUT /api/v1/queue/{id}`. The operator does not pretend otherwise:
@@ -570,6 +593,29 @@ onboarding endpoint self-closes once an admin exists, so a re-run is a no-op —
 the reconciler checks `GET /api/v1/onboarding/status` first and treats
 "already onboarded" as success.
 
+**Non-bootstrap accounts have a real constraint.** `POST /api/v1/onboarding/complete`
+only works for the *first* admin. Every account after that has exactly one
+creation route, `POST /api/v1/account/signup`, and that handler rejects the
+request outright when `--auth.registration.enable=false` — an admin token does
+not exempt it. `/api/v1/rbac` assigns roles to accounts that already exist; it
+cannot create one.
+
+So a `PlainQAccount` with `bootstrap: false` requires
+`PlainQ.spec.auth.registration: true` on the target instance, and the validating
+webhook rejects the pair otherwise with that explanation rather than letting the
+reconciler discover it as a 401 at runtime. That is a genuine restriction:
+production instances that close self-registration — which is the sensible
+setting, and what the single-node sample uses — can provision the bootstrap
+admin declaratively but not additional accounts.
+
+The fix is server-side: an authenticated admin-only account-creation endpoint
+that does not consult the self-registration toggle, since "can a stranger sign
+themselves up" and "can an administrator create an account" are different
+questions that share one flag today. It is listed in
+[Server-side gaps](#server-side-gaps). Until it exists, non-bootstrap
+`PlainQAccount` is only usable on instances with registration enabled, and the
+kind ships with that documented rather than silently failing.
+
 ## Backups
 
 The largest piece, and the one with the most design tension: PlainQ's default
@@ -613,9 +659,31 @@ correct but is a recovery, not a clean open. Offered, not defaulted.
 
 **In a Raft cluster**, every node holds a full copy, so the operator picks the
 backup source deliberately: a non-voter if one exists, otherwise a healthy
-follower, never the leader. Before copying it calls
-`POST /api/v1/cluster/snapshot` on that node so the consensus log is compacted
-first and the copied volume is small and current.
+follower, never the leader.
+
+Picking a *healthy* follower is not enough to make the copy complete.
+`ClusterStatus.Healthy` is `leader != "" && reachableVoters >= quorum` — it says
+nothing about how far that follower's log has been applied, and a node can be
+reachable, voting, and several entries behind while the cluster reports healthy.
+Backing it up in that state produces an artifact that silently omits writes the
+cluster already acknowledged, which is the worst failure mode a backup has: it
+succeeds.
+
+The status endpoint exposes `commitIndex` and `appliedIndex` separately per
+node, so the operator can close the gap:
+
+1. Read `commitIndex` from the **leader** and pin it as the target.
+2. Poll the chosen source node's `appliedIndex` until it reaches that target,
+   or give up after `schedule.sourceSyncTimeout` (default 2m) and either fall
+   back to another follower or fail the backup with a status that says why.
+3. Only then call `POST /api/v1/cluster/snapshot` on that node, so the consensus
+   log is compacted and the copied volume is small and current.
+4. Record both indexes in `PlainQBackup.status.consensus`, so a restore can
+   state exactly how current the artifact was.
+
+This guarantees the copy includes every write acknowledged before the backup
+started. Writes that arrive *during* the copy are not included, which is the
+normal and expected meaning of a point-in-time backup.
 
 ### Destinations
 
@@ -731,13 +799,14 @@ metadata:
   name: orders-pre-upgrade
 spec:
   serverRef: {name: orders}
-  policyRef: {name: orders-backups}    # inherit destination/compression/encryption
+  policyRef: {name: orders-backups}    # seeds the effective config below
   # or inline: destination/compression/encryption/engine, for a one-off
   ttl: 720h                            # object GC; empty -> governed by policy retention
 status:
   phase: Succeeded                     # Pending|Running|Succeeded|Failed|Deleting
   engine: Online
   sourceNode: orders-2
+  consensus: {leaderCommitIndex: 918233, sourceAppliedIndex: 918233}
   startedAt: "2026-07-26T03:00:02Z"
   completedAt: "2026-07-26T03:00:11Z"
   duration: 9s
@@ -748,8 +817,46 @@ status:
   serverVersion: "1.4.0"
   storageDriver: sqlite
   verification: {result: Passed, at: "2026-07-26T03:01:40Z"}
+
+  # Everything needed to read this artifact back, frozen at execution time.
+  effectiveConfig:
+    engine: Online
+    compression: zstd
+    encryption: {enabled: true, secretRef: {name: backup-age, key: age.key}}
+    destination:
+      s3:
+        endpoint: https://s3.us-east-1.amazonaws.com
+        region: us-east-1
+        bucket: plainq-backups
+        prefix: prod/orders
+        forcePathStyle: false
+        credentialsSecretRef: {name: backup-s3, accessKeyIDKey: access-key-id,
+                               secretAccessKeyKey: secret-access-key}
+    # Enough of the source instance's shape to stand a restore up from scratch.
+    source:
+      storageDriver: sqlite
+      serverVersion: "1.4.0"
+      sqlitePath: /data/plainq.db
+      volumeSize: 20Gi
+      cluster: {enabled: true, replicas: 3}
   conditions: [{type: Complete, status: "True"}]
 ```
+
+**`status.effectiveConfig` is materialized before the run starts, and never
+updated afterwards.** A `PlainQBackup` that only carried `policyRef` would stop
+being restorable the moment the policy it points at was edited or deleted:
+`restore --backupRef` would resolve today's bucket, endpoint, encryption
+identity, and compression rather than the ones the artifact was actually written
+with, and would fail to find or decrypt it. Rotating an S3 endpoint or an age
+key would quietly invalidate every historical backup.
+
+Freezing the resolved configuration onto each run makes every backup a
+self-contained, independently restorable record. Secret *references* are frozen,
+not secret values — a rotated credential still has to exist under a name the
+backup names, which is a failure a human can diagnose, unlike a silent
+mis-resolution. `effectiveConfig.source` carries the instance shape for the same
+reason: a restore into a new instance needs to know the storage driver, server
+version, and volume size that the artifact expects.
 
 Printer columns: `PHASE`, `ENGINE`, `SIZE`, `DURATION`, `VERIFIED`, `AGE`.
 
@@ -777,7 +884,9 @@ spec:
     strategy: NewInstance             # NewInstance | InPlace
     newInstance:
       name: orders-restored
-      spec: {}                        # PlainQSpec overlay; inherits the source's spec
+      # Overlay on the inherited base. Required in full for raw-location
+      # sources, which have no base to inherit from — see below.
+      spec: {}
     # inPlace:
     #   plainqRef: {name: orders}
 
@@ -792,11 +901,40 @@ status:
 ```
 
 **`NewInstance` (default, recommended).** The operator creates a new `PlainQ`
-owned by the restore, with a restore init container that materializes the
-database into the fresh PVC before the server ever starts. The damaged instance
-is untouched, so you can compare the two and cut over with a Service edit. This
-is the strategy a person should reach for at 3am, and it is the default for that
-reason.
+with a restore init container that materializes the database into the fresh PVC
+before the server ever starts. The damaged instance is untouched, so you can
+compare the two and cut over deliberately. This is the strategy a person should
+reach for at 3am, and it is the default for that reason.
+
+**The restored instance is not owned by the `PlainQRestore`.** It carries a
+`plainq.dev/restored-from` annotation and nothing else — no controller owner
+reference. A restore object is a record of an operation; the instance it
+produced is the thing you now run in production. Owning it would mean that
+cleaning up a months-old completed restore record — exactly the housekeeping
+anyone would consider safe — cascades a delete through the instance, its
+StatefulSet, and its PVCs. Garbage collecting an audit trail must never be able
+to delete a live database. The restore object can be deleted the moment it is
+read; the instance outlives it.
+
+**Cutover.** The obvious advice — "edit the old Service's selector to point at
+the new pods" — does not survive contact with this operator: Services are owned
+by their `PlainQ` and reconciled with server-side apply, so the old instance's
+next pass reverts the edit and silently takes traffic back. Instead, clients
+address an operator-managed alias:
+
+```yaml
+spec:
+  alias:
+    name: orders-rw           # a Service the operator owns but no PlainQ owns
+    target: orders-restored   # which PlainQ it currently points at
+```
+
+`alias` is a field on `PlainQ`, and exactly one instance may claim a given alias
+name at a time — the webhook rejects a second claimant, so a cutover is a single
+atomic edit that moves the name from one instance to the other. Applications
+connect to `orders-rw` and never learn that the instance behind it changed. This
+also makes cutover reversible: point the alias back and the old instance is
+serving again.
 
 **`InPlace`.** Requires `allowDataLoss: true`. The operator sets
 `status.phase: Restoring` on the target, scales it to zero, runs a restore Job
@@ -805,6 +943,27 @@ that replaces the database file (and, for a cluster, wipes
 then scales back up. For a cluster it brings up exactly one node with
 `-cluster.bootstrap` and lets the rest rejoin and pull a fresh snapshot — never
 several nodes each convinced they hold the truth.
+
+**Where a new instance's spec comes from.** `newInstance.spec` is an overlay on
+an inherited base, and the base depends on the source:
+
+| Source | Base |
+| --- | --- |
+| `backupRef` | `PlainQBackup.status.effectiveConfig.source` — driver, version, SQLite path, volume size, cluster shape |
+| `policyRef` + `pointInTime` | The policy's target `PlainQ`, if it still exists; otherwise the newest `PlainQBackup` under that policy |
+| `location` (raw artifact) | **Nothing.** |
+
+A raw artifact is just bytes in a bucket. There is no `PlainQBackup`, possibly
+no policy, and possibly no surviving source instance — that is the whole point
+of the case, since it exists for importing a file from another cluster or one
+whose backup object has been garbage collected. The operator cannot infer the
+storage driver, a compatible server version, the cluster shape, or the volume
+size from the artifact, and guessing any of them produces an instance that
+either will not start or starts with a database it cannot open.
+
+So the webhook requires a complete `newInstance.spec` whenever `source.location`
+is used, and names the missing fields when it rejects. Guessing at 3am is
+exactly the wrong default.
 
 `recreateResources` re-applies the `PlainQQueue` and `PlainQTopic` objects
 pointing at the target once it is serving. This is why references are by object
@@ -833,6 +992,10 @@ name from `metadata.name`, and generates Secret names.
 | `restore.target.strategy: InPlace` without `allowDataLoss` | Overwrites a live database. |
 | `updatePolicy: Recreate` without `allowDataLoss` | Drops every message in the queue. |
 | Cron expression that does not parse | Fails silently at 3am otherwise. |
+| `PlainQAccount` with `bootstrap: false` against an instance with `auth.registration: false` | `/account/signup` is the only creation route and it refuses when registration is off. |
+| `restore.source.location` without a complete `newInstance.spec` | Nothing to inherit a spec from. |
+| A second `PlainQ` claiming an alias name already held | An alias with two owners is not a cutover. |
+| A cluster scale-in step that cannot commit against the *current* configuration | Loses quorum — evaluated per step, not against the final count. |
 
 Even cluster replica counts produce a **warning**, not a rejection: a 4-node
 cluster tolerates the same single failure a 3-node does, so the extra node buys
@@ -896,18 +1059,30 @@ retiring.
 1. **`UpdateQueue`.** Queue settings are create-only. Until then,
    `updatePolicy` is `Reject` or destructive `Recreate`. This is the single
    biggest wart in the CRD surface.
-2. **Leadership transfer endpoint.** Would make a quorum-aware rolling upgrade
+2. **An admin-only account-creation endpoint.** Today
+   `POST /api/v1/account/signup` is the only way to create an account after the
+   first, and it refuses whenever `--auth.registration.enable=false`. "Can a
+   stranger sign themselves up" and "can an authenticated administrator create
+   an account" are different questions sharing one flag, which leaves
+   non-bootstrap `PlainQAccount` unusable on exactly the instances most likely
+   to run in production.
+3. **A name-capable queue lookup over REST.** `DescribeQueueRequest` already
+   has a `queue_name` field; `GET /api/v1/queue/{id}` does not expose it, so a
+   REST-only client must scan the list endpoint to turn a name into an ID.
+4. **Leadership transfer endpoint.** Would make a quorum-aware rolling upgrade
    election-free instead of election-once.
-3. **Readiness that distinguishes "serving" from "joined".** `/health` today
+5. **Readiness that distinguishes "serving" from "joined".** `/health` today
    cannot tell a Kubernetes readiness gate that a node is up but has not yet
    joined the cluster, which is why formation relies on `Parallel` pod
    management plus discovery-before-ready.
-4. **gRPC authentication.** Would let the operator (and everyone else) use the
+6. **gRPC authentication.** Would let the operator (and everyone else) use the
    faster surface instead of routing control-plane calls through REST.
-5. **A maintenance endpoint for `VACUUM INTO`.** Would let the `Online` engine
+7. **A maintenance endpoint for `VACUUM INTO`.** Would let the `Online` engine
    drop the sidecar entirely and ask the server for a consistent copy.
 
-Items 1 and 2 are the ones worth scheduling alongside the operator itself.
+Items 1–3 are the ones worth scheduling alongside the operator itself: each one
+is currently absorbed by a workaround that is either lossy (1), a documented
+restriction (2), or a full table scan (3).
 
 ## Compatibility and rollout
 
