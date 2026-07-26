@@ -18,6 +18,7 @@ import (
 
 	hraft "github.com/hashicorp/raft"
 	"github.com/marsolab/plainq/internal/cluster/command"
+	"github.com/marsolab/plainq/internal/metrics"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/service/queue"
 	"github.com/marsolab/servekit/logkit"
@@ -106,7 +107,11 @@ func (f *FSM) Apply(entry *hraft.Log) any {
 	determinism := queue.NewDeterminism(cmd.Time(), cmd.IDs, entry.Index)
 	ctx = queue.WithDeterminism(ctx, determinism)
 
+	start := time.Now()
 	response, err := f.dispatch(ctx, cmd)
+
+	metrics.RecordFSMApply(cmd.Op.String(), start, err)
+
 	if err != nil {
 		f.failed.Add(1)
 
@@ -134,6 +139,8 @@ func (f *FSM) Apply(entry *hraft.Log) any {
 	}
 
 	if extra := determinism.Overflowed(); extra > 0 {
+		metrics.RecordDeterminismOverflow(cmd.Op.String(), extra)
+
 		f.logger.Warn("Command needed more identifiers than the leader assigned",
 			slog.Uint64("index", entry.Index),
 			slog.String("op", cmd.Op.String()),

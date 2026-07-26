@@ -102,9 +102,14 @@ func queryStampQueueGCAt() string {
 // Receive selects the same rows on every node, and the tie-break on msg_id
 // makes the order total — ordering by created_at alone leaves rows written in
 // the same millisecond to the storage engine's discretion.
+//
+// retries comes back with the row because a non-zero count means this delivery
+// is a redelivery — a message whose previous consumer never acknowledged it.
+// That is the difference between consumers being busy and consumers being
+// broken, and it is not visible anywhere else.
 // Placeholders: now, max retries, limit.
 func querySelectMessages(queueID string) string {
-	return `select msg_id, msg_body from ` + queueID +
+	return `select msg_id, msg_body, retries from ` + queueID +
 		` where visible_at <= ? and retries <= ? order by created_at, msg_id limit ?;`
 }
 

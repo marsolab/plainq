@@ -10,6 +10,7 @@ import (
 
 	"github.com/marsolab/plainq/internal/cluster/command"
 	"github.com/marsolab/plainq/internal/cluster/consensus"
+	"github.com/marsolab/plainq/internal/metrics"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/service/queue"
 	"github.com/marsolab/servekit/idkit"
@@ -377,7 +378,17 @@ func (s *Store) readBarrier(ctx context.Context) error {
 // ever proposed, or the local engine rejected the proposal outright. A
 // forwarded command whose reply was lost may well have been committed, and
 // re-sending that would enqueue the same message twice.
-func (s *Store) apply(ctx context.Context, cmd *command.Command) (any, error) {
+//
+//nolint:nonamedreturns // the deferred recorder has to know whether the write failed.
+func (s *Store) apply(ctx context.Context, cmd *command.Command) (_ any, aErr error) {
+	// The timer covers the whole write, retries included, because that is the
+	// latency the client actually waited: a write that spent 400ms waiting out
+	// an election was a 400ms write, however briefly the winning attempt took.
+	start := time.Now()
+	op := cmd.Op.String()
+
+	defer func() { metrics.RecordClusterApply(op, start, aErr) }()
+
 	encoded, encodeErr := cmd.Encode()
 	if encodeErr != nil {
 		return nil, fmt.Errorf("encode %s command: %w", cmd.Op, encodeErr)
@@ -402,6 +413,8 @@ func (s *Store) apply(ctx context.Context, cmd *command.Command) (any, error) {
 		if !errors.Is(err, consensus.ErrNoLeader) && !errors.Is(err, consensus.ErrNotLeader) {
 			return nil, err
 		}
+
+		metrics.RecordNotLeader()
 
 		s.logger.Debug("Waiting for a leader before retrying a write",
 			slog.String("op", cmd.Op.String()),
@@ -445,7 +458,16 @@ func (s *Store) applyOnce(ctx context.Context, cmd *command.Command, encoded []b
 	return s.forward(ctx, cmd, encoded)
 }
 
-func (s *Store) forward(ctx context.Context, cmd *command.Command, encoded []byte) (any, error) {
+//nolint:nonamedreturns // the deferred recorder has to know whether the hop failed.
+func (s *Store) forward(ctx context.Context, cmd *command.Command, encoded []byte) (_ any, fErr error) {
+	// Forwarding is timed apart from the write as a whole: the difference
+	// between the two is the network hop clustering added, which is the number
+	// to look at when a follower's writes are slower than the leader's.
+	start := time.Now()
+	op := cmd.Op.String()
+
+	defer func() { metrics.RecordClusterForward(op, start, fErr) }()
+
 	if s.forwarder == nil {
 		return nil, fmt.Errorf("%w: this node cannot forward writes", consensus.ErrNotLeader)
 	}

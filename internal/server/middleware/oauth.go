@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/cristalhq/jwt/v5"
+	"github.com/marsolab/plainq/internal/metrics"
 	"github.com/marsolab/servekit/errkit"
 	"github.com/marsolab/servekit/httpkit"
 )
@@ -79,6 +80,7 @@ func AuthenticateOAuth(
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			authHeader := r.Header.Get("Authorization")
 			if authHeader == "" {
+				metrics.RecordAuthentication(metrics.SchemeOAuth, metrics.AuthMissingCredentials)
 				httpkit.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
 
 				return
@@ -87,14 +89,23 @@ func AuthenticateOAuth(
 			// Remove "Bearer " prefix.
 			tokenString := strings.TrimPrefix(authHeader, "Bearer ")
 			if tokenString == authHeader {
+				metrics.RecordAuthentication(metrics.SchemeOAuth, metrics.AuthMalformedHeader)
 				httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: invalid authorization header format", errkit.ErrUnauthenticated))
 
 				return
 			}
 
-			// Validate the OAuth token.
+			// Validate the OAuth token. The provider call is timed separately
+			// from the request as a whole, because a slow identity provider
+			// becomes a slow login and the two are worth telling apart.
+			validateStart := time.Now()
 			claims, err := provider.ValidateToken(r.Context(), tokenString)
+
+			metrics.RecordOAuthRequest(providerName, metrics.OAuthStageValidateToken, err)
+			metrics.ObserveOAuthDuration(providerName, metrics.OAuthStageValidateToken, time.Since(validateStart).Seconds())
+
 			if err != nil {
+				metrics.RecordAuthentication(metrics.SchemeOAuth, metrics.AuthInvalidToken)
 				httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: invalid oauth token: %s", errkit.ErrUnauthenticated, err.Error()))
 
 				return
@@ -104,12 +115,20 @@ func AuthenticateOAuth(
 			oauthUser := extractOAuthUser(claims, roleClaimName, orgClaimName, teamClaimName)
 
 			// Sync user with local database.
+			syncStart := time.Now()
 			syncedUser, err := syncer.SyncUser(r.Context(), oauthUser, providerName)
+
+			metrics.RecordOAuthRequest(providerName, metrics.OAuthStageSyncUser, err)
+			metrics.ObserveOAuthDuration(providerName, metrics.OAuthStageSyncUser, time.Since(syncStart).Seconds())
+
 			if err != nil {
+				metrics.RecordAuthentication(metrics.SchemeOAuth, metrics.AuthSyncFailed)
 				httpkit.ErrorHTTP(w, r, fmt.Errorf("sync oauth user: %w", err))
 
 				return
 			}
+
+			metrics.RecordAuthentication(metrics.SchemeOAuth, metrics.AuthOK)
 
 			// Create user info for context.
 			userInfo := UserInfo{

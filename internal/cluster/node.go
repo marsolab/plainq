@@ -19,6 +19,7 @@ import (
 	"github.com/marsolab/plainq/internal/cluster/gossip"
 	"github.com/marsolab/plainq/internal/cluster/peer"
 	"github.com/marsolab/plainq/internal/cluster/transport"
+	"github.com/marsolab/plainq/internal/metrics"
 	"github.com/marsolab/plainq/internal/server/service/queue"
 	"github.com/marsolab/servekit/logkit"
 )
@@ -518,6 +519,9 @@ func (n *Node) discoveryLoop() {
 
 // joinDiscovered runs one discovery pass and hands the addresses to gossip.
 func (n *Node) joinDiscovered(ctx context.Context) {
+	// Each provider records its own run — see discovery's observe wrapper —
+	// so a fan-out over several does not collapse into one indistinguishable
+	// "discovery failed".
 	peers, err := n.discoverer.Discover(ctx)
 	if err != nil {
 		n.logger.Warn("Peer discovery failed",
@@ -548,6 +552,9 @@ func (n *Node) joinDiscovered(ctx context.Context) {
 	}
 
 	contacted, joinErr := n.gossip.Join(ctx, addrs)
+
+	metrics.RecordGossipJoin(contacted, joinErr)
+
 	if joinErr != nil {
 		n.logger.Debug("Could not contact any discovered peer",
 			slog.Int("candidates", len(addrs)),
@@ -565,6 +572,33 @@ func (n *Node) joinDiscovered(ctx context.Context) {
 	}
 }
 
+// publishGossipView refreshes the membership gauges.
+//
+// It runs on each membership event rather than on a timer, because the moment
+// worth capturing is the transition: a node failing and being re-admitted
+// inside one sampling interval is exactly the flap a timer would smooth away.
+func (n *Node) publishGossipView() {
+	var view metrics.GossipView
+
+	for _, member := range n.gossip.Members() {
+		switch member.State {
+		case gossip.StateAlive:
+			view.Alive++
+
+		case gossip.StateSuspect:
+			view.Suspect++
+
+		case gossip.StateLeft:
+			view.Left++
+
+		case gossip.StateFailed:
+			view.Failed++
+		}
+	}
+
+	metrics.SetGossipMembers(view)
+}
+
 // watchGossip records liveness. The leader's reconciler reads what it writes.
 func (n *Node) watchGossip() {
 	events := n.gossip.Events()
@@ -578,6 +612,9 @@ func (n *Node) watchGossip() {
 			if !ok {
 				return
 			}
+
+			metrics.RecordGossipEvent(string(event.Type))
+			n.publishGossipView()
 
 			switch event.Type {
 			case gossip.EventJoin, gossip.EventUpdate:
@@ -614,8 +651,10 @@ func (n *Node) watchLeadership() {
 			}
 
 			if isLeader {
+				metrics.RecordLeadershipChange(metrics.LeadershipGained)
 				n.startLeaderJobs()
 			} else {
+				metrics.RecordLeadershipChange(metrics.LeadershipLost)
 				n.logger.Info("Lost cluster leadership")
 				n.stopLeaderJobs()
 			}
@@ -765,7 +804,11 @@ func (n *Node) reconcile(ctx context.Context) {
 			slog.String("timeout", n.cfg.RemoveTimeout.String()),
 		)
 
-		if err := n.consensus.RemoveServer(ctx, id); err != nil {
+		err := n.consensus.RemoveServer(ctx, id)
+
+		metrics.RecordMembershipChange(metrics.MembershipRemove, err)
+
+		if err != nil {
 			n.logger.Error("Failed to remove an unreachable cluster member",
 				slog.String("node_id", id),
 				slog.String("error", err.Error()),
@@ -790,13 +833,19 @@ func suffrageFor(role gossip.Role) consensus.Suffrage {
 // admit adds a member gossip found to the consensus configuration, or moves an
 // existing one to the address it now advertises.
 func (n *Node) admit(ctx context.Context, member gossip.Member) {
-	var err error
+	var (
+		err    error
+		action = metrics.MembershipAddVoter
+	)
 
 	if member.Role == gossip.RoleNonVoter {
+		action = metrics.MembershipAddNonVoter
 		err = n.consensus.AddNonVoter(ctx, member.ID, member.RaftAddr)
 	} else {
 		err = n.consensus.AddVoter(ctx, member.ID, member.RaftAddr)
 	}
+
+	metrics.RecordMembershipChange(action, err)
 
 	if err != nil {
 		n.logger.Error("Failed to add a discovered member to the cluster",
@@ -877,6 +926,9 @@ func (n *Node) sweep(ctx context.Context) {
 
 func (n *Node) sweepQueue(ctx context.Context, queueID string) {
 	dropped, err := n.store.Sweep(ctx, queueID)
+
+	metrics.RecordClusterSweep(err)
+
 	if err != nil {
 		n.logger.Error("Cluster eviction failed for a queue",
 			slog.String("queue_id", queueID),

@@ -364,7 +364,8 @@ is up and gossiping but not yet in the configuration.
 
 ### Metrics
 
-The `/metrics` endpoint gains a cluster section:
+The `/metrics` endpoint gains a cluster section. The state of the node itself,
+all labelled with `node_id`:
 
 | Metric | Meaning |
 | --- | --- |
@@ -375,13 +376,74 @@ The `/metrics` endpoint gains a cluster section:
 | `plainq_cluster_applied_index` | Highest index this node has applied. The gap from the commit index is this replica's lag. |
 | `plainq_cluster_last_index` | Last index stored locally. |
 | `plainq_cluster_voters` | Voters in the configuration. |
+| `plainq_cluster_quorum` | Voters a write needs. Compare with `members_reachable` to see how many more failures the cluster survives. |
 | `plainq_cluster_members` | Members known, voters and non-voters. |
-| `plainq_cluster_members_reachable` | Members gossip can currently see. Below `voters/2 + 1` and the cluster cannot commit. |
+| `plainq_cluster_members_reachable` | Members gossip can currently see. Below quorum and the cluster cannot commit. |
 | `plainq_cluster_leader_last_contact_seconds` | How long ago this follower heard from the leader. |
 | `plainq_cluster_commands_applied_total` | Commands applied to the local replica. |
 | `plainq_cluster_commands_failed_total` | Commands that failed to apply. A steady climb is worth investigating; a rejected `CreateQueue` is a legitimate one. |
+| `plainq_cluster_node_info` | Constant `1` carrying `node_id`, `version` and `engine` as labels — join it onto anything to colour by build. |
 
-All are labelled with `node_id`.
+The write path, labelled by `operation` and `result`:
+
+| Metric | Meaning |
+| --- | --- |
+| `plainq_cluster_applies_total` | Writes this node proposed through consensus. |
+| `plainq_cluster_apply_duration_seconds` | Propose → commit → apply. **This is the cost clustering adds to a write.** |
+| `plainq_cluster_forwards_total` | Writes a follower handed to the leader. |
+| `plainq_cluster_forward_duration_seconds` | Round-trip of a forwarded write. Its gap from `apply_duration` is the network hop. |
+| `plainq_cluster_not_leader_total` | Writes rejected for want of a leader. Spikes during an election. |
+| `plainq_cluster_leadership_changes_total` | Leadership gained or lost, by `state`. |
+| `plainq_cluster_fsm_applies_total` | Log entries applied to the local state machine. |
+| `plainq_cluster_fsm_apply_duration_seconds` | Time in the state machine. Consistently slow means followers fall behind. |
+| `plainq_cluster_determinism_overflows_total` | Commands that needed more identifiers than the leader assigned — a fan-out that raced a subscription change. |
+| `plainq_cluster_sweeps_total` | Retention sweeps the leader proposed through the log. |
+
+Snapshots and catch-up:
+
+| Metric | Meaning |
+| --- | --- |
+| `plainq_cluster_snapshots_total` | Snapshots taken, by `result`. |
+| `plainq_cluster_snapshot_duration_seconds`, `plainq_cluster_snapshot_bytes` | How long one took and how big it was — what a joining node has to pull. |
+| `plainq_cluster_snapshot_records_total` | What went into them, by `kind`. |
+| `plainq_cluster_restores_total`, `plainq_cluster_restore_duration_seconds` | Restores and how long the node was not serving reads. |
+| `plainq_cluster_restore_records_total` | What came back out, by `kind`. |
+
+Membership, discovery and the wire:
+
+| Metric | Meaning |
+| --- | --- |
+| `plainq_cluster_gossip_members` | The gossip view, by `state` (`alive`, `suspect`, `left`, `failed`). |
+| `plainq_cluster_gossip_events_total` | Membership events by `type`. A steady stream of join/leave pairs is a flapping node. |
+| `plainq_cluster_gossip_joins_total`, `plainq_cluster_gossip_join_peers` | Join attempts and how many peers each reached. |
+| `plainq_cluster_membership_changes_total` | Changes the leader made while reconciling, by `action` and `result`. |
+| `plainq_cluster_discovery_runs_total` | Discovery queries by `provider` and `result`. **A provider failing every run is a misconfigured cluster that has not noticed yet.** |
+| `plainq_cluster_discovery_duration_seconds`, `plainq_cluster_discovery_peers` | How long each provider took and what it last returned. |
+| `plainq_cluster_peer_requests_total`, `plainq_cluster_peer_request_duration_seconds` | Internal peer RPC, by `path`. |
+| `plainq_cluster_peer_auth_failures_total` | Peer RPCs rejected for a bad shared secret. On a private network this should be flat at zero. |
+| `plainq_cluster_transport_connections_total` | Connections on the cluster port, by `protocol` and `direction`. |
+| `plainq_cluster_transport_handshake_failures_total` | Inbound connections dropped before naming a protocol. |
+
+Two queries worth having on a dashboard from the start:
+
+```promql
+# Replica lag. Sustained non-zero means this node cannot keep up with the log.
+plainq_cluster_commit_index - plainq_cluster_applied_index
+
+# What clustering costs a write, at the 99th percentile.
+histogram_quantile(0.99, sum by (le, operation) (rate(plainq_cluster_apply_duration_seconds_bucket[5m])))
+```
+
+Discovery providers are named individually, so a fan-out over several does not
+collapse into one indistinguishable "discovery failed":
+
+```promql
+sum by (provider) (rate(plainq_cluster_discovery_runs_total{result="error"}[15m])) > 0
+```
+
+The full catalog — every family, its labels and what it means — is at
+`GET /api/v1/metrics/catalog`, and in the
+[observability guide](observability.md#what-is-measured).
 
 ### Adding a node
 

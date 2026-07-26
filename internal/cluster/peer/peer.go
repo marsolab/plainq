@@ -28,6 +28,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/marsolab/plainq/internal/cluster/consensus"
 	"github.com/marsolab/plainq/internal/cluster/transport"
+	"github.com/marsolab/plainq/internal/metrics"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/marsolab/servekit/errkit"
 	"github.com/marsolab/servekit/logkit"
@@ -129,6 +130,7 @@ func NewServer(cfg ServerConfig) *Server {
 	}
 
 	s.router.Route("/v1", func(r chi.Router) {
+		r.Use(observe)
 		r.Use(s.authenticate)
 
 		r.Post("/forward", s.forwardHandler)
@@ -182,6 +184,8 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 		// constant-time by construction — subtle.ConstantTimeCompare returns 0
 		// for mismatched lengths without branching on content.
 		if subtle.ConstantTimeCompare(presented, s.secret) != 1 {
+			metrics.RecordPeerAuthFailure()
+
 			s.logger.Warn("Rejected a cluster peer with an invalid secret",
 				slog.String("remote", r.RemoteAddr),
 				slog.String("path", r.URL.Path),
@@ -194,6 +198,49 @@ func (s *Server) authenticate(next http.Handler) http.Handler {
 
 		next.ServeHTTP(w, r)
 	})
+}
+
+// observe records every peer RPC this node served.
+//
+// The route pattern is the label, not the path, and the peer's identity is
+// not a label at all: a cluster is a handful of nodes, but the useful question
+// here is whether the internal RPC surface is working, not which peer asked.
+func observe(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+
+		next.ServeHTTP(recorder, r)
+
+		var err error
+		if recorder.status >= http.StatusBadRequest {
+			err = errPeerRequestFailed
+		}
+
+		path := r.URL.Path
+		if ctx := chi.RouteContext(r.Context()); ctx != nil && ctx.RoutePattern() != "" {
+			path = ctx.RoutePattern()
+		}
+
+		metrics.RecordPeerRequest(path, start, err)
+	})
+}
+
+// errPeerRequestFailed marks a peer RPC that answered with an error status. It
+// never leaves this file — it exists so the recorder can express "this one
+// failed" in the same vocabulary every other subsystem uses.
+var errPeerRequestFailed = errors.New("peer request failed")
+
+// statusRecorder remembers the status code a handler wrote.
+type statusRecorder struct {
+	http.ResponseWriter
+
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(status int) {
+	r.status = status
+	r.ResponseWriter.WriteHeader(status)
 }
 
 // forwardHandler commits a command a follower could not commit itself.

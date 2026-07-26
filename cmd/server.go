@@ -34,6 +34,7 @@ import (
 	"github.com/marsolab/plainq/internal/server/service/rbac"
 	rbacstore "github.com/marsolab/plainq/internal/server/service/rbac/litestore"
 	rbacpg "github.com/marsolab/plainq/internal/server/service/rbac/pgstore"
+	"github.com/marsolab/plainq/internal/server/service/telemetry"
 	"github.com/marsolab/servekit/authkit/hashkit"
 	"github.com/marsolab/servekit/authkit/jwtkit"
 	"github.com/marsolab/servekit/dbkit/litekit"
@@ -314,6 +315,14 @@ func serverCommand() *scotty.Command {
 				return backendErr
 			}
 
+			// One observer, shared by the storage layer and — once the
+			// telemetry store is open — by the collector behind Houston's
+			// dashboards. Both then describe the same events instead of two
+			// independently-wired approximations of them.
+			observer := telemetry.NewObserver(backend.driver)
+
+			registerRuntimeMetrics(backend)
+
 			defer func() {
 				if err := backend.Close(); err != nil {
 					logger.Error("Failed to close storage backend",
@@ -322,7 +331,7 @@ func serverCommand() *scotty.Command {
 				}
 			}()
 
-			queueStorage, queueClose, queueStorageInitErr := initQueueStorage(&cfg, &clusterCfg, logger, backend)
+			queueStorage, queueClose, queueStorageInitErr := initQueueStorage(&cfg, &clusterCfg, logger, backend, observer)
 			if queueStorageInitErr != nil {
 				return queueStorageInitErr
 			}
@@ -362,7 +371,9 @@ func serverCommand() *scotty.Command {
 				}
 			}
 
-			queueService := queue.NewService(&cfg, logger, queueStorage)
+			// Wrapping here, after the cluster layer, means one seam measures
+			// every backend: SQLite, Postgres and the replicated store alike.
+			queueService := queue.NewService(&cfg, logger, queue.NewObservedStorage(queueStorage, observer))
 
 			accountStorage, accountStorageInitErr := initAccountStorage(&cfg, logger, backend)
 			if accountStorageInitErr != nil {
@@ -401,6 +412,8 @@ func serverCommand() *scotty.Command {
 
 			// Initialize telemetry database if enabled.
 			var serverOpts []server.Option
+
+			serverOpts = append(serverOpts, server.WithObserver(observer))
 
 			if clusterNode != nil {
 				serverOpts = append(serverOpts, server.WithClusterNode(clusterNode))
@@ -596,6 +609,7 @@ func initQueueStorage(
 	clusterCfg *cluster.Config,
 	logger *slog.Logger,
 	backend *storageBackend,
+	observer *telemetry.Observer,
 ) (queue.Storage, func() error, error) {
 	switch backend.driver {
 	case storageDriverPostgres:
@@ -607,7 +621,9 @@ func initQueueStorage(
 			)
 		}
 
-		opts := make([]queuepg.Option, 0, 2)
+		opts := make([]queuepg.Option, 0, 3)
+
+		opts = append(opts, queuepg.WithObserver(observer))
 
 		if cfg.StorageLogEnable {
 			opts = append(opts, queuepg.WithLogger(logger))
@@ -625,7 +641,9 @@ func initQueueStorage(
 		return store, store.Close, nil
 
 	default:
-		opts := make([]queuestore.Option, 0, 3)
+		opts := make([]queuestore.Option, 0, 4)
+
+		opts = append(opts, queuestore.WithObserver(observer))
 
 		if cfg.StorageLogEnable {
 			opts = append(opts, queuestore.WithLogger(logger))

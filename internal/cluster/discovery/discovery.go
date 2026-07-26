@@ -294,7 +294,7 @@ func Parse(spec string) (Discoverer, error) {
 		return nil, fmt.Errorf("build %q discovery: %w", parsed.Scheme, buildErr)
 	}
 
-	return discoverer, nil
+	return observe(discoverer), nil
 }
 
 // ParseAll builds one Discoverer from several specs. With a single spec it

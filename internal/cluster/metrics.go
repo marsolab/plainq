@@ -1,29 +1,10 @@
 package cluster
 
 import (
-	"strconv"
 	"sync"
 
-	"github.com/VictoriaMetrics/metrics"
 	"github.com/marsolab/plainq/internal/cluster/consensus"
-)
-
-// Cluster metric names. They are registered as gauge callbacks rather than
-// values pushed on a timer: a scrape then reports the cluster as it is at that
-// instant, not as it was when some background loop last looked.
-const (
-	metricIsLeader        = `plainq_cluster_leader`
-	metricTerm            = `plainq_cluster_term`
-	metricCommitIndex     = `plainq_cluster_commit_index`
-	metricAppliedIndex    = `plainq_cluster_applied_index`
-	metricLastIndex       = `plainq_cluster_last_index`
-	metricVoters          = `plainq_cluster_voters`
-	metricReachable       = `plainq_cluster_members_reachable`
-	metricMembers         = `plainq_cluster_members`
-	metricHealthy         = `plainq_cluster_healthy`
-	metricAppliedCommands = `plainq_cluster_commands_applied_total`
-	metricFailedCommands  = `plainq_cluster_commands_failed_total`
-	metricLastContact     = `plainq_cluster_leader_last_contact_seconds`
+	"github.com/marsolab/plainq/internal/metrics"
 )
 
 // registerMetrics exposes the cluster's state on the server's /metrics
@@ -45,55 +26,37 @@ func (n *Node) registerMetrics() {
 var metricsOnce sync.Once
 
 func (n *Node) registerMetricsOnce() {
-	set := metrics.GetDefaultSet()
+	metrics.RegisterClusterNode(n.cfg.NodeID, n.cfg.Version, n.consensus.Status().Engine, n.sample)
+}
 
-	gauge := func(name string, value func(Status) float64) {
-		set.GetOrCreateGauge(name+`{node_id="`+quote(n.cfg.NodeID)+`"}`, func() float64 {
-			return value(n.Status())
-		})
+// sample renders this node's state in the shape the metrics package reads.
+//
+// It is one pass over the same Status the API and the CLI answer from, so a
+// scrape, a dashboard and `plainq cluster status` cannot disagree about what
+// the cluster looked like at a given moment.
+func (n *Node) sample() metrics.ClusterSample {
+	status := n.Status()
+
+	sample := metrics.ClusterSample{
+		Leader:          status.State == consensus.StateLeader,
+		Healthy:         status.Healthy,
+		Term:            status.Term,
+		CommitIndex:     status.CommitIndex,
+		AppliedIndex:    status.AppliedIndex,
+		LastIndex:       status.LastIndex,
+		Voters:          status.Voters,
+		Members:         len(status.Members),
+		Quorum:          status.Quorum,
+		AppliedCommands: status.AppliedCommands,
+		FailedCommands:  status.FailedCommands,
+		LastContact:     n.consensus.LastContact(),
 	}
 
-	gauge(metricIsLeader, func(s Status) float64 { return boolToFloat(s.State == consensus.StateLeader) })
-	gauge(metricTerm, func(s Status) float64 { return float64(s.Term) })
-	gauge(metricCommitIndex, func(s Status) float64 { return float64(s.CommitIndex) })
-	gauge(metricAppliedIndex, func(s Status) float64 { return float64(s.AppliedIndex) })
-	gauge(metricLastIndex, func(s Status) float64 { return float64(s.LastIndex) })
-	gauge(metricVoters, func(s Status) float64 { return float64(s.Voters) })
-	gauge(metricMembers, func(s Status) float64 { return float64(len(s.Members)) })
-	gauge(metricHealthy, func(s Status) float64 { return boolToFloat(s.Healthy) })
-	gauge(metricAppliedCommands, func(s Status) float64 { return float64(s.AppliedCommands) })
-	gauge(metricFailedCommands, func(s Status) float64 { return float64(s.FailedCommands) })
-
-	gauge(metricReachable, func(s Status) float64 {
-		var reachable int
-
-		for _, member := range s.Members {
-			if member.Reachable {
-				reachable++
-			}
+	for _, member := range status.Members {
+		if member.Reachable {
+			sample.Reachable++
 		}
-
-		return float64(reachable)
-	})
-
-	set.GetOrCreateGauge(metricLastContact+`{node_id="`+quote(n.cfg.NodeID)+`"}`, func() float64 {
-		return n.consensus.LastContact().Seconds()
-	})
-}
-
-func boolToFloat(value bool) float64 {
-	if value {
-		return 1
 	}
 
-	return 0
-}
-
-// quote escapes a label value. Node ids are hostnames or pod names, so this is
-// belt and braces — but a metric name that does not parse takes the whole
-// scrape down with it, not just this one series.
-func quote(value string) string {
-	quoted := strconv.Quote(value)
-
-	return quoted[1 : len(quoted)-1]
+	return sample
 }
