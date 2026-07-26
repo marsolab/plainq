@@ -51,12 +51,16 @@ func (s *Storage) CreateTopic(ctx context.Context, input *queue.CreateTopicReque
 		return nil, fmt.Errorf("%w: topic name is empty", errkit.ErrInvalidArgument)
 	}
 
+	// created_at is written rather than left to the column default: a default
+	// reads the local clock, and two replicas applying the same CreateTopic
+	// would then disagree about when the topic appeared.
 	id := queue.NextID(ctx, idkit.XID)
 	if _, err := s.db.ExecContext(
 		ctx,
-		`INSERT INTO topic_properties (topic_id, topic_name) VALUES (?, ?);`,
+		`INSERT INTO topic_properties (topic_id, topic_name, created_at) VALUES (?, ?, ?);`,
 		id,
 		input.TopicName,
+		writeTime(ctx),
 	); err != nil {
 		return nil, fmt.Errorf("create topic: %w", err)
 	}
@@ -90,10 +94,11 @@ func (s *Storage) Subscribe(ctx context.Context, topicID string, input *queue.Su
 	id := queue.NextID(ctx, idkit.XID)
 	if _, err := s.db.ExecContext(
 		ctx,
-		`INSERT INTO topic_subscriptions (subscription_id, topic_id, queue_id) VALUES (?, ?, ?);`,
+		`INSERT INTO topic_subscriptions (subscription_id, topic_id, queue_id, created_at) VALUES (?, ?, ?, ?);`,
 		id,
 		topicID,
 		input.QueueID,
+		writeTime(ctx),
 	); err != nil {
 		return nil, fmt.Errorf("subscribe queue: %w", err)
 	}

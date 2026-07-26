@@ -57,6 +57,25 @@ type Node struct {
 	lastSeenMu sync.Mutex
 	lastSeen   map[string]time.Time
 
+	// membershipMu serializes changes to the consensus configuration.
+	//
+	// Reconciliation and an explicit join or leave both rewrite the same
+	// membership, and they arrive from different goroutines. Without this, a
+	// reconcile already past its "has this node departed?" check can re-add a
+	// node the instant after an operator removed it — and then never remove it
+	// again, because the next pass sees it configured and leaves it alone.
+	membershipMu sync.Mutex
+
+	// departed remembers nodes removed on purpose.
+	//
+	// Removing a node and re-discovering it are the same event seen from two
+	// layers: consensus drops it immediately, gossip takes a moment to agree
+	// it is gone, and in between the reconciler would see a live member
+	// missing from the configuration and helpfully put it back. A node that
+	// left has to stay left, so it is recorded here until gossip catches up.
+	departedMu sync.Mutex
+	departed   map[string]time.Time
+
 	// leaderJobs cancels the work that only the leader does.
 	leaderMu   sync.Mutex
 	leaderJobs context.CancelFunc
@@ -94,7 +113,7 @@ func NewNode(cfg Config, local queue.ReplicatedStorage, logger *slog.Logger) (*N
 		Logger:        logger,
 	})
 	if muxErr != nil {
-		return nil, muxErr
+		return nil, fmt.Errorf("start cluster transport: %w", muxErr)
 	}
 
 	stateMachine := fsm.New(local, logger)
@@ -116,7 +135,7 @@ func NewNode(cfg Config, local queue.ReplicatedStorage, logger *slog.Logger) (*N
 	if engineErr != nil {
 		_ = mux.Close()
 
-		return nil, engineErr
+		return nil, fmt.Errorf("start consensus engine: %w", engineErr)
 	}
 
 	peerClient := peer.NewClient(mux, cfg.Secret)
@@ -139,12 +158,16 @@ func NewNode(cfg Config, local queue.ReplicatedStorage, logger *slog.Logger) (*N
 		peerClient: peerClient,
 		store:      NewStore(local, engine, peerClient, storeOpts...),
 		lastSeen:   make(map[string]time.Time),
+		departed:   make(map[string]time.Time),
 		done:       make(chan struct{}),
 	}
 
+	// Membership changes are routed through the node rather than straight to
+	// the engine, so a removal asked for by a peer is recorded the same way
+	// one asked for locally is.
 	node.peerServer = peer.NewServer(peer.ServerConfig{
 		Applier:    engine,
-		Membership: engine,
+		Membership: &nodeMembership{node: &node},
 		Secret:     cfg.Secret,
 		Logger:     logger,
 	})
@@ -187,11 +210,14 @@ func (n *Node) Start(ctx context.Context) error {
 		return err
 	}
 
+	// These loops outlive Start's context: they run until the node is closed,
+	// and n.done is what stops them. Tying them to a start-up context would
+	// end the cluster's membership tracking the moment startup finished.
 	n.wg.Add(3)
 
 	go func() { defer n.wg.Done(); n.watchGossip() }()
-	go func() { defer n.wg.Done(); n.watchLeadership() }()
-	go func() { defer n.wg.Done(); n.discoveryLoop() }()
+	go func() { defer n.wg.Done(); n.watchLeadership() }() //nolint:contextcheck // outlives Start's context; n.done stops it.
+	go func() { defer n.wg.Done(); n.discoveryLoop() }()   //nolint:contextcheck // same.
 
 	if err := n.formCluster(ctx); err != nil {
 		return err
@@ -225,9 +251,14 @@ func (n *Node) startGossip() error {
 		return splitErr
 	}
 
-	advertiseHost, advertisePort, advertiseErr := "", 0, error(nil)
+	var (
+		advertiseHost string
+		advertisePort int
+	)
 
 	if n.cfg.GossipAdvertiseAddr != "" {
+		var advertiseErr error
+
 		advertiseHost, advertisePort, advertiseErr = splitHostPortInt(n.cfg.GossipAdvertiseAddr)
 		if advertiseErr != nil {
 			return advertiseErr
@@ -251,7 +282,7 @@ func (n *Node) startGossip() error {
 		},
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("start gossip: %w", err)
 	}
 
 	n.gossip = memberlist
@@ -267,7 +298,7 @@ func (n *Node) startDiscovery(ctx context.Context) error {
 
 	discoverer, err := discovery.ParseAll(specs...)
 	if err != nil {
-		return err
+		return fmt.Errorf("configure peer discovery: %w", err)
 	}
 
 	n.discoverer = discoverer
@@ -289,11 +320,15 @@ func (n *Node) formCluster(ctx context.Context) error {
 			slog.String("node_id", n.cfg.NodeID),
 		)
 
-		return n.consensus.Bootstrap([]consensus.Server{{
+		if err := n.consensus.Bootstrap([]consensus.Server{{
 			ID:       n.cfg.NodeID,
 			Addr:     n.mux.Addr().String(),
 			Suffrage: consensus.SuffrageVoter,
-		}})
+		}}); err != nil {
+			return fmt.Errorf("bootstrap cluster: %w", err)
+		}
+
+		return nil
 
 	case n.cfg.BootstrapExpect > 0:
 		n.wg.Add(1)
@@ -646,10 +681,15 @@ func (n *Node) reconcileLoop(ctx context.Context) {
 
 // reconcile adds members gossip can see and are missing from the
 // configuration, and removes members that have been gone long enough.
+//
+//nolint:cyclop,gocyclo // Comparing two membership views is a flat pass over one of them.
 func (n *Node) reconcile(ctx context.Context) {
 	if !n.consensus.IsLeader() {
 		return
 	}
+
+	n.membershipMu.Lock()
+	defer n.membershipMu.Unlock()
 
 	status := n.consensus.Status()
 
@@ -668,12 +708,39 @@ func (n *Node) reconcile(ctx context.Context) {
 		alive[member.ID] = member
 		n.markSeen(member.ID)
 
-		if _, known := configured[member.ID]; known {
+		if server, known := configured[member.ID]; known {
+			// A node keeps its identity across restarts but not necessarily its
+			// address — a rescheduled pod comes back on a new IP under the same
+			// name. Consensus would go on dialing the address it was given, so
+			// the member has to be re-admitted at the address it now gossips.
+			if server.Addr != member.RaftAddr || suffrageFor(member.Role) != server.Suffrage {
+				n.logger.Info("Cluster member changed its address or role",
+					slog.String("node_id", member.ID),
+					slog.String("configured", server.Addr),
+					slog.String("gossiped", member.RaftAddr),
+					slog.String("role", string(member.Role)),
+				)
+
+				n.admit(ctx, member)
+			}
+
+			continue
+		}
+
+		if n.hasDeparted(member.ID) {
+			// It left on purpose and gossip has not caught up. Putting it back
+			// now would undo the operator's decision a few hundred
+			// milliseconds after they made it.
 			continue
 		}
 
 		n.admit(ctx, member)
 	}
+
+	// A departure has propagated once gossip stops reporting the node. After
+	// that the record is spent: a node that comes back later is a node
+	// rejoining, and it is welcome.
+	n.pruneDeparted(alive)
 
 	if !n.cfg.AutoRemove {
 		return
@@ -711,7 +778,17 @@ func (n *Node) reconcile(ctx context.Context) {
 	}
 }
 
-// admit adds a member gossip found to the consensus configuration.
+// suffrageFor maps a gossiped role onto the configuration's vocabulary.
+func suffrageFor(role gossip.Role) consensus.Suffrage {
+	if role == gossip.RoleNonVoter {
+		return consensus.SuffrageNonVoter
+	}
+
+	return consensus.SuffrageVoter
+}
+
+// admit adds a member gossip found to the consensus configuration, or moves an
+// existing one to the address it now advertises.
 func (n *Node) admit(ctx context.Context, member gossip.Member) {
 	var err error
 
@@ -761,54 +838,100 @@ func (n *Node) sweepLoop(ctx context.Context) {
 	}
 }
 
+// sweep proposes eviction for every queue, a page at a time.
+//
+// Paging is not optional: a cluster member's local sweeper is switched off, so
+// any queue this loop skips is a queue nothing ever evicts from.
 func (n *Node) sweep(ctx context.Context) {
-	queues, err := n.store.local.ListQueues(ctx, listAllQueues())
+	cursor := ""
+
+	for {
+		if !n.consensus.IsLeader() {
+			return
+		}
+
+		queues, err := n.store.local.ListQueues(ctx, listAllQueues(cursor))
+		if err != nil {
+			n.logger.Error("Failed to list queues for cluster eviction",
+				slog.String("error", err.Error()),
+			)
+
+			return
+		}
+
+		for _, q := range queues.GetQueues() {
+			if !n.consensus.IsLeader() {
+				return
+			}
+
+			n.sweepQueue(ctx, q.GetQueueId())
+		}
+
+		if !queues.GetHasMore() || queues.GetNextCursor() == "" {
+			return
+		}
+
+		cursor = queues.GetNextCursor()
+	}
+}
+
+func (n *Node) sweepQueue(ctx context.Context, queueID string) {
+	dropped, err := n.store.Sweep(ctx, queueID)
 	if err != nil {
-		n.logger.Error("Failed to list queues for cluster eviction",
+		n.logger.Error("Cluster eviction failed for a queue",
+			slog.String("queue_id", queueID),
 			slog.String("error", err.Error()),
 		)
 
 		return
 	}
 
-	for _, q := range queues.GetQueues() {
-		if !n.consensus.IsLeader() {
-			return
-		}
-
-		dropped, sweepErr := n.store.Sweep(ctx, q.GetQueueId())
-		if sweepErr != nil {
-			n.logger.Error("Cluster eviction failed for a queue",
-				slog.String("queue_id", q.GetQueueId()),
-				slog.String("error", sweepErr.Error()),
-			)
-
-			continue
-		}
-
-		if dropped > 0 {
-			n.logger.Debug("Cluster eviction removed messages",
-				slog.String("queue_id", q.GetQueueId()),
-				slog.Uint64("messages", dropped),
-			)
-		}
+	if dropped > 0 {
+		n.logger.Debug("Cluster eviction removed messages",
+			slog.String("queue_id", queueID),
+			slog.Uint64("messages", dropped),
+		)
 	}
 }
 
 // Join admits a node to the cluster. It is the manual path — the API and the
 // CLI — alongside the automatic one that reconciliation drives.
 func (n *Node) Join(ctx context.Context, nodeID, addr string, nonVoter bool) error {
+	n.membershipMu.Lock()
+	defer n.membershipMu.Unlock()
+
+	var err error
+
 	if nonVoter {
-		return n.consensus.AddNonVoter(ctx, nodeID, addr)
+		err = n.consensus.AddNonVoter(ctx, nodeID, addr)
+	} else {
+		err = n.consensus.AddVoter(ctx, nodeID, addr)
 	}
 
-	return n.consensus.AddVoter(ctx, nodeID, addr)
+	if err != nil {
+		return fmt.Errorf("add cluster member %q (%s): %w", nodeID, addr, err)
+	}
+
+	// Admitting a node that previously left reverses that departure — it asked
+	// to come back, and something granted the request.
+	n.clearDeparted(nodeID)
+
+	return nil
 }
 
 // Remove drops a node from the cluster configuration.
 func (n *Node) Remove(ctx context.Context, nodeID string) error {
+	n.membershipMu.Lock()
+	defer n.membershipMu.Unlock()
+
+	// Marked before the removal, not after: a reconcile that starts while this
+	// one is in flight must already see the node as departed.
+	n.markDeparted(nodeID)
+
 	if err := n.consensus.RemoveServer(ctx, nodeID); err != nil {
-		return err
+		n.clearDeparted(nodeID)
+
+		return fmt.Errorf("remove cluster member %q: %w", nodeID, err)
 	}
 
 	n.forget(nodeID)
@@ -817,7 +940,13 @@ func (n *Node) Remove(ctx context.Context, nodeID string) error {
 }
 
 // Snapshot forces a state machine snapshot, compacting the consensus log.
-func (n *Node) Snapshot(ctx context.Context) error { return n.consensus.Snapshot(ctx) }
+func (n *Node) Snapshot(ctx context.Context) error {
+	if err := n.consensus.Snapshot(ctx); err != nil {
+		return fmt.Errorf("snapshot cluster state: %w", err)
+	}
+
+	return nil
+}
 
 // Leave takes this node out of the cluster deliberately: it hands leadership
 // on, asks the leader to drop it from the configuration, and announces its
@@ -837,7 +966,7 @@ func (n *Node) Leave(ctx context.Context) error {
 	// through a healthy cluster.
 	if _, addr, err := n.consensus.Leader(); err == nil {
 		if n.consensus.IsLeader() {
-			if removeErr := n.consensus.RemoveServer(ctx, n.cfg.NodeID); removeErr != nil {
+			if removeErr := n.Remove(ctx, n.cfg.NodeID); removeErr != nil {
 				errs = append(errs, removeErr)
 			}
 		} else if leaveErr := n.peerClient.Leave(ctx, addr, n.cfg.NodeID); leaveErr != nil {
@@ -855,6 +984,8 @@ func (n *Node) Leave(ctx context.Context) error {
 // Close stops the node. It does not leave the cluster — a restart is not a
 // departure, and a node that removed itself on every shutdown could never be
 // restarted into the cluster it belongs to. Call Leave for that.
+//
+//nolint:cyclop // Shutdown is one guarded close per subsystem, in order.
 func (n *Node) Close() error {
 	var errs []error
 
@@ -915,6 +1046,67 @@ func (n *Node) votingMembers() []gossip.Member {
 
 	return voters
 }
+
+// markDeparted records that a node was removed on purpose.
+func (n *Node) markDeparted(id string) {
+	n.departedMu.Lock()
+	defer n.departedMu.Unlock()
+
+	n.departed[id] = time.Now()
+}
+
+// clearDeparted forgets a departure, so the node can be admitted again.
+func (n *Node) clearDeparted(id string) {
+	n.departedMu.Lock()
+	defer n.departedMu.Unlock()
+
+	delete(n.departed, id)
+}
+
+// hasDeparted reports whether a node left on purpose and gossip has not yet
+// agreed that it is gone.
+func (n *Node) hasDeparted(id string) bool {
+	n.departedMu.Lock()
+	defer n.departedMu.Unlock()
+
+	_, departed := n.departed[id]
+
+	return departed
+}
+
+// pruneDeparted drops departures that gossip has caught up with.
+func (n *Node) pruneDeparted(alive map[string]gossip.Member) {
+	n.departedMu.Lock()
+	defer n.departedMu.Unlock()
+
+	for id := range n.departed {
+		if _, stillAlive := alive[id]; !stillAlive {
+			delete(n.departed, id)
+		}
+	}
+}
+
+// nodeMembership adapts a Node to the membership surface peer RPC needs, so a
+// change asked for by another node takes the same path as a local one.
+type nodeMembership struct{ node *Node }
+
+// AddVoter implements peer.Membership.
+func (m *nodeMembership) AddVoter(ctx context.Context, id, addr string) error {
+	return m.node.Join(ctx, id, addr, false)
+}
+
+// AddNonVoter implements peer.Membership.
+func (m *nodeMembership) AddNonVoter(ctx context.Context, id, addr string) error {
+	return m.node.Join(ctx, id, addr, true)
+}
+
+// RemoveServer implements peer.Membership.
+func (m *nodeMembership) RemoveServer(ctx context.Context, id string) error {
+	return m.node.Remove(ctx, id)
+}
+
+// Status implements peer.Membership.
+func (m *nodeMembership) Status() consensus.Status { return m.node.consensus.Status() }
 
 func (n *Node) markSeen(id string) {
 	n.lastSeenMu.Lock()

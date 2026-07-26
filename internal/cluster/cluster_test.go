@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,19 +32,73 @@ type testNode struct {
 	gossip  string
 }
 
-// freePort reserves and releases a port, so the caller can bind it. Gossip
-// needs a concrete port rather than zero, since it binds both TCP and UDP.
+// takenPorts remembers every port this process has handed out. Asking the
+// kernel for a free port and then closing it leaves a window in which another
+// test can be given the same one, and gossip needs a concrete port — it binds
+// UDP as well as TCP, so it cannot be handed an already-open listener.
+var (
+	takenPortsMu sync.Mutex
+	takenPorts   = map[int]bool{}
+)
+
+// freePort reserves and releases a port, so the caller can bind it.
 func freePort(t *testing.T) int {
 	t.Helper()
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	td.Require(t).CmpNoError(err)
+	for range 50 {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		td.Require(t).CmpNoError(err)
 
-	port := listener.Addr().(*net.TCPAddr).Port //nolint:errcheck,forcetypeassert // test on a TCP listener.
+		port := listener.Addr().(*net.TCPAddr).Port //nolint:errcheck,forcetypeassert // test on a TCP listener.
 
-	td.Require(t).CmpNoError(listener.Close())
+		td.Require(t).CmpNoError(listener.Close())
 
-	return port
+		takenPortsMu.Lock()
+		taken := takenPorts[port]
+		takenPorts[port] = true
+		takenPortsMu.Unlock()
+
+		if !taken {
+			return port
+		}
+	}
+
+	t.Fatal("could not find an unused port")
+
+	return 0
+}
+
+// startNode brings a single node up, retrying when the port it was given turns
+// out to be taken after all.
+func startNode(t *testing.T, build func(gossipPort int) (*Node, error)) *Node {
+	t.Helper()
+
+	var lastErr error
+
+	for range 5 {
+		node, err := build(freePort(t))
+		if err != nil {
+			lastErr = err
+
+			continue
+		}
+
+		if startErr := node.Start(context.Background()); startErr != nil {
+			_ = node.Close()
+
+			lastErr = startErr
+
+			continue
+		}
+
+		t.Cleanup(func() { _ = node.Close() })
+
+		return node
+	}
+
+	t.Fatalf("could not start a cluster node: %v", lastErr)
+
+	return nil
 }
 
 func newTestStorage(t *testing.T, dir string) *litestore.Storage {
@@ -69,20 +124,49 @@ func newTestStorage(t *testing.T, dir string) *litestore.Storage {
 // newTestCluster starts size nodes that find each other through static
 // discovery and bootstrap together.
 //
+// The whole cluster is built inside a retry loop. Ports are picked by asking
+// the kernel for a free one and closing it again, which leaves a window for
+// something else to take it — and a node that cannot bind is a test failure
+// that says nothing about the code under test.
+//
 // The timings are deliberately aggressive. A real deployment wants the library
 // defaults; a test wants an election to resolve before the suite times out.
 func newTestCluster(t *testing.T, size int) *testCluster {
 	t.Helper()
 
-	gossipPorts := make([]int, size)
-	gossipAddrs := make([]string, size)
+	var lastErr error
 
+	for range 5 {
+		cluster, err := tryTestCluster(t, size)
+		if err == nil {
+			return cluster
+		}
+
+		lastErr = err
+	}
+
+	t.Fatalf("could not start a %d-node cluster: %v", size, lastErr)
+
+	return nil
+}
+
+func tryTestCluster(t *testing.T, size int) (*testCluster, error) {
+	t.Helper()
+
+	gossipAddrs := make([]string, size)
 	for i := range size {
-		gossipPorts[i] = freePort(t)
-		gossipAddrs[i] = net.JoinHostPort("127.0.0.1", strconv.Itoa(gossipPorts[i]))
+		gossipAddrs[i] = net.JoinHostPort("127.0.0.1", strconv.Itoa(freePort(t)))
 	}
 
 	cluster := testCluster{t: t}
+
+	// Anything already started has to come down before the next attempt, or
+	// the retry inherits half a cluster on ports it no longer knows about.
+	abandon := func() {
+		for _, n := range cluster.nodes {
+			_ = n.node.Close()
+		}
+	}
 
 	for i := range size {
 		id := fmt.Sprintf("node-%d", i+1)
@@ -120,18 +204,28 @@ func newTestCluster(t *testing.T, size int) *testCluster {
 		}
 
 		node, err := NewNode(cfg, storage, nil)
-		td.Require(t).CmpNoError(err, "create node %s", id)
+		if err != nil {
+			abandon()
+
+			return nil, fmt.Errorf("create node %s: %w", id, err)
+		}
+
+		if startErr := node.Start(context.Background()); startErr != nil {
+			_ = node.Close()
+
+			abandon()
+
+			return nil, fmt.Errorf("start node %s: %w", id, startErr)
+		}
 
 		t.Cleanup(func() { _ = node.Close() })
-
-		td.Require(t).CmpNoError(node.Start(context.Background()), "start node %s", id)
 
 		cluster.nodes = append(cluster.nodes, &testNode{
 			id: id, node: node, storage: storage, gossip: gossipAddrs[i],
 		})
 	}
 
-	return &cluster
+	return &cluster, nil
 }
 
 // leader returns the node that currently leads, waiting for an election.
@@ -482,36 +576,31 @@ func TestNodeJoiningAnEstablishedClusterCatchesUp(t *testing.T) {
 	dir := t.TempDir()
 	storage := newTestStorage(t, dir)
 
-	gossipPort := freePort(t)
-
 	seeds := make([]string, 0, len(cluster.nodes))
 	for _, n := range cluster.nodes {
 		seeds = append(seeds, n.gossip)
 	}
 
-	joiner, joinErr := NewNode(Config{
-		Enabled:            true,
-		NodeID:             "node-4",
-		BindAddr:           "127.0.0.1:0",
-		GossipAddr:         net.JoinHostPort("127.0.0.1", strconv.Itoa(gossipPort)),
-		GossipProfile:      "local",
-		DataDir:            filepath.Join(dir, "cluster"),
-		Discovery:          []string{"static://" + strings.Join(seeds, ",")},
-		DiscoveryInterval:  200 * time.Millisecond,
-		NonVoter:           true,
-		ReconcileInterval:  300 * time.Millisecond,
-		SweepInterval:      time.Hour,
-		ApplyTimeout:       10 * time.Second,
-		HeartbeatTimeout:   200 * time.Millisecond,
-		ElectionTimeout:    200 * time.Millisecond,
-		LeaderLeaseTimeout: 200 * time.Millisecond,
-		CommitTimeout:      20 * time.Millisecond,
-	}, storage, nil)
-	td.Require(t).CmpNoError(joinErr, "create the joining node")
-
-	t.Cleanup(func() { _ = joiner.Close() })
-
-	td.Require(t).CmpNoError(joiner.Start(context.Background()), "start the joining node")
+	startNode(t, func(gossipPort int) (*Node, error) {
+		return NewNode(Config{
+			Enabled:            true,
+			NodeID:             "node-4",
+			BindAddr:           "127.0.0.1:0",
+			GossipAddr:         net.JoinHostPort("127.0.0.1", strconv.Itoa(gossipPort)),
+			GossipProfile:      "local",
+			DataDir:            filepath.Join(dir, "cluster"),
+			Discovery:          []string{"static://" + strings.Join(seeds, ",")},
+			DiscoveryInterval:  200 * time.Millisecond,
+			NonVoter:           true,
+			ReconcileInterval:  300 * time.Millisecond,
+			SweepInterval:      time.Hour,
+			ApplyTimeout:       10 * time.Second,
+			HeartbeatTimeout:   200 * time.Millisecond,
+			ElectionTimeout:    200 * time.Millisecond,
+			LeaderLeaseTimeout: 200 * time.Millisecond,
+			CommitTimeout:      20 * time.Millisecond,
+		}, storage, nil)
+	})
 
 	cluster.waitFor(45*time.Second, func() bool {
 		peeked, peekErr := storage.Peek(ctx, &queue.PeekRequest{QueueID: queueID, Limit: 10})

@@ -460,7 +460,7 @@ type slogWriter struct{ logger *slog.Logger }
 func (w *slogWriter) Write(p []byte) (int, error) {
 	line := strings.TrimSpace(string(p))
 
-	// memberlist prefixes lines with a level in square brackets. Honour the
+	// memberlist prefixes lines with a level in square brackets. Honor the
 	// ones that matter and bury the rest at debug.
 	switch {
 	case strings.Contains(line, "[ERR]"):

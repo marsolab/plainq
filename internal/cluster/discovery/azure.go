@@ -297,43 +297,42 @@ func escapeKQL(value string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(value, `\`, `\\`), `'`, `\'`)
 }
 
-func init() {
-	Register("azure", func(spec *Spec) (Discoverer, error) {
-		port, portErr := spec.OptionPort(defaultGossipPort)
-		if portErr != nil {
-			return nil, portErr
-		}
+// newAzureFromSpec builds an Azure discoverer.
+func newAzureFromSpec(spec *Spec) (Discoverer, error) {
+	port, portErr := spec.OptionPort(defaultGossipPort)
+	if portErr != nil {
+		return nil, portErr
+	}
 
-		var subscriptions []string
+	var subscriptions []string
 
-		for _, raw := range spec.Options["subscription"] {
-			subscriptions = append(subscriptions, strings.Split(raw, ",")...)
-		}
+	for _, raw := range spec.Options["subscription"] {
+		subscriptions = append(subscriptions, strings.Split(raw, ",")...)
+	}
 
-		if spec.Target != "" {
-			subscriptions = append(subscriptions, spec.Target)
-		}
+	if spec.Target != "" {
+		subscriptions = append(subscriptions, spec.Target)
+	}
 
-		tagKey, tagValue, _ := strings.Cut(spec.Option("tag", ""), "=")
+	tagKey, tagValue, _ := strings.Cut(spec.Option("tag", ""), "=")
 
-		opts := make([]AzureOption, 0, 4)
+	opts := make([]AzureOption, 0, 4)
 
-		if group := spec.Option("resource-group", ""); group != "" {
-			opts = append(opts, WithAzureResourceGroup(group))
-		}
+	if group := spec.Option("resource-group", ""); group != "" {
+		opts = append(opts, WithAzureResourceGroup(group))
+	}
 
-		if scaleSet := spec.Option("scale-set", ""); scaleSet != "" {
-			opts = append(opts, WithAzureScaleSet(scaleSet))
-		}
+	if scaleSet := spec.Option("scale-set", ""); scaleSet != "" {
+		opts = append(opts, WithAzureScaleSet(scaleSet))
+	}
 
-		if base := spec.Option("management-base", ""); base != "" {
-			opts = append(opts, WithAzureManagementBase(base))
-		}
+	if base := spec.Option("management-base", ""); base != "" {
+		opts = append(opts, WithAzureManagementBase(base))
+	}
 
-		if base := spec.Option("imds-base", ""); base != "" {
-			opts = append(opts, WithAzureIMDSBase(base))
-		}
+	if base := spec.Option("imds-base", ""); base != "" {
+		opts = append(opts, WithAzureIMDSBase(base))
+	}
 
-		return NewAzure(subscriptions, tagKey, tagValue, port, opts...)
-	})
+	return NewAzure(subscriptions, tagKey, tagValue, port, opts...)
 }

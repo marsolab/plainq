@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -153,6 +154,8 @@ func (d *DNS) Close() error { return nil }
 // LookupSRV wants. A name that is not in underscore form is passed through as
 // the domain with empty service and proto, which makes LookupSRV query the
 // name verbatim.
+//
+//nolint:nonamedreturns // the three results are indistinguishable strings; naming them is the documentation.
 func splitSRVName(name string) (service, proto, domain string) {
 	if !strings.HasPrefix(name, "_") {
 		return "", "", name
@@ -171,63 +174,49 @@ func splitSRVName(name string) (service, proto, domain string) {
 	return service, proto, domain
 }
 
+// asDNSError finds a *net.DNSError anywhere in the error chain.
 func asDNSError(err error, target **net.DNSError) bool {
-	for err != nil {
-		if dnsErr, ok := err.(*net.DNSError); ok { //nolint:errorlint // unwrap loop below handles wrapping.
-			*target = dnsErr
-
-			return true
-		}
-
-		unwrapper, ok := err.(interface{ Unwrap() error }) //nolint:errorlint // same.
-		if !ok {
-			return false
-		}
-
-		err = unwrapper.Unwrap()
-	}
-
-	return false
+	return errors.As(err, target)
 }
 
-func init() {
-	Register("dns", func(spec *Spec) (Discoverer, error) {
-		port, portErr := spec.OptionPort(defaultGossipPort)
-		if portErr != nil {
-			return nil, portErr
-		}
+// newDNSFromSpec builds an A/AAAA discoverer, or an SRV one when the spec asks.
+func newDNSFromSpec(spec *Spec) (Discoverer, error) {
+	port, portErr := spec.OptionPort(defaultGossipPort)
+	if portErr != nil {
+		return nil, portErr
+	}
 
-		name := spec.Target
-		if name == "" {
-			name = spec.Option("name", "")
-		}
+	name := spec.Target
+	if name == "" {
+		name = spec.Option("name", "")
+	}
 
-		if name == "" {
-			return nil, fmt.Errorf("dns discovery %q names no record", spec.Raw)
-		}
+	if name == "" {
+		return nil, fmt.Errorf("dns discovery %q names no record", spec.Raw)
+	}
 
-		if strings.EqualFold(spec.Option("type", "a"), "srv") {
-			return NewDNSSRV(name, port), nil
-		}
-
-		return NewDNS(name, port), nil
-	})
-
-	Register("dns+srv", func(spec *Spec) (Discoverer, error) {
-		port, portErr := spec.OptionPort(defaultGossipPort)
-		if portErr != nil {
-			return nil, portErr
-		}
-
-		name := spec.Target
-		if name == "" {
-			name = spec.Option("name", "")
-		}
-
-		if name == "" {
-			return nil, fmt.Errorf("dns+srv discovery %q names no record", spec.Raw)
-		}
-
+	if strings.EqualFold(spec.Option("type", "a"), "srv") {
 		return NewDNSSRV(name, port), nil
-	})
+	}
+
+	return NewDNS(name, port), nil
+}
+
+// newDNSSRVFromSpec builds an SRV discoverer.
+func newDNSSRVFromSpec(spec *Spec) (Discoverer, error) {
+	port, portErr := spec.OptionPort(defaultGossipPort)
+	if portErr != nil {
+		return nil, portErr
+	}
+
+	name := spec.Target
+	if name == "" {
+		name = spec.Option("name", "")
+	}
+
+	if name == "" {
+		return nil, fmt.Errorf("dns+srv discovery %q names no record", spec.Raw)
+	}
+
+	return NewDNSSRV(name, port), nil
 }

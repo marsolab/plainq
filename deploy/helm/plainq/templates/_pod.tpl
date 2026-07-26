@@ -71,14 +71,14 @@ $(VAR) expansion above, plus any user-supplied env.
   valueFrom:
     fieldRef:
       fieldPath: metadata.namespace
-{{- if .Values.cluster.gossipSecret }}
+{{- if or .Values.cluster.gossipSecret .Values.cluster.existingSecret }}
 - name: PLAINQ_GOSSIP_SECRET
   valueFrom:
     secretKeyRef:
       name: {{ include "plainq.clusterSecretName" . }}
       key: {{ .Values.cluster.gossipSecretKey }}
 {{- end }}
-{{- if .Values.cluster.secret }}
+{{- if or .Values.cluster.secret .Values.cluster.existingSecret }}
 - name: PLAINQ_CLUSTER_SECRET
   valueFrom:
     secretKeyRef:
@@ -109,10 +109,10 @@ what it gossips, so only one port has to be discoverable.
 - -cluster.discovery={{ include "plainq.discoverySpec" . }}
 - -cluster.auto-remove={{ .Values.cluster.autoRemove }}
 - -cluster.remove.timeout={{ .Values.cluster.removeTimeout }}
-{{- if .Values.cluster.gossipSecret }}
+{{- if or .Values.cluster.gossipSecret .Values.cluster.existingSecret }}
 - -cluster.gossip.secret=$(PLAINQ_GOSSIP_SECRET)
 {{- end }}
-{{- if .Values.cluster.secret }}
+{{- if or .Values.cluster.secret .Values.cluster.existingSecret }}
 - -cluster.secret=$(PLAINQ_CLUSTER_SECRET)
 {{- end }}
 {{- with .Values.cluster.extraArgs }}

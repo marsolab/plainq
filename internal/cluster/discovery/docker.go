@@ -3,6 +3,7 @@ package discovery
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -76,7 +77,7 @@ func NewDocker(labels map[string]string, port int, opts ...DockerOption) (*Docke
 	}
 
 	if len(d.labels) == 0 {
-		return nil, fmt.Errorf("docker discovery: at least one label filter is required")
+		return nil, errors.New("docker discovery: at least one label filter is required")
 	}
 
 	if d.client == nil {
@@ -286,39 +287,38 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func init() {
-	Register("docker", func(spec *Spec) (Discoverer, error) {
-		port, portErr := spec.OptionPort(defaultGossipPort)
-		if portErr != nil {
-			return nil, portErr
+// newDockerFromSpec builds a Docker discoverer.
+func newDockerFromSpec(spec *Spec) (Discoverer, error) {
+	port, portErr := spec.OptionPort(defaultGossipPort)
+	if portErr != nil {
+		return nil, portErr
+	}
+
+	labels := map[string]string{}
+
+	for _, raw := range spec.Options["label"] {
+		key, value, _ := strings.Cut(raw, "=")
+		if key = strings.TrimSpace(key); key != "" {
+			labels[key] = value
 		}
+	}
 
-		labels := map[string]string{}
-
-		for _, raw := range spec.Options["label"] {
-			key, value, _ := strings.Cut(raw, "=")
-			if key = strings.TrimSpace(key); key != "" {
-				labels[key] = value
-			}
+	if spec.Target != "" {
+		key, value, _ := strings.Cut(spec.Target, "=")
+		if key = strings.TrimSpace(key); key != "" {
+			labels[key] = value
 		}
+	}
 
-		if spec.Target != "" {
-			key, value, _ := strings.Cut(spec.Target, "=")
-			if key = strings.TrimSpace(key); key != "" {
-				labels[key] = value
-			}
-		}
+	opts := make([]DockerOption, 0, 2)
 
-		opts := make([]DockerOption, 0, 2)
+	if host := spec.Option("host", ""); host != "" {
+		opts = append(opts, WithDockerHost(host))
+	}
 
-		if host := spec.Option("host", ""); host != "" {
-			opts = append(opts, WithDockerHost(host))
-		}
+	if network := spec.Option("network", ""); network != "" {
+		opts = append(opts, WithDockerNetwork(network))
+	}
 
-		if network := spec.Option("network", ""); network != "" {
-			opts = append(opts, WithDockerNetwork(network))
-		}
-
-		return NewDocker(labels, port, opts...)
-	})
+	return NewDocker(labels, port, opts...)
 }

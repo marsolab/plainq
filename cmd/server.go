@@ -74,7 +74,7 @@ func (b *storageBackend) Close() error {
 	return nil
 }
 
-//nolint:cyclop,gocognit,funlen // CLI server setup wires the full dependency graph in one place.
+//nolint:cyclop,gocognit,funlen,gocyclo // CLI server setup wires the full dependency graph in one place.
 func serverCommand() *scotty.Command {
 	var (
 		cfg              config.Config
@@ -589,6 +589,8 @@ func initPostgresBackend(cfg *config.Config, logger *slog.Logger) (*pgxpool.Pool
 // initQueueStorage returns a queue.Storage along with a shutdown function
 // that stops any background goroutines owned by the store (GC sweeper).
 // The returned close fn is safe to call exactly once.
+//
+//nolint:cyclop // One branch per storage driver and per optional store setting.
 func initQueueStorage(
 	cfg *config.Config,
 	clusterCfg *cluster.Config,
@@ -678,7 +680,7 @@ func initClusterNode(
 
 	node, err := cluster.NewNode(*clusterCfg, replicated, logger)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create cluster node: %w", err)
 	}
 
 	return node, nil

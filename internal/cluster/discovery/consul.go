@@ -101,6 +101,8 @@ type consulHealthEntry struct {
 }
 
 // Discover implements Discoverer.
+//
+//nolint:cyclop // One branch per optional field of a Consul health entry.
 func (c *Consul) Discover(ctx context.Context) ([]Peer, error) {
 	query := url.Values{}
 	query.Set("passing", "true")
@@ -171,51 +173,66 @@ func (c *Consul) Discover(ctx context.Context) ([]Peer, error) {
 // Close implements Discoverer.
 func (c *Consul) Close() error { return nil }
 
-func init() {
-	Register("consul", func(spec *Spec) (Discoverer, error) {
-		service := spec.Option("service", "")
-		address := spec.Option("address", "")
+// newConsulFromSpec builds a Consul discoverer.
+//
+// `consul://plainq` names the service; `consul://host:8500/plainq` names both.
+// Either reads naturally.
+func newConsulFromSpec(spec *Spec) (Discoverer, error) {
+	service := spec.Option("service", "")
+	address := spec.Option("address", "")
 
-		// `consul://plainq` names the service; `consul://host:8500/plainq`
-		// names both. Either reads naturally.
-		if spec.Target != "" {
-			host, target, found := strings.Cut(spec.Target, "/")
-			if found {
-				if address == "" {
-					address = "http://" + host
-				}
+	if spec.Target != "" {
+		address, service = consulTarget(spec.Target, address, service)
+	}
 
-				if service == "" {
-					service = target
-				}
-			} else if service == "" {
-				service = host
-			}
+	opts := make([]ConsulOption, 0, 4)
+
+	if tag := spec.Option("tag", ""); tag != "" {
+		opts = append(opts, WithConsulTag(tag))
+	}
+
+	if dc := spec.Option("dc", spec.Option("datacenter", "")); dc != "" {
+		opts = append(opts, WithConsulDatacenter(dc))
+	}
+
+	if token := spec.Option("token", ""); token != "" {
+		opts = append(opts, WithConsulToken(token))
+	}
+
+	if spec.Options.Get("port") != "" {
+		port, portErr := spec.OptionPort(defaultGossipPort)
+		if portErr != nil {
+			return nil, portErr
 		}
 
-		opts := make([]ConsulOption, 0, 4)
+		opts = append(opts, WithConsulPort(port))
+	}
 
-		if tag := spec.Option("tag", ""); tag != "" {
-			opts = append(opts, WithConsulTag(tag))
+	return NewConsul(address, service, opts...)
+}
+
+// consulTarget splits the target into an address and a service, keeping
+// whatever the options already supplied.
+//
+//nolint:nonamedreturns // two bare strings in a row need naming to be readable.
+func consulTarget(target, address, service string) (resolvedAddress, resolvedService string) {
+	host, path, found := strings.Cut(target, "/")
+
+	if !found {
+		if service == "" {
+			service = host
 		}
 
-		if dc := spec.Option("dc", spec.Option("datacenter", "")); dc != "" {
-			opts = append(opts, WithConsulDatacenter(dc))
-		}
+		return address, service
+	}
 
-		if token := spec.Option("token", ""); token != "" {
-			opts = append(opts, WithConsulToken(token))
-		}
+	if address == "" {
+		address = "http://" + host
+	}
 
-		if raw := spec.Options.Get("port"); raw != "" {
-			port, portErr := spec.OptionPort(defaultGossipPort)
-			if portErr != nil {
-				return nil, portErr
-			}
+	if service == "" {
+		service = path
+	}
 
-			opts = append(opts, WithConsulPort(port))
-		}
-
-		return NewConsul(address, service, opts...)
-	})
+	return address, service
 }

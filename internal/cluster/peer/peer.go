@@ -34,12 +34,12 @@ import (
 )
 
 // secretHeader carries the cluster shared secret.
-const secretHeader = "X-PlainQ-Cluster-Secret" //nolint:gosec // header name, not a credential.
+const secretHeader = "X-Plainq-Cluster-Secret" //nolint:gosec // header name, not a credential.
 
 // errorHeader carries a machine-readable error class alongside the status, so
 // a forwarded pqerr keeps its meaning across the hop instead of collapsing
 // into "the leader said no".
-const errorHeader = "X-PlainQ-Cluster-Error"
+const errorHeader = "X-Plainq-Cluster-Error"
 
 // requestTimeout bounds a peer call. It is generous — the leader may be
 // committing to a majority — but finite, because a follower blocked forever on
@@ -342,7 +342,9 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 
-	_ = json.NewEncoder(w).Encode(value)
+	// The status line is already on the wire, so a failed encode has nowhere
+	// to be reported to the caller. It means the peer hung up.
+	_ = json.NewEncoder(w).Encode(value) //nolint:errcheck,errchkjson // see above.
 }
 
 // encodeResponse renders a state machine response for the wire.
@@ -381,6 +383,9 @@ type Client struct {
 // NewClient builds a peer client that dials through the cluster mux, so peer
 // RPC and consensus share one port and one TLS configuration.
 func NewClient(mux *transport.Mux, secret string) *Client {
+	// The mux dials with a timeout rather than a context; the caller's deadline
+	// is translated into one here, which is the whole contract it can honor.
+	//nolint:contextcheck // see above.
 	dial := func(ctx context.Context, _, addr string) (net.Conn, error) {
 		timeout := requestTimeout
 
@@ -486,7 +491,7 @@ func (c *Client) do(ctx context.Context, method, addr, path, contentType string,
 		return nil, fmt.Errorf("call peer %s: %w", addr, doErr)
 	}
 
-	defer func() { _, _ = io.Copy(io.Discard, resp.Body); _ = resp.Body.Close() }()
+	defer closeResponse(resp)
 
 	responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxRequestBytes))
 	if readErr != nil {
@@ -500,8 +505,16 @@ func (c *Client) do(ctx context.Context, method, addr, path, contentType string,
 	return nil, peerError(addr, resp, responseBody)
 }
 
+// closeResponse drains and closes a response body so the connection returns to
+// the pool. Neither result is actionable — the call already has its answer.
+func closeResponse(resp *http.Response) {
+	//nolint:errcheck,dogsled // draining is best-effort connection reuse.
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+}
+
 // peerError rebuilds an error the remote node reported, keeping the class it
-// travelled with so `errors.Is` still works on this side of the hop.
+// traveled with so `errors.Is` still works on this side of the hop.
 func peerError(addr string, resp *http.Response, body []byte) error {
 	message := strings.TrimSpace(string(body))
 	if message == "" {

@@ -11,6 +11,10 @@ import (
 // table along with its indexes and the updated_at trigger. Each queue lives
 // in its own table — DROP TABLE on purge/delete is O(metadata) which matters
 // for tail latency under SQLite's single-writer lock.
+//
+// The created_at index carries msg_id as well, matching the (created_at,
+// msg_id) order a receive claims messages in. Indexing created_at alone would
+// leave SQLite to sort every candidate row before applying the LIMIT.
 func queryCreateQueueTable(queueID string) string {
 	q := `create table ` + queueID +
 		`(
@@ -25,7 +29,7 @@ func queryCreateQueueTable(queueID string) string {
 		);
 
 		create index if not exists ` + queueID + `_created_at_index
-			on ` + queueID + ` (created_at);
+			on ` + queueID + ` (created_at, msg_id);
 
 		create index if not exists ` + queueID + `_visible_at_index
 			on ` + queueID + `(visible_at);

@@ -108,6 +108,8 @@ type Status struct {
 }
 
 // Consensus is the agreement engine.
+//
+//nolint:interfacebloat // Propose, observe, and reconfigure is the whole contract; splitting it would only scatter it.
 type Consensus interface {
 	// Apply proposes a command and waits for it to be committed and applied.
 	// It returns whatever the state machine returned for that command.

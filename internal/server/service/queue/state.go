@@ -19,15 +19,18 @@ import (
 // Storage knows records; the cluster knows bytes.
 
 // QueueState is a queue's full definition.
+//
+// The json tags are wire format: a snapshot written by one build is read by
+// another, so a renamed field would silently restore as its zero value.
 type QueueState struct {
-	ID                       string
-	Name                     string
-	CreatedAt                time.Time
-	RetentionPeriodSeconds   uint64
-	VisibilityTimeoutSeconds uint64
-	MaxReceiveAttempts       uint32
-	EvictionPolicy           uint32
-	DeadLetterQueueID        string
+	ID                       string    `json:"id"`
+	Name                     string    `json:"name"`
+	CreatedAt                time.Time `json:"createdAt"`
+	RetentionPeriodSeconds   uint64    `json:"retentionPeriodSeconds"`
+	VisibilityTimeoutSeconds uint64    `json:"visibilityTimeoutSeconds"`
+	MaxReceiveAttempts       uint32    `json:"maxReceiveAttempts"`
+	EvictionPolicy           uint32    `json:"evictionPolicy"`
+	DeadLetterQueueID        string    `json:"deadLetterQueueId"`
 }
 
 // MessageState is one message, with the fields that make it recoverable:
@@ -56,15 +59,17 @@ type MessageState struct {
 
 // TopicState is a pub/sub topic.
 type TopicState struct {
-	ID   string
-	Name string
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 // SubscriptionState attaches a queue to a topic.
 type SubscriptionState struct {
-	ID      string
-	TopicID string
-	QueueID string
+	ID        string    `json:"id"`
+	TopicID   string    `json:"topicId"`
+	QueueID   string    `json:"queueId"`
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 // StateSink receives every record a store holds during a snapshot. Returning

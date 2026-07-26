@@ -103,8 +103,6 @@ type Engine struct {
 
 // New starts the engine. The node begins as a follower with no configuration:
 // it neither leads nor votes until it is bootstrapped or joined to a cluster.
-//
-//nolint:funlen // Engine construction wires stores, transport and tuning in one place.
 func New(cfg Config) (*Engine, error) {
 	if cfg.NodeID == "" {
 		return nil, errors.New("raft: node id is required")
@@ -277,13 +275,15 @@ func (e *Engine) Apply(ctx context.Context, data []byte) (any, error) {
 func (e *Engine) IsLeader() bool { return e.raft.State() == hraft.Leader }
 
 // Leader implements consensus.Consensus.
-func (e *Engine) Leader() (string, string, error) {
-	addr, id := e.raft.LeaderWithID()
-	if addr == "" || id == "" {
+//
+//nolint:nonamedreturns // two bare strings need naming; the interface names them too.
+func (e *Engine) Leader() (id, addr string, err error) {
+	leaderAddr, leaderID := e.raft.LeaderWithID()
+	if leaderAddr == "" || leaderID == "" {
 		return "", "", consensus.ErrNoLeader
 	}
 
-	return string(id), string(addr), nil
+	return string(leaderID), string(leaderAddr), nil
 }
 
 // Status implements consensus.Consensus.
@@ -471,7 +471,7 @@ func (e *Engine) Close() error {
 	return errors.Join(errs...)
 }
 
-// waitFuture waits for a raft future, honouring the caller's cancellation.
+// waitFuture waits for a raft future, honoring the caller's cancellation.
 //
 // Abandoning a future does not abandon the operation — raft continues with it —
 // so this reports that the caller stopped waiting, not that nothing happened.
@@ -556,15 +556,33 @@ type streamLayer struct {
 }
 
 // Accept implements raft.StreamLayer.
-func (s *streamLayer) Accept() (net.Conn, error) { return s.listener.Accept() }
+func (s *streamLayer) Accept() (net.Conn, error) {
+	conn, err := s.listener.Accept()
+	if err != nil {
+		return nil, fmt.Errorf("accept consensus connection: %w", err)
+	}
+
+	return conn, nil
+}
 
 // Close implements raft.StreamLayer.
-func (s *streamLayer) Close() error { return s.listener.Close() }
+func (s *streamLayer) Close() error {
+	if err := s.listener.Close(); err != nil {
+		return fmt.Errorf("close consensus listener: %w", err)
+	}
+
+	return nil
+}
 
 // Addr implements raft.StreamLayer.
 func (s *streamLayer) Addr() net.Addr { return s.listener.Addr() }
 
 // Dial implements raft.StreamLayer.
 func (s *streamLayer) Dial(address hraft.ServerAddress, timeout time.Duration) (net.Conn, error) {
-	return s.mux.Dial(transport.ProtoRaft, string(address), timeout)
+	conn, err := s.mux.Dial(transport.ProtoRaft, string(address), timeout)
+	if err != nil {
+		return nil, fmt.Errorf("dial consensus peer: %w", err)
+	}
+
+	return conn, nil
 }

@@ -98,51 +98,29 @@ const (
 	opMax Op = 13
 )
 
+// opNames is the op vocabulary as it appears in logs and metric labels.
+var opNames = map[Op]string{
+	OpCreateQueue: "create_queue",
+	OpDeleteQueue: "delete_queue",
+	OpPurgeQueue:  "purge_queue",
+	OpSend:        "send",
+	OpReceive:     "receive",
+	OpDelete:      "delete",
+	OpCreateTopic: "create_topic",
+	OpDeleteTopic: "delete_topic",
+	OpSubscribe:   "subscribe",
+	OpUnsubscribe: "unsubscribe",
+	OpPublish:     "publish",
+	OpSweep:       "sweep",
+}
+
 // String renders the op for logs and metrics labels.
 func (o Op) String() string {
-	switch o {
-	case OpCreateQueue:
-		return "create_queue"
-
-	case OpDeleteQueue:
-		return "delete_queue"
-
-	case OpPurgeQueue:
-		return "purge_queue"
-
-	case OpSend:
-		return "send"
-
-	case OpReceive:
-		return "receive"
-
-	case OpDelete:
-		return "delete"
-
-	case OpCreateTopic:
-		return "create_topic"
-
-	case OpDeleteTopic:
-		return "delete_topic"
-
-	case OpSubscribe:
-		return "subscribe"
-
-	case OpUnsubscribe:
-		return "unsubscribe"
-
-	case OpPublish:
-		return "publish"
-
-	case OpSweep:
-		return "sweep"
-
-	case OpUnknown, opMax:
-		return "unknown"
-
-	default:
-		return "unknown"
+	if name, known := opNames[o]; known {
+		return name
 	}
+
+	return "unknown"
 }
 
 // Valid reports whether the op is one this build knows how to apply.
@@ -167,7 +145,7 @@ type Command struct {
 	IDs []string
 
 	// Payload is the operation's request, encoded by the caller. Queue
-	// operations carry a vtproto-marshalled schema message; pub/sub
+	// operations carry a vtproto-marshaled schema message; pub/sub
 	// operations carry JSON, because their request types are plain structs.
 	Payload []byte
 }
@@ -207,6 +185,8 @@ func (c *Command) Encode() ([]byte, error) {
 }
 
 // Decode parses a log entry.
+//
+//nolint:cyclop // Every branch is one malformed-entry check, and each has its own error.
 func Decode(raw []byte) (*Command, error) {
 	if len(raw) < len(magic)+2+8 {
 		return nil, ErrShortBuffer
@@ -287,6 +267,7 @@ func appendBytes(buf, value []byte) []byte {
 	return append(buf, value...)
 }
 
+//nolint:nonamedreturns // three same-typed results; the names are the documentation.
 func readBytes(buf []byte) (value, rest []byte, err error) {
 	length, read := binary.Uvarint(buf)
 	if read <= 0 {

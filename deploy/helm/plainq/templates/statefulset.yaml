@@ -43,6 +43,13 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       serviceAccountName: {{ include "plainq.serviceAccountName" . }}
+      {{- if include "plainq.needsServiceAccountToken" . }}
+      # Kubernetes discovery authenticates to the API with the mounted service
+      # account. Without the token and CA the pod cannot find its peers, so the
+      # mount is turned on here rather than left to a value the operator has to
+      # know to change.
+      automountServiceAccountToken: true
+      {{- end }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:

@@ -215,36 +215,9 @@ func (a *AWS) Discover(ctx context.Context) ([]Peer, error) {
 }
 
 func (a *AWS) describeInstances(ctx context.Context, nextToken string) (*ec2DescribeInstancesResponse, error) {
-	query := url.Values{}
-	query.Set("Action", "DescribeInstances")
-	query.Set("Version", ec2APIVersion)
+	requestURL := a.endpoint + "/?" + a.describeInstancesQuery(nextToken).Encode()
 
-	if nextToken != "" {
-		query.Set("NextToken", nextToken)
-	}
-
-	// The query API numbers filters from 1, and both the name and each value
-	// are separate parameters. Sorting keeps the encoding — and therefore the
-	// signature — reproducible.
-	names := make([]string, 0, len(a.filters))
-	for name := range a.filters {
-		names = append(names, name)
-	}
-
-	sort.Strings(names)
-
-	for i, name := range names {
-		prefix := fmt.Sprintf("Filter.%d.", i+1)
-		query.Set(prefix+"Name", name)
-
-		for j, value := range a.filters[name] {
-			query.Set(fmt.Sprintf("%sValue.%d", prefix, j+1), value)
-		}
-	}
-
-	requestURL := a.endpoint + "/?" + query.Encode()
-
-	req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
+	req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, http.NoBody)
 	if reqErr != nil {
 		return nil, fmt.Errorf("build EC2 request: %w", reqErr)
 	}
@@ -263,7 +236,7 @@ func (a *AWS) describeInstances(ctx context.Context, nextToken string) (*ec2Desc
 		return nil, fmt.Errorf("call EC2 DescribeInstances: %w", doErr)
 	}
 
-	defer func() { _, _ = io.Copy(io.Discard, resp.Body); _ = resp.Body.Close() }()
+	defer closeResponse(resp)
 
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if readErr != nil {
@@ -285,50 +258,83 @@ func (a *AWS) describeInstances(ctx context.Context, nextToken string) (*ec2Desc
 	return &decoded, nil
 }
 
+// describeInstancesQuery builds the EC2 query API parameters.
+//
+// The API numbers filters from 1, and both the name and each value are separate
+// parameters. Sorting keeps the encoding — and therefore the signature —
+// reproducible.
+func (a *AWS) describeInstancesQuery(nextToken string) url.Values {
+	query := url.Values{}
+	query.Set("Action", "DescribeInstances")
+	query.Set("Version", ec2APIVersion)
+
+	if nextToken != "" {
+		query.Set("NextToken", nextToken)
+	}
+
+	names := make([]string, 0, len(a.filters))
+	for name := range a.filters {
+		names = append(names, name)
+	}
+
+	sort.Strings(names)
+
+	for i, name := range names {
+		prefix := fmt.Sprintf("Filter.%d.", i+1)
+		query.Set(prefix+"Name", name)
+
+		for j, value := range a.filters[name] {
+			query.Set(fmt.Sprintf("%sValue.%d", prefix, j+1), value)
+		}
+	}
+
+	return query
+}
+
 // Close implements Discoverer.
 func (a *AWS) Close() error { return nil }
 
-func init() {
-	Register("aws", func(spec *Spec) (Discoverer, error) {
-		port, portErr := spec.OptionPort(defaultGossipPort)
-		if portErr != nil {
-			return nil, portErr
+// newAWSFromSpec builds an EC2 discoverer.
+//
+// Anything that looks like an EC2 filter name is passed through, so an operator
+// can write `tag:Cluster=plainq` or the more general
+// `instance-state-name=running` without this package enumerating the EC2 filter
+// vocabulary.
+func newAWSFromSpec(spec *Spec) (Discoverer, error) {
+	port, portErr := spec.OptionPort(defaultGossipPort)
+	if portErr != nil {
+		return nil, portErr
+	}
+
+	filters := map[string][]string{}
+
+	for key, values := range spec.Options {
+		if !strings.HasPrefix(key, "tag:") && !strings.Contains(key, "-") {
+			continue
 		}
 
-		filters := map[string][]string{}
+		filters[key] = values
+	}
 
-		// Anything that looks like an EC2 filter name is passed through, so an
-		// operator can write `tag:Cluster=plainq` or the more general
-		// `instance-state-name=running` without this package enumerating the
-		// EC2 filter vocabulary.
-		for key, values := range spec.Options {
-			if !strings.HasPrefix(key, "tag:") && !strings.Contains(key, "-") {
-				continue
-			}
+	if tag := spec.Option("tag", ""); tag != "" {
+		key, value, _ := strings.Cut(tag, "=")
+		filters["tag:"+key] = []string{value}
+	}
 
-			filters[key] = values
-		}
+	opts := make([]AWSOption, 0, 2)
 
-		if tag := spec.Option("tag", ""); tag != "" {
-			key, value, _ := strings.Cut(tag, "=")
-			filters["tag:"+key] = []string{value}
-		}
+	if endpoint := spec.Option("endpoint", ""); endpoint != "" {
+		opts = append(opts, WithAWSEndpoint(endpoint))
+	}
 
-		opts := make([]AWSOption, 0, 2)
+	public, publicErr := spec.OptionBool("public", false)
+	if publicErr != nil {
+		return nil, publicErr
+	}
 
-		if endpoint := spec.Option("endpoint", ""); endpoint != "" {
-			opts = append(opts, WithAWSEndpoint(endpoint))
-		}
+	if public {
+		opts = append(opts, WithAWSPublicIP())
+	}
 
-		public, publicErr := spec.OptionBool("public", false)
-		if publicErr != nil {
-			return nil, publicErr
-		}
-
-		if public {
-			opts = append(opts, WithAWSPublicIP())
-		}
-
-		return NewAWS(spec.Option("region", spec.Target), filters, port, opts...)
-	})
+	return NewAWS(spec.Option("region", spec.Target), filters, port, opts...)
 }

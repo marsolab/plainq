@@ -206,7 +206,7 @@ func (c *Config) Normalize() error {
 
 // Validate reports configuration that cannot work, with an explanation of why.
 //
-//nolint:cyclop // Each branch is one independent rule, and each carries its own message.
+//nolint:cyclop,gocyclo // Each branch is one independent rule, and each carries its own message.
 func (c *Config) Validate() error {
 	if !c.Enabled {
 		return nil
@@ -357,7 +357,12 @@ func (c *Config) GossipPort() int {
 
 // GossipSecretKey decodes the configured gossip key.
 func (c *Config) GossipSecretKey() ([]byte, error) {
-	return gossip.ParseSecretKey(c.GossipSecret)
+	key, err := gossip.ParseSecretKey(c.GossipSecret)
+	if err != nil {
+		return nil, fmt.Errorf("cluster.gossip.secret: %w", err)
+	}
+
+	return key, nil
 }
 
 // DiscoverySpecs returns the configured specs with blanks removed. A single

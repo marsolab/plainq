@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -161,7 +162,7 @@ func clusterJoinCommand() *scotty.Command {
 		},
 		Run: func(_ *scotty.Command, _ []string) error {
 			if nodeID == "" || addr == "" {
-				return fmt.Errorf("both -node-id and -addr are required")
+				return errors.New("both -node-id and -addr are required")
 			}
 
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -207,7 +208,7 @@ func clusterLeaveCommand() *scotty.Command {
 		},
 		Run: func(_ *scotty.Command, _ []string) error {
 			if nodeID == "" {
-				return fmt.Errorf("-node-id is required")
+				return errors.New("-node-id is required")
 			}
 
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -260,6 +261,8 @@ func clusterSnapshotCommand() *scotty.Command {
 }
 
 // clusterCall performs one admin API request.
+//
+//nolint:cyclop // A request builder is one branch per optional part of the request.
 func clusterCall(ctx context.Context, flags *clusterFlags, method, path string, body, out any) error {
 	ctx, cancel := context.WithTimeout(ctx, clusterRequestTimeout)
 	defer cancel()
@@ -293,7 +296,11 @@ func clusterCall(ctx context.Context, flags *clusterFlags, method, path string, 
 		return fmt.Errorf("call %s: %w", flags.addr, doErr)
 	}
 
-	defer func() { _, _ = io.Copy(io.Discard, resp.Body); _ = resp.Body.Close() }()
+	defer func() {
+		//nolint:errcheck // draining is best-effort connection reuse.
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
 
 	payload, readErr := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if readErr != nil {

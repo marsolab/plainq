@@ -360,11 +360,6 @@ func lastPathSegment(link string) string {
 	return link
 }
 
-func init() {
-	Register("gcp", newGCPFromSpec)
-	Register("gce", newGCPFromSpec)
-}
-
 func newGCPFromSpec(spec *Spec) (Discoverer, error) {
 	port, portErr := spec.OptionPort(defaultGossipPort)
 	if portErr != nil {

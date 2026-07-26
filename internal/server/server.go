@@ -53,7 +53,7 @@ type PlainQ struct {
 
 // NewServer returns a pointer to a new instance of the PlainQ.
 //
-//nolint:funlen // server wiring assembles the full HTTP/gRPC stack in one place.
+//nolint:funlen,cyclop // server wiring assembles the full HTTP/gRPC stack in one place.
 func NewServer(
 	cfg *config.Config,
 	logger *slog.Logger,

@@ -152,8 +152,8 @@ func (c *QueuePropsCache) reset() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.byID = make(map[string]*list.Element, int(c.size))
-	c.byName = make(map[string]*list.Element, int(c.size))
+	c.byID = make(map[string]*list.Element, int(c.size))   //nolint:gosec // cache size is a bounded configuration value.
+	c.byName = make(map[string]*list.Element, int(c.size)) //nolint:gosec // same.
 	c.props = list.New()
 }
 

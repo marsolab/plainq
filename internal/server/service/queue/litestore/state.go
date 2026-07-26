@@ -47,7 +47,7 @@ func (s *Storage) BeginSnapshot(ctx context.Context) (queue.StateSnapshot, error
 	// is not actually pinned yet. Read something trivial to pin it now, at the
 	// instant the caller asked for, rather than whenever streaming starts.
 	if _, err := tx.ExecContext(ctx, `select count(*) from queue_properties;`); err != nil {
-		_ = tx.Rollback()
+		rollback(tx)
 
 		return nil, fmt.Errorf("pin snapshot view: %w", err)
 	}
@@ -157,6 +157,10 @@ func snapshotQueues(ctx context.Context, tx *sql.Tx) (_ []queue.QueueState, sErr
 }
 
 func snapshotMessages(ctx context.Context, tx *sql.Tx, queueID string, sink queue.StateSink) error {
+	if !validQueueID(queueID) {
+		return fmt.Errorf("queue id %q is not usable as a table name", queueID)
+	}
+
 	// Paginated by (msg_id) rather than OFFSET: the table is keyed on it, so
 	// each page is an index seek instead of a rescan of everything already
 	// written.
@@ -191,6 +195,9 @@ func snapshotMessagePage(
 	tx *sql.Tx,
 	queueID, cursor string,
 ) (_ []queue.MessageState, sErr error) {
+	// queueID is a generated identifier that validQueueID has vetted, and
+	// SQLite cannot parameterise a table name.
+	//nolint:gosec // see above.
 	query := `select msg_id, msg_body, cast(created_at as text), cast(visible_at as text), retries from ` +
 		queueID + ` where msg_id > ? order by msg_id limit ?;`
 
@@ -229,64 +236,85 @@ func snapshotMessagePage(
 	return page, nil
 }
 
-func snapshotTopics(ctx context.Context, tx *sql.Tx, sink queue.StateSink) (sErr error) {
-	topicRows, topicErr := tx.QueryContext(ctx, `select topic_id, topic_name from topic_properties order by topic_id;`)
-	if topicErr != nil {
-		return fmt.Errorf("read topics for snapshot: %w", topicErr)
+func snapshotTopics(ctx context.Context, tx *sql.Tx, sink queue.StateSink) error {
+	if err := snapshotTopicRecords(ctx, tx, sink); err != nil {
+		return err
+	}
+
+	return snapshotSubscriptionRecords(ctx, tx, sink)
+}
+
+func snapshotTopicRecords(ctx context.Context, tx *sql.Tx, sink queue.StateSink) (sErr error) {
+	rows, queryErr := tx.QueryContext(ctx,
+		`select topic_id, topic_name, cast(created_at as text) from topic_properties order by topic_id;`,
+	)
+	if queryErr != nil {
+		return fmt.Errorf("read topics for snapshot: %w", queryErr)
 	}
 
 	defer func() {
-		if err := topicRows.Close(); err != nil && sErr == nil {
+		if err := rows.Close(); err != nil && sErr == nil {
 			sErr = fmt.Errorf("close topic rows: %w", err)
 		}
 	}()
 
-	for topicRows.Next() {
-		var state queue.TopicState
+	for rows.Next() {
+		var (
+			state     queue.TopicState
+			createdAt string
+		)
 
-		if err := topicRows.Scan(&state.ID, &state.Name); err != nil {
+		if err := rows.Scan(&state.ID, &state.Name, &createdAt); err != nil {
 			return fmt.Errorf("scan topic for snapshot: %w", err)
 		}
+
+		state.CreatedAt = parseSQLiteTime(createdAt)
 
 		if err := sink.Topic(state); err != nil {
 			return fmt.Errorf("write topic %q to snapshot: %w", state.ID, err)
 		}
 	}
 
-	if err := topicRows.Err(); err != nil {
+	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate topics for snapshot: %w", err)
 	}
 
-	if err := topicRows.Close(); err != nil {
-		return fmt.Errorf("close topic rows: %w", err)
-	}
+	return nil
+}
 
-	subRows, subErr := tx.QueryContext(ctx,
-		`select subscription_id, topic_id, queue_id from topic_subscriptions order by subscription_id;`,
+func snapshotSubscriptionRecords(ctx context.Context, tx *sql.Tx, sink queue.StateSink) (sErr error) {
+	rows, queryErr := tx.QueryContext(ctx,
+		`select subscription_id, topic_id, queue_id, cast(created_at as text) `+
+			`from topic_subscriptions order by subscription_id;`,
 	)
-	if subErr != nil {
-		return fmt.Errorf("read subscriptions for snapshot: %w", subErr)
+	if queryErr != nil {
+		return fmt.Errorf("read subscriptions for snapshot: %w", queryErr)
 	}
 
 	defer func() {
-		if err := subRows.Close(); err != nil && sErr == nil {
+		if err := rows.Close(); err != nil && sErr == nil {
 			sErr = fmt.Errorf("close subscription rows: %w", err)
 		}
 	}()
 
-	for subRows.Next() {
-		var state queue.SubscriptionState
+	for rows.Next() {
+		var (
+			state     queue.SubscriptionState
+			createdAt string
+		)
 
-		if err := subRows.Scan(&state.ID, &state.TopicID, &state.QueueID); err != nil {
+		if err := rows.Scan(&state.ID, &state.TopicID, &state.QueueID, &createdAt); err != nil {
 			return fmt.Errorf("scan subscription for snapshot: %w", err)
 		}
+
+		state.CreatedAt = parseSQLiteTime(createdAt)
 
 		if err := sink.Subscription(state); err != nil {
 			return fmt.Errorf("write subscription %q to snapshot: %w", state.ID, err)
 		}
 	}
 
-	if err := subRows.Err(); err != nil {
+	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterate subscriptions for snapshot: %w", err)
 	}
 
@@ -311,7 +339,7 @@ func (s *Storage) BeginRestore(ctx context.Context) error {
 	}
 
 	if err := dropAllQueueTables(ctx, tx); err != nil {
-		_ = tx.Rollback()
+		rollback(tx)
 
 		return err
 	}
@@ -322,7 +350,7 @@ func (s *Storage) BeginRestore(ctx context.Context) error {
 		`delete from queue_properties;`,
 	} {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {
-			_ = tx.Rollback()
+			rollback(tx)
 
 			return fmt.Errorf("clear state for restore: %w", err)
 		}
@@ -333,41 +361,24 @@ func (s *Storage) BeginRestore(ctx context.Context) error {
 	return nil
 }
 
+// rollback abandons a transaction that is already being abandoned. Its own
+// failure has nowhere useful to go: the caller is returning the error that
+// caused the rollback.
+func rollback(tx *sql.Tx) {
+	if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+		_ = err
+	}
+}
+
 // dropAllQueueTables removes the per-queue message tables. They are named
-// after the queue id, so the set of them is discovered from the catalogue
+// after the queue id, so the set of them is discovered from the catalog
 // rather than assumed from queue_properties — a table left behind by an
 // interrupted delete would otherwise survive the restore and collide with a
 // later queue of the same id.
-func dropAllQueueTables(ctx context.Context, tx *sql.Tx) (sErr error) {
-	rows, queryErr := tx.QueryContext(ctx,
-		`select name from sqlite_master where type = 'table' and name in (select queue_id from queue_properties);`,
-	)
-	if queryErr != nil {
-		return fmt.Errorf("list queue tables for restore: %w", queryErr)
-	}
-
-	var tables []string
-
-	for rows.Next() {
-		var name string
-
-		if err := rows.Scan(&name); err != nil {
-			_ = rows.Close()
-
-			return fmt.Errorf("scan queue table name: %w", err)
-		}
-
-		tables = append(tables, name)
-	}
-
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-
-		return fmt.Errorf("iterate queue tables: %w", err)
-	}
-
-	if err := rows.Close(); err != nil {
-		return fmt.Errorf("close queue table rows: %w", err)
+func dropAllQueueTables(ctx context.Context, tx *sql.Tx) error {
+	tables, listErr := listQueueTables(ctx, tx)
+	if listErr != nil {
+		return listErr
 	}
 
 	for _, table := range tables {
@@ -381,6 +392,40 @@ func dropAllQueueTables(ctx context.Context, tx *sql.Tx) (sErr error) {
 	}
 
 	return nil
+}
+
+// listQueueTables reads the per-queue table names from the catalog.
+func listQueueTables(ctx context.Context, tx *sql.Tx) (_ []string, sErr error) {
+	rows, queryErr := tx.QueryContext(ctx,
+		`select name from sqlite_master where type = 'table' and name in (select queue_id from queue_properties);`,
+	)
+	if queryErr != nil {
+		return nil, fmt.Errorf("list queue tables for restore: %w", queryErr)
+	}
+
+	defer func() {
+		if err := rows.Close(); err != nil && sErr == nil {
+			sErr = fmt.Errorf("close queue table rows: %w", err)
+		}
+	}()
+
+	var tables []string
+
+	for rows.Next() {
+		var name string
+
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("scan queue table name: %w", err)
+		}
+
+		tables = append(tables, name)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate queue tables: %w", err)
+	}
+
+	return tables, nil
 }
 
 // RestoreQueue implements queue.StateRestorer.
@@ -474,7 +519,8 @@ func (s *Storage) RestoreTopic(ctx context.Context, state queue.TopicState) erro
 	}
 
 	if _, err := tx.ExecContext(ctx,
-		`insert into topic_properties (topic_id, topic_name) values (?, ?);`, state.ID, state.Name,
+		`insert into topic_properties (topic_id, topic_name, created_at) values (?, ?, ?);`,
+		state.ID, state.Name, sqliteTime(state.CreatedAt),
 	); err != nil {
 		return fmt.Errorf("restore topic %q: %w", state.ID, err)
 	}
@@ -490,8 +536,8 @@ func (s *Storage) RestoreSubscription(ctx context.Context, state queue.Subscript
 	}
 
 	if _, err := tx.ExecContext(ctx,
-		`insert into topic_subscriptions (subscription_id, topic_id, queue_id) values (?, ?, ?);`,
-		state.ID, state.TopicID, state.QueueID,
+		`insert into topic_subscriptions (subscription_id, topic_id, queue_id, created_at) values (?, ?, ?, ?);`,
+		state.ID, state.TopicID, state.QueueID, sqliteTime(state.CreatedAt),
 	); err != nil {
 		return fmt.Errorf("restore subscription %q: %w", state.ID, err)
 	}
@@ -588,18 +634,23 @@ func validQueueID(id string) bool {
 	}
 
 	for _, r := range id {
-		switch {
-		case r >= 'a' && r <= 'z':
-		case r >= 'A' && r <= 'Z':
-		case r >= '0' && r <= '9':
-		case r == '_':
-
-		default:
+		if !isIdentifierRune(r) {
 			return false
 		}
 	}
 
 	return true
+}
+
+// isIdentifierRune reports whether r may appear in a SQL identifier.
+func isIdentifierRune(r rune) bool {
+	switch {
+	case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
+		return true
+
+	default:
+		return false
+	}
 }
 
 // queryRestoreMessagesBatch inserts messages with every column supplied,

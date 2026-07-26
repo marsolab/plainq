@@ -246,7 +246,7 @@ func (s *Storage) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest)
 		RetentionPeriodSeconds:   input.RetentionPeriodSeconds,
 		VisibilityTimeoutSeconds: input.VisibilityTimeoutSeconds,
 		MaxReceiveAttempts:       input.MaxReceiveAttempts,
-		EvictionPolicy:           uint32(evictionPolicy),
+		EvictionPolicy:           uint32(evictionPolicy), //nolint:gosec // EvictionPolicy enum is non-negative.
 		DeadLetterQueueID:        input.DeadLetterQueueId,
 	}
 
@@ -450,10 +450,15 @@ func (s *Storage) Send(ctx context.Context, input *v1.SendRequest) (_ *v1.SendRe
 	args := make([]any, 0, len(messages)*sendInsertColumns)
 	enqueuedAt := writeTime(ctx)
 
+	// Every message in the batch shares a created_at, so the identifier is what
+	// orders them. A monotonic generator keeps that order the one the client
+	// sent them in.
+	nextID := queue.NewBatchIDs(queue.WriteTime(ctx))
+
 	var sentBytes uint64
 
 	for _, m := range messages {
-		msgID := queue.NextID(ctx, idkit.ULID)
+		msgID := queue.NextID(ctx, nextID)
 
 		args = append(args, msgID, m.Body, enqueuedAt, enqueuedAt)
 		output.MessageIds = append(output.MessageIds, msgID)

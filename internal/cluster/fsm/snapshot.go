@@ -90,7 +90,7 @@ func (s *snapshot) Persist(sink hraft.SnapshotSink) error {
 	writer := newSnapshotWriter(sink)
 
 	if err := writer.header(); err != nil {
-		_ = sink.Cancel()
+		cancelSink(sink, s.logger)
 
 		return err
 	}
@@ -102,13 +102,13 @@ func (s *snapshot) Persist(sink hraft.SnapshotSink) error {
 	defer cancel()
 
 	if err := s.view.Stream(ctx, writer); err != nil {
-		_ = sink.Cancel()
+		cancelSink(sink, s.logger)
 
 		return fmt.Errorf("stream state into snapshot: %w", err)
 	}
 
 	if err := writer.flush(); err != nil {
-		_ = sink.Cancel()
+		cancelSink(sink, s.logger)
 
 		return err
 	}
@@ -125,6 +125,17 @@ func (s *snapshot) Persist(sink hraft.SnapshotSink) error {
 	)
 
 	return nil
+}
+
+// cancelSink discards a half-written snapshot. There is nothing to do about a
+// failure here beyond saying so: the snapshot has already failed.
+func cancelSink(sink hraft.SnapshotSink, logger *slog.Logger) {
+	if err := sink.Cancel(); err != nil {
+		logger.Error("Failed to discard an incomplete snapshot",
+			slog.String("id", sink.ID()),
+			slog.String("error", err.Error()),
+		)
+	}
 }
 
 // Release implements raft.FSMSnapshot. Raft calls it whether Persist succeeded
@@ -144,6 +155,8 @@ func (s *snapshot) Release() {
 // Raft calls it when this node is too far behind to catch up from the log —
 // on a fresh node joining, or one that was down long enough for the leader to
 // have compacted past it. It replaces everything the store holds.
+//
+//nolint:nonamedreturns // the deferred abort has to know whether the restore failed.
 func (f *FSM) Restore(reader io.ReadCloser) (rErr error) {
 	defer func() { _ = reader.Close() }()
 
@@ -199,7 +212,7 @@ type snapshotStats struct {
 	subscriptions uint64
 }
 
-//nolint:cyclop,funlen // Reading a tagged record stream is one branch per record type.
+//nolint:cyclop,funlen,gocognit,gocyclo // Reading a tagged record stream is one branch per record type.
 func (f *FSM) readSnapshot(ctx context.Context, source io.Reader) (snapshotStats, error) {
 	var stats snapshotStats
 
@@ -495,6 +508,7 @@ func appendFrame(buf, value []byte) []byte {
 	return append(buf, value...)
 }
 
+//nolint:nonamedreturns // three same-typed results; the names are the documentation.
 func readField(buf []byte) (value, rest []byte, err error) {
 	length, read := binary.Uvarint(buf)
 	if read <= 0 {
@@ -525,7 +539,7 @@ func readFrame(reader io.ByteReader) ([]byte, error) {
 		return nil, fmt.Errorf("snapshot record length %d is out of range", length)
 	}
 
-	payload := make([]byte, length)
+	payload := make([]byte, length) //nolint:makezero // ReadFull fills it; appending would be wrong here.
 
 	full, ok := reader.(io.Reader)
 	if !ok {

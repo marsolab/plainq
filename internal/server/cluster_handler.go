@@ -169,7 +169,9 @@ func writeClusterJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 
-	_ = json.NewEncoder(w).Encode(value)
+	// The status line is already sent, so a failed encode cannot be reported to
+	// the caller; it means they hung up.
+	_ = json.NewEncoder(w).Encode(value) //nolint:errcheck,errchkjson // see above.
 }
 
 func writeClusterError(w http.ResponseWriter, status int, message string) {

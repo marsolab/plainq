@@ -95,6 +95,8 @@ type Member struct {
 }
 
 // Status returns this node's view of the cluster.
+//
+//nolint:cyclop // Merging two membership views is a flat pass over each.
 func (n *Node) Status() Status {
 	consensusStatus := n.consensus.Status()
 	applied, failed := n.fsm.Stats()
@@ -160,6 +162,7 @@ func (n *Node) Status() Status {
 		}
 
 		seen[server.ID] = true
+
 		status.Members = append(status.Members, member)
 	}
 
@@ -189,22 +192,24 @@ func (n *Node) Status() Status {
 	return status
 }
 
-// listAllQueues builds the request the leader's sweeper pages through.
-func listAllQueues() *v1.ListQueuesRequest {
-	return &v1.ListQueuesRequest{Limit: listAllQueuesLimit}
+// listAllQueues builds one page of the request the leader's sweeper walks.
+func listAllQueues(cursor string) *v1.ListQueuesRequest {
+	return &v1.ListQueuesRequest{Limit: listAllQueuesLimit, Cursor: cursor}
 }
 
 // splitHostPortInt splits host:port, returning the port as an int.
-func splitHostPortInt(addr string) (string, int, error) {
-	host, rawPort, err := net.SplitHostPort(addr)
-	if err != nil {
-		return "", 0, fmt.Errorf("parse address %q: %w", addr, err)
+//
+//nolint:nonamedreturns // a bare (string, int) pair reads as nothing in particular.
+func splitHostPortInt(addr string) (host string, port int, err error) {
+	host, rawPort, splitErr := net.SplitHostPort(addr)
+	if splitErr != nil {
+		return "", 0, fmt.Errorf("parse address %q: %w", addr, splitErr)
 	}
 
-	port, convErr := strconv.Atoi(rawPort)
+	parsed, convErr := strconv.Atoi(rawPort)
 	if convErr != nil {
 		return "", 0, fmt.Errorf("parse port of address %q: %w", addr, convErr)
 	}
 
-	return host, port, nil
+	return host, parsed, nil
 }

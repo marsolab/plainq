@@ -8,6 +8,7 @@
 package transport
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -91,7 +92,9 @@ func New(cfg Config) (*Mux, error) {
 		logger = logkit.NewNop()
 	}
 
-	listener, listenErr := net.Listen("tcp", cfg.BindAddr)
+	var listenConfig net.ListenConfig
+
+	listener, listenErr := listenConfig.Listen(context.Background(), "tcp", cfg.BindAddr)
 	if listenErr != nil {
 		return nil, fmt.Errorf("listen on cluster address %q: %w", cfg.BindAddr, listenErr)
 	}
@@ -160,7 +163,10 @@ func (m *Mux) Dial(proto Protocol, addr string, timeout time.Duration) (net.Conn
 	if m.tlsConfig != nil {
 		tlsConn := tls.Client(conn, m.tlsConfig)
 
-		if err := tlsConn.Handshake(); err != nil {
+		handshakeCtx, cancelHandshake := context.WithTimeout(context.Background(), handshakeTimeout)
+		defer cancelHandshake()
+
+		if err := tlsConn.HandshakeContext(handshakeCtx); err != nil {
 			_ = conn.Close()
 
 			return nil, fmt.Errorf("tls handshake with peer %q: %w", addr, err)
@@ -271,7 +277,13 @@ func (m *Mux) route(conn net.Conn) {
 	if m.tlsConfig != nil {
 		tlsConn := tls.Server(conn, m.tlsConfig)
 
-		if err := tlsConn.Handshake(); err != nil {
+		handshakeCtx, cancelHandshake := context.WithTimeout(context.Background(), handshakeTimeout)
+
+		err := tlsConn.HandshakeContext(handshakeCtx)
+
+		cancelHandshake()
+
+		if err != nil {
 			m.logger.Debug("Cluster TLS handshake failed",
 				slog.String("remote", conn.RemoteAddr().String()),
 				slog.String("error", err.Error()),

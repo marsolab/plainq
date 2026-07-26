@@ -163,11 +163,26 @@ func (s *Spec) OptionPort(def int) (int, error) {
 	return port, nil
 }
 
-// registry maps a scheme to the factory that builds it. Providers register
-// themselves from their own file's init, so adding a platform is one file.
+// registry maps a scheme to the factory that builds it.
+//
+// The table is spelled out rather than assembled from per-file init functions:
+// one place lists every platform PlainQ can discover on, and it is the first
+// thing to read when adding another.
 var (
 	registryMu sync.RWMutex
-	registry   = map[string]Factory{}
+	registry   = map[string]Factory{
+		"static":     newStaticFromSpec,
+		"dns":        newDNSFromSpec,
+		"dns+srv":    newDNSSRVFromSpec,
+		"kubernetes": newKubernetesFromSpec,
+		"k8s":        newKubernetesFromSpec,
+		"docker":     newDockerFromSpec,
+		"aws":        newAWSFromSpec,
+		"gcp":        newGCPFromSpec,
+		"gce":        newGCPFromSpec,
+		"azure":      newAzureFromSpec,
+		"consul":     newConsulFromSpec,
+	}
 )
 
 // Register adds a provider under the given scheme. It panics on a duplicate
@@ -243,7 +258,9 @@ func Parse(spec string) (Discoverer, error) {
 	}
 
 	registryMu.RLock()
+
 	factory, ok := registry[parsed.Scheme]
+
 	registryMu.RUnlock()
 
 	if !ok {
@@ -325,7 +342,7 @@ func (m *Multi) Discover(ctx context.Context) ([]Peer, error) {
 		err   error
 	}
 
-	results := make([]result, len(m.discoverers))
+	results := make([]result, len(m.discoverers)) //nolint:makezero // indexed in place below, never appended to.
 
 	var wg sync.WaitGroup
 
@@ -389,6 +406,7 @@ func Dedupe(peers []Peer) []Peer {
 	}
 
 	byAddr := make(map[string]int, len(peers))
+
 	out := make([]Peer, 0, len(peers))
 
 	for _, p := range peers {
@@ -482,7 +500,7 @@ func (s *Static) Name() string { return "static" }
 
 // Discover implements Discoverer.
 func (s *Static) Discover(context.Context) ([]Peer, error) {
-	out := make([]Peer, len(s.peers))
+	out := make([]Peer, len(s.peers)) //nolint:makezero // filled by copy, never appended to.
 	copy(out, s.peers)
 
 	return out, nil
@@ -500,23 +518,22 @@ func (s *Static) Close() error { return nil }
 // the other is learned rather than configured twice.
 const defaultGossipPort = 8083
 
-func init() {
-	Register("static", func(spec *Spec) (Discoverer, error) {
-		port, portErr := spec.OptionPort(defaultGossipPort)
-		if portErr != nil {
-			return nil, portErr
-		}
+// newStaticFromSpec builds a fixed-list discoverer.
+func newStaticFromSpec(spec *Spec) (Discoverer, error) {
+	port, portErr := spec.OptionPort(defaultGossipPort)
+	if portErr != nil {
+		return nil, portErr
+	}
 
-		addrs := strings.Split(spec.Target, ",")
-		if extra := spec.Options["addr"]; len(extra) > 0 {
-			addrs = append(addrs, extra...)
-		}
+	addrs := strings.Split(spec.Target, ",")
+	if extra := spec.Options["addr"]; len(extra) > 0 {
+		addrs = append(addrs, extra...)
+	}
 
-		static := NewStatic(addrs, port)
-		if len(static.peers) == 0 {
-			return nil, fmt.Errorf("static discovery %q lists no addresses", spec.Raw)
-		}
+	static := NewStatic(addrs, port)
+	if len(static.peers) == 0 {
+		return nil, fmt.Errorf("static discovery %q lists no addresses", spec.Raw)
+	}
 
-		return static, nil
-	})
+	return static, nil
 }

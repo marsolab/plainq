@@ -15,6 +15,9 @@ import (
 // allowed to stall the loop.
 const defaultHTTPTimeout = 10 * time.Second
 
+// errorSnippetBytes caps how much of an error body is carried into the error.
+const errorSnippetBytes = 512
+
 // maxResponseBytes caps how much of a provider response we will read. A
 // discovery response is a list of addresses; anything at this scale is a
 // misconfiguration pointed at the wrong endpoint.
@@ -65,7 +68,7 @@ func doJSON(
 		return fmt.Errorf("call %s: %w", redactURL(url), doErr)
 	}
 
-	defer func() { _, _ = io.Copy(io.Discard, resp.Body); _ = resp.Body.Close() }()
+	defer closeResponse(resp)
 
 	limited := io.LimitReader(resp.Body, maxResponseBytes)
 
@@ -73,7 +76,7 @@ func doJSON(
 		// Provider errors are usually a short JSON or XML document explaining
 		// exactly what is wrong (bad selector, missing permission). Carrying a
 		// clipped copy into the error saves an operator a packet capture.
-		snippet, _ := io.ReadAll(io.LimitReader(limited, 512))
+		snippet, _ := io.ReadAll(io.LimitReader(limited, errorSnippetBytes)) //nolint:errcheck // a clipped body is best-effort context.
 
 		return fmt.Errorf("call %s: unexpected status %d: %s",
 			redactURL(url), resp.StatusCode, strings.TrimSpace(string(snippet)),
@@ -94,7 +97,7 @@ func doJSON(
 // newTextRequest builds a GET for an endpoint that answers with plain text —
 // the cloud metadata servers do, for single values.
 func newTextRequest(ctx context.Context, url string, headers map[string]string) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
@@ -113,7 +116,7 @@ func readText(client httpDoer, req *http.Request) (string, error) {
 		return "", fmt.Errorf("call %s: %w", redactURL(req.URL.String()), doErr)
 	}
 
-	defer func() { _, _ = io.Copy(io.Discard, resp.Body); _ = resp.Body.Close() }()
+	defer closeResponse(resp)
 
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if readErr != nil {
@@ -127,6 +130,15 @@ func readText(client httpDoer, req *http.Request) (string, error) {
 	}
 
 	return strings.TrimSpace(string(body)), nil
+}
+
+// closeResponse drains and closes a response body, so the connection returns to
+// the pool instead of being torn down. Neither result is actionable: the call
+// already produced whatever answer the caller is going to get.
+func closeResponse(resp *http.Response) {
+	//nolint:errcheck,dogsled // draining is best-effort connection reuse.
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
 }
 
 // redactURL strips the query string from a URL before it reaches a log or an

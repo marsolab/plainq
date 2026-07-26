@@ -73,10 +73,14 @@ type Store struct {
 	// now is the clock the leader stamps commands with, injectable for tests.
 	now func() time.Time
 
-	// newID generates the identifiers the leader assigns, injectable for
-	// tests.
+	// newULID overrides message identifier generation for tests. Left nil, a
+	// Send mints a fresh monotonic batch — which is what keeps a batch in
+	// order — so nothing but a test should set it.
 	newULID func() string
-	newXID  func() string
+
+	// newXID generates the identifiers for queues, topics and subscriptions,
+	// injectable for tests.
+	newXID func() string
 }
 
 // StoreOption configures a Store.
@@ -125,7 +129,6 @@ func NewStore(
 		consistency:  ConsistencyLocal,
 		applyTimeout: 15 * time.Second,
 		now:          func() time.Time { return time.Now().UTC() },
-		newULID:      idkit.ULID,
 		newXID:       idkit.XID,
 	}
 
@@ -139,18 +142,18 @@ func NewStore(
 // CreateQueue implements queue.Storage.
 func (s *Store) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest) (*v1.CreateQueueResponse, error) {
 	return protoResponse[v1.CreateQueueResponse](
-		s.applyProto(ctx, command.OpCreateQueue, input, "", []string{s.newXID()}),
+		s.applyProto(ctx, command.OpCreateQueue, input, []string{s.newXID()}),
 	)
 }
 
 // DeleteQueue implements queue.Storage.
 func (s *Store) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest) (*v1.DeleteQueueResponse, error) {
-	return protoResponse[v1.DeleteQueueResponse](s.applyProto(ctx, command.OpDeleteQueue, input, "", nil))
+	return protoResponse[v1.DeleteQueueResponse](s.applyProto(ctx, command.OpDeleteQueue, input, nil))
 }
 
 // PurgeQueue implements queue.Storage.
 func (s *Store) PurgeQueue(ctx context.Context, input *v1.PurgeQueueRequest) (*v1.PurgeQueueResponse, error) {
-	return protoResponse[v1.PurgeQueueResponse](s.applyProto(ctx, command.OpPurgeQueue, input, "", nil))
+	return protoResponse[v1.PurgeQueueResponse](s.applyProto(ctx, command.OpPurgeQueue, input, nil))
 }
 
 // Send implements queue.Storage.
@@ -159,12 +162,31 @@ func (s *Store) PurgeQueue(ctx context.Context, input *v1.PurgeQueueRequest) (*v
 // travel with the command. Letting each replica mint its own would give the
 // same message a different id on every node.
 func (s *Store) Send(ctx context.Context, input *v1.SendRequest) (*v1.SendResponse, error) {
-	ids := make([]string, 0, len(input.GetMessages()))
-	for range input.GetMessages() {
-		ids = append(ids, s.newULID())
+	ids := s.batchIDs(len(input.GetMessages()))
+
+	return protoResponse[v1.SendResponse](s.applyProto(ctx, command.OpSend, input, ids))
+}
+
+// batchIDs mints n message identifiers that sort in the order they were
+// produced, so a batch is delivered in the order it was sent.
+func (s *Store) batchIDs(n int) []string {
+	if n == 0 {
+		return nil
 	}
 
-	return protoResponse[v1.SendResponse](s.applyProto(ctx, command.OpSend, input, "", ids))
+	// The override exists for tests; production always takes the monotonic
+	// generator, because a batch's delivery order depends on it.
+	next := s.newULID
+	if next == nil {
+		next = queue.NewBatchIDs(s.now())
+	}
+
+	ids := make([]string, 0, n)
+	for range n {
+		ids = append(ids, next())
+	}
+
+	return ids
 }
 
 // Receive implements queue.Storage.
@@ -173,12 +195,12 @@ func (s *Store) Send(ctx context.Context, input *v1.SendRequest) (*v1.SendRespon
 // local replica would let two consumers on two nodes claim the same message,
 // which is the one thing a queue may not do.
 func (s *Store) Receive(ctx context.Context, input *v1.ReceiveRequest) (*v1.ReceiveResponse, error) {
-	return protoResponse[v1.ReceiveResponse](s.applyProto(ctx, command.OpReceive, input, "", nil))
+	return protoResponse[v1.ReceiveResponse](s.applyProto(ctx, command.OpReceive, input, nil))
 }
 
 // Delete implements queue.Storage.
 func (s *Store) Delete(ctx context.Context, input *v1.DeleteRequest) (*v1.DeleteResponse, error) {
-	return protoResponse[v1.DeleteResponse](s.applyProto(ctx, command.OpDelete, input, "", nil))
+	return protoResponse[v1.DeleteResponse](s.applyProto(ctx, command.OpDelete, input, nil))
 }
 
 // DescribeQueue implements queue.Storage.
@@ -187,7 +209,12 @@ func (s *Store) DescribeQueue(ctx context.Context, input *v1.DescribeQueueReques
 		return nil, err
 	}
 
-	return s.local.DescribeQueue(ctx, input)
+	response, err := s.local.DescribeQueue(ctx, input)
+	if err != nil {
+		return nil, fmt.Errorf("describe queue on the local replica: %w", err)
+	}
+
+	return response, nil
 }
 
 // ListQueues implements queue.Storage.
@@ -196,7 +223,12 @@ func (s *Store) ListQueues(ctx context.Context, input *v1.ListQueuesRequest) (*v
 		return nil, err
 	}
 
-	return s.local.ListQueues(ctx, input)
+	response, err := s.local.ListQueues(ctx, input)
+	if err != nil {
+		return nil, fmt.Errorf("list queues on the local replica: %w", err)
+	}
+
+	return response, nil
 }
 
 // Peek implements queue.Storage.
@@ -205,7 +237,12 @@ func (s *Store) Peek(ctx context.Context, input *queue.PeekRequest) (*queue.Peek
 		return nil, err
 	}
 
-	return s.local.Peek(ctx, input)
+	response, err := s.local.Peek(ctx, input)
+	if err != nil {
+		return nil, fmt.Errorf("browse queue on the local replica: %w", err)
+	}
+
+	return response, nil
 }
 
 // ListTopics implements queue.Storage.
@@ -214,7 +251,12 @@ func (s *Store) ListTopics(ctx context.Context) (*queue.ListTopicsResponse, erro
 		return nil, err
 	}
 
-	return s.local.ListTopics(ctx)
+	response, err := s.local.ListTopics(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list topics on the local replica: %w", err)
+	}
+
+	return response, nil
 }
 
 // CreateTopic implements queue.Storage.
@@ -265,10 +307,7 @@ func (s *Store) Publish(
 		return nil, err
 	}
 
-	ids := make([]string, 0, subscribers*len(input.Messages))
-	for range subscribers * len(input.Messages) {
-		ids = append(ids, s.newULID())
-	}
+	ids := s.batchIDs(subscribers * len(input.Messages))
 
 	return jsonResponse[queue.PublishResponse](s.applyJSON(ctx, command.OpPublish, input, topicID, ids))
 }
@@ -286,7 +325,7 @@ func (s *Store) Sweep(ctx context.Context, queueID string) (uint64, error) {
 		return 0, err
 	}
 
-	dropped, _ := response.(uint64)
+	dropped, _ := response.(uint64) //nolint:errcheck // a backend that reports no count is fine.
 
 	return dropped, nil
 }
@@ -341,7 +380,7 @@ func (s *Store) readBarrier(ctx context.Context) error {
 func (s *Store) apply(ctx context.Context, cmd *command.Command) (any, error) {
 	encoded, encodeErr := cmd.Encode()
 	if encodeErr != nil {
-		return nil, encodeErr
+		return nil, fmt.Errorf("encode %s command: %w", cmd.Op, encodeErr)
 	}
 
 	ctx, cancel := context.WithTimeout(ctx, s.applyTimeout)
@@ -355,7 +394,12 @@ func (s *Store) apply(ctx context.Context, cmd *command.Command) (any, error) {
 			return response, nil
 		}
 
-		if !errors.Is(err, consensus.ErrNoLeader) {
+		// Both retryable cases are ones where nothing was proposed: no leader
+		// was known, or the peer we asked answered that it is not the leader.
+		// A transport failure carries neither class — the leader may well have
+		// committed before the reply was lost — and re-sending that would
+		// enqueue the same message twice.
+		if !errors.Is(err, consensus.ErrNoLeader) && !errors.Is(err, consensus.ErrNotLeader) {
 			return nil, err
 		}
 
@@ -388,7 +432,7 @@ func (s *Store) applyOnce(ctx context.Context, cmd *command.Command, encoded []b
 		}
 
 		if !errors.Is(err, consensus.ErrNotLeader) {
-			return nil, err
+			return nil, fmt.Errorf("commit %s: %w", cmd.Op, err)
 		}
 
 		// Leadership moved between the check and the proposal. The command was
@@ -408,7 +452,7 @@ func (s *Store) forward(ctx context.Context, cmd *command.Command, encoded []byt
 
 	_, addr, leaderErr := s.consensus.Leader()
 	if leaderErr != nil {
-		return nil, leaderErr
+		return nil, fmt.Errorf("locate the leader for %s: %w", cmd.Op, leaderErr)
 	}
 
 	raw, err := s.forwarder.Forward(ctx, addr, encoded)
@@ -424,7 +468,6 @@ func (s *Store) applyProto(
 	ctx context.Context,
 	op command.Op,
 	input vtMarshaler,
-	target string,
 	ids []string,
 ) (any, error) {
 	payload, marshalErr := input.MarshalVT()
@@ -432,10 +475,11 @@ func (s *Store) applyProto(
 		return nil, fmt.Errorf("encode %s request: %w", op, marshalErr)
 	}
 
+	// Queue operations carry their target inside the request, so the envelope's
+	// Target is only used by the pub/sub and sweep commands.
 	return s.apply(ctx, &command.Command{
 		Op:        op,
 		Timestamp: s.now().UnixNano(),
-		Target:    target,
 		IDs:       ids,
 		Payload:   payload,
 	})

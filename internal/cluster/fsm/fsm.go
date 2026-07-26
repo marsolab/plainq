@@ -61,6 +61,8 @@ func New(storage queue.ReplicatedStorage, logger *slog.Logger) *FSM {
 func (f *FSM) AppliedIndex() uint64 { return f.appliedIndex.Load() }
 
 // Stats returns counters for the metrics endpoint.
+//
+//nolint:nonamedreturns // two bare uint64s in a row need naming to be readable.
 func (f *FSM) Stats() (applied, failed uint64) {
 	return f.applied.Load(), f.failed.Load()
 }
@@ -92,13 +94,16 @@ func (f *FSM) Apply(entry *hraft.Log) any {
 			slog.String("error", decodeErr.Error()),
 		)
 
-		return decodeErr
+		return fmt.Errorf("decode log entry %d: %w", entry.Index, decodeErr)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), applyTimeout)
 	defer cancel()
 
-	determinism := queue.NewDeterminism(cmd.Time(), cmd.IDs)
+	// The log index seeds any identifier the command needs beyond the ones the
+	// leader assigned. It is unique per entry and identical on every replica,
+	// which is exactly what a derived identifier has to be.
+	determinism := queue.NewDeterminism(cmd.Time(), cmd.IDs, entry.Index)
 	ctx = queue.WithDeterminism(ctx, determinism)
 
 	response, err := f.dispatch(ctx, cmd)
@@ -116,8 +121,10 @@ func (f *FSM) Apply(entry *hraft.Log) any {
 
 	f.applied.Add(1)
 
-	// Left-over ids mean the leader thought this command needed more work than
-	// the replica did — a real divergence, even though this apply "succeeded".
+	// A mismatch either way means the leader sized the command against state
+	// that had already moved by the time it was applied. The replicas stay
+	// consistent — the extras are derived, not generated — but it is worth
+	// seeing, because it says a fan-out raced a subscription change.
 	if remaining := determinism.Remaining(); remaining > 0 {
 		f.logger.Warn("Command used fewer identifiers than the leader assigned",
 			slog.Uint64("index", entry.Index),
@@ -126,10 +133,18 @@ func (f *FSM) Apply(entry *hraft.Log) any {
 		)
 	}
 
+	if extra := determinism.Overflowed(); extra > 0 {
+		f.logger.Warn("Command needed more identifiers than the leader assigned",
+			slog.Uint64("index", entry.Index),
+			slog.String("op", cmd.Op.String()),
+			slog.Int("derived", extra),
+		)
+	}
+
 	return response
 }
 
-//nolint:cyclop,funlen // A dispatch table over the op set is naturally one branch per op.
+//nolint:cyclop,gocyclo // A dispatch table over the op set is naturally one branch per op.
 func (f *FSM) dispatch(ctx context.Context, cmd *command.Command) (any, error) {
 	switch cmd.Op {
 	case command.OpCreateQueue:
@@ -168,7 +183,11 @@ func (f *FSM) dispatch(ctx context.Context, cmd *command.Command) (any, error) {
 		})
 
 	case command.OpDeleteTopic:
-		return nil, f.storage.DeleteTopic(ctx, cmd.Target)
+		if err := f.storage.DeleteTopic(ctx, cmd.Target); err != nil {
+			return nil, fmt.Errorf("delete topic %q: %w", cmd.Target, err)
+		}
+
+		return nil, nil //nolint:nilnil // a delete has no response to return.
 
 	case command.OpSubscribe:
 		return decodeJSONAnd(cmd, func(req *queue.SubscribeRequest) (any, error) {
@@ -180,7 +199,11 @@ func (f *FSM) dispatch(ctx context.Context, cmd *command.Command) (any, error) {
 			return nil, errors.New("unsubscribe command carries no subscription id")
 		}
 
-		return nil, f.storage.Unsubscribe(ctx, cmd.Target, cmd.IDs[0])
+		if err := f.storage.Unsubscribe(ctx, cmd.Target, cmd.IDs[0]); err != nil {
+			return nil, fmt.Errorf("unsubscribe %q from topic %q: %w", cmd.IDs[0], cmd.Target, err)
+		}
+
+		return nil, nil //nolint:nilnil // an unsubscribe has no response to return.
 
 	case command.OpPublish:
 		return decodeJSONAnd(cmd, func(req *queue.PublishRequest) (any, error) {
@@ -213,7 +236,7 @@ func (f *FSM) sweep(ctx context.Context, queueID string) (any, error) {
 
 	dropped, err := s.Sweep(ctx, queueID)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("sweep queue %q: %w", queueID, err)
 	}
 
 	return dropped, nil

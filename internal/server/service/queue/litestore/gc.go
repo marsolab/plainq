@@ -156,7 +156,9 @@ func (s *Storage) sweep(ctx context.Context, queueID string) (_ *sweepResult, sE
 
 	// The retention cutoff is derived from the command's instant, so a
 	// replicated sweep deletes exactly the same rows on every node.
-	cutoff := sqliteTime(queue.WriteTime(ctx).Add(-time.Duration(props.RetentionPeriodSeconds) * time.Second))
+	//nolint:gosec // the retention period is bounded by validation on the way in.
+	retention := time.Duration(props.RetentionPeriodSeconds) * time.Second
+	cutoff := sqliteTime(queue.WriteTime(ctx).Add(-retention))
 
 	tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if txErr != nil {

@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -162,5 +163,5 @@ func TestJoinOnAFollowerIsRefused(t *testing.T) {
 	err := cluster.follower().node.Join(context.Background(), "node-9", "127.0.0.1:19999", false)
 
 	td.Require(t).CmpError(err)
-	td.Cmp(t, err, consensus.ErrNotLeader)
+	td.Cmp(t, errors.Is(err, consensus.ErrNotLeader), true, "the caller can tell where to ask instead")
 }

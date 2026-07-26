@@ -122,6 +122,8 @@ type KubernetesConfig struct {
 
 // NewKubernetes returns a Discoverer backed by the Kubernetes API. Called
 // inside a pod it configures itself from the mounted service account.
+//
+//nolint:cyclop // Each branch fills in one thing the pod environment would otherwise supply.
 func NewKubernetes(cfg KubernetesConfig, opts ...KubernetesOption) (*Kubernetes, error) {
 	k := Kubernetes{
 		namespace: cfg.Namespace,
@@ -320,6 +322,7 @@ type k8sPodList struct {
 	} `json:"items"`
 }
 
+//nolint:cyclop // One branch per optional field of a pod spec.
 func (k *Kubernetes) discoverPods(ctx context.Context) ([]Peer, error) {
 	query := url.Values{}
 	if k.selector != "" {
@@ -428,11 +431,6 @@ func newKubernetesHTTPClient() (*http.Client, error) {
 	transport.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 
 	return &http.Client{Timeout: defaultHTTPTimeout, Transport: transport}, nil
-}
-
-func init() {
-	Register("kubernetes", newKubernetesFromSpec)
-	Register("k8s", newKubernetesFromSpec)
 }
 
 // newKubernetesFromSpec accepts both `kubernetes://namespace/service` and the
