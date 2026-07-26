@@ -1161,6 +1161,8 @@ func buildTLSConfig(cfg Config) (*tls.Config, error) {
 		return nil, errors.New("cluster TLS CA file holds no usable certificate")
 	}
 
+	verify := verifyAgainstPool(pool)
+
 	return &tls.Config{
 		Certificates: []tls.Certificate{certificate},
 		RootCAs:      pool,
@@ -1169,17 +1171,33 @@ func buildTLSConfig(cfg Config) (*tls.Config, error) {
 		MinVersion:   tls.VersionTLS12,
 
 		// Nodes dial each other by IP, which no certificate is issued for.
-		// Verification is against the cluster CA, which is the property that
-		// matters: the peer holds a certificate this cluster issued.
-		InsecureSkipVerify:    true, //nolint:gosec // see VerifyPeerCertificate below.
-		VerifyPeerCertificate: verifyAgainstPool(pool),
+		// Verification is against the cluster CA instead, which is the property
+		// that actually matters: the peer holds a certificate this cluster
+		// issued.
+		InsecureSkipVerify: true, //nolint:gosec // replaced by the two checks below.
+
+		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			return verify(rawCerts)
+		},
+
+		// VerifyPeerCertificate is *not* called when a session is resumed, so
+		// on its own it would let a peer skip the CA check by resuming. This
+		// one runs on every handshake, resumed or not.
+		VerifyConnection: func(state tls.ConnectionState) error {
+			raw := make([][]byte, 0, len(state.PeerCertificates))
+			for _, certificate := range state.PeerCertificates {
+				raw = append(raw, certificate.Raw)
+			}
+
+			return verify(raw)
+		},
 	}, nil
 }
 
 // verifyAgainstPool checks a peer's chain against the cluster CA without
 // requiring the hostname to match, since peers are addressed by IP.
-func verifyAgainstPool(pool *x509.CertPool) func([][]byte, [][]*x509.Certificate) error {
-	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+func verifyAgainstPool(pool *x509.CertPool) func(rawCerts [][]byte) error {
+	return func(rawCerts [][]byte) error {
 		if len(rawCerts) == 0 {
 			return errors.New("cluster peer presented no certificate")
 		}

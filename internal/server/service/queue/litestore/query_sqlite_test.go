@@ -45,7 +45,7 @@ func Test_queryCreateQueueTable_executes(t *testing.T) {
 
 	stamp := sqliteTime(testNow)
 
-	_, err = db.Exec(queryInsertMessagesBatch("qtable", 1), "id1", []byte("body"), stamp, stamp)
+	_, err = db.Exec(queryInsertMessagesBatch("qtable", 1, true), "id1", []byte("body"), stamp, stamp)
 	td.Require(t).CmpNoError(err, "insert message")
 
 	_, err = db.Exec(queryUpdateMessagesVisibility("qtable", 1), 1, "id1")
@@ -67,7 +67,7 @@ func Test_messageBatchQueries_roundTrip(t *testing.T) {
 	// so the msg_id tie-break in the SELECT is what fixes their order.
 	stamp := sqliteTime(testNow)
 
-	_, err = db.Exec(queryInsertMessagesBatch(queueID, 3),
+	_, err = db.Exec(queryInsertMessagesBatch(queueID, 3, true),
 		"m1", []byte("a"), stamp, stamp,
 		"m2", []byte("b"), stamp, stamp,
 		"m3", []byte("c"), stamp, stamp,
@@ -139,7 +139,7 @@ func Test_queryPeekMessages_browsesWithoutConsuming(t *testing.T) {
 
 	stamp := sqliteTime(testNow)
 
-	_, err = db.Exec(queryInsertMessagesBatch(queueID, 3),
+	_, err = db.Exec(queryInsertMessagesBatch(queueID, 3, true),
 		"m1", []byte("a"), stamp, stamp,
 		"m2", []byte("b"), stamp, stamp,
 		"m3", []byte("c"), stamp, stamp,

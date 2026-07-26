@@ -65,10 +65,10 @@ func NewDNSSRV(name string, port int, opts ...DNSOption) *DNS {
 // Name implements Discoverer.
 func (d *DNS) Name() string {
 	if d.srv {
-		return "dns+srv"
+		return SchemeDNSSRV
 	}
 
-	return "dns"
+	return SchemeDNS
 }
 
 // Discover implements Discoverer.
@@ -99,7 +99,7 @@ func (d *DNS) discoverHosts(ctx context.Context) ([]Peer, error) {
 		peers = append(peers, Peer{
 			Addr:   net.JoinHostPort(addr, strconv.Itoa(d.port)),
 			Meta:   map[string]string{"dns_name": d.name},
-			Source: "dns",
+			Source: SchemeDNS,
 		})
 	}
 
@@ -140,7 +140,7 @@ func (d *DNS) discoverSRV(ctx context.Context) ([]Peer, error) {
 			ID:     host,
 			Addr:   net.JoinHostPort(host, strconv.Itoa(port)),
 			Meta:   map[string]string{"dns_name": d.name},
-			Source: "dns+srv",
+			Source: SchemeDNSSRV,
 		})
 	}
 

@@ -38,29 +38,41 @@ func queryCreateQueueTable(queueID string) string {
 	return q
 }
 
+// queryInsertMessages inserts one message with every timestamp supplied. It
+// backs the dead-letter move, which reproduces a message rather than creating
+// one, so its timestamps are never a column default.
 func queryInsertMessages(queueID string) string {
 	return `insert into ` + queueID + ` (msg_id, msg_body, created_at, visible_at) values (?, ?, ?, ?);`
 }
 
 // queryInsertMessagesBatch builds a single multi-row INSERT for n messages so
 // an entire Send batch is one statement (and one trip through SQLite's
-// single-writer lock) instead of n. Args are passed as
-// (msg_id, msg_body, created_at, visible_at) tuples.
+// single-writer lock) instead of n.
 //
-// The timestamps are written explicitly rather than left to the column
-// default. A column default reads the node's own clock, and two replicas
-// applying the same Send would then disagree about when the message arrived.
-func queryInsertMessagesBatch(queueID string, n int) string {
+// A replicated write stamps its own timestamps: a column default reads the
+// node's own clock, and two replicas applying the same Send would then
+// disagree about when the message arrived. A standalone write leaves them to
+// the default, because writing them costs two extra values per row — per
+// message, per index entry — and buys a single node nothing.
+//
+// Args are (msg_id, msg_body) pairs, or (msg_id, msg_body, created_at,
+// visible_at) tuples when stamped.
+func queryInsertMessagesBatch(queueID string, n int, stamped bool) string {
+	columns, row := `(msg_id, msg_body) values `, "(?,?)"
+	if stamped {
+		columns, row = `(msg_id, msg_body, created_at, visible_at) values `, "(?,?,?,?)"
+	}
+
 	var b strings.Builder
 
-	b.WriteString(`insert into ` + queueID + ` (msg_id, msg_body, created_at, visible_at) values `)
+	b.WriteString(`insert into ` + queueID + ` ` + columns)
 
 	for i := range n {
 		if i > 0 {
 			b.WriteString(",")
 		}
 
-		b.WriteString("(?,?,?,?)")
+		b.WriteString(row)
 	}
 
 	b.WriteString(";")

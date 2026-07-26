@@ -121,7 +121,7 @@ func NewGCP(project string, zones []string, filter string, port int, opts ...GCP
 }
 
 // Name implements Discoverer.
-func (g *GCP) Name() string { return "gcp" }
+func (g *GCP) Name() string { return SchemeGCP }
 
 // gceInstanceList is the subset of the Compute API instance list we read. It
 // covers both the zonal shape (`items` is a list) and the aggregated shape
@@ -160,7 +160,7 @@ func (g *GCP) Discover(ctx context.Context) ([]Peer, error) {
 		return nil, tokenErr
 	}
 
-	headers := map[string]string{"Authorization": "Bearer " + token}
+	headers := map[string]string{headerAuthorization: bearer + token}
 
 	if len(g.zones) == 0 {
 		return g.discoverAggregated(ctx, headers)
@@ -293,7 +293,7 @@ func (g *GCP) toPeers(instances []gceInstance) []Peer {
 			ID:     instance.Name,
 			Addr:   JoinHostPort(host, g.port),
 			Meta:   meta,
-			Source: "gcp",
+			Source: SchemeGCP,
 		})
 	}
 

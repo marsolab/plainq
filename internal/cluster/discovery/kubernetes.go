@@ -25,6 +25,12 @@ const (
 	k8sNamespacePath = "/var/run/secrets/kubernetes.io/serviceaccount/namespace"
 )
 
+// metaNamespace is the peer-metadata key carrying a pod's namespace.
+const metaNamespace = "namespace"
+
+// bearer prefixes a token in an Authorization header.
+const bearer = "Bearer "
+
 // k8sTokenRefresh is how long a projected service-account token is trusted
 // before it is read from disk again. Projected tokens rotate; a long-lived
 // process that reads the file once will start getting 401s within the hour.
@@ -186,7 +192,7 @@ func NewKubernetes(cfg KubernetesConfig, opts ...KubernetesOption) (*Kubernetes,
 }
 
 // Name implements Discoverer.
-func (k *Kubernetes) Name() string { return "kubernetes" }
+func (k *Kubernetes) Name() string { return SchemeKubernetes }
 
 // Discover implements Discoverer.
 func (k *Kubernetes) Discover(ctx context.Context) ([]Peer, error) {
@@ -280,8 +286,8 @@ func (k *Kubernetes) discoverEndpoints(ctx context.Context) ([]Peer, error) {
 			peers = append(peers, Peer{
 				ID:     addr.TargetRef.Name,
 				Addr:   net.JoinHostPort(addr.IP, strconv.Itoa(port)),
-				Meta:   map[string]string{"namespace": k.namespace, "service": k.service, "ready": "true"},
-				Source: "kubernetes",
+				Meta:   map[string]string{metaNamespace: k.namespace, "service": k.service, "ready": "true"},
+				Source: SchemeKubernetes,
 			})
 		}
 
@@ -289,8 +295,8 @@ func (k *Kubernetes) discoverEndpoints(ctx context.Context) ([]Peer, error) {
 			peers = append(peers, Peer{
 				ID:     addr.TargetRef.Name,
 				Addr:   net.JoinHostPort(addr.IP, strconv.Itoa(port)),
-				Meta:   map[string]string{"namespace": k.namespace, "service": k.service, "ready": "false"},
-				Source: "kubernetes",
+				Meta:   map[string]string{metaNamespace: k.namespace, "service": k.service, "ready": "false"},
+				Source: SchemeKubernetes,
 			})
 		}
 	}
@@ -365,7 +371,7 @@ func (k *Kubernetes) discoverPods(ctx context.Context) ([]Peer, error) {
 			}
 		}
 
-		meta := map[string]string{"namespace": k.namespace, "phase": pod.Status.Phase}
+		meta := map[string]string{metaNamespace: k.namespace, "phase": pod.Status.Phase}
 		for key, value := range pod.Metadata.Labels {
 			meta["label."+key] = value
 		}
@@ -374,7 +380,7 @@ func (k *Kubernetes) discoverPods(ctx context.Context) ([]Peer, error) {
 			ID:     pod.Metadata.Name,
 			Addr:   net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(port)),
 			Meta:   meta,
-			Source: "kubernetes",
+			Source: SchemeKubernetes,
 		})
 	}
 
@@ -401,7 +407,7 @@ func (k *Kubernetes) headers() (map[string]string, error) {
 		return nil, errors.New("kubernetes discovery: no service account token available")
 	}
 
-	return map[string]string{"Authorization": "Bearer " + k.token}, nil
+	return map[string]string{headerAuthorization: bearer + k.token}, nil
 }
 
 func readNamespace() string {

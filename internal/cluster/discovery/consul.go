@@ -81,7 +81,7 @@ func NewConsul(address, service string, opts ...ConsulOption) (*Consul, error) {
 }
 
 // Name implements Discoverer.
-func (c *Consul) Name() string { return "consul" }
+func (c *Consul) Name() string { return SchemeConsul }
 
 // consulHealthEntry is the subset of /v1/health/service we read.
 type consulHealthEntry struct {
@@ -163,7 +163,7 @@ func (c *Consul) Discover(ctx context.Context) ([]Peer, error) {
 			ID:     firstNonEmpty(entry.Service.ID, entry.Node.Node),
 			Addr:   host + ":" + strconv.Itoa(port),
 			Meta:   meta,
-			Source: "consul",
+			Source: SchemeConsul,
 		})
 	}
 

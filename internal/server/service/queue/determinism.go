@@ -119,7 +119,6 @@ func (d *Determinism) derive(n int) string {
 
 	copy(entropy[:], sum[:])
 
-	//nolint:gosec // ULID timestamps are milliseconds since the epoch, which fits.
 	return ulid.MustNew(uint64(d.now.UnixMilli()), readerOf(entropy[:])).String()
 }
 

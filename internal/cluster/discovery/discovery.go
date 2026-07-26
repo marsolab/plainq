@@ -20,6 +20,26 @@ import (
 	"time"
 )
 
+// The provider schemes, as they appear in a discovery spec. They are also the
+// names a provider reports and the Source stamped on the peers it finds, so
+// they are spelled once here rather than repeated per file.
+const (
+	SchemeStatic     = "static"
+	SchemeDNS        = "dns"
+	SchemeDNSSRV     = "dns+srv"
+	SchemeKubernetes = "kubernetes"
+	SchemeK8s        = "k8s"
+	SchemeDocker     = "docker"
+	SchemeAWS        = "aws"
+	SchemeGCP        = "gcp"
+	SchemeGCE        = "gce"
+	SchemeAzure      = "azure"
+	SchemeConsul     = "consul"
+)
+
+// headerAuthorization is the bearer-token header the cloud providers use.
+const headerAuthorization = "Authorization"
+
 // ErrUnknownProvider is returned by Parse when a spec names a provider that is
 // not registered.
 var ErrUnknownProvider = errors.New("unknown discovery provider")
@@ -171,17 +191,17 @@ func (s *Spec) OptionPort(def int) (int, error) {
 var (
 	registryMu sync.RWMutex
 	registry   = map[string]Factory{
-		"static":     newStaticFromSpec,
-		"dns":        newDNSFromSpec,
-		"dns+srv":    newDNSSRVFromSpec,
-		"kubernetes": newKubernetesFromSpec,
-		"k8s":        newKubernetesFromSpec,
-		"docker":     newDockerFromSpec,
-		"aws":        newAWSFromSpec,
-		"gcp":        newGCPFromSpec,
-		"gce":        newGCPFromSpec,
-		"azure":      newAzureFromSpec,
-		"consul":     newConsulFromSpec,
+		SchemeStatic:     newStaticFromSpec,
+		SchemeDNS:        newDNSFromSpec,
+		SchemeDNSSRV:     newDNSSRVFromSpec,
+		SchemeKubernetes: newKubernetesFromSpec,
+		SchemeK8s:        newKubernetesFromSpec,
+		SchemeDocker:     newDockerFromSpec,
+		SchemeAWS:        newAWSFromSpec,
+		SchemeGCP:        newGCPFromSpec,
+		SchemeGCE:        newGCPFromSpec,
+		SchemeAzure:      newAzureFromSpec,
+		SchemeConsul:     newConsulFromSpec,
 	}
 )
 
@@ -225,7 +245,7 @@ func ParseSpec(spec string) (*Spec, error) {
 		// A bare host list is the overwhelmingly common case for a hand-built
 		// cluster, so treat `a:8082,b:8082` as `static://a:8082,b:8082` rather
 		// than making operators type the scheme.
-		scheme, rest = "static", trimmed
+		scheme, rest = SchemeStatic, trimmed
 	}
 
 	target, rawQuery, _ := strings.Cut(rest, "?")
@@ -488,7 +508,7 @@ func NewStatic(addrs []string, defaultPort int) *Static {
 
 		peers = append(peers, Peer{
 			Addr:   JoinHostPort(trimmed, defaultPort),
-			Source: "static",
+			Source: SchemeStatic,
 		})
 	}
 
@@ -496,7 +516,7 @@ func NewStatic(addrs []string, defaultPort int) *Static {
 }
 
 // Name implements Discoverer.
-func (s *Static) Name() string { return "static" }
+func (s *Static) Name() string { return SchemeStatic }
 
 // Discover implements Discoverer.
 func (s *Static) Discover(context.Context) ([]Peer, error) {

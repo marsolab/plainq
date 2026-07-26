@@ -124,7 +124,7 @@ func NewAzure(subscriptions []string, tagKey, tagValue string, port int, opts ..
 }
 
 // Name implements Discoverer.
-func (a *Azure) Name() string { return "azure" }
+func (a *Azure) Name() string { return SchemeAzure }
 
 // azureGraphResponse is the subset of a Resource Graph answer we read. The
 // projection in the query below fixes the column names, so the rows decode
@@ -155,8 +155,8 @@ func (a *Azure) Discover(ctx context.Context) ([]Peer, error) {
 	}
 
 	headers := map[string]string{
-		"Authorization": "Bearer " + token,
-		"Content-Type":  "application/json",
+		headerAuthorization: bearer + token,
+		"Content-Type":      "application/json",
 	}
 
 	var resp azureGraphResponse
@@ -183,7 +183,7 @@ func (a *Azure) Discover(ctx context.Context) ([]Peer, error) {
 			ID:     row.Name,
 			Addr:   JoinHostPort(row.Address, a.port),
 			Meta:   meta,
-			Source: "azure",
+			Source: SchemeAzure,
 		})
 	}
 
@@ -204,14 +204,14 @@ func (a *Azure) graphQuery() string {
 	query.WriteString(` | join kind=inner (`)
 	query.WriteString(`Resources | where type =~ 'microsoft.compute/virtualmachines'`)
 	query.WriteString(` or type =~ 'microsoft.compute/virtualmachinescalesets/virtualmachines'`)
-	query.WriteString(fmt.Sprintf(` | where tags['%s'] =~ '%s'`, escapeKQL(a.tagKey), escapeKQL(a.tagValue)))
+	fmt.Fprintf(&query, ` | where tags['%s'] =~ '%s'`, escapeKQL(a.tagKey), escapeKQL(a.tagValue))
 
 	if a.resourceGroup != "" {
-		query.WriteString(fmt.Sprintf(` | where resourceGroup =~ '%s'`, escapeKQL(a.resourceGroup)))
+		fmt.Fprintf(&query, ` | where resourceGroup =~ '%s'`, escapeKQL(a.resourceGroup))
 	}
 
 	if a.scaleSet != "" {
-		query.WriteString(fmt.Sprintf(` | where id contains '/virtualMachineScaleSets/%s/'`, escapeKQL(a.scaleSet)))
+		fmt.Fprintf(&query, ` | where id contains '/virtualMachineScaleSets/%s/'`, escapeKQL(a.scaleSet))
 	}
 
 	query.WriteString(` | project vmId = id, name, tags`)
@@ -249,7 +249,7 @@ func (a *Azure) accessToken(ctx context.Context) (string, error) {
 
 	var token azureTokenResponse
 
-	if err := getJSON(ctx, a.client, tokenURL, map[string]string{"Metadata": "true"}, &token); err != nil {
+	if err := getJSON(ctx, a.client, tokenURL, azureIMDSHeaders(), &token); err != nil {
 		return "", fmt.Errorf("fetch Azure access token: %w", err)
 	}
 
@@ -281,7 +281,7 @@ func (a *Azure) instanceSubscription(ctx context.Context) (string, error) {
 
 	instanceURL := a.imdsBase + "/instance?api-version=2021-02-01"
 
-	if err := getJSON(ctx, a.client, instanceURL, map[string]string{"Metadata": "true"}, &instance); err != nil {
+	if err := getJSON(ctx, a.client, instanceURL, azureIMDSHeaders(), &instance); err != nil {
 		return "", err
 	}
 
@@ -291,6 +291,9 @@ func (a *Azure) instanceSubscription(ctx context.Context) (string, error) {
 
 	return instance.Compute.SubscriptionID, nil
 }
+
+// azureIMDSHeaders are the headers the instance metadata service requires.
+func azureIMDSHeaders() map[string]string { return map[string]string{"Metadata": "true"} }
 
 // escapeKQL makes a value safe to embed in a single-quoted KQL literal.
 func escapeKQL(value string) string {

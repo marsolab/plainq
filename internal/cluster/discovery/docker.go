@@ -96,7 +96,7 @@ func NewDocker(labels map[string]string, port int, opts ...DockerOption) (*Docke
 }
 
 // Name implements Discoverer.
-func (d *Docker) Name() string { return "docker" }
+func (d *Docker) Name() string { return SchemeDocker }
 
 // dockerContainer is the subset of the Engine API container list we read.
 type dockerContainer struct {
@@ -173,7 +173,7 @@ func (d *Docker) Discover(ctx context.Context) ([]Peer, error) {
 			ID:     shortID(container.ID),
 			Addr:   addr,
 			Meta:   meta,
-			Source: "docker",
+			Source: SchemeDocker,
 		})
 	}
 

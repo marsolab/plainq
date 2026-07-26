@@ -133,7 +133,7 @@ func NewAWS(region string, filters map[string][]string, port int, opts ...AWSOpt
 }
 
 // Name implements Discoverer.
-func (a *AWS) Name() string { return "aws" }
+func (a *AWS) Name() string { return SchemeAWS }
 
 // ec2DescribeInstancesResponse is the subset of the EC2 query API response we
 // read.
@@ -199,7 +199,7 @@ func (a *AWS) Discover(ctx context.Context) ([]Peer, error) {
 					ID:     instance.InstanceID,
 					Addr:   JoinHostPort(host, a.port),
 					Meta:   meta,
-					Source: "aws",
+					Source: SchemeAWS,
 				})
 			}
 		}

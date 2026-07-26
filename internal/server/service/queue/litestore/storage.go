@@ -40,9 +40,13 @@ const (
 	// maxReceiveAttempts represents the maximum number of receive attempts for a message.
 	maxReceiveAttempts = 5
 
-	// sendInsertColumns is how many parameters each message binds in the
-	// multi-row INSERT: id, body, created_at, visible_at.
+	// sendInsertColumns is how many parameters each message binds in a
+	// replicated multi-row INSERT: id, body, created_at, visible_at.
 	sendInsertColumns = 4
+
+	// sendInsertColumnsUnstamped is the same for a standalone write, which
+	// leaves the timestamps to their column defaults: id, body.
+	sendInsertColumnsUnstamped = 2
 
 	// maxSendInsertBatch caps how many messages go into a single multi-row
 	// INSERT, so the statement stays well under SQLite's bind-parameter limit;
@@ -246,7 +250,7 @@ func (s *Storage) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest)
 		RetentionPeriodSeconds:   input.RetentionPeriodSeconds,
 		VisibilityTimeoutSeconds: input.VisibilityTimeoutSeconds,
 		MaxReceiveAttempts:       input.MaxReceiveAttempts,
-		EvictionPolicy:           uint32(evictionPolicy), //nolint:gosec // EvictionPolicy enum is non-negative.
+		EvictionPolicy:           uint32(evictionPolicy),
 		DeadLetterQueueID:        input.DeadLetterQueueId,
 	}
 
@@ -447,24 +451,13 @@ func (s *Storage) Send(ctx context.Context, input *v1.SendRequest) (_ *v1.SendRe
 	// batch into one (msg_id, msg_body, created_at, visible_at) argument slice
 	// for multi-row INSERT. Under replication the ids and the timestamp come
 	// from the leader instead of from this node.
-	args := make([]any, 0, len(messages)*sendInsertColumns)
-	enqueuedAt := writeTime(ctx)
+	// Only a replicated write stamps its timestamps; see
+	// queryInsertMessagesBatch for why a standalone one does not.
+	stamped := queue.Replicated(ctx)
+	columns := sendInsertColumnsFor(stamped)
 
-	// Every message in the batch shares a created_at, so the identifier is what
-	// orders them. A monotonic generator keeps that order the one the client
-	// sent them in.
-	nextID := queue.NewBatchIDs(queue.WriteTime(ctx))
-
-	var sentBytes uint64
-
-	for _, m := range messages {
-		msgID := queue.NextID(ctx, nextID)
-
-		args = append(args, msgID, m.Body, enqueuedAt, enqueuedAt)
-		output.MessageIds = append(output.MessageIds, msgID)
-
-		sentBytes += uint64(len(m.Body))
-	}
+	args, ids, sentBytes := buildSendArgs(ctx, messages, stamped)
+	output.MessageIds = ids
 
 	tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if txErr != nil {
@@ -483,9 +476,9 @@ func (s *Storage) Send(ctx context.Context, input *v1.SendRequest) (_ *v1.SendRe
 	for start := 0; start < len(messages); start += maxSendInsertBatch {
 		end := min(start+maxSendInsertBatch, len(messages))
 
-		chunk := args[start*sendInsertColumns : end*sendInsertColumns]
+		chunk := args[start*columns : end*columns]
 
-		if _, err := tx.ExecContext(ctx, queryInsertMessagesBatch(queueID, end-start), chunk...); err != nil {
+		if _, err := tx.ExecContext(ctx, queryInsertMessagesBatch(queueID, end-start, stamped), chunk...); err != nil {
 			return nil, fmt.Errorf("insert messages: %w", err)
 		}
 	}
@@ -548,6 +541,52 @@ func (s *Storage) Receive(ctx context.Context, input *v1.ReceiveRequest) (_ *v1.
 	s.observer.MessagesReceived(queueID).Add(uint64(len(messages)))
 
 	return &v1.ReceiveResponse{Messages: messages}, nil
+}
+
+// sendInsertColumnsFor reports how many parameters each message binds.
+func sendInsertColumnsFor(stamped bool) int {
+	if stamped {
+		return sendInsertColumns
+	}
+
+	return sendInsertColumnsUnstamped
+}
+
+// buildSendArgs flattens a batch into the argument slice the multi-row INSERT
+// takes, and returns the ids assigned to the messages in request order.
+//
+// The ids are minted monotonically: every message in the batch shares a
+// created_at, so the identifier is what orders them, and a consumer should see
+// them in the order the client sent them.
+//
+//nolint:nonamedreturns // three results of unrelated types; the names are the documentation.
+func buildSendArgs(
+	ctx context.Context,
+	messages []*v1.SendMessage,
+	stamped bool,
+) (args []any, ids []string, sentBytes uint64) {
+	var (
+		enqueuedAt = writeTime(ctx)
+		nextID     = queue.NewBatchIDs(queue.WriteTime(ctx))
+	)
+
+	args = make([]any, 0, len(messages)*sendInsertColumnsFor(stamped))
+	ids = make([]string, 0, len(messages))
+
+	for _, m := range messages {
+		msgID := queue.NextID(ctx, nextID)
+
+		args = append(args, msgID, m.Body)
+		if stamped {
+			args = append(args, enqueuedAt, enqueuedAt)
+		}
+
+		ids = append(ids, msgID)
+
+		sentBytes += uint64(len(m.Body))
+	}
+
+	return args, ids, sentBytes
 }
 
 // selectVisibleMessages reads up to limit visible, under-attempt-limit messages
