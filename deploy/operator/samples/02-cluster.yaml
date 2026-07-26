@@ -1,0 +1,101 @@
+# A three-node PlainQ cluster: Raft consensus, gossip membership, Kubernetes
+# discovery. Every node holds a full copy of the queue; losing one keeps the
+# other two serving.
+#
+# Use an odd replica count. A cluster of 4 tolerates the same single failure a
+# cluster of 3 does, so the fourth node buys cost and nothing else.
+apiVersion: plainq.dev/v1alpha1
+kind: PlainQ
+metadata:
+  name: orders
+  namespace: plainq
+spec:
+  version: "1.4.0"
+
+  storage:
+    driver: sqlite            # cluster mode requires SQLite; the webhook enforces it
+    sqlite:
+      path: /data/plainq.db
+      persistence:
+        enabled: true         # becomes a volumeClaimTemplate: one volume per node
+        size: 20Gi
+        storageClassName: fast-ssd
+
+  cluster:
+    enabled: true
+    replicas: 3
+    clusterPort: 8082
+    gossipPort: 8083
+
+    # "kubernetes" queries the API for this instance's pods, so it sees peers
+    # that are not ready yet — which is exactly what a cluster forming for the
+    # first time needs. "dns" needs no RBAC but only resolves ready endpoints.
+    discovery: kubernetes
+    discoveryInterval: 15s
+
+    # "local" reads are fast and may lag by milliseconds; "strong" is
+    # leader-only and linearizable.
+    consistency: local
+
+    # Off on purpose: in Kubernetes a pod being rescheduled looks exactly like
+    # a pod that failed, and removing a member changes quorum.
+    autoRemove: false
+    removeTimeout: 5m
+
+    # Gossip encryption key and peer-RPC secret. Generated into an owned Secret
+    # when secretRef.name is empty.
+    secretRef:
+      name: ""
+
+    dataDir: /data/cluster
+
+    # Leave empty for the engine defaults. Widen these for a cluster spread
+    # across availability zones, where a 1s heartbeat is a false positive
+    # waiting to happen.
+    raft:
+      heartbeatTimeout: 1s
+      electionTimeout: 1s
+      leaderLeaseTimeout: 500ms
+      snapshotInterval: 2m
+      snapshotThreshold: 8192
+
+    podDisruptionBudget:
+      enabled: true           # maxUnavailable derived from quorum
+
+  auth:
+    enabled: true
+
+  bootstrap:
+    enabled: true
+    adminSecretRef:
+      name: orders-admin
+
+  # One pod at a time, each rejoining as a voter before the next is touched,
+  # and the current leader restarted last so the roll costs one election.
+  updateStrategy:
+    type: RollingUpdate
+    quorumAware: true
+
+  observability:
+    serviceMonitor:
+      enabled: true
+    prometheusRule:
+      enabled: true
+
+  pod:
+    resources:
+      requests:
+        cpu: 500m
+        memory: 512Mi
+      limits:
+        cpu: "2"
+        memory: 2Gi
+    # Spread the nodes so a zone loss is a minority loss.
+    topologySpreadConstraints:
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: plainq
+            app.kubernetes.io/instance: orders

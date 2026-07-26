@@ -1,0 +1,87 @@
+# PlainQ against a shared PostgreSQL backend: several stateless replicas, no
+# per-pod volume, horizontal autoscaling.
+#
+# The operator does not manage PostgreSQL. Point it at a database your own
+# Postgres operator (or your cloud provider) runs, and back that database up
+# with that system's tooling — a PlainQBackupPolicy with the PostgresDump
+# engine complements it, it does not replace WAL archiving.
+apiVersion: plainq.dev/v1alpha1
+kind: PlainQ
+metadata:
+  name: orders
+  namespace: plainq
+spec:
+  version: "1.4.0"
+  replicas: 3
+
+  storage:
+    driver: postgres
+    postgres:
+      dsnSecretRef:
+        name: orders-postgres
+        key: dsn
+
+  auth:
+    enabled: true
+    jwtSecretRef:
+      name: orders-jwt
+      key: jwt-secret
+
+  bootstrap:
+    enabled: true
+    adminSecretRef:
+      name: orders-admin
+
+  # Only meaningful with the postgres driver — SQLite is single-writer and
+  # pinned to one replica outside cluster mode.
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+
+  listeners:
+    http:
+      port: 8081
+      readHeaderTimeout: 5s
+      writeTimeout: 30s
+      idleTimeout: 120s
+
+  telemetry:
+    enabled: true
+    collectionInterval: 10s
+    retentionPeriod: 336h
+
+  networking:
+    ingress:
+      enabled: true
+      className: nginx
+      hosts:
+        - host: plainq.example.com
+          paths:
+            - path: /
+              pathType: Prefix
+              port: http
+        # gRPC on its own host: the backend-protocol annotation must not bleed
+        # onto the HTTP host.
+        - host: grpc.plainq.example.com
+          paths:
+            - path: /
+              pathType: Prefix
+              port: grpc
+      annotations:
+        nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
+      tls:
+        - secretName: plainq-tls
+          hosts:
+            - plainq.example.com
+            - grpc.plainq.example.com
+
+  pod:
+    resources:
+      requests:
+        cpu: 500m
+        memory: 512Mi
+      limits:
+        cpu: "2"
+        memory: 2Gi

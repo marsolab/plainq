@@ -1,0 +1,94 @@
+# Backups to a filesystem volume — NFS, CephFS, a SAN-backed ReadWriteMany
+# PVC. This is the path for on-prem and air-gapped clusters where there is no
+# object store to talk to.
+#
+# The claim should be ReadWriteMany if more than one instance writes into it,
+# or if you want to read backups from a restore Job scheduled on another node.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: plainq-backups
+  namespace: plainq
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: nfs
+  resources:
+    requests:
+      storage: 500Gi
+---
+apiVersion: plainq.dev/v1alpha1
+kind: PlainQBackupPolicy
+metadata:
+  name: orders-backups
+  namespace: plainq
+spec:
+  serverRef:
+    name: orders
+
+  # No object store, so no WAL shipping target: the schedule is the whole
+  # story here and the RPO is the interval between runs. Pick it accordingly.
+  continuous:
+    enabled: false
+
+  schedule:
+    enabled: true
+    cron: "0 */6 * * *"        # every six hours
+    timeZone: Europe/Madrid
+    engine: Online
+    concurrencyPolicy: Forbid
+    timeout: 2h
+
+  destination:
+    filesystem:
+      existingClaim: plainq-backups
+      path: prod/orders
+      # Or let the operator create the volume:
+      # claimTemplate:
+      #   size: 500Gi
+      #   storageClassName: nfs
+      #   accessModes: [ReadWriteMany]
+
+  compression: zstd
+
+  # Backups leaving the cluster's trust boundary — onto shared storage other
+  # teams can read — should be encrypted at rest by us, not only by the array.
+  encryption:
+    enabled: true
+    secretRef:
+      name: backup-age
+      key: age.key
+
+  retention:
+    keepLast: 12               # two days at six-hourly
+    keepDaily: 14
+    keepWeekly: 8
+    keepMonthly: 12
+
+  verify: Checksum             # cheaper than Restore; upgrade it if the volume is cheap
+---
+# The VolumeSnapshot engine, for clusters whose CSI driver supports snapshots.
+# It moves the backup I/O off the serving pod entirely: the operator snapshots
+# the data volume, creates a PVC from the snapshot, and a Job reads that.
+# The copy is crash-consistent rather than clean, which SQLite recovers by
+# replaying the WAL — correct, but a recovery rather than a clean open.
+apiVersion: plainq.dev/v1alpha1
+kind: PlainQBackupPolicy
+metadata:
+  name: orders-snapshots
+  namespace: plainq
+spec:
+  serverRef:
+    name: orders
+  schedule:
+    enabled: true
+    cron: "30 2 * * *"
+    engine: VolumeSnapshot
+  destination:
+    filesystem:
+      existingClaim: plainq-backups
+      path: prod/orders-snapshots
+  retention:
+    keepLast: 7
+  verify: Checksum

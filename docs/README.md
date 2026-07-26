@@ -47,6 +47,15 @@ This documentation is organized so you can move from "never heard of it" to
 | [CLI reference](reference/cli.md)                              | Command + flag tables for quick lookup.                             |
 | [Configuration reference](reference/configuration.md)          | Full `serve` flag table with defaults.                              |
 
+## Design documents
+
+Specs for the bigger pieces, written before they were built.
+
+| Design                                                                              | What it covers                                                      |
+| ----------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| [Clustering](superpowers/specs/2026-07-26-clustering-design.md)                     | Raft, gossip, discovery, and the layers underneath cluster mode.    |
+| [Kubernetes operator](superpowers/specs/2026-07-26-kubernetes-operator-design.md)   | CRDs for servers, clusters, queues, topics, backups, and restores. _(Proposed — see the [sample manifests](../deploy/operator/README.md).)_ |
+
 ## The 30-second mental model
 
 ```

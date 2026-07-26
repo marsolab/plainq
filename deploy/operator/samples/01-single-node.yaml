@@ -1,0 +1,76 @@
+# A single PlainQ backed by embedded SQLite on a persistent volume.
+#
+# This is the shape most deployments should start with: one binary, one file,
+# one volume. Add a backup policy (see 05/06) before you call it production.
+apiVersion: plainq.dev/v1alpha1
+kind: PlainQ
+metadata:
+  name: orders
+  namespace: plainq
+spec:
+  version: "1.4.0"
+
+  storage:
+    driver: sqlite
+    sqlite:
+      path: /data/plainq.db
+      journalMode: wal
+      persistence:
+        enabled: true
+        size: 20Gi
+        storageClassName: fast-ssd
+    gc:
+      timeout: 30m
+
+  auth:
+    enabled: true
+    # Omitting jwtSecretRef makes the operator generate a 32-byte secret into a
+    # Secret it owns. Point it at your own Secret to bring your own.
+    accessTokenTTL: 60m
+    refreshTokenTTL: 720h
+    registration: false
+    emailVerification: false
+
+  # Creates the first admin without anyone opening a browser. The password is
+  # generated into this Secret when the Secret does not already exist.
+  bootstrap:
+    enabled: true
+    adminSecretRef:
+      name: orders-admin
+
+  logging:
+    level: info
+    accessLogs: true
+
+  observability:
+    metrics:
+      enabled: true
+      route: /metrics
+    serviceMonitor:
+      enabled: true
+      interval: 30s
+      labels:
+        release: kube-prometheus-stack
+    prometheusRule:
+      enabled: true
+
+  networking:
+    service:
+      type: ClusterIP
+    # Neither listener authenticates gRPC today, so close them to everything
+    # that is not a known client.
+    networkPolicy:
+      enabled: true
+      allowFrom:
+        - podSelector:
+            matchLabels:
+              plainq.dev/client: "true"
+
+  pod:
+    resources:
+      requests:
+        cpu: 200m
+        memory: 256Mi
+      limits:
+        cpu: "1"
+        memory: 1Gi
