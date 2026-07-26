@@ -175,6 +175,12 @@ func New(db *litekit.Conn, options ...Option) (*Storage, error) {
 
 	go s.gc(ctx)
 
+	// Correct the delta-tracked gauges against what is actually on disk. A
+	// process restarting onto a database full of messages would otherwise
+	// report a depth of zero until the next write, and a delete before then
+	// would drive it negative.
+	go s.sampleAllQueues(ctx)
+
 	return &s, nil
 }
 

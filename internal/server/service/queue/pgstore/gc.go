@@ -38,36 +38,56 @@ func (s *Storage) gc(ctx context.Context) {
 			return
 
 		case <-timer.C:
-			start := time.Now()
-
 			if s.observer.Queues() == 0 {
 				continue
 			}
 
-			queues, queuesErr := s.queuesForGC(ctx)
-			if queuesErr != nil {
-				panic(fmt.Sprintf("get queue IDs for GC: %v", queuesErr))
-			}
-
-			for _, queueID := range queues {
-				s.logger.Debug("Running garbage collection for queue",
-					slog.String("queue_id", queueID),
-				)
-
-				result, sweepErr := s.sweep(ctx, queueID)
-				if sweepErr != nil {
-					panic(fmt.Errorf("sweep queue (id: %q): %s", queueID, sweepErr.Error()))
-				}
-
-				s.logger.Debug("Garbage collection",
-					slog.String("queue_id", queueID),
-					slog.String("duration", result.Duration.String()),
-					slog.Uint64("messages_dropped", result.MessagesDropped),
-				)
-			}
-
-			s.observer.GC(metrics.GCScopeAll, start, nil)
+			s.collect(ctx)
 		}
+	}
+}
+
+// collect runs one full sweep and records how it went. It mirrors the SQLite
+// backend: the failure paths still panic, but the outcome is recorded on the
+// way out, so the error result is reachable for exactly the failures an
+// operator needs to see.
+func (s *Storage) collect(ctx context.Context) {
+	var (
+		start = time.Now()
+		cErr  error
+	)
+
+	defer func() { s.observer.GC(metrics.GCScopeAll, start, cErr) }()
+
+	queues, queuesErr := s.queuesForGC(ctx)
+	if queuesErr != nil {
+		cErr = queuesErr
+
+		panic(fmt.Sprintf("get queue IDs for GC: %v", queuesErr))
+	}
+
+	for _, queueID := range queues {
+		s.logger.Debug("Running garbage collection for queue",
+			slog.String("queue_id", queueID),
+		)
+
+		result, sweepErr := s.sweep(ctx, queueID)
+		if sweepErr != nil {
+			cErr = sweepErr
+
+			panic(fmt.Errorf("sweep queue (id: %q): %s", queueID, sweepErr.Error()))
+		}
+
+		// A sweep is the one moment the store already knows a queue changed
+		// size, so it is where the delta-tracked gauges are corrected against
+		// an exact count.
+		s.sampleQueue(ctx, queueID)
+
+		s.logger.Debug("Garbage collection",
+			slog.String("queue_id", queueID),
+			slog.String("duration", result.Duration.String()),
+			slog.Uint64("messages_dropped", result.MessagesDropped),
+		)
 	}
 }
 

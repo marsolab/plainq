@@ -176,9 +176,10 @@ func (o *Observer) TimeInQueue(queueID string, d time.Duration) {
 	metrics.RecordTimeInQueue(queueID, d)
 }
 
-// QueueDepth re-bases a queue's depth from an exact count.
-func (o *Observer) QueueDepth(queueID string, depth int64) {
-	metrics.SetQueueDepth(queueID, depth)
+// QueueStats re-bases a queue's depth and in-flight count from exact
+// readings taken by the backend.
+func (o *Observer) QueueStats(queueID string, depth, inFlight int64) {
+	metrics.SetQueueStats(queueID, depth, inFlight)
 }
 
 // QueuePurged records a queue emptied in one go.
@@ -197,6 +198,12 @@ func (o *Observer) TopicOperation(operation string, start time.Time, err error) 
 // Published records a publish and its fan-out.
 func (o *Observer) Published(topicID string, messages, bytes, delivered, failed uint64) {
 	metrics.RecordPublish(topicID, messages, bytes, delivered, failed)
+}
+
+// StorageError records a storage failure that no single API operation owns —
+// a background sweep blowing up, a statistics sample that could not be taken.
+func (o *Observer) StorageError(operation string) {
+	metrics.RecordStorageError(o.backend, operation)
 }
 
 // GC records a retention sweep.

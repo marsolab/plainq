@@ -97,13 +97,13 @@ first failure rather than after it.
 | `plainq_messages_dead_lettered_total` | counter | `queue` | Messages moved to a dead-letter queue. Anything above zero wants a human. |
 | `plainq_messages_deleted_total` | counter | `queue` | Messages acknowledged and removed. Persistently below the receive rate means consumers are failing. |
 | `plainq_messages_dropped_total` | counter | `queue`, `policy` | Messages evicted by retention or retry exhaustion, by eviction policy. |
-| `plainq_messages_in_flight` | gauge | `queue` | Messages claimed by a consumer and not yet acknowledged. Rising and not falling means consumers are stalled. |
+| `plainq_messages_in_flight` | gauge | `queue` | Messages claimed by a consumer and not yet acknowledged. Tracked by delta between exact samples, so it is live rather than exact; rising and not falling means consumers are stalled. |
 | `plainq_messages_received_bytes_total` | counter | `queue` | Message body bytes handed to consumers. |
 | `plainq_messages_received_total` | counter | `queue` | Messages handed to a consumer. Counts redeliveries, so it exceeds messages_sent when consumers fail. |
 | `plainq_messages_redelivered_total` | counter | `queue` | Messages handed out again after a visibility timeout expired. |
 | `plainq_messages_sent_bytes_total` | counter | `queue` | Message body bytes accepted into a queue. |
 | `plainq_messages_sent_total` | counter | `queue` | Messages accepted into a queue. |
-| `plainq_queue_depth` | gauge | `queue` | Messages held by a queue. Derived from observed operations and re-based whenever an exact count is taken. |
+| `plainq_queue_depth` | gauge | `queue` | Messages held by a queue. Tracked by delta between exact samples, so it is live rather than exact. |
 | `plainq_queue_operation_duration_seconds` | histogram | `backend`, `operation` | How long a queue operation took inside the storage layer, transport excluded. |
 | `plainq_queue_operations_total` | counter | `backend`, `operation`, `result` | Queue operations by outcome. The error rate here is the queue API's error rate. |
 | `plainq_queues_exist` | gauge | — | Queues that currently exist. |
@@ -245,6 +245,23 @@ queues in a loop.
 
 Route labels are chi's route *patterns* (`/api/v1/queue/{id}/messages`), never
 the request path, so a busy server does not mint a series per queue id.
+
+### Depth and in-flight are live, not exact
+
+Every counter and histogram above is exact. The two gauges
+`plainq_queue_depth` and `plainq_messages_in_flight` are not: they are tracked
+by delta on the write path so they move the instant traffic does, and corrected
+against an exact row count at start-up and after every retention sweep.
+
+The correction is not decoration. Deltas start from zero on a process that
+restarts onto a database full of messages, and nothing emits an event when a
+visibility timeout lapses and a claimed message quietly becomes available
+again — so between samples both gauges can be a little off, and without the
+samples they would drift without bound. Redeliveries are compensated
+explicitly, because a queue whose consumers keep failing is precisely the one
+you are watching in-flight for.
+
+If you need an exact depth at a moment in time, `DescribeQueue` counts rows.
 
 ## Telemetry & Houston dashboards
 

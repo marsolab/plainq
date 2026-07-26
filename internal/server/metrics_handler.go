@@ -691,6 +691,12 @@ type PrometheusMetricDescription struct {
 // GetPrometheusCatalog lists every metric family the Prometheus endpoint can
 // expose.
 //
+// It is a package-level handler rather than a method because it reads the
+// process-wide metric registry and nothing else. Hanging it off the metrics
+// handler would have tied it to the telemetry store, and a server running
+// with `--telemetry.enable=false` still has a /metrics endpoint worth
+// documenting.
+//
 // The exposition format the metrics library writes carries a metric's type but
 // not its description, so a `/metrics` page is a list of names with no
 // explanation attached. This is where the explanation lives, and because both
@@ -699,7 +705,7 @@ type PrometheusMetricDescription struct {
 // It answers what the binary is *able* to emit, not what it has emitted so
 // far: a counter that has never been incremented has no series yet, but an
 // operator building a dashboard still needs to know it exists.
-func (*MetricsHandler) GetPrometheusCatalog(w http.ResponseWriter, r *http.Request) {
+func GetPrometheusCatalog(w http.ResponseWriter, r *http.Request) {
 	catalog := metrics.Catalog()
 	out := make([]PrometheusMetricDescription, 0, len(catalog))
 

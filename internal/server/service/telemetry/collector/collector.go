@@ -657,9 +657,14 @@ func (c *Collector) RecordDelete(queueID string, count uint64) {
 }
 
 // RecordRedelivery records a message redelivery.
+//
+// The redelivered messages come back out of the in-flight count for the same
+// reason they do on the Prometheus side: the receive that carried them already
+// counted them, and they were counted once already on their first delivery.
 func (c *Collector) RecordRedelivery(queueID string, count uint64) {
 	m := c.getOrCreateQueueMetrics(queueID)
 	m.messagesRedelivered.Add(count)
+	m.messagesInFlight.Add(-int64(count)) //nolint:gosec // a redelivery count cannot approach int64 max.
 }
 
 // RecordDrop records dropped messages.

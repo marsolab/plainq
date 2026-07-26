@@ -157,6 +157,16 @@ func queryCountMessages(queueID string) string {
 	return `select count(*) from ` + queueID + `;`
 }
 
+// queryQueueStats counts a queue's messages and how many of them are claimed
+// but not yet visible again. Placeholder: now.
+//
+// One pass for both, because the pair is only meaningful read together: a
+// depth of a thousand means something different when all of it is in flight.
+// The in-flight half is an index range on visible_at.
+func queryQueueStats(queueID string) string {
+	return `select count(*), coalesce(sum(case when visible_at > ? then 1 else 0 end), 0) from ` + queueID + `;`
+}
+
 // queryDropMessages evicts messages that exhausted their retries or outlived
 // their retention. Placeholders: max retries, retention cutoff.
 //

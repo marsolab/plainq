@@ -160,6 +160,11 @@ func (s *Storage) Publish(ctx context.Context, topicID string, input *queue.Publ
 			return nil, fmt.Errorf("publish to queue %q: %w", sub.QueueID, err)
 		}
 
+		// Fan-out reaches Send directly, below the layer that records queue
+		// traffic, so a message delivered through a topic would otherwise
+		// never appear in its destination queue's counters or depth.
+		s.observer.Sent(sub.QueueID, uint64(len(sent.MessageIds)), publishedBytes(msgs))
+
 		out.QueueIDs = append(out.QueueIDs, sub.QueueID)
 		out.MessageIDs = append(out.MessageIDs, sent.MessageIds...)
 		out.DeliveredCount += len(sent.MessageIds)
@@ -220,4 +225,15 @@ func (s *Storage) listSubscriptions(ctx context.Context, topicID string) ([]queu
 	}
 
 	return subs, nil
+}
+
+// publishedBytes totals the bodies one fan-out delivery carried.
+func publishedBytes(messages []*v1.SendMessage) uint64 {
+	var total uint64
+
+	for _, message := range messages {
+		total += uint64(len(message.GetBody()))
+	}
+
+	return total
 }

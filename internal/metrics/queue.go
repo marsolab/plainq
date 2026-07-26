@@ -28,6 +28,7 @@ const (
 	OpDelete        = "delete"
 	OpPeek          = "peek"
 	OpSweep         = "sweep"
+	OpSample        = "sample"
 )
 
 // Queue and message metrics.
@@ -99,14 +100,16 @@ var (
 	})
 
 	messagesInFlight = NewGaugeVec(Definition{
-		Name:   Namespace + "_messages_in_flight",
-		Help:   "Messages claimed by a consumer and not yet acknowledged. Rising and not falling means consumers are stalled.",
+		Name: Namespace + "_messages_in_flight",
+		Help: "Messages claimed by a consumer and not yet acknowledged. " +
+			"Tracked by delta between exact samples, so it is live rather than exact; rising and not falling means consumers are stalled.",
 		Labels: []string{labelQueue},
 	})
 
 	queueDepth = NewGaugeVec(Definition{
-		Name:   Namespace + "_queue_depth",
-		Help:   "Messages held by a queue. Derived from observed operations and re-based whenever an exact count is taken.",
+		Name: Namespace + "_queue_depth",
+		Help: "Messages held by a queue. " +
+			"Tracked by delta between exact samples, so it is live rather than exact.",
 		Labels: []string{labelQueue},
 	})
 
@@ -203,8 +206,20 @@ func RecordReceive(queueID string, count, bytes uint64) {
 
 // RecordRedelivery records messages that were handed out again after their
 // visibility timeout expired.
+//
+// It also takes those messages back out of the in-flight gauge, because the
+// receive that carried them has already put them in. A redelivered message was
+// counted as in flight on its first delivery and nothing removed it when its
+// visibility lapsed — counting it again on every retry is how that gauge
+// climbs forever on a queue whose consumers are failing, which is exactly the
+// queue you are watching it for.
 func RecordRedelivery(queueID string, count uint64) {
+	if count == 0 {
+		return
+	}
+
 	messagesRedelivered.Add(count, queueID)
+	messagesInFlight.Add(-float64(count), queueID)
 }
 
 // RecordDelete records acknowledged messages leaving a queue.
@@ -245,13 +260,19 @@ func RecordDeadLetter(queueID string, count uint64) {
 	messagesDeadLettered.Add(count, queueID)
 }
 
-// SetQueueDepth re-bases a queue's depth from an exact count.
+// SetQueueStats re-bases a queue's depth and in-flight count from exact
+// readings.
 //
-// Depth is tracked by delta on the write path, which is free but drifts if
-// anything mutates the store behind its back — a snapshot restore, most
-// obviously. Every exact count the server already computes is fed back
-// through here, so the gauge self-corrects rather than slowly lying.
-func SetQueueDepth(queueID string, depth int64) { queueDepth.Set(float64(depth), queueID) }
+// Both gauges are tracked by delta on the write path, which is free and keeps
+// them live between samples. Deltas alone cannot be right, though: they start
+// from zero on a process that restarts onto a database full of messages, and
+// nothing emits an event when a visibility timeout lapses. So the backends
+// count the rows — one indexed query each — at start-up and after every
+// retention sweep, and the gauges are corrected to what is actually there.
+func SetQueueStats(queueID string, depth, inFlight int64) {
+	queueDepth.Set(float64(depth), queueID)
+	messagesInFlight.Set(float64(inFlight), queueID)
+}
 
 // ResetQueue clears the per-queue gauges after a purge or a queue deletion,
 // so a deleted queue does not leave a permanent non-zero depth behind.

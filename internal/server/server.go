@@ -212,50 +212,54 @@ func NewServer(
 				r.Get("/config", NewSystemHandler(cfg).GetConfig)
 			})
 
-			// Metrics API routes for dashboard.
-			if pq.metricsHandler != nil {
-				v1.Route("/metrics", func(metrics chi.Router) {
-					protect(metrics)
+			v1.Route("/metrics", func(metrics chi.Router) {
+				protect(metrics)
 
-					// Overview dashboard data.
-					metrics.Get("/overview", pq.metricsHandler.GetDashboardOverview)
-					metrics.Get("/topics/overview", pq.metricsHandler.GetTopicDashboardOverview)
+				// What the Prometheus endpoint can expose, with the help text
+				// the exposition format has nowhere to carry. It reads the
+				// process registry, so unlike the dashboard routes it does not
+				// depend on the telemetry store being open.
+				metrics.Get("/catalog", GetPrometheusCatalog)
 
-					// Time-series chart data.
-					metrics.Get("/chart", pq.metricsHandler.GetMetricsChart)
+				// Metrics API routes for dashboard.
+				if pq.metricsHandler == nil {
+					return
+				}
 
-					// System-wide rates.
-					metrics.Get("/rates", pq.metricsHandler.GetRatesChart)
+				// Overview dashboard data.
+				metrics.Get("/overview", pq.metricsHandler.GetDashboardOverview)
+				metrics.Get("/topics/overview", pq.metricsHandler.GetTopicDashboardOverview)
 
-					// In-flight metrics.
-					metrics.Get("/inflight", pq.metricsHandler.GetInFlightMetrics)
+				// Time-series chart data.
+				metrics.Get("/chart", pq.metricsHandler.GetMetricsChart)
 
-					// Available metrics list.
-					metrics.Get("/available", pq.metricsHandler.GetAvailableMetrics)
+				// System-wide rates.
+				metrics.Get("/rates", pq.metricsHandler.GetRatesChart)
 
-					// What the Prometheus endpoint can expose, with the help
-					// text the exposition format has nowhere to carry.
-					metrics.Get("/catalog", pq.metricsHandler.GetPrometheusCatalog)
+				// In-flight metrics.
+				metrics.Get("/inflight", pq.metricsHandler.GetInFlightMetrics)
 
-					// Time range presets.
-					metrics.Get("/time-ranges", pq.metricsHandler.GetTimeRangePresets)
+				// Available metrics list.
+				metrics.Get("/available", pq.metricsHandler.GetAvailableMetrics)
 
-					// Export metrics (for Metabase/custom charts).
-					metrics.Get("/export", pq.metricsHandler.ExportMetrics)
+				// Time range presets.
+				metrics.Get("/time-ranges", pq.metricsHandler.GetTimeRangePresets)
 
-					// Queue-specific metrics.
-					metrics.Route("/queue/{id}", func(queueMetrics chi.Router) {
-						queueMetrics.Get("/", pq.metricsHandler.GetQueueMetrics)
-						queueMetrics.Get("/rates", pq.metricsHandler.GetRatesChart)
-						queueMetrics.Get("/inflight", pq.metricsHandler.GetInFlightMetrics)
-					})
+				// Export metrics (for Metabase/custom charts).
+				metrics.Get("/export", pq.metricsHandler.ExportMetrics)
 
-					metrics.Route("/topic/{id}", func(topicMetrics chi.Router) {
-						topicMetrics.Get("/", pq.metricsHandler.GetTopicMetrics)
-						topicMetrics.Get("/rates", pq.metricsHandler.GetTopicRatesChart)
-					})
+				// Queue-specific metrics.
+				metrics.Route("/queue/{id}", func(queueMetrics chi.Router) {
+					queueMetrics.Get("/", pq.metricsHandler.GetQueueMetrics)
+					queueMetrics.Get("/rates", pq.metricsHandler.GetRatesChart)
+					queueMetrics.Get("/inflight", pq.metricsHandler.GetInFlightMetrics)
 				})
-			}
+
+				metrics.Route("/topic/{id}", func(topicMetrics chi.Router) {
+					topicMetrics.Get("/", pq.metricsHandler.GetTopicMetrics)
+					topicMetrics.Get("/rates", pq.metricsHandler.GetTopicRatesChart)
+				})
+			})
 		})
 	})
 

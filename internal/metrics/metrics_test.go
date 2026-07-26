@@ -331,3 +331,66 @@ func Test_Catalog_isFullyDocumented(t *testing.T) {
 		)
 	}
 }
+
+// Test_inFlight_doesNotDriftOnRedelivery pins the arithmetic that decides
+// whether the in-flight gauge is usable on a queue whose consumers are
+// failing — which is the only queue anyone looks at it for.
+//
+// A redelivered message was already counted as in flight on its first
+// delivery, and nothing takes it back out when its visibility lapses. Counting
+// the receive again without compensating is how that gauge climbs forever.
+func Test_inFlight_doesNotDriftOnRedelivery(t *testing.T) {
+	const queueID = "QTESTREDRIFT"
+
+	RecordSend(queueID, 1, 10)
+
+	// First delivery: one message claimed.
+	RecordReceive(queueID, 1, 10)
+	RecordRedelivery(queueID, 0)
+
+	td.Require(t).Cmp(messagesInFlight.With(queueID).Get(), float64(1))
+
+	// Three redeliveries of that same message. Each is a receive carrying one
+	// message that was already counted.
+	for range 3 {
+		RecordReceive(queueID, 1, 10)
+		RecordRedelivery(queueID, 1)
+
+		td.Cmp(t, messagesInFlight.With(queueID).Get(), float64(1),
+			"a retry re-claims the same message, it does not add a second one",
+		)
+	}
+
+	// Acknowledged: nothing left in flight, and nothing left behind.
+	RecordDelete(queueID, 1)
+
+	td.Cmp(t, messagesInFlight.With(queueID).Get(), float64(0))
+	td.Cmp(t, queueDepth.With(queueID).Get(), float64(0))
+	td.Cmp(t, messagesRedelivered.With(queueID).Get(), uint64(3))
+}
+
+// Test_SetQueueStats_rebasesBothGauges proves the correction path exists and
+// overrides whatever the deltas had accumulated — the mechanism that makes a
+// process restarting onto a database full of messages report the truth rather
+// than starting from zero.
+func Test_SetQueueStats_rebasesBothGauges(t *testing.T) {
+	const queueID = "QTESTREBASE"
+
+	// Deltas from an incomplete view: a delete with no matching send, which is
+	// exactly what a restart looks like.
+	RecordDelete(queueID, 5)
+
+	td.Require(t).Cmp(queueDepth.With(queueID).Get(), float64(-5),
+		"deltas alone can go negative, which is the problem being corrected",
+	)
+
+	SetQueueStats(queueID, 100, 7)
+
+	td.Cmp(t, queueDepth.With(queueID).Get(), float64(100))
+	td.Cmp(t, messagesInFlight.With(queueID).Get(), float64(7))
+
+	// And the deltas carry on from the corrected value.
+	RecordSend(queueID, 2, 20)
+
+	td.Cmp(t, queueDepth.With(queueID).Get(), float64(102))
+}

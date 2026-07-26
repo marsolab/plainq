@@ -193,3 +193,16 @@ func queryListQueues(pageSize int32, cursor string, orderBy v1.ListQueuesRequest
 		where, orderByStr, sortByStr, pageSize,
 	)
 }
+
+// queryQueueStats counts a queue's messages and how many of them are claimed
+// but not yet visible again.
+//
+// One pass for both, because the pair is only meaningful read together: a
+// depth of a thousand means something different when all of it is in flight.
+// The in-flight half is an index range on visible_at.
+func queryQueueStats(queueID string) string {
+	return fmt.Sprintf(
+		`SELECT count(*), count(*) FILTER (WHERE visible_at > now()) FROM %s;`,
+		quoteIdent(queueID),
+	)
+}
