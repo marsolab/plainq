@@ -22,9 +22,9 @@ import (
 	"github.com/marsolab/plainq/internal/server/service/rbac"
 	"github.com/marsolab/plainq/internal/server/service/telemetry"
 	"github.com/marsolab/plainq/internal/server/service/telemetry/collector"
+	"github.com/marsolab/plainq/internal/shared/pqlite"
 	"github.com/marsolab/servekit"
 	"github.com/marsolab/servekit/authkit/jwtkit"
-	"github.com/marsolab/servekit/dbkit/litekit"
 	"github.com/marsolab/servekit/grpckit"
 	"github.com/marsolab/servekit/httpkit"
 	_ "google.golang.org/grpc/encoding/proto"
@@ -421,7 +421,7 @@ func listenerHTTP(cfg *config.Config, logger *slog.Logger, checker hc.HealthChec
 type Option func(*PlainQ)
 
 // WithMetricsStore sets the metrics store for telemetry collection.
-func WithMetricsStore(db *litekit.Conn) Option {
+func WithMetricsStore(db pqlite.DB) Option {
 	return func(pq *PlainQ) {
 		pq.metricsStore = collector.NewSQLiteStore(db)
 	}

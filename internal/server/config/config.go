@@ -21,8 +21,11 @@ type Config struct {
 	HTTPWriteTimeout      time.Duration
 	HTTPIdleTimeout       time.Duration
 
-	StorageDriver      string // "sqlite" (default) or "postgres".
+	StorageDriver      string // "sqlite" (default), "postgres" or "turso".
 	StoragePostgresDSN string // Postgres DSN when StorageDriver == "postgres".
+
+	StorageTursoURL       string // Turso/libSQL database URL when StorageDriver == "turso".
+	StorageTursoAuthToken string // Turso auth token; optional for unauthenticated sqld instances.
 
 	StorageLogEnable   bool
 	StorageDBPath      string

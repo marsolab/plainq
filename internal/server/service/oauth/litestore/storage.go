@@ -12,7 +12,7 @@ import (
 	"github.com/marsolab/plainq/internal/server/service/oauth"
 	"github.com/marsolab/plainq/internal/server/service/oauth/litestore/sqlcgen"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
-	"github.com/marsolab/servekit/dbkit/litekit"
+	"github.com/marsolab/plainq/internal/shared/pqlite"
 	"github.com/marsolab/servekit/idkit"
 	"github.com/marsolab/servekit/logkit"
 )
@@ -22,7 +22,7 @@ var _ oauth.Storage = (*Storage)(nil)
 
 // Storage is the SQLite-backed implementation of oauth.Storage.
 type Storage struct {
-	db      *litekit.Conn
+	db      pqlite.DB
 	queries *sqlcgen.Queries
 	logger  *slog.Logger
 }
@@ -34,7 +34,7 @@ type Option func(*Storage)
 func WithLogger(logger *slog.Logger) Option { return func(s *Storage) { s.logger = logger } }
 
 // NewStorage creates a new SQLite-backed oauth storage.
-func NewStorage(db *litekit.Conn, logger *slog.Logger, opts ...Option) (*Storage, error) {
+func NewStorage(db pqlite.DB, logger *slog.Logger, opts ...Option) (*Storage, error) {
 	if db == nil {
 		return nil, errors.New("db is nil")
 	}
@@ -156,7 +156,7 @@ func (s *Storage) ListProviders(ctx context.Context, orgID string) ([]oauth.Prov
 // oauth_sub) in a serializable transaction so the check-then-act is
 // race-free.
 func (s *Storage) SyncOAuthUser(ctx context.Context, user oauth.OAuthUser, providerName, orgID string) (sErr error) {
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	tx, err := pqlite.BeginTx(ctx, s.db)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}

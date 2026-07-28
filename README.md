@@ -20,7 +20,8 @@ need to scale out.
 - **Ship it anywhere.** An optimized multi-stage [Docker image](Dockerfile)
   (distroless, static binary) and a production [Helm chart](deploy/helm/plainq).
 - **Pick your storage.** Embedded SQLite (default) for local and Litestream-friendly
-  deployments, or PostgreSQL when you want a shared backend.
+  deployments, PostgreSQL when you want a shared backend, or
+  [Turso](https://turso.tech) when you want SQLite hosted for you.
 - **Cluster when you need to.** Turn on `-cluster.enable` and several nodes
   agree on queue state through Raft, track each other with a gossip protocol,
   and find each other on Kubernetes, Docker, AWS, GCP, Azure, Consul or DNS.
@@ -216,9 +217,11 @@ Every flag below is set on the `serve` subcommand. The most useful ones:
 
 | Flag                          | Default       | Purpose                                                            |
 | ----------------------------- | ------------- | ------------------------------------------------------------------ |
-| `--storage.driver`            | `sqlite`      | Storage backend: `sqlite` or `postgres`.                           |
+| `--storage.driver`            | `sqlite`      | Storage backend: `sqlite`, `postgres`, or `turso`.                 |
 | `--storage.path`              | `./plainq.db` | Path to the SQLite database file.                                  |
 | `--storage.postgres.dsn`      | _required when `postgres`_ | PostgreSQL connection string.                          |
+| `--storage.turso.url`         | _required when `turso`_ | Turso database URL, e.g. `libsql://db-org.turso.io`.      |
+| `--storage.turso.auth-token`  | _empty_       | Turso auth token. Omit for an unauthenticated `sqld`.              |
 | `--grpc.addr`                 | `:8080`       | gRPC listener address.                                             |
 | `--http.addr`                 | `:8081`       | HTTP listener address (Houston + metrics + health).                |
 | `--auth.enable`               | `true`        | Toggle JWT auth.                                                   |
@@ -241,6 +244,8 @@ PlainQ is intentionally boring on the inside:
   services. Each one owns its business logic and exposes a `Storage`
   interface implemented by both SQLite (`litestore`) and PostgreSQL
   (`pgstore`) backends. SQL is generated with [sqlc](https://sqlc.dev).
+  Turso reuses the `litestore` backend — libSQL is a fork of SQLite and shares
+  its dialect, so the two differ only in how the connection is opened.
 - `internal/houston/ui` — the Astro + React admin dashboard, built into the
   server binary's assets.
 - `schema/v1` — the protobuf API, mirrored to the Buf Schema Registry.
@@ -249,6 +254,24 @@ The SQLite backend is the default because it's small, fast, and pairs
 naturally with [Litestream](https://litestream.io) for cheap, continuous
 replication to object storage. PostgreSQL is there when you want a shared
 backend across replicas.
+
+Turso is the managed option: a shared SQLite-compatible database over the
+network, reached with a pure-Go driver, so a replica set can share storage
+without running Postgres.
+
+```bash
+./plainq serve \
+  --storage.driver=turso \
+  --storage.turso.url=libsql://plainq-org.turso.io \
+  --storage.turso.auth-token="$TURSO_AUTH_TOKEN"
+```
+
+Two things to know about the Turso driver. Every query is a network
+round-trip, so it trades the local SQLite backend's microsecond latency for a
+shared backend — the local file stays the faster choice for a single node. And
+only `libsql://`, `https://`, and `http://` URLs are accepted: over websockets
+the driver speaks a protocol that omits column types, which PlainQ needs to
+read its `TIMESTAMP` columns back as timestamps.
 
 ## Project layout
 

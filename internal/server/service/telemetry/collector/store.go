@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/marsolab/servekit/dbkit/litekit"
+	"github.com/marsolab/plainq/internal/shared/pqlite"
 )
 
 // errScanRow is a common error format string for row scanning failures.
@@ -14,11 +14,11 @@ const errScanRow = "scan row: %w"
 
 // SQLiteStore implements the Store interface using SQLite.
 type SQLiteStore struct {
-	db *litekit.Conn
+	db pqlite.DB
 }
 
 // NewSQLiteStore creates a new SQLite-backed metrics store.
-func NewSQLiteStore(db *litekit.Conn) *SQLiteStore {
+func NewSQLiteStore(db pqlite.DB) *SQLiteStore {
 	return &SQLiteStore{db: db}
 }
 

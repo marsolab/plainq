@@ -21,6 +21,7 @@ func queryCreateQueueTable(queueID string) string {
 			msg_id     text                                not null,
 			msg_body   blob                                not null,
 			created_at int 		 default current_timestamp not null,
+			updated_at int 		 default current_timestamp not null,
 			visible_at int 		 default current_timestamp not null,
 			retries    int       default 0                 not null,
 
@@ -36,6 +37,26 @@ func queryCreateQueueTable(queueID string) string {
 	`
 
 	return q
+}
+
+// querySelectQueuesMissingUpdatedAt finds queue tables created before the
+// updated_at column was declared. Their trigger writes to a column that is not
+// there, so every update against them — every Receive — fails. The correlated
+// pragma_table_info keeps the check to a single round-trip, which matters when
+// the database is remote.
+const querySelectQueuesMissingUpdatedAt = `
+	select p.queue_id
+	from queue_properties p
+	where not exists (
+		select 1 from pragma_table_info(p.queue_id) where name = 'updated_at'
+	);`
+
+// queryAddUpdatedAtColumn repairs one such table. SQLite refuses to add a NOT
+// NULL column whose default is non-constant, so current_timestamp is not
+// available here; the column lands at 0 and the trigger fills it in on the
+// next update of each row.
+func queryAddUpdatedAtColumn(queueID string) string {
+	return `alter table ` + queueID + ` add column updated_at int default 0 not null;`
 }
 
 // queryInsertMessages inserts one message with every timestamp supplied. It
