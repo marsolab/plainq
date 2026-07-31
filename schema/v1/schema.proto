@@ -31,6 +31,26 @@ service PlainQService {
 
   // Delete deletes message from the queue.
   rpc Delete(DeleteRequest) returns (DeleteResponse) {}
+
+  // ListTopics lists all topics on the server.
+  rpc ListTopics(ListTopicsRequest) returns (ListTopicsResponse) {}
+
+  // CreateTopic creates new topic.
+  rpc CreateTopic(CreateTopicRequest) returns (CreateTopicResponse) {}
+
+  // DeleteTopic deletes topic along with all of its subscriptions.
+  rpc DeleteTopic(DeleteTopicRequest) returns (DeleteTopicResponse) {}
+
+  // Subscribe subscribes a queue to the topic, so every message published
+  // to the topic is fanned out to that queue.
+  rpc Subscribe(SubscribeRequest) returns (SubscribeResponse) {}
+
+  // Unsubscribe removes a subscription from the topic.
+  rpc Unsubscribe(UnsubscribeRequest) returns (UnsubscribeResponse) {}
+
+  // Publish publishes messages to the topic, fanning them out to every
+  // queue subscribed to it.
+  rpc Publish(PublishRequest) returns (PublishResponse) {}
 }
 
 // SendMessage represents a message which should be enqueued.
@@ -234,6 +254,13 @@ message ReceiveRequest {
   // The valid values: from 1 to 10.
   // If 0 is specified the 1 will be used.
   uint32 batch_size = 2;
+
+  // wait_time_seconds enables long polling: how long the server holds the
+  // request open waiting for a message before returning an empty response.
+  // The valid values: from 0 to 20.
+  // If 0 is specified the call returns immediately with whatever is available,
+  // which is the short-polling behaviour every client gets today.
+  uint32 wait_time_seconds = 3;
 }
 
 // ReceiveResponse represents the response.
@@ -271,4 +298,131 @@ message DeleteFailure {
 
   // error represents an error message which shows why delete message has failed.
   string error = 2;
+}
+
+// Topic represents a publish/subscribe topic. A topic owns no storage of its
+// own: publishing to it fans the message out to every subscribed queue.
+message Topic {
+  // topic_id represents the unique identifier for the topic.
+  string topic_id = 1;
+
+  // topic_name represents the name of the topic.
+  string topic_name = 2;
+
+  // created_at denotes the timestamp when the topic was created.
+  google.protobuf.Timestamp created_at = 3;
+
+  // subscriptions holds the queues currently subscribed to the topic.
+  repeated Subscription subscriptions = 4;
+}
+
+// Subscription represents a binding between a topic and a queue.
+message Subscription {
+  // subscription_id represents the unique identifier for the subscription.
+  string subscription_id = 1;
+
+  // topic_id represents the unique identifier of the subscribed topic.
+  string topic_id = 2;
+
+  // queue_id represents the unique identifier of the queue which receives
+  // the messages published to the topic.
+  string queue_id = 3;
+
+  // queue_name represents the name of the subscribed queue.
+  string queue_name = 4;
+
+  // created_at denotes the timestamp when the subscription was created.
+  google.protobuf.Timestamp created_at = 5;
+}
+
+// PublishMessage represents a message which should be published to a topic.
+message PublishMessage {
+  // body represents the message content as sequence of bytes.
+  bytes body = 1;
+}
+
+// ListTopicsRequest represents a request to list topics.
+message ListTopicsRequest {}
+
+// ListTopicsResponse represents a response to ListTopicsRequest.
+message ListTopicsResponse {
+  // topics holds the topics on the server along with their subscriptions.
+  repeated Topic topics = 1;
+}
+
+// CreateTopicRequest represents a request to create a topic.
+message CreateTopicRequest {
+  // topic_name represents the name of the topic.
+  string topic_name = 1;
+}
+
+// CreateTopicResponse represents a response to CreateTopicRequest.
+message CreateTopicResponse {
+  // topic_id represents the unique identifier for the created topic.
+  string topic_id = 1;
+}
+
+// DeleteTopicRequest represents a request to delete a topic.
+message DeleteTopicRequest {
+  // topic_id represents the unique identifier for the topic.
+  string topic_id = 1;
+}
+
+// DeleteTopicResponse represents a response to DeleteTopicRequest.
+message DeleteTopicResponse {}
+
+// SubscribeRequest represents a request to subscribe a queue to a topic.
+message SubscribeRequest {
+  // topic_id represents the unique identifier for the topic.
+  string topic_id = 1;
+
+  // queue_id represents the unique identifier of the queue which should
+  // receive the messages published to the topic.
+  string queue_id = 2;
+}
+
+// SubscribeResponse represents a response to SubscribeRequest.
+message SubscribeResponse {
+  // subscription_id represents the unique identifier for the created subscription.
+  string subscription_id = 1;
+}
+
+// UnsubscribeRequest represents a request to remove a subscription from a topic.
+message UnsubscribeRequest {
+  // topic_id represents the unique identifier for the topic.
+  string topic_id = 1;
+
+  // subscription_id represents the unique identifier for the subscription.
+  string subscription_id = 2;
+}
+
+// UnsubscribeResponse represents a response to UnsubscribeRequest.
+message UnsubscribeResponse {}
+
+// PublishRequest represents a request which publishes given messages
+// to the specified topic.
+message PublishRequest {
+  // topic_id represents the unique identifier for the topic.
+  string topic_id = 1;
+
+  // messages represents an array of messages which will be published to the topic.
+  repeated PublishMessage messages = 2;
+}
+
+// PublishResponse represents the response to PublishRequest which contains
+// information about the fan-out of the published messages.
+message PublishResponse {
+  // topic_id represents the unique identifier of the topic published to.
+  string topic_id = 1;
+
+  // queue_ids represents an array of queue IDs the messages were fanned out to.
+  repeated string queue_ids = 2;
+
+  // message_ids represents an array of message IDs that has been enqueued
+  // across all subscribed queues.
+  repeated string message_ids = 3;
+
+  // delivered_count represents the total number of deliveries performed,
+  // which is the number of published messages times the number of subscribers.
+  uint64 delivered_count = 4;
 }

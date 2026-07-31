@@ -27,6 +27,12 @@ const (
 	PlainQService_Send_FullMethodName          = "/v1.PlainQService/Send"
 	PlainQService_Receive_FullMethodName       = "/v1.PlainQService/Receive"
 	PlainQService_Delete_FullMethodName        = "/v1.PlainQService/Delete"
+	PlainQService_ListTopics_FullMethodName    = "/v1.PlainQService/ListTopics"
+	PlainQService_CreateTopic_FullMethodName   = "/v1.PlainQService/CreateTopic"
+	PlainQService_DeleteTopic_FullMethodName   = "/v1.PlainQService/DeleteTopic"
+	PlainQService_Subscribe_FullMethodName     = "/v1.PlainQService/Subscribe"
+	PlainQService_Unsubscribe_FullMethodName   = "/v1.PlainQService/Unsubscribe"
+	PlainQService_Publish_FullMethodName       = "/v1.PlainQService/Publish"
 )
 
 // PlainQServiceClient is the client API for PlainQService service.
@@ -51,6 +57,20 @@ type PlainQServiceClient interface {
 	Receive(ctx context.Context, in *ReceiveRequest, opts ...grpc.CallOption) (*ReceiveResponse, error)
 	// Delete deletes message from the queue.
 	Delete(ctx context.Context, in *DeleteRequest, opts ...grpc.CallOption) (*DeleteResponse, error)
+	// ListTopics lists all topics on the server.
+	ListTopics(ctx context.Context, in *ListTopicsRequest, opts ...grpc.CallOption) (*ListTopicsResponse, error)
+	// CreateTopic creates new topic.
+	CreateTopic(ctx context.Context, in *CreateTopicRequest, opts ...grpc.CallOption) (*CreateTopicResponse, error)
+	// DeleteTopic deletes topic along with all of its subscriptions.
+	DeleteTopic(ctx context.Context, in *DeleteTopicRequest, opts ...grpc.CallOption) (*DeleteTopicResponse, error)
+	// Subscribe subscribes a queue to the topic, so every message published
+	// to the topic is fanned out to that queue.
+	Subscribe(ctx context.Context, in *SubscribeRequest, opts ...grpc.CallOption) (*SubscribeResponse, error)
+	// Unsubscribe removes a subscription from the topic.
+	Unsubscribe(ctx context.Context, in *UnsubscribeRequest, opts ...grpc.CallOption) (*UnsubscribeResponse, error)
+	// Publish publishes messages to the topic, fanning them out to every
+	// queue subscribed to it.
+	Publish(ctx context.Context, in *PublishRequest, opts ...grpc.CallOption) (*PublishResponse, error)
 }
 
 type plainQServiceClient struct {
@@ -141,6 +161,66 @@ func (c *plainQServiceClient) Delete(ctx context.Context, in *DeleteRequest, opt
 	return out, nil
 }
 
+func (c *plainQServiceClient) ListTopics(ctx context.Context, in *ListTopicsRequest, opts ...grpc.CallOption) (*ListTopicsResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListTopicsResponse)
+	err := c.cc.Invoke(ctx, PlainQService_ListTopics_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *plainQServiceClient) CreateTopic(ctx context.Context, in *CreateTopicRequest, opts ...grpc.CallOption) (*CreateTopicResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateTopicResponse)
+	err := c.cc.Invoke(ctx, PlainQService_CreateTopic_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *plainQServiceClient) DeleteTopic(ctx context.Context, in *DeleteTopicRequest, opts ...grpc.CallOption) (*DeleteTopicResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DeleteTopicResponse)
+	err := c.cc.Invoke(ctx, PlainQService_DeleteTopic_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *plainQServiceClient) Subscribe(ctx context.Context, in *SubscribeRequest, opts ...grpc.CallOption) (*SubscribeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SubscribeResponse)
+	err := c.cc.Invoke(ctx, PlainQService_Subscribe_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *plainQServiceClient) Unsubscribe(ctx context.Context, in *UnsubscribeRequest, opts ...grpc.CallOption) (*UnsubscribeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UnsubscribeResponse)
+	err := c.cc.Invoke(ctx, PlainQService_Unsubscribe_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *plainQServiceClient) Publish(ctx context.Context, in *PublishRequest, opts ...grpc.CallOption) (*PublishResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PublishResponse)
+	err := c.cc.Invoke(ctx, PlainQService_Publish_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // PlainQServiceServer is the server API for PlainQService service.
 // All implementations must embed UnimplementedPlainQServiceServer
 // for forward compatibility.
@@ -163,6 +243,20 @@ type PlainQServiceServer interface {
 	Receive(context.Context, *ReceiveRequest) (*ReceiveResponse, error)
 	// Delete deletes message from the queue.
 	Delete(context.Context, *DeleteRequest) (*DeleteResponse, error)
+	// ListTopics lists all topics on the server.
+	ListTopics(context.Context, *ListTopicsRequest) (*ListTopicsResponse, error)
+	// CreateTopic creates new topic.
+	CreateTopic(context.Context, *CreateTopicRequest) (*CreateTopicResponse, error)
+	// DeleteTopic deletes topic along with all of its subscriptions.
+	DeleteTopic(context.Context, *DeleteTopicRequest) (*DeleteTopicResponse, error)
+	// Subscribe subscribes a queue to the topic, so every message published
+	// to the topic is fanned out to that queue.
+	Subscribe(context.Context, *SubscribeRequest) (*SubscribeResponse, error)
+	// Unsubscribe removes a subscription from the topic.
+	Unsubscribe(context.Context, *UnsubscribeRequest) (*UnsubscribeResponse, error)
+	// Publish publishes messages to the topic, fanning them out to every
+	// queue subscribed to it.
+	Publish(context.Context, *PublishRequest) (*PublishResponse, error)
 	mustEmbedUnimplementedPlainQServiceServer()
 }
 
@@ -196,6 +290,24 @@ func (UnimplementedPlainQServiceServer) Receive(context.Context, *ReceiveRequest
 }
 func (UnimplementedPlainQServiceServer) Delete(context.Context, *DeleteRequest) (*DeleteResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Delete not implemented")
+}
+func (UnimplementedPlainQServiceServer) ListTopics(context.Context, *ListTopicsRequest) (*ListTopicsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ListTopics not implemented")
+}
+func (UnimplementedPlainQServiceServer) CreateTopic(context.Context, *CreateTopicRequest) (*CreateTopicResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method CreateTopic not implemented")
+}
+func (UnimplementedPlainQServiceServer) DeleteTopic(context.Context, *DeleteTopicRequest) (*DeleteTopicResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method DeleteTopic not implemented")
+}
+func (UnimplementedPlainQServiceServer) Subscribe(context.Context, *SubscribeRequest) (*SubscribeResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Subscribe not implemented")
+}
+func (UnimplementedPlainQServiceServer) Unsubscribe(context.Context, *UnsubscribeRequest) (*UnsubscribeResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Unsubscribe not implemented")
+}
+func (UnimplementedPlainQServiceServer) Publish(context.Context, *PublishRequest) (*PublishResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Publish not implemented")
 }
 func (UnimplementedPlainQServiceServer) mustEmbedUnimplementedPlainQServiceServer() {}
 func (UnimplementedPlainQServiceServer) testEmbeddedByValue()                       {}
@@ -362,6 +474,114 @@ func _PlainQService_Delete_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _PlainQService_ListTopics_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListTopicsRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PlainQServiceServer).ListTopics(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PlainQService_ListTopics_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PlainQServiceServer).ListTopics(ctx, req.(*ListTopicsRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PlainQService_CreateTopic_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateTopicRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PlainQServiceServer).CreateTopic(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PlainQService_CreateTopic_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PlainQServiceServer).CreateTopic(ctx, req.(*CreateTopicRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PlainQService_DeleteTopic_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DeleteTopicRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PlainQServiceServer).DeleteTopic(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PlainQService_DeleteTopic_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PlainQServiceServer).DeleteTopic(ctx, req.(*DeleteTopicRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PlainQService_Subscribe_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SubscribeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PlainQServiceServer).Subscribe(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PlainQService_Subscribe_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PlainQServiceServer).Subscribe(ctx, req.(*SubscribeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PlainQService_Unsubscribe_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UnsubscribeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PlainQServiceServer).Unsubscribe(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PlainQService_Unsubscribe_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PlainQServiceServer).Unsubscribe(ctx, req.(*UnsubscribeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _PlainQService_Publish_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PublishRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PlainQServiceServer).Publish(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PlainQService_Publish_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PlainQServiceServer).Publish(ctx, req.(*PublishRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // PlainQService_ServiceDesc is the grpc.ServiceDesc for PlainQService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -400,6 +620,30 @@ var PlainQService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Delete",
 			Handler:    _PlainQService_Delete_Handler,
+		},
+		{
+			MethodName: "ListTopics",
+			Handler:    _PlainQService_ListTopics_Handler,
+		},
+		{
+			MethodName: "CreateTopic",
+			Handler:    _PlainQService_CreateTopic_Handler,
+		},
+		{
+			MethodName: "DeleteTopic",
+			Handler:    _PlainQService_DeleteTopic_Handler,
+		},
+		{
+			MethodName: "Subscribe",
+			Handler:    _PlainQService_Subscribe_Handler,
+		},
+		{
+			MethodName: "Unsubscribe",
+			Handler:    _PlainQService_Unsubscribe_Handler,
+		},
+		{
+			MethodName: "Publish",
+			Handler:    _PlainQService_Publish_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
