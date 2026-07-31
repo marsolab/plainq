@@ -255,9 +255,8 @@ naturally with [Litestream](https://litestream.io) for cheap, continuous
 replication to object storage. PostgreSQL is there when you want a shared
 backend across replicas.
 
-Turso is the managed option: a shared SQLite-compatible database over the
-network, reached with a pure-Go driver, so a replica set can share storage
-without running Postgres.
+Turso keeps the SQLite backend but hands the database to someone else to run,
+which suits deployments with no local disk worth persisting:
 
 ```bash
 ./plainq serve \
@@ -266,12 +265,16 @@ without running Postgres.
   --storage.turso.auth-token="$TURSO_AUTH_TOKEN"
 ```
 
-Two things to know about the Turso driver. Every query is a network
-round-trip, so it trades the local SQLite backend's microsecond latency for a
-shared backend — the local file stays the faster choice for a single node. And
-only `libsql://`, `https://`, and `http://` URLs are accepted: over websockets
-the driver speaks a protocol that omits column types, which PlainQ needs to
-read its `TIMESTAMP` columns back as timestamps.
+Three things to know before choosing it. **Run one server per Turso database.**
+The SQLite backend keeps queue properties in an in-process cache that nothing
+invalidates from outside, so a second server pointed at the same database would
+not see the first one's queues. To run several nodes, use `-cluster.enable`
+with the embedded SQLite store, or PostgreSQL to share one database;
+`-cluster.enable` together with Turso is rejected at startup. **Every query is
+a network round-trip**, so the local file stays far faster for a single node.
+And only `libsql://`, `https://`, and `http://` URLs are accepted: over
+websockets the driver speaks a protocol that omits column types, which PlainQ
+needs to read its `TIMESTAMP` columns back as timestamps.
 
 ## Project layout
 

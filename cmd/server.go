@@ -713,6 +713,34 @@ func initQueueStorage(
 	observer *telemetry.Observer,
 ) (queue.Storage, func() error, error) {
 	switch backend.driver {
+	case storageDriverTurso:
+		if clusterCfg.Enabled {
+			return nil, nil, errors.New(
+				"cluster mode replicates the embedded store, so it needs storage.driver=sqlite. " +
+					"A Turso database is already shared between nodes and replicating it " +
+					"would write every message twice",
+			)
+		}
+
+		opts := make([]queuestore.Option, 0, 3)
+
+		opts = append(opts, queuestore.WithObserver(observer))
+
+		if cfg.StorageLogEnable {
+			opts = append(opts, queuestore.WithLogger(logger))
+		}
+
+		if cfg.StorageGCTimeout != 0 {
+			opts = append(opts, queuestore.WithGCTimeout(cfg.StorageGCTimeout))
+		}
+
+		store, err := queuestore.New(backend.lite(), opts...)
+		if err != nil {
+			return nil, nil, fmt.Errorf("create turso queue storage: %w", err)
+		}
+
+		return store, store.Close, nil
+
 	case storageDriverPostgres:
 		if clusterCfg.Enabled {
 			return nil, nil, errors.New(

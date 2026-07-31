@@ -45,10 +45,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS id_uindex ON schema_version (id);
 	tursoSchemaVersionSeed = `INSERT OR IGNORE INTO schema_version (id, version) VALUES (0, 0);`
 
 	// tursoSchemaVersionBump is appended to each mutation script so the version
-	// bump rides along in the same transactional batch. It takes the version as
-	// a format argument rather than a bound parameter to keep the script free
-	// of arguments, which is what makes it a batch.
-	tursoSchemaVersionBump = `UPDATE schema_version SET version = %d, updated_at = current_timestamp WHERE id = 0;`
+	// bump rides along in the same transactional batch. It takes the versions as
+	// format arguments rather than bound parameters to keep the script free of
+	// arguments, which is what makes it a batch.
+	//
+	// The WHERE clause guards against a stale bump: it only lands if the version
+	// is still the one this mutation expected to find, so a server that lost a
+	// migration race cannot move the version on top of the winner's.
+	tursoSchemaVersionBump = `UPDATE schema_version SET version = %d, updated_at = current_timestamp` +
+		` WHERE id = 0 AND version = %d;`
 
 	// tursoMutationTimeout bounds the whole migration run. It is more generous
 	// than the local SQLite equivalent because every statement is a round-trip
@@ -78,6 +83,14 @@ func newTursoEvolver(db *sql.DB, mutations fs.FS) *tursoEvolver {
 // The bump cannot be issued in a separate database/sql transaction: the libSQL
 // driver opens an explicit transaction by sending BEGIN on the stream, and a
 // multi-statement script inside it would nest a second BEGIN.
+//
+// Two servers starting against the same database race: both read the same
+// version and both try to apply the same mutation. libSQL serializes the two
+// batches, and the loser's copy of a mutation that seeds rows fails on the rows
+// the winner already inserted, rolling its whole batch back. That failure is
+// expected rather than fatal, so the version is re-read: if the winner has
+// already recorded this mutation, the loser moves on instead of refusing to
+// start.
 func (e *tursoEvolver) MutateSchema() error {
 	ctx, cancel := context.WithTimeout(context.Background(), e.timeout)
 	defer cancel()
@@ -86,12 +99,9 @@ func (e *tursoEvolver) MutateSchema() error {
 		return err
 	}
 
-	var currentVersion int
-
-	if err := e.db.QueryRowContext(ctx,
-		`SELECT version FROM schema_version WHERE id = 0`,
-	).Scan(&currentVersion); err != nil {
-		return fmt.Errorf("read schema version: %w", err)
+	currentVersion, versionErr := e.schemaVersion(ctx)
+	if versionErr != nil {
+		return versionErr
 	}
 
 	mutations, loadErr := loadSQLMutations(e.mutations)
@@ -104,16 +114,42 @@ func (e *tursoEvolver) MutateSchema() error {
 			continue
 		}
 
-		// The version is an index into the mutation files, never user input,
-		// so interpolating it keeps the script a single parameterless batch.
-		script := fmt.Sprintf("%s\n%s\n", m.changes, fmt.Sprintf(tursoSchemaVersionBump, m.version))
+		// The versions are indexes into the mutation files, never user input,
+		// so interpolating them keeps the script a single parameterless batch.
+		script := fmt.Sprintf("%s\n%s\n", m.changes,
+			fmt.Sprintf(tursoSchemaVersionBump, m.version, m.version-1),
+		)
 
 		if _, err := e.db.ExecContext(ctx, script); err != nil {
+			// Losing the race is not a failure: whoever won applied exactly the
+			// mutation this one was about to. Anything else is a real error.
+			applied, readErr := e.schemaVersion(ctx)
+			if readErr == nil && applied >= m.version {
+				currentVersion = applied
+
+				continue
+			}
+
 			return fmt.Errorf("apply schema mutation %q: %w", m.name, err)
 		}
+
+		currentVersion = m.version
 	}
 
 	return nil
+}
+
+// schemaVersion reads the currently recorded schema version.
+func (e *tursoEvolver) schemaVersion(ctx context.Context) (int, error) {
+	var version int
+
+	if err := e.db.QueryRowContext(ctx,
+		`SELECT version FROM schema_version WHERE id = 0`,
+	).Scan(&version); err != nil {
+		return 0, fmt.Errorf("read schema version: %w", err)
+	}
+
+	return version, nil
 }
 
 func (e *tursoEvolver) ensureSchemaVersionTable(ctx context.Context) error {
