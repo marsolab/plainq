@@ -1,19 +1,26 @@
 name: Merge
 
 on:
-  release:
-    types:
-      - published
-    paths-ignore:
-      - '.github/workflows/pr.yml'
+  # The schema is published when a change to it lands on main. This used to
+  # trigger on `release: published`, but the repository has never cut a
+  # release, so the workflow never ran once and the registry drifted behind
+  # main until someone pushed by hand.
+  push:
     branches:
       - main
+    paths:
+      - 'schema/**'
+      - '.github/workflows/schema-release.yaml'
+
+  # Lets the schema be republished without a commit, e.g. after rotating
+  # BUF_TOKEN or recovering from a failed push.
+  workflow_dispatch:
 
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - uses: bufbuild/buf-setup-action@v1
       - uses: bufbuild/buf-lint-action@v1
         with:
@@ -22,12 +29,16 @@ jobs:
   breaking:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - uses: bufbuild/buf-setup-action@v1
+      # Checked against what is actually published, not against main. This
+      # job now runs on main, so comparing against main would compare the
+      # commit with itself and pass unconditionally. The registry is the
+      # baseline that protects consumers.
       - uses: bufbuild/buf-breaking-action@v1
         with:
           input: schema
-          against: "https://github.com/${GITHUB_REPOSITORY}.git#branch=main,subdir=schema"
+          against: buf.build/plainq/schema
 
   push:
     runs-on: ubuntu-latest
@@ -35,7 +46,7 @@ jobs:
       - breaking
       - lint
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - uses: bufbuild/buf-setup-action@v1
       - uses: bufbuild/buf-push-action@v1
         with:
