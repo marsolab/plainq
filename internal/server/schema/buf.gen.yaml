@@ -17,3 +17,14 @@ plugins:
     out: .
     opt:
       - paths=source_relative
+
+  # schema.pb.json.go is not decoration: the REST handlers decode request
+  # bodies straight into v1 types, so these MarshalJSON/UnmarshalJSON methods
+  # are what make the API accept proto JSON names. Without them encoding/json
+  # falls back to the snake_case struct tags and Houston's camelCase payloads
+  # decode to empty fields. It was generated once and then left out of this
+  # config, so it drifted; generating it here keeps it in step with the proto.
+  - plugin: buf.build/community/mitchellh-go-json:v1.1.0
+    out: .
+    opt:
+      - paths=source_relative
