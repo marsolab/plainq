@@ -1,12 +1,17 @@
 name: Pull Request | Merge
 
 on:
-  push:
+  # Only pull requests. This used to carry a bare `push:` as well, with no
+  # branch or path filter, so every push to every branch ran these jobs -- and
+  # a PR branch ran them twice, once for the push and once for the pull
+  # request. Pushes to main are already covered by schema-release.yaml, which
+  # lints and breaking-checks before it publishes.
   pull_request:
-    paths-ignore:
-      - '.github/workflows/merge.yml'
     branches:
       - main
+    paths:
+      - 'schema/**'
+      - '.github/workflows/schema-pr.yaml'
 
 jobs:
   lint:
@@ -23,7 +28,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: bufbuild/buf-setup-action@v1
+      # github.repository, not ${GITHUB_REPOSITORY}: Actions only interpolates
+      # ${{ }}, so the old form reached buf verbatim and only resolved because
+      # the action happens to pass it through a shell, where the runner env var
+      # expands. That is an accident, not a contract.
       - uses: bufbuild/buf-breaking-action@v1
         with:
           input: schema
-          against: "https://github.com/${GITHUB_REPOSITORY}.git#branch=main,subdir=schema"
+          against: "https://github.com/${{ github.repository }}.git#branch=main,subdir=schema"
