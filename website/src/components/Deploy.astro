@@ -14,7 +14,7 @@ $ helm install plainq deploy/helm/plainq \\
 const targets = [
   {
     title: "Single binary",
-    body: "make build produces ./plainq. Copy it to a box, run serve, and you are done — SQLite lives in one file.",
+    body: "make build produces ./plainq. Copy it to a box and run serve for queue and pub/sub APIs with SQLite in one file.",
   },
   {
     title: "Docker",
@@ -31,11 +31,11 @@ const targets = [
   <div class="mx-auto max-w-6xl px-4 py-20 sm:px-6">
     <div class="max-w-2xl">
       <h2 class="text-3xl font-bold tracking-tight sm:text-4xl">
-        Ship it anywhere
+        From one process to a cluster
       </h2>
       <p class="mt-4 text-lg text-[var(--color-muted-foreground)]">
-        From a laptop to a cluster, the same binary follows you. Pick the
-        smallest thing that works.
+        Start on a laptop and grow into a clustered deployment. Queues and
+        topics keep the same model while storage and topology change underneath.
       </p>
     </div>
 

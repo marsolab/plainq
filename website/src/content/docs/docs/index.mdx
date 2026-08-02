@@ -1,31 +1,31 @@
 ---
 title: PlainQ Documentation
-description: Documentation for PlainQ — the truly simple queue service. One binary with a gRPC API, CLI, TUI, and a built-in admin UI.
+description: Documentation for PlainQ — simple work queues and topic-based pub/sub in one self-hosted binary.
 ---
 
 import { Card, CardGrid, LinkCard } from "@astrojs/starlight/components";
 
-**PlainQ** is a small, self-contained queue server written in Go. A single
-binary gives you a gRPC API, a CLI, a terminal UI, and a built-in admin
-dashboard (Houston) — backed by embedded SQLite for local and small
-deployments, or PostgreSQL when you need to scale out.
+**PlainQ** is a small, self-contained message broker written in Go. A single
+binary gives you reliable work queues, topic-based pub/sub, gRPC and HTTP APIs,
+a CLI, a terminal UI, and the Houston admin dashboard — backed by SQLite,
+Turso, or PostgreSQL.
 
 <CardGrid stagger>
-  <Card title="One binary" icon="rocket">
-    Run `./plainq serve` and you have a queue. No broker fleet, no external
-    dependencies.
+  <Card title="Queues + pub/sub" icon="rocket">
+    Send work to competing consumers, or publish once to fan out into every
+    subscribed queue.
   </Card>
-  <Card title="gRPC + CLI + TUI" icon="laptop">
-    The same surface, scripted or interactive — with `-json` everywhere for
-    scripts and agents.
+  <Card title="One operational unit" icon="laptop">
+    Run `./plainq serve` for the broker APIs, storage, metrics, and admin UI. No
+    separate broker fleet.
   </Card>
   <Card title="Pick your storage" icon="seti:db">
-    Embedded SQLite by default (Litestream-friendly), or PostgreSQL for a shared
-    backend.
+    Embedded SQLite by default, Turso for hosted SQLite, or PostgreSQL for a
+    shared backend.
   </Card>
-  <Card title="Auth built in" icon="approve-check">
-    JWT sessions, refresh tokens, RBAC, and OAuth/OIDC hooks ship with the
-    server.
+  <Card title="Built for automation" icon="approve-check">
+    Use typed gRPC and JSON-friendly CLI output for queues, plus HTTP for
+    pub/sub and admin integrations.
   </Card>
 </CardGrid>
 
