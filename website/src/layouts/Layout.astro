@@ -7,8 +7,8 @@ interface Props {
 }
 
 const {
-  title = "PlainQ — Truly Simple Queue Service",
-  description = "PlainQ is a small, self-contained queue server written in Go. One binary gives you a gRPC API, a CLI, a TUI, and a built-in admin UI — backed by SQLite or PostgreSQL.",
+  title = "PlainQ — Simple Queues and Pub/Sub",
+  description = "PlainQ is a self-hosted message broker for reliable work queues and topic-based pub/sub. Run one Go binary with gRPC and HTTP APIs, SQLite, Turso, or PostgreSQL.",
 } = Astro.props;
 
 const canonical = new URL(Astro.url.pathname, Astro.site).toString();

@@ -12,7 +12,7 @@ export default defineConfig({
     starlight({
       title: "PlainQ Docs",
       description:
-        "Documentation for PlainQ — the truly simple queue service. One binary, gRPC API, CLI, TUI, and a built-in admin UI.",
+        "Documentation for PlainQ — simple work queues and topic-based pub/sub in one self-hosted binary.",
       logo: {
         light: "./src/assets/logo-light.svg",
         dark: "./src/assets/logo-dark.svg",
