@@ -9,7 +9,7 @@ import (
 
 	"github.com/marsolab/plainq/internal/server/service/account"
 	"github.com/marsolab/plainq/internal/server/service/account/litestore/sqlcgen"
-	"github.com/marsolab/servekit/dbkit/litekit"
+	"github.com/marsolab/plainq/internal/shared/pqlite"
 	"github.com/marsolab/servekit/logkit"
 )
 
@@ -19,13 +19,13 @@ var _ account.Storage = (*Storage)(nil)
 // Storage is the SQLite-backed implementation of account.Storage.
 // It delegates all queries to sqlc-generated code.
 type Storage struct {
-	db      *litekit.Conn
+	db      pqlite.DB
 	queries *sqlcgen.Queries
 	logger  *slog.Logger
 }
 
 // NewStorage creates a new SQLite-backed account storage.
-func NewStorage(db *litekit.Conn, logger *slog.Logger, opts ...Option) (*Storage, error) {
+func NewStorage(db pqlite.DB, logger *slog.Logger, opts ...Option) (*Storage, error) {
 	if db == nil {
 		return nil, errors.New("db is nil")
 	}

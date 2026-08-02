@@ -15,7 +15,7 @@ import (
 	"github.com/marsolab/plainq/internal/server/service/queue/litestore/sqlcgen"
 	"github.com/marsolab/plainq/internal/server/service/telemetry"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
-	"github.com/marsolab/servekit/dbkit/litekit"
+	"github.com/marsolab/plainq/internal/shared/pqlite"
 	"github.com/marsolab/servekit/errkit"
 	"github.com/marsolab/servekit/idkit"
 	"github.com/marsolab/servekit/logkit"
@@ -107,7 +107,7 @@ func WithObserver(observer *telemetry.Observer) Option {
 // Storage represents a storage system.
 // This struct holds the necessary configurations and dependencies for the storage.
 type Storage struct {
-	db      *litekit.Conn
+	db      pqlite.DB
 	queries *sqlcgen.Queries
 	logger  *slog.Logger
 
@@ -136,7 +136,7 @@ type Storage struct {
 }
 
 // New returns a pointer to a new instance of Storage with a pointer to sql.DB struct.
-func New(db *litekit.Conn, options ...Option) (*Storage, error) {
+func New(db pqlite.DB, options ...Option) (*Storage, error) {
 	s := Storage{
 		db:      db,
 		queries: sqlcgen.New(db),
@@ -168,6 +168,10 @@ func New(db *litekit.Conn, options ...Option) (*Storage, error) {
 
 	if err := s.fillCache(prepareCtx, ""); err != nil {
 		return nil, fmt.Errorf("filling cache: %w", err)
+	}
+
+	if err := s.repairQueueTables(prepareCtx); err != nil {
+		return nil, fmt.Errorf("repair queue tables: %w", err)
 	}
 
 	ctx, stop := context.WithCancel(context.Background())
@@ -208,7 +212,7 @@ func (s *Storage) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest)
 		input.VisibilityTimeoutSeconds = uint64(msgVisibilityTimeout.Seconds())
 	}
 
-	tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	tx, txErr := pqlite.BeginTx(ctx, s.db)
 	if txErr != nil {
 		return nil, fmt.Errorf(fmtBeginTxError, txErr)
 	}
@@ -366,7 +370,7 @@ func (s *Storage) DescribeQueue(ctx context.Context, input *v1.DescribeQueueRequ
 }
 
 func (s *Storage) PurgeQueue(ctx context.Context, input *v1.PurgeQueueRequest) (_ *v1.PurgeQueueResponse, sErr error) {
-	tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	tx, txErr := pqlite.BeginTx(ctx, s.db)
 	if txErr != nil {
 		return nil, fmt.Errorf("begin transaction: %w", txErr)
 	}
@@ -415,7 +419,7 @@ func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest)
 		return nil, fmt.Errorf("queue props (id: %q) not cached", queueID)
 	}
 
-	tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	tx, txErr := pqlite.BeginTx(ctx, s.db)
 	if txErr != nil {
 		return nil, fmt.Errorf("begin transaction: %w", txErr)
 	}
@@ -477,7 +481,7 @@ func (s *Storage) Send(ctx context.Context, input *v1.SendRequest) (_ *v1.SendRe
 	args, ids := buildSendArgs(ctx, messages, stamped)
 	output.MessageIds = ids
 
-	tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	tx, txErr := pqlite.BeginTx(ctx, s.db)
 	if txErr != nil {
 		return nil, fmt.Errorf("begin transaction: %w", txErr)
 	}
@@ -516,7 +520,7 @@ func (s *Storage) Receive(ctx context.Context, input *v1.ReceiveRequest) (_ *v1.
 		return nil, fmt.Errorf("describe queue (id: %q): %w", queueID, describeErr)
 	}
 
-	tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	tx, txErr := pqlite.BeginTx(ctx, s.db)
 	if txErr != nil {
 		return nil, fmt.Errorf("begin transaction: %w", txErr)
 	}
@@ -865,7 +869,7 @@ func (s *Storage) Close() error {
 
 //nolint:cyclop // sErr is set by deferred rollback; covers the full SQL fetch path.
 func (s *Storage) listQueues(ctx context.Context, query string, pageSize uint32) (_ []*v1.DescribeQueueResponse, sErr error) {
-	tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	tx, txErr := pqlite.BeginTx(ctx, s.db)
 	if txErr != nil {
 		return nil, fmt.Errorf("begin transaction: %w", txErr)
 	}
@@ -891,9 +895,12 @@ func (s *Storage) listQueues(ctx context.Context, query string, pageSize uint32)
 
 	for rows.Next() {
 		var (
-			info              v1.DescribeQueueResponse
-			createdAt         time.Time
-			gcAt              time.Time
+			info      v1.DescribeQueueResponse
+			createdAt time.Time
+			gcAt      time.Time
+
+			// A queue with no dead-letter queue stores NULL here, which is the
+			// common case, so this cannot be scanned straight into a string.
 			deadLetterQueueID sql.NullString
 		)
 
@@ -932,6 +939,65 @@ func (s *Storage) listQueues(ctx context.Context, query string, pageSize uint32)
 	}
 
 	return queues, nil
+}
+
+// repairQueueTables brings queue tables created by older versions up to the
+// shape queryCreateQueueTable produces today.
+//
+// Those versions declared a trigger that maintains updated_at without
+// declaring the column, which left every one of their tables unable to serve a
+// Receive. Repairing on open is what makes the fix reach queues that already
+// exist; on a database with nothing to repair it costs one query.
+func (s *Storage) repairQueueTables(ctx context.Context) error {
+	queueIDs, listErr := s.queuesMissingUpdatedAt(ctx)
+	if listErr != nil {
+		return listErr
+	}
+
+	for _, queueID := range queueIDs {
+		if _, err := s.db.ExecContext(ctx, queryAddUpdatedAtColumn(queueID)); err != nil {
+			return fmt.Errorf("add updated_at column to queue (id: %q): %w", queueID, err)
+		}
+
+		s.logger.Info("Repaired queue table missing the updated_at column",
+			slog.String("queue_id", queueID),
+		)
+	}
+
+	return nil
+}
+
+// queuesMissingUpdatedAt returns the ids of queue tables that predate the
+// updated_at column. sErr is set by the deferred close to surface close errors.
+func (s *Storage) queuesMissingUpdatedAt(ctx context.Context) (_ []string, sErr error) {
+	rows, queryErr := s.db.QueryContext(ctx, querySelectQueuesMissingUpdatedAt)
+	if queryErr != nil {
+		return nil, fmt.Errorf("list queue tables missing updated_at: %w", queryErr)
+	}
+
+	defer func() {
+		if err := rows.Close(); err != nil {
+			sErr = errors.Join(sErr, fmt.Errorf("close rows: %w", err))
+		}
+	}()
+
+	queueIDs := make([]string, 0)
+
+	for rows.Next() {
+		var queueID string
+
+		if err := rows.Scan(&queueID); err != nil {
+			return nil, fmt.Errorf("scan queue id: %w", err)
+		}
+
+		queueIDs = append(queueIDs, queueID)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate queue ids: %w", err)
+	}
+
+	return queueIDs, nil
 }
 
 func (s *Storage) fillCache(ctx context.Context, cursor string) error {

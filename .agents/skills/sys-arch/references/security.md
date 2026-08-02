@@ -15,7 +15,7 @@ risk)
 **Format:**
 
 ```text
-Authorization: Bearer <your-bearer-token>
+Authorization: Bearer sk_live_51H8v7xKJ2v3x7x7x7x7x7x7x
 X-API-Key: your-api-key-here
 ```
 

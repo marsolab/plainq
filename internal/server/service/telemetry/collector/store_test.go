@@ -82,9 +82,9 @@ func TestGetTopicMetricsSummaryReturnsErrorOnLookupFailure(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	store := newTelemetryTestStore(t)
+	store, conn := newTelemetryTestStoreWithConn(t)
 
-	if err := store.db.Close(); err != nil {
+	if err := conn.Close(); err != nil {
 		t.Fatalf("close litekit connection: %v", err)
 	}
 
@@ -136,6 +136,17 @@ func TestGetTopicMetricsSummaryUsesNilSubscriptionsWhenGaugeMissing(t *testing.T
 func newTelemetryTestStore(t *testing.T) *SQLiteStore {
 	t.Helper()
 
+	store, _ := newTelemetryTestStoreWithConn(t)
+
+	return store
+}
+
+// newTelemetryTestStoreWithConn also hands back the connection. SQLiteStore
+// holds a pqlite.DB, which deliberately omits Close, so a test that needs to
+// break the handle has to keep hold of the litekit connection itself.
+func newTelemetryTestStoreWithConn(t *testing.T) (*SQLiteStore, *litekit.Conn) {
+	t.Helper()
+
 	conn, err := litekit.New(filepath.Join(t.TempDir(), "plainq.db"))
 	if err != nil {
 		t.Fatalf("open litekit connection: %v", err)
@@ -151,12 +162,12 @@ func newTelemetryTestStore(t *testing.T) *SQLiteStore {
 	}
 
 	t.Cleanup(func() {
-		if err := conn.Close(); err != nil {
-			t.Fatalf("close litekit connection: %v", err)
-		}
+		// Already closed by tests that break the handle on purpose; Close is
+		// idempotent, so a second call is harmless.
+		_ = conn.Close()
 	})
 
-	return NewSQLiteStore(conn)
+	return NewSQLiteStore(conn), conn
 }
 
 func seedRawMetric(t *testing.T, store *SQLiteStore, timestamp int64, queueID, metricName string, value float64) {

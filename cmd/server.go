@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -35,17 +36,20 @@ import (
 	rbacstore "github.com/marsolab/plainq/internal/server/service/rbac/litestore"
 	rbacpg "github.com/marsolab/plainq/internal/server/service/rbac/pgstore"
 	"github.com/marsolab/plainq/internal/server/service/telemetry"
+	"github.com/marsolab/plainq/internal/shared/pqlite"
 	"github.com/marsolab/servekit/authkit/hashkit"
 	"github.com/marsolab/servekit/authkit/jwtkit"
 	"github.com/marsolab/servekit/dbkit/litekit"
 	"github.com/marsolab/servekit/logkit"
+	"github.com/tursodatabase/libsql-client-go/libsql"
 )
 
-// storageDriverSQLite and storageDriverPostgres are the accepted values
-// for the --storage.driver flag.
+// storageDriverSQLite, storageDriverPostgres and storageDriverTurso are the
+// accepted values for the --storage.driver flag.
 const (
 	storageDriverSQLite   = "sqlite"
 	storageDriverPostgres = "postgres"
+	storageDriverTurso    = "turso"
 )
 
 // storageBackend holds the underlying connection handle for whichever
@@ -54,7 +58,24 @@ const (
 type storageBackend struct {
 	driver string
 	sqlite *litekit.Conn
+	turso  *sql.DB
 	pgpool *pgxpool.Pool
+}
+
+// lite returns the handle for the SQLite-dialect drivers — a local SQLite file
+// or a remote Turso/libSQL database. It is nil when the Postgres driver is in
+// use, and both are wired through the same litestore packages.
+func (b *storageBackend) lite() pqlite.DB {
+	switch {
+	case b.sqlite != nil:
+		return b.sqlite
+
+	case b.turso != nil:
+		return b.turso
+
+	default:
+		return nil
+	}
 }
 
 func (b *storageBackend) Close() error {
@@ -62,6 +83,13 @@ func (b *storageBackend) Close() error {
 	case b.sqlite != nil:
 		if err := b.sqlite.Close(); err != nil {
 			return fmt.Errorf("close sqlite: %w", err)
+		}
+
+		return nil
+
+	case b.turso != nil:
+		if err := b.turso.Close(); err != nil {
+			return fmt.Errorf("close turso: %w", err)
 		}
 
 		return nil
@@ -89,11 +117,19 @@ func serverCommand() *scotty.Command {
 		SetFlags: func(f *scotty.FlagSet) {
 			// Storage.
 			f.StringVar(&cfg.StorageDriver, "storage.driver", "sqlite",
-				"storage driver: 'sqlite' (default) or 'postgres'",
+				"storage driver: 'sqlite' (default), 'postgres' or 'turso'",
 			)
 
 			f.StringVar(&cfg.StoragePostgresDSN, "storage.postgres.dsn", "",
 				"PostgreSQL connection string (used when storage.driver=postgres)",
+			)
+
+			f.StringVar(&cfg.StorageTursoURL, "storage.turso.url", "",
+				"Turso/libSQL database URL, e.g. libsql://db-org.turso.io (used when storage.driver=turso)",
+			)
+
+			f.StringVar(&cfg.StorageTursoAuthToken, "storage.turso.auth-token", "",
+				"Turso auth token (used when storage.driver=turso; omit for unauthenticated sqld)",
 			)
 
 			f.BoolVar(&cfg.StorageLogEnable, "storage.log.enable", false,
@@ -491,6 +527,14 @@ func initStorageBackend(cfg *config.Config, logger *slog.Logger) (*storageBacken
 
 		return &storageBackend{driver: storageDriverSQLite, sqlite: conn}, nil
 
+	case storageDriverTurso:
+		conn, err := initTursoBackend(cfg, logger)
+		if err != nil {
+			return nil, err
+		}
+
+		return &storageBackend{driver: storageDriverTurso, turso: conn}, nil
+
 	case storageDriverPostgres:
 		pool, err := initPostgresBackend(cfg, logger)
 		if err != nil {
@@ -500,8 +544,8 @@ func initStorageBackend(cfg *config.Config, logger *slog.Logger) (*storageBacken
 		return &storageBackend{driver: storageDriverPostgres, pgpool: pool}, nil
 
 	default:
-		return nil, fmt.Errorf("unsupported storage driver %q (want %q or %q)",
-			driver, storageDriverSQLite, storageDriverPostgres,
+		return nil, fmt.Errorf("unsupported storage driver %q (want %q, %q or %q)",
+			driver, storageDriverSQLite, storageDriverPostgres, storageDriverTurso,
 		)
 	}
 }
@@ -567,6 +611,63 @@ func initSQLiteBackend(cfg *config.Config, logger *slog.Logger) (*litekit.Conn, 
 	return conn, nil
 }
 
+// tursoMaxIdleConns caps the pooled libSQL connections kept warm between
+// queries. Every connection is an HTTP session to a remote database, so the
+// database/sql default of two would mean reconnecting under any real
+// concurrency.
+const tursoMaxIdleConns = 10
+
+// initTursoBackend opens a Turso/libSQL database and brings its schema up to
+// date. libSQL shares the SQLite dialect, so the same embedded mutations and
+// the same litestore packages serve both drivers.
+func initTursoBackend(cfg *config.Config, logger *slog.Logger) (*sql.DB, error) {
+	dsn, dsnErr := parseTursoDSN(cfg.StorageTursoURL, cfg.StorageTursoAuthToken)
+	if dsnErr != nil {
+		return nil, dsnErr
+	}
+
+	connOptions := make([]libsql.Option, 0, 1)
+
+	if dsn.authToken != "" {
+		connOptions = append(connOptions, libsql.WithAuthToken(dsn.authToken))
+	}
+
+	connector, connectorErr := libsql.NewConnector(dsn.url, connOptions...)
+	if connectorErr != nil {
+		return nil, fmt.Errorf("create turso connector: %w", connectorErr)
+	}
+
+	db := sql.OpenDB(connector)
+	db.SetMaxIdleConns(tursoMaxIdleConns)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := db.PingContext(ctx); err != nil {
+		if closeErr := db.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close turso connection: %w", closeErr))
+		}
+
+		return nil, fmt.Errorf("connect to turso: %w", err)
+	}
+
+	logger.Info("Turso database connection has been initialized",
+		slog.String("url", dsn.url),
+	)
+
+	if err := newTursoEvolver(db, mutations.SqliteStorageMutations()).MutateSchema(); err != nil {
+		if closeErr := db.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close turso connection: %w", closeErr))
+		}
+
+		return nil, fmt.Errorf("turso schema mutation: %w", err)
+	}
+
+	logger.Info("Turso schema has been initialized")
+
+	return db, nil
+}
+
 func initPostgresBackend(cfg *config.Config, logger *slog.Logger) (*pgxpool.Pool, error) {
 	if cfg.StoragePostgresDSN == "" {
 		return nil, errors.New("storage.postgres.dsn must be set when storage.driver=postgres")
@@ -612,6 +713,34 @@ func initQueueStorage(
 	observer *telemetry.Observer,
 ) (queue.Storage, func() error, error) {
 	switch backend.driver {
+	case storageDriverTurso:
+		if clusterCfg.Enabled {
+			return nil, nil, errors.New(
+				"cluster mode replicates the embedded store, so it needs storage.driver=sqlite. " +
+					"A Turso database is already shared between nodes and replicating it " +
+					"would write every message twice",
+			)
+		}
+
+		opts := make([]queuestore.Option, 0, 3)
+
+		opts = append(opts, queuestore.WithObserver(observer))
+
+		if cfg.StorageLogEnable {
+			opts = append(opts, queuestore.WithLogger(logger))
+		}
+
+		if cfg.StorageGCTimeout != 0 {
+			opts = append(opts, queuestore.WithGCTimeout(cfg.StorageGCTimeout))
+		}
+
+		store, err := queuestore.New(backend.lite(), opts...)
+		if err != nil {
+			return nil, nil, fmt.Errorf("create turso queue storage: %w", err)
+		}
+
+		return store, store.Close, nil
+
 	case storageDriverPostgres:
 		if clusterCfg.Enabled {
 			return nil, nil, errors.New(
@@ -660,9 +789,9 @@ func initQueueStorage(
 			opts = append(opts, queuestore.WithoutGC())
 		}
 
-		store, err := queuestore.New(backend.sqlite, opts...)
+		store, err := queuestore.New(backend.lite(), opts...)
 		if err != nil {
-			return nil, nil, fmt.Errorf("create sqlite queue storage: %w", err)
+			return nil, nil, fmt.Errorf("create %s queue storage: %w", backend.driver, err)
 		}
 
 		return store, store.Close, nil
@@ -725,9 +854,9 @@ func initAccountStorage(cfg *config.Config, logger *slog.Logger, backend *storag
 			opts = append(opts, accountstore.WithLogger(logger))
 		}
 
-		store, err := accountstore.NewStorage(backend.sqlite, logger, opts...)
+		store, err := accountstore.NewStorage(backend.lite(), logger, opts...)
 		if err != nil {
-			return nil, fmt.Errorf("create sqlite account storage: %w", err)
+			return nil, fmt.Errorf("create %s account storage: %w", backend.driver, err)
 		}
 
 		return store, nil
@@ -755,9 +884,9 @@ func initRBACStorage(cfg *config.Config, logger *slog.Logger, backend *storageBa
 			opts = append(opts, rbacstore.WithLogger(logger))
 		}
 
-		store, err := rbacstore.NewStorage(backend.sqlite, logger, opts...)
+		store, err := rbacstore.NewStorage(backend.lite(), logger, opts...)
 		if err != nil {
-			return nil, fmt.Errorf("create sqlite rbac storage: %w", err)
+			return nil, fmt.Errorf("create %s rbac storage: %w", backend.driver, err)
 		}
 
 		return store, nil
@@ -785,9 +914,9 @@ func initOnboardingStorage(cfg *config.Config, logger *slog.Logger, backend *sto
 			opts = append(opts, onboardstore.WithLogger(logger))
 		}
 
-		store, err := onboardstore.NewStorage(backend.sqlite, logger, opts...)
+		store, err := onboardstore.NewStorage(backend.lite(), logger, opts...)
 		if err != nil {
-			return nil, fmt.Errorf("create sqlite onboarding storage: %w", err)
+			return nil, fmt.Errorf("create %s onboarding storage: %w", backend.driver, err)
 		}
 
 		return store, nil
@@ -815,9 +944,9 @@ func initOAuthStorage(cfg *config.Config, logger *slog.Logger, backend *storageB
 			opts = append(opts, oauthstore.WithLogger(logger))
 		}
 
-		store, err := oauthstore.NewStorage(backend.sqlite, logger, opts...)
+		store, err := oauthstore.NewStorage(backend.lite(), logger, opts...)
 		if err != nil {
-			return nil, fmt.Errorf("create sqlite oauth storage: %w", err)
+			return nil, fmt.Errorf("create %s oauth storage: %w", backend.driver, err)
 		}
 
 		return store, nil

@@ -11,7 +11,20 @@ description: >-
   "is this idiomatic Go?". Pair with go-errors, go-concurrency, go-testing,
   go-logging, go-http, go-cli, go-sql, or go-lint when those concerns
   dominate the task.
-version: 1.0.0
+when_to_use: >-
+  TRIGGER WHEN the user is writing, reviewing, refactoring, or asking
+  about idiomatic Go style — naming (packages, variables, exported vs
+  unexported, acronym case, Get/Set), package and file layout, the
+  `internal/` directory, godoc comments, struct literal initialization,
+  zero values, interface size and consumer-side definition, generics
+  vs `any`, iterators (`iter.Seq`, `iter.Seq2`), `range`-over-int,
+  `slices` / `maps` / `cmp` helpers, dependency management with
+  `go.mod`, or any "is this idiomatic Go?" question. ALSO TRIGGER on
+  pitfall debugging: loop-variable capture, nil-interface comparison,
+  variable shadowing, defer timing in loops, nil-map writes.
+  SKIP when the task is dominated by a more specific sibling
+  (concurrency, errors, HTTP, SQL, logging, testing, lint, CLI).
+version: 1.1.0
 tags:
   - go
   - golang
@@ -20,6 +33,8 @@ tags:
   - generics
   - interfaces
   - pitfalls
+paths:
+  - "**/*.go"
 ---
 
 # Go Style

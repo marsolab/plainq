@@ -12,6 +12,7 @@ import (
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/service/queue"
 	"github.com/marsolab/plainq/internal/server/service/queue/litestore/sqlcgen"
+	"github.com/marsolab/plainq/internal/shared/pqlite"
 )
 
 type sweepResult struct {
@@ -113,7 +114,7 @@ func (s *Storage) queuesForGC(ctx context.Context) (_ []string, sErr error) {
 	cutoff := time.Now().Add(-s.gcTimeout)
 	queues := make([]string, 0, limit)
 
-	tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	tx, txErr := pqlite.BeginTx(ctx, s.db)
 	if txErr != nil {
 		return nil, fmt.Errorf(fmtBeginTxError, txErr)
 	}
@@ -198,7 +199,7 @@ func (s *Storage) sweep(ctx context.Context, queueID string) (_ *sweepResult, sE
 	retention := time.Duration(props.RetentionPeriodSeconds) * time.Second
 	cutoff := sqliteTime(queue.WriteTime(ctx).Add(-retention))
 
-	tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	tx, txErr := pqlite.BeginTx(ctx, s.db)
 	if txErr != nil {
 		panic(fmt.Errorf("begin transaction: %w", txErr))
 	}

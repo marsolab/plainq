@@ -13,13 +13,29 @@ description: >-
   dependency-free projects, never testify). Pair with go-sql for
   testing DB code with sqlc's `Querier` interface, go-http for `httptest`
   patterns, and go-concurrency for race-detector usage.
-version: 1.0.0
+when_to_use: >-
+  TRIGGER WHEN the user is writing or reviewing Go tests — files
+  ending in `_test.go`, `testing.T`, `testing.B`, `testing.F`,
+  table-driven tests with `map[string]testCase`, `t.Run` subtests,
+  `t.Helper`, `t.Cleanup`, `t.Parallel`, `t.TempDir`, fixtures under
+  `testdata/`, integration test gating via env var, benchmarks,
+  fuzz tests, race detector (`go test -race`), go-testdeep operators
+  (`td.Cmp`, `td.CmpError`, `td.CmpNoError`, `td.Struct`, `td.Smuggle`,
+  `td.Between`, `td.Re`, `td.Require`), or the framework decision
+  (stdlib-only vs go-testdeep — never testify). ALSO TRIGGER on
+  phrases like "write a test for…", "table-driven test", "add a
+  benchmark", "mock this with Querier". SKIP for non-Go testing
+  frameworks.
+version: 1.1.0
 tags:
   - go
   - golang
   - testing
   - table-driven-tests
   - benchmarks
+paths:
+  - "**/*_test.go"
+  - "**/testdata/**"
 ---
 
 # Go Testing

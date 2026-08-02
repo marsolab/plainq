@@ -10,7 +10,19 @@ description: >-
   revive, gocritic), suppressing findings with `//nolint` comments,
   reading lint output, or wiring lint into CI. Pair with go-style for
   the underlying idioms most lint rules enforce.
-version: 1.0.0
+when_to_use: >-
+  TRIGGER WHEN the user is setting up or troubleshooting Go linting
+  and formatting — installing `golangci-lint`, dropping
+  `.golangci.yml` into a project, configuring pre-commit hooks,
+  picking linters (errcheck, govet, staticcheck, unused, misspell,
+  prealloc, gosec, revive, gocritic, ineffassign, gocyclo),
+  suppressing findings with `//nolint:linter-name` comments, reading
+  lint output, debugging false positives, or wiring lint into CI
+  (GitHub Actions, GitLab, etc.). ALSO TRIGGER on phrases like "set
+  up linting", "configure golangci-lint", "why is the linter
+  complaining", "run gofmt on this", "fix the imports". SKIP for
+  non-Go linters (eslint, ruff, clippy).
+version: 1.1.0
 tags:
   - go
   - golang
@@ -18,6 +30,10 @@ tags:
   - golangci-lint
   - tooling
   - formatting
+paths:
+  - "**/.golangci.yml"
+  - "**/.golangci.yaml"
+  - "**/*.go"
 ---
 
 # Go Lint

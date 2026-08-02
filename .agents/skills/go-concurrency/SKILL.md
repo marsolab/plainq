@@ -9,7 +9,20 @@ description: >-
   pattern. Also use when debugging deadlocks, goroutine leaks, race
   conditions, or channel-related bugs. Pair with go-errors for error
   propagation across goroutines.
-version: 1.0.0
+when_to_use: >-
+  TRIGGER WHEN the user touches Go concurrency — `go func()`,
+  channels (buffered / unbuffered / directional), `context.Context`
+  for cancellation/timeouts/deadlines, `sync.WaitGroup`, `sync.Mutex`,
+  `sync.RWMutex`, `sync.Once`, `sync.Pool`, `errgroup.Group`, worker
+  pools, fan-out / fan-in pipelines, semaphores, rate limiting,
+  pipelines that "run in the background". ALSO TRIGGER on debugging
+  scenarios: goroutine leaks, deadlocks, channel send on closed,
+  race-detector hits (`go test -race`), data races, "why is my
+  program hanging?". ALSO TRIGGER on indirect phrasings: "run this in
+  parallel", "process N items concurrently", "limit concurrency to N",
+  "cancel this if it takes too long". SKIP when the task is purely
+  sequential.
+version: 1.1.0
 tags:
   - go
   - golang
@@ -18,6 +31,8 @@ tags:
   - channels
   - context
   - errgroup
+paths:
+  - "**/*.go"
 ---
 
 # Go Concurrency

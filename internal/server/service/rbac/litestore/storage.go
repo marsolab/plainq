@@ -11,7 +11,7 @@ import (
 	"github.com/marsolab/plainq/internal/server/service/rbac"
 	"github.com/marsolab/plainq/internal/server/service/rbac/litestore/sqlcgen"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
-	"github.com/marsolab/servekit/dbkit/litekit"
+	"github.com/marsolab/plainq/internal/shared/pqlite"
 	"github.com/marsolab/servekit/logkit"
 )
 
@@ -20,7 +20,7 @@ var _ rbac.Storage = (*Storage)(nil)
 
 // Storage is the SQLite-backed implementation of rbac.Storage.
 type Storage struct {
-	db      *litekit.Conn
+	db      pqlite.DB
 	queries *sqlcgen.Queries
 	logger  *slog.Logger
 }
@@ -32,7 +32,7 @@ type Option func(*Storage)
 func WithLogger(logger *slog.Logger) Option { return func(s *Storage) { s.logger = logger } }
 
 // NewStorage creates a new SQLite-backed rbac storage.
-func NewStorage(db *litekit.Conn, logger *slog.Logger, opts ...Option) (*Storage, error) {
+func NewStorage(db pqlite.DB, logger *slog.Logger, opts ...Option) (*Storage, error) {
 	if db == nil {
 		return nil, errors.New("db is nil")
 	}
