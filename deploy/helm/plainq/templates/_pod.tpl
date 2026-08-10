@@ -147,7 +147,11 @@ StatefulSet (sqlite) and the Deployment (postgres).
 - name: {{ .Chart.Name }}
   securityContext:
     {{- toYaml .Values.securityContext | nindent 4 }}
+  {{- if .Values.image.digest }}
+  image: "{{ .Values.image.repository }}@{{ .Values.image.digest }}"
+  {{- else }}
   image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+  {{- end }}
   imagePullPolicy: {{ .Values.image.pullPolicy }}
   args:
     {{- include "plainq.args" . | nindent 4 }}

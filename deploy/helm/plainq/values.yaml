@@ -16,6 +16,9 @@ image:
   pullPolicy: IfNotPresent
   # -- Image tag. Defaults to the chart appVersion when left empty.
   tag: ""
+  # -- Image digest. When set, this takes precedence over tag and deploys an
+  # immutable image reference (for example, sha256:...).
+  digest: ""
 
 # -- Image pull secrets for private registries (e.g. ghcr.io).
 # Each entry is an object with a "name" key referencing an existing secret.
