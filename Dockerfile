@@ -26,7 +26,7 @@ RUN bun run build
 # ---------------------------------------------------------------------------
 # Stage 2: compile the Go binary with the UI embedded.
 # ---------------------------------------------------------------------------
-FROM golang:1.26-alpine AS build
+FROM golang:1.26.4-alpine AS build
 
 # build-base provides gcc/musl-dev needed by cgo (mattn/go-sqlite3).
 RUN apk add --no-cache build-base git ca-certificates tzdata

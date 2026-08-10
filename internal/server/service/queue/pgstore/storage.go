@@ -260,6 +260,10 @@ func (s *Storage) DescribeQueue(ctx context.Context, input *v1.DescribeQueueRequ
 		return nil, fmt.Errorf("%w: queue_id or queue_name should be specified", pqerr.ErrInvalidInput)
 	}
 
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("queue not found: %w", pqerr.ErrNotFound)
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("get queue properties: %w", err)
 	}
