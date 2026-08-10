@@ -40,6 +40,8 @@ jobs:
           input: schema
           against: buf.build/plainq/schema
 
+  # Append-only publish. Never delete/recreate buf.build/plainq/schema or
+  # rewrite labels so existing consumer pins stop resolving — fix forward only.
   push:
     runs-on: ubuntu-latest
     needs:
