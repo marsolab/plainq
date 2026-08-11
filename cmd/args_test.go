@@ -104,6 +104,53 @@ func TestNormalizeArgs(t *testing.T) {
 	}
 }
 
+// TestNormalizeArgsLeavesServeUntouched is the highest-stakes case in this
+// file. Rewriting os.Args happens before any command runs, so it applies to
+// "serve" too — and serve is how the server is started in Docker, in Helm, and
+// in the perf harness. A reordering bug that dropped or swapped a server flag
+// would not fail a test or print a warning; it would silently start a server
+// configured differently from the one that was asked for.
+//
+// The first case is the literal command line from perf/docker-compose.yml.
+func TestNormalizeArgsLeavesServeUntouched(t *testing.T) {
+	cases := map[string][]string{
+		"perf harness command line": {
+			"serve",
+			"-grpc.addr=:8080",
+			"-http.addr=:8081",
+			"-storage.path=/data/plainq.db",
+			"-auth.enable=false",
+			"-auth.jwt.secret=perf-not-a-secret",
+			"-telemetry.enable=false",
+			"-log.access.enable=false",
+			"-log.level=warn",
+		},
+		"space-separated values travel with their flags": {
+			"serve", "-grpc.addr", ":8080", "-storage.path", "/data/plainq.db", "-log.level", "warn",
+		},
+		"bare bool flag does not swallow the next flag": {
+			"serve", "-auth.enable", "-log.level=warn",
+		},
+		"quickstart form from the README": {
+			"serve", "--auth.jwt.secret=abc123",
+		},
+		"durations and cluster flags": {
+			"serve", "-cluster.enable", "-storage.gc.timeout=30s", "-auth.access.ttl", "1h",
+		},
+	}
+
+	for name, args := range cases {
+		t.Run(name, func(t *testing.T) {
+			root := testRoot(t)
+
+			got := normalizeArgs(root, args)
+			if !slices.Equal(got, args) {
+				t.Fatalf("normalizeArgs rewrote a serve command line\n in: %q\nout: %q", args, got)
+			}
+		})
+	}
+}
+
 // TestNormalizeArgsPreservesArguments guards the property that matters most:
 // reordering may move arguments, but it must never lose or invent one.
 func TestNormalizeArgsPreservesArguments(t *testing.T) {
