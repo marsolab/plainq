@@ -21,7 +21,10 @@ import (
 // request.
 func validateQueueID(id string) error {
 	if err := idkit.ValidateXID(strings.ToLower(id)); err != nil {
-		return fmt.Errorf("validate queue id: %w", err)
+		return usagef("invalid queue id %q: %w"+
+			` (expected the 20-character id printed by "plainq create" or "plainq list", not a queue name)`,
+			id, err,
+		)
 	}
 
 	return nil

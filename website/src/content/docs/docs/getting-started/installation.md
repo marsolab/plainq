@@ -70,7 +70,7 @@ See the [Deployment guide](/docs/guides/deployment/) for the full story.
 
 ```shell
 ./plainq version
-./plainq schema   # print the gRPC API surface
+./plainq schema   # print the CLI and gRPC surfaces
 ```
 
 ## Next steps

@@ -11,7 +11,9 @@ need to scale out.
 
 - **One binary, no broker fleet.** Run `./plainq serve` and you have a queue.
 - **gRPC API + CLI + TUI.** Same surface, scripted or interactive. The CLI is
-  built for humans *and* AI agents (`-json` everywhere, `schema` introspection);
+  built for humans *and* AI agents: `-json` everywhere, flags in any position,
+  meaningful exit codes, and `plainq schema` to print the whole command surface
+  as JSON without contacting a server;
   `plainq tui` is a rich [Bubble Tea](https://github.com/charmbracelet/bubbletea)
   terminal dashboard. The schema is published to the
   [Buf Schema Registry](https://buf.build/plainq/schema) for client codegen.
@@ -43,6 +45,7 @@ Full documentation lives in [`docs/`](docs/README.md):
   [Core concepts](docs/getting-started/core-concepts.md)
 - **Product** — [User stories](docs/user-stories.md)
 - **Guides** — [CLI](docs/guides/cli.md) ·
+  [Driving PlainQ from an agent](docs/guides/agents.md) ·
   [Terminal UI (TUI)](docs/guides/tui.md) ·
   [Queues & messages](docs/guides/queues-and-messages.md) ·
   [gRPC API](docs/guides/grpc-api.md) ·
@@ -157,8 +160,9 @@ not yet built. The chart remains the supported install path.
 
 The `plainq` binary is both the server and the client. Every client command
 talks gRPC and accepts `-grpc.addr` (default `localhost:8080`) and `-json`
-for machine-readable output. **Flags go before the positional queue id**
-(e.g. `plainq send -message hi <queue-id>`).
+for machine-readable output. Flags may go **before or after** the positional
+arguments, so `plainq send -message hi <queue-id>` and
+`plainq send <queue-id> -message hi` are the same command.
 
 | Command                          | Description                                          |
 | -------------------------------- | ---------------------------------------------------- |
@@ -174,14 +178,22 @@ for machine-readable output. **Flags go before the positional queue id**
 | `plainq receive <queue-id>`      | Receive messages (`-batch=N` up to 10, `-ack` to delete after read). |
 | `plainq delete-message <queue-id> <id>...` | Acknowledge (delete) messages by ID.       |
 | `plainq tui`                     | Launch the interactive terminal UI.                  |
-| `plainq schema`                  | Print the gRPC API surface (text or `-json`).        |
+| `plainq schema`                  | Print the CLI and gRPC surfaces (text or `-json`).   |
 | `plainq cluster status`          | Show this node's view of the cluster.                |
 | `plainq cluster members`         | List cluster members.                                |
 | `plainq cluster join`            | Add a node to the cluster (`-node-id`, `-addr`).     |
 | `plainq cluster leave`           | Remove a node from the cluster (`-node-id`).         |
 | `plainq cluster snapshot`        | Force a state snapshot, compacting the consensus log. |
 
-Run any command with `-h` for its full flag list.
+Run any command with `-h` for its description, arguments, flags with defaults,
+worked examples, and exit codes. Commands exit `0` on success, `1` when the
+command ran but failed, and `2` on a usage error; errors go to stderr so `-json`
+output on stdout is always parseable.
+
+Driving PlainQ from a script or an AI agent? `plainq schema -target=cli -json`
+prints the entire command surface — arguments, flags, defaults, effects, and
+examples — without contacting a server. See
+[Driving PlainQ from an agent](docs/guides/agents.md).
 
 ### gRPC
 

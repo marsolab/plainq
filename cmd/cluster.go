@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -31,26 +30,30 @@ const (
 	// administrator-only, so a server with auth on needs one.
 	flagToken = "token"
 
+	// envClusterToken supplies the bearer token when the flag is omitted.
+	envClusterToken = "PLAINQ_TOKEN"
+
 	// clusterRequestTimeout bounds a cluster CLI call.
 	clusterRequestTimeout = 30 * time.Second
 )
 
 // clusterCommand groups the operator-facing cluster subcommands.
-func clusterCommand() *scotty.Command {
-	cmd := scotty.Command{
-		Name:  "cluster",
-		Short: "Inspect and administer the cluster",
+func clusterCommand() *commandSpec {
+	return &commandSpec{
+		Name:   "cluster",
+		Short:  "Inspect and administer the cluster",
+		Effect: effectReadOnly,
+		Long: "Operator commands for a clustered deployment. Unlike the queue commands,\n" +
+			"these talk to the admin HTTP API at -" + flagHTTPAddr + " rather than to gRPC,\n" +
+			"and they are administrator-only: a server with auth enabled needs -" + flagToken + ".",
+		Subcommands: []*commandSpec{
+			clusterStatusCommand(),
+			clusterMembersCommand(),
+			clusterJoinCommand(),
+			clusterLeaveCommand(),
+			clusterSnapshotCommand(),
+		},
 	}
-
-	cmd.AddSubcommands(
-		clusterStatusCommand(),
-		clusterMembersCommand(),
-		clusterJoinCommand(),
-		clusterLeaveCommand(),
-		clusterSnapshotCommand(),
-	)
-
-	return &cmd
 }
 
 // clusterFlags is the set every cluster subcommand shares.
@@ -62,11 +65,13 @@ type clusterFlags struct {
 
 func (c *clusterFlags) register(flags *scotty.FlagSet) {
 	flags.StringVar(&c.addr, flagHTTPAddr, defaultHTTPAddr,
-		"sets the PlainQ admin API address",
+		"address of the PlainQ admin HTTP API",
 	)
 
-	flags.StringVar(&c.token, flagToken, os.Getenv("PLAINQ_TOKEN"),
-		"bearer token for the admin API (defaults to $PLAINQ_TOKEN)",
+	// The default stays empty on purpose: putting the environment's token here
+	// would print a live credential in help output and in the schema dump.
+	flags.StringVar(&c.token, flagToken, "",
+		"bearer token for the admin API (falls back to $"+envClusterToken+")",
 	)
 
 	flags.BoolVar(&c.jsonOut, flagJSON, false,
@@ -74,12 +79,29 @@ func (c *clusterFlags) register(flags *scotty.FlagSet) {
 	)
 }
 
-func clusterStatusCommand() *scotty.Command {
+// bearerToken returns the token to authenticate with, preferring the flag over
+// the environment.
+func (c *clusterFlags) bearerToken() string {
+	if c.token != "" {
+		return c.token
+	}
+
+	return os.Getenv(envClusterToken)
+}
+
+func clusterStatusCommand() *commandSpec {
 	var flags clusterFlags
 
-	cmd := scotty.Command{
-		Name:     "status",
-		Short:    "Show this node's view of the cluster",
+	return &commandSpec{
+		Name:   "status",
+		Short:  "Show this node's view of the cluster",
+		Effect: effectReadOnly,
+		Long: "Reports the node's role, the current leader, the consensus term, and the\n" +
+			"member list as this node sees it. Answers are per-node: during a partition\n" +
+			"two nodes can legitimately disagree.",
+		Examples: []exampleSpec{
+			{Description: "Check whether this node is the leader.", Command: "plainq cluster status"},
+		},
 		SetFlags: flags.register,
 		Run: func(_ *scotty.Command, _ []string) error {
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -100,16 +122,24 @@ func clusterStatusCommand() *scotty.Command {
 			return nil
 		},
 	}
-
-	return &cmd
 }
 
-func clusterMembersCommand() *scotty.Command {
+func clusterMembersCommand() *commandSpec {
 	var flags clusterFlags
 
-	cmd := scotty.Command{
-		Name:     "members",
-		Short:    "List cluster members",
+	return &commandSpec{
+		Name:   "members",
+		Short:  "List cluster members",
+		Effect: effectReadOnly,
+		Long: "Lists every node in the cluster with its identity, address, and whether it\n" +
+			"votes in elections.",
+		Examples: []exampleSpec{
+			{Description: "List the members.", Command: "plainq cluster members"},
+			{
+				Description: "Extract the node identities.",
+				Command:     "plainq cluster members -json | jq -r '.[].id'",
+			},
+		},
 		SetFlags: flags.register,
 		Run: func(_ *scotty.Command, _ []string) error {
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -130,11 +160,9 @@ func clusterMembersCommand() *scotty.Command {
 			return nil
 		},
 	}
-
-	return &cmd
 }
 
-func clusterJoinCommand() *scotty.Command {
+func clusterJoinCommand() *commandSpec {
 	var (
 		flags    clusterFlags
 		nodeID   string
@@ -142,9 +170,23 @@ func clusterJoinCommand() *scotty.Command {
 		nonVoter bool
 	)
 
-	cmd := scotty.Command{
-		Name:  "join",
-		Short: "Add a node to the cluster",
+	return &commandSpec{
+		Name:   "join",
+		Short:  "Add a node to the cluster",
+		Effect: effectMutating,
+		Long: "Adds a node to the consensus group. Must be sent to the current leader;\n" +
+			`run "plainq cluster status" first if you are not sure which node that is.` + "\n\n" +
+			"Both -node-id and -addr are required.",
+		Examples: []exampleSpec{
+			{
+				Description: "Add a voting node.",
+				Command:     "plainq cluster join -node-id=node-2 -addr=10.0.0.2:9080",
+			},
+			{
+				Description: "Add a read replica that does not vote in elections.",
+				Command:     "plainq cluster join -node-id=node-3 -addr=10.0.0.3:9080 -non-voter",
+			},
+		},
 		SetFlags: func(f *scotty.FlagSet) {
 			flags.register(f)
 
@@ -162,7 +204,7 @@ func clusterJoinCommand() *scotty.Command {
 		},
 		Run: func(_ *scotty.Command, _ []string) error {
 			if nodeID == "" || addr == "" {
-				return errors.New("both -node-id and -addr are required")
+				return usagef("both -node-id and -addr are required")
 			}
 
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -186,19 +228,27 @@ func clusterJoinCommand() *scotty.Command {
 			return nil
 		},
 	}
-
-	return &cmd
 }
 
-func clusterLeaveCommand() *scotty.Command {
+func clusterLeaveCommand() *commandSpec {
 	var (
 		flags  clusterFlags
 		nodeID string
 	)
 
-	cmd := scotty.Command{
-		Name:  "leave",
-		Short: "Remove a node from the cluster",
+	return &commandSpec{
+		Name:   "leave",
+		Short:  "Remove a node from the cluster",
+		Effect: effectDestructive,
+		Long: "Removes a node from the consensus group. Removing enough nodes to lose the\n" +
+			"quorum stops the cluster from serving, so check the member count first.\n\n" +
+			"-node-id is required.",
+		Examples: []exampleSpec{
+			{
+				Description: "Remove a node that has been decommissioned.",
+				Command:     "plainq cluster leave -node-id=node-3",
+			},
+		},
 		SetFlags: func(f *scotty.FlagSet) {
 			flags.register(f)
 
@@ -208,7 +258,7 @@ func clusterLeaveCommand() *scotty.Command {
 		},
 		Run: func(_ *scotty.Command, _ []string) error {
 			if nodeID == "" {
-				return errors.New("-node-id is required")
+				return usagef("-node-id is required")
 			}
 
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -232,16 +282,21 @@ func clusterLeaveCommand() *scotty.Command {
 			return nil
 		},
 	}
-
-	return &cmd
 }
 
-func clusterSnapshotCommand() *scotty.Command {
+func clusterSnapshotCommand() *commandSpec {
 	var flags clusterFlags
 
-	cmd := scotty.Command{
-		Name:     "snapshot",
-		Short:    "Force a state snapshot, compacting the consensus log",
+	return &commandSpec{
+		Name:   "snapshot",
+		Short:  "Force a state snapshot, compacting the consensus log",
+		Effect: effectMutating,
+		Long: "Writes a snapshot of the replicated state and truncates the consensus log\n" +
+			"up to that point, which shortens recovery for a node that restarts. Queue\n" +
+			"data is unaffected.",
+		Examples: []exampleSpec{
+			{Description: "Compact the log now.", Command: "plainq cluster snapshot"},
+		},
 		SetFlags: flags.register,
 		Run: func(_ *scotty.Command, _ []string) error {
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -256,8 +311,6 @@ func clusterSnapshotCommand() *scotty.Command {
 			return nil
 		},
 	}
-
-	return &cmd
 }
 
 // clusterCall performs one admin API request.
@@ -287,8 +340,8 @@ func clusterCall(ctx context.Context, flags *clusterFlags, method, path string, 
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	if flags.token != "" {
-		req.Header.Set("Authorization", "Bearer "+flags.token)
+	if token := flags.bearerToken(); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
 	resp, doErr := http.DefaultClient.Do(req)

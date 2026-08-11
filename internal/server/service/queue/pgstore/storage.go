@@ -303,7 +303,7 @@ func (s *Storage) PurgeQueue(ctx context.Context, input *v1.PurgeQueueRequest) (
 		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
 
-	return &v1.PurgeQueueResponse{}, nil
+	return &v1.PurgeQueueResponse{MessagesCount: count}, nil
 }
 
 func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest) (_ *v1.DeleteQueueResponse, sErr error) {

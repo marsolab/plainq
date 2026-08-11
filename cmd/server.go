@@ -104,16 +104,35 @@ func (b *storageBackend) Close() error {
 }
 
 //nolint:cyclop,gocognit,funlen,gocyclo // CLI server setup wires the full dependency graph in one place.
-func serverCommand() *scotty.Command {
+func serverCommand() *commandSpec {
 	var (
 		cfg              config.Config
 		clusterCfg       cluster.Config
 		clusterDiscovery string
 	)
 
-	cmd := scotty.Command{
-		Name:  "serve",
-		Short: "Runs the PlainQ server",
+	return &commandSpec{
+		Name:     "serve",
+		Short:    "Run the PlainQ server",
+		Effect:   effectMutating,
+		Blocking: true,
+		Long: "Starts the queue server: the gRPC API every other command talks to, the\n" +
+			"admin HTTP API, and the Houston web UI, all from this one process.\n\n" +
+			"Storage defaults to an embedded SQLite database, so a server needs no\n" +
+			"external dependencies to start. It runs until interrupted.\n\n" +
+			"There are far more flags here than on any other command; run\n" +
+			`"plainq serve -h" for the full list, or see the configuration guide.`,
+		Examples: []exampleSpec{
+			{
+				Description: "Start a local server backed by SQLite.",
+				Command:     `plainq serve --auth.jwt.secret="$(openssl rand -hex 32)"`,
+			},
+			{
+				Description: "Start a server backed by PostgreSQL.",
+				Command: "plainq serve -storage.driver=postgres \\\n" +
+					`    -storage.postgres.dsn="postgres://user:pass@localhost:5432/plainq"`,
+			},
+		},
 		SetFlags: func(f *scotty.FlagSet) {
 			// Storage.
 			f.StringVar(&cfg.StorageDriver, "storage.driver", "sqlite",
@@ -233,19 +252,19 @@ func serverCommand() *scotty.Command {
 			)
 
 			f.DurationVar(&cfg.HTTPReadHeaderTimeout, "http.read-header-timeout", 0,
-				"",
+				"how long the HTTP server waits for request headers (0 means no limit)",
 			)
 
 			f.DurationVar(&cfg.HTTPReadTimeout, "http.read-timeout", 0,
-				"",
+				"how long the HTTP server waits for a whole request (0 means no limit)",
 			)
 
 			f.DurationVar(&cfg.HTTPWriteTimeout, "http.write-timeout", 0,
-				"",
+				"how long the HTTP server may take to write a response (0 means no limit)",
 			)
 
 			f.DurationVar(&cfg.HTTPIdleTimeout, "http.idle-timeout", 0,
-				"",
+				"how long an idle keep-alive connection is held open (0 means no limit)",
 			)
 
 			// Metrics.
@@ -482,8 +501,6 @@ func serverCommand() *scotty.Command {
 			return plainqServer.Serve(ctx)
 		},
 	}
-
-	return &cmd
 }
 
 func initLogger(cfg *config.Config) (*slog.Logger, error) {

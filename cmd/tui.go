@@ -8,14 +8,23 @@ import (
 	"github.com/marsolab/plainq/internal/tui"
 )
 
-func tuiCommand() *scotty.Command {
+func tuiCommand() *commandSpec {
 	var addr string
 
-	cmd := scotty.Command{
-		Name:  "tui",
-		Short: "Launch the interactive terminal UI",
+	return &commandSpec{
+		Name:     "tui",
+		Short:    "Launch the interactive terminal dashboard",
+		Effect:   effectMutating,
+		Blocking: true,
+		Long: "Opens a full-screen dashboard for browsing queues and messages.\n\n" +
+			"This command needs an interactive terminal and runs until you quit it, so\n" +
+			"it is the one command in the CLI that cannot be scripted. Every operation\n" +
+			"it offers is also available as a plain command.",
+		Examples: []exampleSpec{
+			{Description: "Open the dashboard against a local server.", Command: "plainq tui"},
+		},
 		SetFlags: func(flags *scotty.FlagSet) {
-			flags.StringVar(&addr, flagGRPCAddr, defaultGRPCAddr,
+			flags.StringVar(&addr, flagGRPCAddr, resolveGRPCAddr(),
 				flagGRPCAddrUsage,
 			)
 		},
@@ -32,6 +41,4 @@ func tuiCommand() *scotty.Command {
 			return nil
 		},
 	}
-
-	return &cmd
 }

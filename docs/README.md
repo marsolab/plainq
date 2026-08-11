@@ -20,6 +20,7 @@ This documentation is organized so you can move from "never heard of it" to
 | Guide                                                          | What it covers                                                      |
 | -------------------------------------------------------------- | ------------------------------------------------------------------- |
 | [CLI](guides/cli.md)                                           | Every `plainq` command, flags, and scripting patterns.              |
+| [Driving PlainQ from an agent](guides/agents.md)                | The CLI contract for scripts and AI agents: discovery, exit codes, JSON. |
 | [Terminal UI (TUI)](guides/tui.md)                             | The interactive Bubble Tea queue browser.                           |
 | [User stories](user-stories.md)                                | What each role can do, with a traceability matrix.                  |
 | [Queues & messages](guides/queues-and-messages.md)             | Visibility timeout, retries, retention, eviction, dead-letter.      |
