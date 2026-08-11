@@ -92,7 +92,6 @@ func contextInitCommand() *commandSpec {
 
 				return fmt.Errorf("create context file: %w", createErr)
 			}
-			defer f.Close()
 
 			ctxConfig := plainqContextConfig{
 				Current: plainqContext{
@@ -103,8 +102,15 @@ func contextInitCommand() *commandSpec {
 				},
 			}
 
-			if err := json.NewEncoder(f).Encode(&ctxConfig); err != nil {
-				return fmt.Errorf("encode context file content: %w", err)
+			if err := writeContextFile(f, ctxConfig); err != nil {
+				// O_EXCL means a half-written file would make every later
+				// "ctx init" report that the context already exists, leaving
+				// the caller stuck with the wreckage of this one. Clear it.
+				if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+					return errors.Join(err, fmt.Errorf("remove partial context file %s: %w", path, removeErr))
+				}
+
+				return err
 			}
 
 			fmt.Printf("created\t%s\n", path)
@@ -112,6 +118,27 @@ func contextInitCommand() *commandSpec {
 			return nil
 		},
 	}
+}
+
+// writeContextFile encodes cfg into f and closes it.
+//
+// The close error is reported rather than deferred away: f is open for writing,
+// and Close is where a delayed write failure — a full disk, an exceeded quota,
+// a network filesystem giving up — actually surfaces. Discarding it would let
+// the command print "created" over a file that never landed.
+func writeContextFile(f *os.File, cfg plainqContextConfig) (err error) {
+	defer func() {
+		closeErr := f.Close()
+		if closeErr != nil && err == nil {
+			err = fmt.Errorf("close context file: %w", closeErr)
+		}
+	}()
+
+	if encodeErr := json.NewEncoder(f).Encode(&cfg); encodeErr != nil {
+		return fmt.Errorf("encode context file content: %w", encodeErr)
+	}
+
+	return nil
 }
 
 func contextListCommand() *commandSpec {

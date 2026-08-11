@@ -28,8 +28,9 @@ These rules hold everywhere:
 - Flags accept `-flag value` and `-flag=value`, with one or two leading dashes.
 - Errors go to **stderr**; stdout carries only command output, so `--json` is
   always safe to parse.
-- Nothing prompts for confirmation or reads from a TTY (except `tui`), so every
-  command is safe to run unattended.
+- Nothing prompts for confirmation. Every command except `tui` is safe to run
+  unattended; `tui` needs a terminal and runs until quit, and is the only
+  command marked `"interactive": true` in `plainq schema -target=cli`.
 - `--json` output is protobuf JSON: zero-valued fields are omitted, 64-bit
   integers are quoted strings, and byte fields such as a message body are
   base64.

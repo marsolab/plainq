@@ -60,6 +60,10 @@ type cliCommand struct {
 	// Blocking reports whether the command runs until interrupted.
 	Blocking bool `json:"blocking"`
 
+	// Interactive reports whether the command needs a terminal and therefore
+	// cannot be run unattended.
+	Interactive bool `json:"interactive"`
+
 	// Arguments are the positional arguments, in order.
 	Arguments []argSpec `json:"arguments,omitempty"`
 
@@ -208,13 +212,15 @@ func collectCLISchema(root *commandSpec) *cliSchema {
 // collectCLICommand renders one command and everything under it.
 func collectCLICommand(spec *commandSpec) cliCommand {
 	command := cliCommand{
-		Path:      spec.path(),
-		Name:      spec.Name,
-		Short:     spec.Short,
-		Long:      strings.TrimSpace(spec.Long),
-		Usage:     spec.usageLine(),
-		Effect:    spec.Effect,
-		Blocking:  spec.Blocking,
+		Path:        spec.path(),
+		Name:        spec.Name,
+		Short:       spec.Short,
+		Long:        strings.TrimSpace(spec.Long),
+		Usage:       spec.usageLine(),
+		Effect:      spec.Effect,
+		Blocking:    spec.Blocking,
+		Interactive: spec.Interactive,
+
 		Arguments: spec.Args,
 		Flags:     spec.flags(),
 		Examples:  spec.Examples,

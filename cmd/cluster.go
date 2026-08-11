@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -378,6 +379,12 @@ func clusterCall(ctx context.Context, flags *clusterFlags, method, path string, 
 // clusterAPIError renders a failed call the way an operator needs to read it.
 // A "not the leader" answer carries the leader's address, so the next command
 // is obvious rather than a guess.
+//
+// A 4xx that is not a redirect to the leader is the caller's mistake, so it is
+// reported as a usage error. That keeps the admin API consistent with the data
+// plane, where a rejected request also exits 2 rather than looking like a
+// transient failure worth retrying. "Not the leader" is deliberately excluded:
+// retrying it against the address in the message is exactly the right move.
 func clusterAPIError(status int, payload []byte) error {
 	var body struct {
 		Error         string `json:"error"`
@@ -386,14 +393,30 @@ func clusterAPIError(status int, payload []byte) error {
 	}
 
 	if err := json.Unmarshal(payload, &body); err != nil || body.Error == "" {
-		return fmt.Errorf("cluster API returned %d: %s", status, strings.TrimSpace(string(payload)))
+		message := fmt.Sprintf("cluster API returned %d: %s", status, strings.TrimSpace(string(payload)))
+
+		if isClientError(status) {
+			return usagef("%s", message)
+		}
+
+		return errors.New(message)
 	}
 
 	if body.LeaderID != "" {
 		return fmt.Errorf("%s — the leader is %s at %s", body.Error, body.LeaderID, body.LeaderAddress)
 	}
 
-	return fmt.Errorf("%s", body.Error)
+	if isClientError(status) {
+		return usagef("%s", body.Error)
+	}
+
+	return errors.New(body.Error)
+}
+
+// isClientError reports whether status blames the request rather than the
+// server.
+func isClientError(status int) bool {
+	return status >= http.StatusBadRequest && status < http.StatusInternalServerError
 }
 
 func clusterBaseURL(addr string) string {

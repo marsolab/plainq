@@ -12,14 +12,16 @@ func tuiCommand() *commandSpec {
 	var addr string
 
 	return &commandSpec{
-		Name:     "tui",
-		Short:    "Launch the interactive terminal dashboard",
-		Effect:   effectMutating,
-		Blocking: true,
+		Name:        "tui",
+		Short:       "Launch the interactive terminal dashboard",
+		Effect:      effectMutating,
+		Blocking:    true,
+		Interactive: true,
 		Long: "Opens a full-screen dashboard for browsing queues and messages.\n\n" +
 			"This command needs an interactive terminal and runs until you quit it, so\n" +
-			"it is the one command in the CLI that cannot be scripted. Every operation\n" +
-			"it offers is also available as a plain command.",
+			"it is the one command in the CLI that cannot be scripted: in a job with no\n" +
+			"TTY it will fail or hang. Every operation it offers is also available as a\n" +
+			"plain command.",
 		Examples: []exampleSpec{
 			{Description: "Open the dashboard against a local server.", Command: "plainq tui"},
 		},

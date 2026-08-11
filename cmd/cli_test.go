@@ -258,6 +258,118 @@ func TestUsageErrorSurvivesScottyWrapping(t *testing.T) {
 	}
 }
 
+// TestUsageErrorsCarryTheUsageExitCode pins the classification of every failure
+// the agent guide documents as exit 2. The exit code is the part of the
+// contract a script branches on, so a validation error that quietly reports
+// itself as a runtime failure invites an unbounded retry loop on a command that
+// can never succeed.
+func TestUsageErrorsCarryTheUsageExitCode(t *testing.T) {
+	cases := map[string]error{
+		"missing send payload":  mustErr(collectSendMessages(nil, "")),
+		"queue name as id":      validateQueueID("orders"),
+		"malformed queue id":    validateQueueID("!!!"),
+		"missing queue id":      mustErr(queueIDArg("send", nil)),
+		"admin api rejection":   clusterAPIError(400, []byte(`{"error":"node-id is unknown"}`)),
+		"admin api bad payload": clusterAPIError(422, []byte("not json")),
+	}
+
+	for name, err := range cases {
+		t.Run(name, func(t *testing.T) {
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+
+			var b strings.Builder
+
+			if got := reportError(&b, err); got != exitUsage {
+				t.Fatalf("exit code = %d, want %d (%v)", got, exitUsage, err)
+			}
+		})
+	}
+}
+
+// TestServerFailuresAreNotUsageErrors is the other half: a failure the caller
+// cannot fix by editing the command line must stay retryable.
+func TestServerFailuresAreNotUsageErrors(t *testing.T) {
+	cases := map[string]error{
+		"admin api server error": clusterAPIError(500, []byte(`{"error":"raft is unavailable"}`)),
+		"admin api unparseable":  clusterAPIError(503, []byte("gateway down")),
+		"not the leader":         clusterAPIError(409, []byte(`{"error":"not the leader","leaderId":"n1","leaderAddress":"10.0.0.1:8081"}`)),
+	}
+
+	for name, err := range cases {
+		t.Run(name, func(t *testing.T) {
+			var b strings.Builder
+
+			if got := reportError(&b, err); got != exitFailure {
+				t.Fatalf("exit code = %d, want %d (%v)", got, exitFailure, err)
+			}
+		})
+	}
+}
+
+// TestOnlyTuiIsInteractive keeps the "safe to run unattended" convention true.
+// The claim is printed in the root help and served in the schema, so an agent
+// acts on it; the moment a second command needs a terminal, the blanket
+// statement has to change with it.
+func TestOnlyTuiIsInteractive(t *testing.T) {
+	root := testRoot(t)
+
+	var interactive []string
+
+	walkSpecs(root, func(spec *commandSpec) {
+		if spec.Interactive {
+			interactive = append(interactive, spec.path())
+		}
+	})
+
+	if len(interactive) != 1 || interactive[0] != "plainq tui" {
+		t.Fatalf("interactive commands = %v, want [plainq tui]; update the unattended convention", interactive)
+	}
+
+	// An interactive command must also be reachable as such from the schema,
+	// which is where a program looks rather than at the prose.
+	out, err := buildSchema(root, schemaTargetCLI)
+	if err != nil {
+		t.Fatalf("build schema: %v", err)
+	}
+
+	var found bool
+
+	for _, command := range out.CLI.Commands {
+		if command.Path == "plainq tui" {
+			found = command.Interactive
+		}
+	}
+
+	if !found {
+		t.Error(`schema does not mark "plainq tui" as interactive`)
+	}
+}
+
+// TestUnattendedConventionNamesTheException guards the wording itself: the
+// convention an agent reads must not promise that every command is safe.
+func TestUnattendedConventionNamesTheException(t *testing.T) {
+	var unattended string
+
+	for _, convention := range cliConventions() {
+		if strings.Contains(convention, "unattended") {
+			unattended = convention
+		}
+	}
+
+	if unattended == "" {
+		t.Fatal("no convention mentions running unattended")
+	}
+
+	if !strings.Contains(unattended, "tui") {
+		t.Errorf("the unattended convention does not name its exception: %q", unattended)
+	}
+}
+
+// mustErr adapts a (value, error) pair for table use, discarding the value.
+func mustErr[T any](_ T, err error) error { return err }
+
 func TestWrapText(t *testing.T) {
 	got := wrapText("one two three four five", 9, "..")
 

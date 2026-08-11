@@ -135,7 +135,9 @@ func cliConventions() []string {
 		"-json output is protobuf JSON: fields at their zero value are omitted, 64-bit integers are " +
 			"quoted strings, and byte fields such as a message body are base64.",
 		"Errors go to stderr. stdout carries only command output, so -json output is always parseable.",
-		"No command prompts for confirmation or reads from a TTY, so every command is safe to run unattended.",
+		`No command prompts for confirmation. Every command except "plainq tui" is safe to run ` +
+			`unattended; tui needs a terminal and runs until quit, and is the only command with ` +
+			`"interactive": true in this schema.`,
 		`Queue ids are 20-character identifiers returned by "plainq create"; queue names are not accepted in their place.`,
 		`Run "plainq schema -target=cli -json" for this whole surface in machine-readable form.`,
 	}
@@ -165,6 +167,12 @@ type commandSpec struct {
 	// Blocking marks a command that runs until interrupted. An agent should not
 	// run one of these in the foreground while waiting for it to return.
 	Blocking bool
+
+	// Interactive marks a command that drives a terminal and cannot be
+	// scripted. Blocking is not enough to express this on its own: "serve"
+	// blocks but runs happily headless, while an interactive command fails or
+	// hangs the moment there is no TTY.
+	Interactive bool
 
 	// SetFlags registers the command's flags, exactly as scotty expects.
 	SetFlags func(flags *scotty.FlagSet)
@@ -451,7 +459,10 @@ func (s *commandSpec) printFooter(b *strings.Builder) {
 		fmt.Fprintf(b, "\nEffect: %s\n", s.Effect)
 	}
 
-	if s.Blocking {
+	if s.Interactive {
+		b.WriteString("\nThis command needs an interactive terminal and runs until you quit it.\n" +
+			"It is the one command here that cannot be scripted.\n")
+	} else if s.Blocking {
 		b.WriteString("\nThis command runs until interrupted. Start it in the background\n" +
 			"if you need the shell back.\n")
 	}

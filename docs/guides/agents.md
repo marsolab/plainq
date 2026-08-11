@@ -34,6 +34,7 @@ plainq <command> -h              # one command in depth, with examples
         "usage": "plainq send [flags] <queue-id>",
         "effect": "mutating",               // read-only | mutating | destructive
         "blocking": false,                  // true = runs until interrupted
+        "interactive": false,               // true = needs a TTY; never run unattended
         "arguments": [
           {"name": "queue-id", "description": "...", "required": true, "variadic": false}
         ],
@@ -77,11 +78,15 @@ while exploring. `mutating` commands change state. `destructive` commands
 (`purge`, `delete`, `delete-message`, `cluster leave`) remove data immediately,
 with no confirmation prompt and no undo — do not run them to "see what happens".
 
-**Two commands block.** `serve` and `tui` run until interrupted; `tui` also
-needs a terminal. Everything `tui` offers is available as a plain command.
+**Two commands block, and one of them is interactive.** `serve` and `tui` both
+run until interrupted, but they are not the same kind of unsafe: `serve` runs
+happily headless, while `tui` drives a terminal and will fail or hang in a job
+with no TTY. The schema distinguishes them — `tui` is the only command with
+`"interactive": true`, and it is the only one you should refuse to launch
+unattended. Everything `tui` offers is available as a plain command.
 
-**Nothing is interactive.** No command prompts, and none reads stdin unless you
-pass `-file=-`.
+**Nothing prompts.** No command asks for confirmation, and none reads stdin
+unless you pass `-file=-`.
 
 ## Reading `-json` output
 
