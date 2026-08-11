@@ -21,20 +21,47 @@ always authoritative.
 | `plainq receive <queue-id>`    | Receive messages.                                          |
 | `plainq delete-message <queue-id> <id>...` | Acknowledge (delete) messages by ID.          |
 | `plainq tui`                   | Launch the interactive terminal UI.                       |
-| `plainq schema`                | Print the gRPC API surface (text or `-json`).             |
+| `plainq schema`                | Print the CLI and gRPC surfaces (`-target=all\|cli\|grpc`, text or `-json`). |
 
-> Client commands take flags **before** the positional queue id, e.g.
-> `plainq send -message hi <queue-id>`. Flags after the positional are ignored.
+> Flags may be written **before or after** the positional arguments:
+> `plainq send -message hi <queue-id>` and `plainq send <queue-id> -message hi`
+> are equivalent. Both `-flag value` and `-flag=value` work, with one or two
+> leading dashes.
 
 ## Common client flags
 
 Accepted by every client command (`list`, `create`, `describe`, `purge`,
-`delete`, `send`, `receive`):
+`delete`, `send`, `receive`, `delete-message`, `tui`):
 
 | Flag          | Default          | Meaning                              |
 | ------------- | ---------------- | ------------------------------------ |
 | `--grpc.addr` | `localhost:8080` | gRPC server address.                 |
 | `--json`      | `false`          | Emit the raw response as JSON.       |
+
+## Environment variables
+
+| Variable              | Meaning                                                       |
+| --------------------- | ------------------------------------------------------------- |
+| `PLAINQ_ADDR`         | Default for `--grpc.addr`. Overrides the current context.      |
+| `PLAINQ_CONTEXT_FILE` | Path of the context file (default `~/.config/plainq/context.json`). |
+| `PLAINQ_TOKEN`        | Default bearer token for `plainq cluster` admin calls.         |
+
+`--grpc.addr` resolves in this order: flag, `PLAINQ_ADDR`, current context,
+`localhost:8080`.
+
+## Command effects
+
+Every command declares what running it does to server state. The value appears
+in `-h` output and in `plainq schema -target=cli`.
+
+| Effect        | Commands                                                       |
+| ------------- | -------------------------------------------------------------- |
+| `read-only`   | `list`, `describe`, `schema`, `version`, `ctx list`, `cluster status`, `cluster members` |
+| `mutating`    | `serve`, `create`, `send`, `receive`, `tui`, `ctx init`, `cluster join`, `cluster snapshot` |
+| `destructive` | `purge`, `delete`, `delete-message`, `cluster leave`            |
+
+Destructive commands take effect immediately: no confirmation prompt, no undo.
+`serve` and `tui` are also marked *blocking* — they run until interrupted.
 
 ## Per-command flags
 
@@ -87,8 +114,11 @@ Accepted by every client command (`list`, `create`, `describe`, `purge`,
 
 ## Exit codes
 
-| Code | Meaning            |
-| ---- | ------------------ |
-| `0`  | Success.           |
-| `2`  | Error (printed to output). |
+Errors are written to stderr; stdout carries only command output.
+
+| Code | Meaning                                                                    |
+| ---- | -------------------------------------------------------------------------- |
+| `0`  | Success.                                                                   |
+| `1`  | The command ran but failed: server unreachable, queue not found, request rejected. |
+| `2`  | Usage error: unknown flag, missing or malformed argument. Retrying unchanged will not help. |
 </content>

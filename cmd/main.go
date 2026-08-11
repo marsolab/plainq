@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/heartwilltell/scotty"
@@ -26,45 +27,70 @@ var (
 )
 
 func main() {
-	rootCmd := scotty.Command{
-		Name: "plainq",
-	}
+	rootName = filepath.Base(os.Args[0])
 
-	rootCmd.AddSubcommands(
-		versionCommand(),
-		contextCommand(),
+	root := rootCommand()
 
-		// Serer commands.
-		serverCommand(),
+	// Build the command tree before touching the arguments: normalization has
+	// to know which flags each command defines.
+	command := root.command()
 
-		// Client commands.
-		listQueueCommand(),
-		createQueueCommand(),
-		describeQueueCommand(),
-		purgeQueueCommand(),
-		deleteQueueCommand(),
-		sendCommand(),
-		receiveCommand(),
-		deleteMessageCommand(),
+	os.Args = append(os.Args[:1:1], normalizeArgs(root, os.Args[1:])...)
 
-		// Cluster administration.
-		clusterCommand(),
-
-		// Interactive and introspection commands.
-		tuiCommand(),
-		schemaCommand(),
-	)
-
-	if err := rootCmd.Exec(); err != nil {
-		fmt.Println(err)
-		os.Exit(2)
+	if err := command.Exec(); err != nil {
+		os.Exit(reportError(os.Stderr, err))
 	}
 }
 
-func versionCommand() *scotty.Command {
-	cmd := scotty.Command{
-		Name:  "version",
-		Short: "Prints the version of the program.",
+// rootCommand assembles the command tree.
+func rootCommand() *commandSpec {
+	return &commandSpec{
+		Name:  "plainq",
+		Short: "Truly simple queue service",
+		Long: "PlainQ is a queue server and its client in one binary. Every command except\n" +
+			`"serve" is a client that talks to a running server over gRPC.` + "\n\n" +
+			"A round trip looks like this:\n\n" +
+			"  plainq serve &                       # or point -grpc.addr at a server\n" +
+			"  QID=$(plainq create orders)          # create a queue, keep its id\n" +
+			`  plainq send -message='hello' "$QID"  # enqueue` + "\n" +
+			`  plainq receive -ack "$QID"           # dequeue and acknowledge`,
+		Subcommands: []*commandSpec{
+			// Server.
+			serverCommand(),
+
+			// Queues.
+			listQueueCommand(),
+			createQueueCommand(),
+			describeQueueCommand(),
+			purgeQueueCommand(),
+			deleteQueueCommand(),
+
+			// Messages.
+			sendCommand(),
+			receiveCommand(),
+			deleteMessageCommand(),
+
+			// Cluster administration.
+			clusterCommand(),
+
+			// Local configuration, introspection and interactive use.
+			contextCommand(),
+			schemaCommand(),
+			tuiCommand(),
+			versionCommand(),
+		},
+	}
+}
+
+func versionCommand() *commandSpec {
+	return &commandSpec{
+		Name:   "version",
+		Short:  "Print the build branch, commit, and time",
+		Effect: effectReadOnly,
+		Long:   "Prints the build metadata of this binary. Talks to no server.",
+		Examples: []exampleSpec{
+			{Description: "Show which build this is.", Command: "plainq version"},
+		},
 		Run: func(_ *scotty.Command, _ []string) error {
 			fmt.Printf("Built from: %s [%s]\n", Branch, Commit)
 			fmt.Printf("Built on: %s\n", BuildTime)
@@ -73,6 +99,4 @@ func versionCommand() *scotty.Command {
 			return nil
 		},
 	}
-
-	return &cmd
 }

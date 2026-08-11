@@ -18,9 +18,10 @@ These apply to every command that talks to a server:
 | `-json`      | `false`            | Emit machine-readable JSON output. |
 | `-h`, `-help`| —                  | Print command help.               |
 
-:::caution
-Flags go **before** the positional queue id:
-`plainq send -message hi <queue-id>`.
+:::tip
+Flags may go **before or after** the positional queue id:
+`plainq send -message hi <queue-id>` and `plainq send <queue-id> -message hi`
+are equivalent.
 :::
 
 ## Commands
@@ -97,7 +98,39 @@ Launch the interactive Bubble Tea terminal UI.
 
 ### `plainq schema`
 
-Print the gRPC API surface as text, or as JSON with `-json`.
+Print PlainQ's surfaces as text, or as JSON with `-json`. `-target` selects
+which: `all` (the default), `cli`, or `grpc`.
+
+The `cli` surface lists every command with its call signature, positional
+arguments, flags (type, default, usage), effect classification, and worked
+examples. Neither surface contacts a server, which makes `schema` the right
+first call when working out how to drive PlainQ from a script or an agent.
+
+```shell
+plainq schema -target=cli -json \
+  | jq -r '.cli.commands[] | recurse(.subcommands[]?) | select(.effect != "read-only") | .path'
+```
+
+## Environment variables
+
+| Variable              | Meaning                                                             |
+| --------------------- | ------------------------------------------------------------------- |
+| `PLAINQ_ADDR`         | Default for `-grpc.addr`. Overrides the current context.            |
+| `PLAINQ_CONTEXT_FILE` | Path of the context file (default `~/.config/plainq/context.json`). |
+| `PLAINQ_TOKEN`        | Default bearer token for `plainq cluster` admin calls.              |
+
+`-grpc.addr` resolves in this order: flag, `PLAINQ_ADDR`, current context,
+`localhost:8080`.
+
+## Exit codes
+
+Errors are written to stderr; stdout carries only command output.
+
+| Code | Meaning                                                                            |
+| ---- | ---------------------------------------------------------------------------------- |
+| `0`  | Success.                                                                           |
+| `1`  | The command ran but failed: server unreachable, queue not found, request rejected.  |
+| `2`  | Usage error: unknown flag, missing or malformed argument. Retrying unchanged will not help. |
 
 ## gRPC service
 

@@ -9,9 +9,11 @@ The `plainq` binary is both the server and the client. Every client command
 talks gRPC and accepts `-grpc.addr` (default `localhost:8080`) and `-json` for
 machine-readable output.
 
-:::caution
-**Flags go before the positional queue id.** For example:
-`plainq send -message hi <queue-id>`.
+:::tip
+**Flags may go before or after the positional arguments.**
+`plainq send -message hi <queue-id>` and `plainq send <queue-id> -message hi`
+are the same command. Both `-flag value` and `-flag=value` work, with one or two
+leading dashes.
 :::
 
 ## Commands
@@ -30,16 +32,20 @@ machine-readable output.
 | `plainq receive <queue-id>`                | Receive messages (`-batch=N` up to 10, `-ack` to delete after read).                                                                                            |
 | `plainq delete-message <queue-id> <id>...` | Acknowledge (delete) messages by ID.                                                                                                                            |
 | `plainq tui`                               | Launch the interactive terminal UI.                                                                                                                             |
-| `plainq schema`                            | Print the gRPC API surface (text or `-json`).                                                                                                                   |
+| `plainq schema`                            | Print the CLI and gRPC surfaces (`-target=all\|cli\|grpc`, text or `-json`).                                                                                    |
 
-Run any command with `-h` for its full flag list.
+Run any command with `-h` for its description, arguments, flags with their
+defaults, worked examples, and exit codes.
+
+Commands exit `0` on success, `1` when the command ran but failed, and `2` on a
+usage error. Errors go to stderr, so `-json` output on stdout is always
+parseable.
 
 ## Everyday recipes
 
 ### Create a queue with a dead-letter policy
 
-Remember: **flags go before the positional queue name**, and durations are given
-as whole seconds.
+Durations are given as whole seconds.
 
 ```shell
 DLQ=$(plainq create my-queue-dlq)

@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -21,7 +20,10 @@ import (
 // request.
 func validateQueueID(id string) error {
 	if err := idkit.ValidateXID(strings.ToLower(id)); err != nil {
-		return fmt.Errorf("validate queue id: %w", err)
+		return usagef("invalid queue id %q: %w"+
+			` (expected the 20-character id printed by "plainq create" or "plainq list", not a queue name)`,
+			id, err,
+		)
 	}
 
 	return nil
@@ -82,8 +84,11 @@ func collectSendMessages(messages []string, file string) ([]*v1.SendMessage, err
 		bodies = append(bodies, fileBodies...)
 	}
 
+	// A send with nothing to send is a mistake in the command line, not a
+	// runtime failure: retrying it unchanged can never succeed, so it has to
+	// carry the usage exit code that tells a caller to stop retrying.
 	if len(bodies) == 0 {
-		return nil, errors.New("no messages: provide -message and/or -file")
+		return nil, usagef("no messages: provide -message and/or -file")
 	}
 
 	return bodies, nil

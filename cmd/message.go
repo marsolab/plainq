@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -15,19 +14,47 @@ import (
 // minDeleteMessageArgs is the queue id plus at least one message id.
 const minDeleteMessageArgs = 2
 
-func deleteMessageCommand() *scotty.Command {
+func deleteMessageCommand() *commandSpec {
 	var (
 		addr    string
 		jsonOut bool
 	)
 
-	cmd := scotty.Command{
-		Name:  "delete-message",
-		Short: "Delete (acknowledge) one or more messages from a queue",
+	return &commandSpec{
+		Name:   "delete-message",
+		Short:  "Acknowledge (delete) messages by id",
+		Effect: effectDestructive,
+		Long: "Deletes the given messages from the queue so they are not redelivered.\n" +
+			"This is how a worker acknowledges the work it has finished.\n\n" +
+			"Message ids come from \"plainq send\" or \"plainq receive\". Deleting a message\n" +
+			"that does not exist is reported per id rather than failing the command, so\n" +
+			"check the output: text mode prints \"deleted\\t<id>\" per success and\n" +
+			"\"failed\\t<id>\\t<error>\" per failure.",
+		Args: []argSpec{
+			{Name: argQueueID, Description: descQueueID, Required: true},
+			{
+				Name:        "message-id",
+				Description: `message identifier printed by "plainq send" or "plainq receive"`,
+				Required:    true,
+				Variadic:    true,
+			},
+		},
+		Examples: []exampleSpec{
+			{
+				Description: "Acknowledge one message.",
+				Command:     "plainq delete-message " + exampleQueueID + " 9m4e2mr0ui3e8a215n4g",
+			},
+			{
+				Description: "Receive a batch, then acknowledge it after the work succeeds.",
+				Command: "IDS=$(plainq receive -batch=10 -json " + exampleQueueID + " | jq -r '.messages[].id')\n" +
+					"  plainq delete-message " + exampleQueueID + " $IDS",
+			},
+		},
 		SetFlags: func(flags *scotty.FlagSet) {
-			flags.StringVar(&addr, flagGRPCAddr, defaultGRPCAddr,
+			flags.StringVar(&addr, flagGRPCAddr, resolveGRPCAddr(),
 				flagGRPCAddrUsage,
 			)
+
 			flags.BoolVar(&jsonOut, flagJSON, false,
 				flagJSONUsage,
 			)
@@ -37,7 +64,7 @@ func deleteMessageCommand() *scotty.Command {
 			defer cancel()
 
 			if len(args) < minDeleteMessageArgs {
-				return errors.New("usage: plainq delete-message [queue id] [message id...]")
+				return usagef("usage: plainq delete-message [flags] <queue-id> <message-id>...")
 			}
 
 			id := args[0]
@@ -53,7 +80,7 @@ func deleteMessageCommand() *scotty.Command {
 
 			resp, deleteErr := cli.Delete(ctx, &v1.DeleteRequest{QueueId: id, MessageIds: args[1:]})
 			if deleteErr != nil {
-				return fmt.Errorf("delete messages: %w", deleteErr)
+				return grpcError(addr, "delete messages", deleteErr)
 			}
 
 			if jsonOut {
@@ -71,6 +98,4 @@ func deleteMessageCommand() *scotty.Command {
 			return nil
 		},
 	}
-
-	return &cmd
 }

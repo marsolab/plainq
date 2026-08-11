@@ -410,7 +410,7 @@ func (s *Storage) PurgeQueue(ctx context.Context, input *v1.PurgeQueueRequest) (
 		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
 
-	output := v1.PurgeQueueResponse{}
+	output := v1.PurgeQueueResponse{MessagesCount: count}
 
 	return &output, nil
 }

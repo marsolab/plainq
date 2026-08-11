@@ -94,7 +94,7 @@ func TestEvictionPolicyString(t *testing.T) {
 }
 
 func TestCollectSchemaListsService(t *testing.T) {
-	services := collectSchema()
+	services := collectGRPCSchema()
 	if len(services) == 0 {
 		t.Fatal("expected at least one service")
 	}
