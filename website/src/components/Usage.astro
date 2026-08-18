@@ -1,57 +1,85 @@
 ---
-import Terminal from "./Terminal.astro";
-
-const queue = `# One message, one worker group
-$ plainq create \\
-    -visibility-timeout=30 \\
-    -max-receive-attempts=5 \\
-    -drop-policy=dead-letter \\
-    my-queue
-
-$ plainq send -message='{"job":"resize"}' "$QID"
-$ plainq receive -batch=10 -ack "$QID"
-
-# Machine-readable output for scripts and agents
-$ plainq list -json | jq '.queues[].queue_name'`;
-
-const pubsub = `# 1. Create a topic
-POST /api/v1/queue/topics/
-{"topicName":"order-events"}
-
-# 2. Attach each existing queue
-POST /api/v1/queue/topics/:topicId/subscriptions
-{"queueId":"email-workers-id"}
-
-# 3. Publish once; every attached queue gets a copy
-POST /api/v1/queue/topics/:topicId/publish
-{"messages":[{"body":"eyJvcmRlcklkIjo0Mn0="}]}`;
+const queueCommand = `plainq send -message='{"job":"resize"}' "$QID"`;
 ---
 
-<section id="usage" class="border-b border-[var(--color-border)] bg-[var(--color-muted)]">
-  <div class="mx-auto max-w-6xl px-4 py-20 sm:px-6">
-    <div class="max-w-2xl">
-      <h2 class="text-3xl font-bold tracking-tight sm:text-4xl">
-        Choose the delivery pattern that fits
-      </h2>
-      <p class="mt-4 text-lg text-[var(--color-muted-foreground)]">
-        Send jobs to a queue for competing consumers. Publish events to a topic
-        to fan out into independent queues — without adding another broker.
+<section id="patterns" class="border-b border-[var(--color-border)] bg-[var(--color-muted)]">
+  <div class="section-shell py-24 sm:py-32">
+    <div class="grid gap-8 lg:grid-cols-2 lg:items-end">
+      <div>
+        <span class="section-label">Delivery patterns</span>
+        <h2 class="font-display mt-7 max-w-2xl text-4xl font-semibold leading-[1.03] tracking-[-0.05em] sm:text-6xl">
+          Queues for work.<br />Topics for fan-out.
+        </h2>
+      </div>
+      <p class="max-w-xl text-base leading-7 text-[var(--color-muted-foreground)] sm:text-lg lg:justify-self-end">
+        Keep the same durable queue semantics whether one worker group handles a
+        job or several independent consumers need the same event.
       </p>
     </div>
 
-    <div class="mt-12 grid gap-6 lg:grid-cols-2">
-      <div class="min-w-0">
-        <h3 class="mb-3 font-mono text-sm font-medium text-[var(--color-muted-foreground)]">
-          Work queue · CLI
-        </h3>
-        <Terminal code={queue} title="plainq" />
-      </div>
-      <div class="min-w-0">
-        <h3 class="mb-3 font-mono text-sm font-medium text-[var(--color-muted-foreground)]">
-          Pub/sub · HTTP
-        </h3>
-        <Terminal code={pubsub} title="topics.http" />
-      </div>
+    <div class="mt-14 grid gap-5 lg:grid-cols-2">
+      <article class="pattern-card">
+        <div class="pattern-copy">
+          <div class="pattern-kicker"><span>Work queue</span><code>stable</code></div>
+          <h3>One message. One worker group.</h3>
+          <p>Add consumers without coordinating them. Each message goes to one worker and returns to the queue if it is not acknowledged.</p>
+        </div>
+        <div class="work-diagram" aria-label="An application sends jobs to one queue shared by three workers" role="img">
+          <div class="tiny-node">app</div><span class="connector"><i></i></span>
+          <div class="queue-stack"><i></i><i></i><i></i><span>jobs</span></div>
+          <span class="connector"><i></i></span>
+          <div class="workers"><span>worker 1</span><span>worker 2</span><span>worker 3</span></div>
+        </div>
+        <code class="pattern-code">{queueCommand}</code>
+      </article>
+
+      <article class="pattern-card">
+        <div class="pattern-copy">
+          <div class="pattern-kicker"><span>Topic fan-out</span><code class="experimental">experimental</code></div>
+          <h3>Publish once. Deliver independently.</h3>
+          <p>Every subscribed queue gets its own durable copy, with its own retries, retention, and dead-letter policy.</p>
+        </div>
+        <div class="topic-diagram" aria-label="An order event fans out from a topic into three independent queues" role="img">
+          <div class="tiny-node">event</div><span class="connector"><i></i></span>
+          <div class="topic-node">order.created</div><span class="branch-line"></span>
+          <div class="subscriber-list"><span>email-q</span><span>analytics-q</span><span>audit-q</span></div>
+        </div>
+        <code class="pattern-code">POST /api/v1/queue/topics/:id/publish</code>
+      </article>
     </div>
   </div>
 </section>
+
+<style>
+  .pattern-card { display:flex; min-width:0; flex-direction:column; border:1px solid var(--color-border); background:#fff; }
+  .pattern-copy { padding:28px 28px 22px; }
+  .pattern-kicker { display:flex; align-items:center; justify-content:space-between; gap:16px; font:500 10px/1 var(--font-mono); letter-spacing:.08em; text-transform:uppercase; color:var(--color-muted-foreground); }
+  .pattern-kicker code { padding:5px 7px; background:#e9f8f2; color:#08734f; font:500 9px/1 var(--font-mono); letter-spacing:.05em; }
+  .pattern-kicker .experimental { background:#fff7e7; color:#9a6000; }
+  .pattern-copy h3 { margin-top:42px; max-width:460px; font:600 clamp(1.8rem,3vw,2.65rem)/1.04 var(--font-display); letter-spacing:-.045em; }
+  .pattern-copy p { margin-top:16px; max-width:520px; font-size:14px; line-height:1.75; color:var(--color-muted-foreground); }
+  .work-diagram,.topic-diagram { display:grid; grid-template-columns:auto 1fr auto 1fr minmax(110px,1.2fr); align-items:center; min-height:230px; margin-top:auto; padding:36px 28px; border-top:1px solid var(--color-border); background-image:radial-gradient(var(--color-border) .7px,transparent .7px); background-size:18px 18px; }
+  .tiny-node,.topic-node { border:1px solid var(--color-border); background:#fff; padding:12px 14px; font:600 11px/1 var(--font-mono); color:var(--color-foreground); box-shadow:0 8px 20px rgba(17,19,16,.05); }
+  .topic-node { color:var(--color-accent); }
+  .connector { position:relative; height:1px; background:var(--color-border); }
+  .connector i { position:absolute; top:-4px; left:8%; width:8px; height:8px; border:2px solid white; border-radius:50%; background:var(--color-accent); animation:flow 3s linear infinite; }
+  .queue-stack { position:relative; display:grid; gap:4px; min-width:86px; padding:13px; border:1px solid var(--color-border); background:#fff; }
+  .queue-stack i { display:block; height:5px; background:var(--color-accent); opacity:.85; }
+  .queue-stack i:nth-child(2){width:74%;opacity:.6}.queue-stack i:nth-child(3){width:48%;opacity:.35}
+  .queue-stack span { margin-top:5px; font:500 9px/1 var(--font-mono); color:var(--color-muted-foreground); }
+  .workers,.subscriber-list { display:grid; gap:6px; }
+  .workers span,.subscriber-list span { border:1px solid var(--color-border); background:#fff; padding:10px; font:500 9px/1 var(--font-mono); color:var(--color-muted-foreground); }
+  .workers span:first-child { border-color:#bfc9ff; color:var(--color-accent); }
+  .branch-line { align-self:stretch; margin-block:30px; border-block:1px solid var(--color-border); border-right:1px solid var(--color-border); }
+  .pattern-code { display:block; overflow-x:auto; border-top:1px solid var(--color-border); background:var(--color-muted); padding:16px 20px; font:500 10px/1.4 var(--font-mono); color:var(--color-muted-foreground); white-space:nowrap; }
+  @keyframes flow { from{left:8%;opacity:0} 15%{opacity:1} 85%{opacity:1} to{left:calc(92% - 8px);opacity:0} }
+  @media (max-width:560px) {
+    .pattern-copy { padding:24px 20px; }
+    .pattern-copy h3 { margin-top:32px; }
+    .work-diagram,.topic-diagram { grid-template-columns:1fr; gap:12px; padding:28px 20px; }
+    .connector,.branch-line { display:none; }
+    .tiny-node,.topic-node,.queue-stack { justify-self:stretch; }
+    .workers,.subscriber-list { grid-template-columns:repeat(3,1fr); }
+    .workers span,.subscriber-list span { overflow:hidden; padding-inline:5px; text-align:center; text-overflow:ellipsis; }
+  }
+</style>

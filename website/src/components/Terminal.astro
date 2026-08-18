@@ -22,17 +22,17 @@ function classify(line: string) {
 
 <div
   class:list={[
-    "min-w-0 overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] shadow-sm",
+    "min-w-0 overflow-hidden border border-[var(--color-border)] bg-[var(--color-surface)] shadow-[0_24px_60px_rgba(17,19,16,.07)]",
     className,
   ]}
 >
   <div
-    class="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-muted)] px-4 py-2.5"
+    class="flex items-center justify-between border-b border-[var(--color-border)] bg-[#f7f8f6] px-4 py-2.5"
   >
     <div class="flex items-center gap-1.5">
-      <span class="h-2.5 w-2.5 rounded-full bg-[var(--color-border)]"></span>
-      <span class="h-2.5 w-2.5 rounded-full bg-[var(--color-border)]"></span>
-      <span class="h-2.5 w-2.5 rounded-full bg-[var(--color-border)]"></span>
+      <span class="h-2 w-2 rounded-full bg-[var(--color-accent)]"></span>
+      <span class="h-2 w-2 rounded-full bg-[var(--color-border)]"></span>
+      <span class="h-2 w-2 rounded-full bg-[var(--color-border)]"></span>
       <span class="ml-2 font-mono text-xs text-[var(--color-muted-foreground)]"
         >{title}</span
       >
@@ -40,7 +40,7 @@ function classify(line: string) {
     <CopyButton value={code} client:visible />
   </div>
   <pre
-    class="overflow-x-auto p-4 font-mono text-[13px] leading-relaxed"><code class="block w-max min-w-full">{lines.map((line) => {
+    class="overflow-x-auto bg-white p-5 font-mono text-[12px] leading-[1.8] sm:p-6 sm:text-[13px]"><code class="block w-max min-w-full">{lines.map((line) => {
       const kind = classify(line);
       if (kind === "comment") {
         return <span class="block text-[var(--color-muted-foreground)]">{line}</span>;

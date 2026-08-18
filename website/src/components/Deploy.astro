@@ -1,62 +1,113 @@
 ---
 import Terminal from "./Terminal.astro";
 
-const docker = `# Distroless, static binary, nonroot
+const deploy = `# Build an image and run one durable node
+$ make docker IMAGE=plainq VERSION=dev
 $ docker run --rm -p 8080:8080 -p 8081:8081 \\
     -v plainq-data:/data plainq:dev serve \\
     -storage.path=/data/plainq.db \\
-    -auth.jwt.secret="$(openssl rand -hex 32)"`;
+    -auth.jwt.secret="$(openssl rand -hex 32)"
 
-const helm = `# Production-grade chart with StatefulSet + PVC
+# Or install the included Helm chart
 $ helm install plainq deploy/helm/plainq \\
     --set auth.jwtSecret="$(openssl rand -hex 32)"`;
 
-const targets = [
-  {
-    title: "Single binary",
-    body: "make build produces ./plainq. Copy it to a box and run serve for queue and pub/sub APIs with SQLite in one file.",
-  },
-  {
-    title: "Docker",
-    body: "An optimized multi-stage image: Bun builds Houston, Go builds a static binary, shipped on distroless:nonroot.",
-  },
-  {
-    title: "Kubernetes (Helm)",
-    body: "A StatefulSet + PVC for SQLite, or a Deployment + HPA when you point it at PostgreSQL. JWT secret from a Secret.",
-  },
+const backends = [
+  { name: "SQLite", note: "one node · one local file", tone: "blue" },
+  { name: "Turso", note: "hosted SQLite · one node", tone: "violet" },
+  { name: "PostgreSQL", note: "shared backend · many instances", tone: "green" },
 ];
 ---
 
-<section id="deploy" class="border-b border-[var(--color-border)]">
-  <div class="mx-auto max-w-6xl px-4 py-20 sm:px-6">
-    <div class="max-w-2xl">
-      <h2 class="text-3xl font-bold tracking-tight sm:text-4xl">
-        From one process to a cluster
-      </h2>
-      <p class="mt-4 text-lg text-[var(--color-muted-foreground)]">
-        Start on a laptop and grow into a clustered deployment. Queues and
-        topics keep the same model while storage and topology change underneath.
-      </p>
+<section id="deployment" class="border-b border-[var(--color-border)] bg-[var(--color-muted)]">
+  <div class="section-shell py-24 sm:py-32">
+    <div class="grid items-center gap-14 lg:grid-cols-[1.15fr_.85fr] lg:gap-20">
+      <div class="storage-visual">
+        <div class="storage-head"><span>Storage topology</span><code>choose at startup</code></div>
+        <div class="storage-body">
+          <div class="plainq-core">
+            <span class="core-mark">Q</span>
+            <span><strong>PlainQ</strong><small>queue API</small></span>
+          </div>
+          <div class="storage-trunk" aria-hidden="true"><i></i></div>
+          <div class="backend-list">
+            {
+              backends.map((backend) => (
+                <div class="backend-node">
+                  <span class:list={["backend-light", backend.tone]}></span>
+                  <span><strong>{backend.name}</strong><small>{backend.note}</small></span>
+                </div>
+              ))
+            }
+          </div>
+        </div>
+        <div class="storage-foot"><span>Need machine-level availability?</span><strong>Replicate SQLite state with Raft →</strong></div>
+      </div>
+
+      <div>
+        <span class="section-label">Storage</span>
+        <h2 class="font-display mt-7 max-w-xl text-4xl font-semibold leading-[1.03] tracking-[-0.05em] sm:text-6xl">
+          Start small. Add only what you need.
+        </h2>
+        <p class="mt-6 max-w-xl text-base leading-7 text-[var(--color-muted-foreground)] sm:text-lg">
+          Run an embedded SQLite file on one host. Choose Turso for hosted
+          SQLite, PostgreSQL for a shared backend, or Raft when replicated
+          SQLite availability matters.
+        </p>
+        <a href="/docs/guides/configuration/" class="mt-8 inline-flex items-center gap-2 text-sm font-semibold underline decoration-[var(--color-border)] underline-offset-4 transition-colors hover:text-[var(--color-accent)]">
+          Compare storage options <span aria-hidden="true">→</span>
+        </a>
+      </div>
     </div>
 
-    <div class="mt-12 grid gap-10 lg:grid-cols-2 lg:items-start">
-      <div class="grid gap-px overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-border)]">
-        {
-          targets.map((target) => (
-            <div class="bg-[var(--color-card)] p-6">
-              <h3 class="font-semibold">{target.title}</h3>
-              <p class="mt-2 text-sm leading-relaxed text-[var(--color-muted-foreground)]">
-                {target.body}
-              </p>
-            </div>
-          ))
-        }
+    <div class="mt-24 grid gap-12 border-t border-[var(--color-border)] pt-24 lg:grid-cols-[.75fr_1.25fr] lg:gap-20 sm:mt-32 sm:pt-32">
+      <div>
+        <span class="section-label">Deployment</span>
+        <h2 class="font-display mt-7 max-w-lg text-4xl font-semibold leading-[1.03] tracking-[-0.05em] sm:text-5xl">
+          Deploy like the rest of your stack.
+        </h2>
+        <p class="mt-6 max-w-lg text-base leading-7 text-[var(--color-muted-foreground)]">
+          Copy the binary to a host, build the distroless non-root container,
+          or install the Helm chart. The operator can manage servers, queues,
+          topics, and accounts declaratively on Kubernetes.
+        </p>
+        <ul class="mt-9 grid gap-3 font-mono text-[11px] text-[var(--color-muted-foreground)]">
+          <li class="flex items-center gap-3"><span class="deploy-check">✓</span> single process + local file</li>
+          <li class="flex items-center gap-3"><span class="deploy-check">✓</span> Docker + persistent volume</li>
+          <li class="flex items-center gap-3"><span class="deploy-check">✓</span> Helm + Kubernetes operator</li>
+        </ul>
       </div>
-
-      <div class="min-w-0 space-y-6">
-        <Terminal code={docker} title="docker" />
-        <Terminal code={helm} title="helm" />
-      </div>
+      <div class="min-w-0"><Terminal code={deploy} title="deploy.sh" /></div>
     </div>
   </div>
 </section>
+
+<style>
+  .storage-visual { overflow:hidden; border:1px solid var(--color-border); background:#fff; box-shadow:0 28px 70px rgba(17,19,16,.07); }
+  .storage-head { display:flex; align-items:center; justify-content:space-between; gap:14px; border-bottom:1px solid var(--color-border); padding:17px 20px; font:600 12px/1 var(--font-display); }
+  .storage-head code { font:500 10px/1 var(--font-mono); color:var(--color-muted-foreground); }
+  .storage-body { display:grid; grid-template-columns:minmax(130px,.8fr) minmax(54px,.4fr) minmax(220px,1.2fr); align-items:center; min-height:360px; padding:44px; background-image:radial-gradient(var(--color-border) .7px,transparent .7px); background-size:18px 18px; }
+  .plainq-core { display:flex; align-items:center; gap:12px; border:1px solid #bfc9ff; background:#fff; padding:15px; box-shadow:0 10px 26px rgba(49,92,255,.09); }
+  .core-mark { display:grid; width:34px; height:34px; place-items:center; background:var(--color-foreground); color:#fff; font:600 14px/1 var(--font-display); }
+  .plainq-core strong,.backend-node strong { display:block; font:600 13px/1.2 var(--font-display); }
+  .plainq-core small,.backend-node small { display:block; margin-top:5px; font:500 9px/1.3 var(--font-mono); color:var(--color-muted-foreground); }
+  .storage-trunk { position:relative; height:1px; background:var(--color-border); }
+  .storage-trunk i { position:absolute; top:-4px; left:0; width:9px; height:9px; border:2px solid #fff; border-radius:50%; background:var(--color-accent); animation:storage-flow 3.4s linear infinite; }
+  .backend-list { position:relative; display:grid; gap:9px; }
+  .backend-list::before { position:absolute; top:26px; bottom:26px; left:-1px; width:1px; background:var(--color-border); content:""; }
+  .backend-node { position:relative; display:flex; align-items:center; gap:12px; border:1px solid var(--color-border); background:#fff; padding:14px; }
+  .backend-node::before { position:absolute; top:50%; left:-28px; width:27px; height:1px; background:var(--color-border); content:""; }
+  .backend-light { width:8px; height:8px; border-radius:50%; background:var(--color-accent); }
+  .backend-light.violet { background:#7c5cff; }.backend-light.green { background:var(--color-success); }
+  .storage-foot { display:flex; align-items:center; justify-content:space-between; gap:16px; border-top:1px solid var(--color-border); background:var(--color-muted); padding:16px 20px; font-size:11px; color:var(--color-muted-foreground); }
+  .storage-foot strong { color:var(--color-foreground); font-weight:600; }
+  .deploy-check { display:inline-grid; width:20px; height:20px; place-items:center; background:#e9f8f2; color:#08734f; }
+  @keyframes storage-flow { from{left:0;opacity:0} 12%{opacity:1} 88%{opacity:1} to{left:calc(100% - 9px);opacity:0} }
+  @media (max-width:600px) {
+    .storage-head,.storage-foot { align-items:flex-start; flex-direction:column; }
+    .storage-body { grid-template-columns:1fr; gap:24px; padding:28px 20px; }
+    .storage-trunk { width:1px; height:28px; margin:-12px 0 -12px 27px; }
+    .storage-trunk i { display:none; }
+    .backend-list::before,.backend-node::before { display:none; }
+  }
+</style>

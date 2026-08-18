@@ -1,0 +1,73 @@
+---
+const interfaces = [
+  {
+    label: "CLI",
+    title: "Friendly to humans and scripts",
+    body: "Readable output by default, stable JSON when a program is listening, and meaningful exit codes for automation.",
+    note: "plainq list -json",
+  },
+  {
+    label: "Go SDK",
+    title: "A typed client for every RPC",
+    body: "Use the maintained Go client for queues, messages, and topics without hand-writing gRPC plumbing.",
+    note: "go get …/plainq-go-sdk",
+  },
+  {
+    label: "gRPC + Buf",
+    title: "Generate the client you need",
+    body: "The schema is published in the Buf registry so other languages can generate a native client.",
+    note: "buf.build/plainq/schema",
+  },
+  {
+    label: "Houston + TUI",
+    title: "Operate it without another service",
+    body: "Browse queues and metrics in the bundled web dashboard, or stay in the terminal with the built-in TUI.",
+    note: "plainq tui",
+  },
+  {
+    label: "Agent-native",
+    title: "The command surface explains itself",
+    body: "Inspect flags, effects, examples, and RPCs as JSON without starting or contacting a server.",
+    note: "plainq schema -json",
+  },
+  {
+    label: "Operations",
+    title: "The basics ship in the binary",
+    body: "Health checks, Prometheus metrics, structured logs, and queue dashboards are present from the first process.",
+    note: "/health · /metrics",
+  },
+];
+---
+
+<section id="interfaces" class="border-b border-[var(--color-border)]">
+  <div class="section-shell py-24 sm:py-32">
+    <div class="grid gap-8 lg:grid-cols-[.9fr_1.1fr] lg:items-end">
+      <div>
+        <span class="section-label">Every way in</span>
+        <h2 class="font-display mt-7 max-w-2xl text-4xl font-semibold leading-[1.03] tracking-[-0.05em] sm:text-6xl">
+          One binary.<br />No single interface.
+        </h2>
+      </div>
+      <p class="max-w-xl text-base leading-7 text-[var(--color-muted-foreground)] sm:text-lg lg:justify-self-end">
+        Use the queue from code, a shell, a browser, or an agent. Each surface
+        describes the same small model instead of inventing another one.
+      </p>
+    </div>
+
+    <div class="mt-14 grid border-l border-t border-[var(--color-border)] sm:grid-cols-2 lg:grid-cols-3">
+      {
+        interfaces.map((item) => (
+          <article class="group border-b border-r border-[var(--color-border)] p-6 transition-colors hover:bg-[var(--color-muted)] sm:min-h-[270px] sm:p-7">
+            <div class="flex items-center justify-between gap-3">
+              <span class="font-mono text-[10px] uppercase tracking-[.08em] text-[var(--color-accent)]">{item.label}</span>
+              <span class="h-1.5 w-1.5 rounded-full bg-[var(--color-border)] transition-colors group-hover:bg-[var(--color-accent)]"></span>
+            </div>
+            <h3 class="font-display mt-12 text-xl font-semibold leading-tight tracking-[-.025em]">{item.title}</h3>
+            <p class="mt-3 text-sm leading-6 text-[var(--color-muted-foreground)]">{item.body}</p>
+            <code class="mt-7 block overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[10px] text-[var(--color-muted-foreground)]">{item.note}</code>
+          </article>
+        ))
+      }
+    </div>
+  </div>
+</section>
