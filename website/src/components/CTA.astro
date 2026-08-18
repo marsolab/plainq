@@ -1,39 +1,38 @@
 ---
 import Terminal from "./Terminal.astro";
 
-const oneLiner = `$ make build && ./plainq serve \\
-    --auth.jwt.secret="$(openssl rand -hex 32)"`;
+const quickstart = `# Build and start PlainQ (SQLite by default)
+$ make build
+$ ./plainq serve --auth.jwt.secret="$(openssl rand -hex 32)"
+
+# In another terminal: create → send → receive
+$ QID=$(./plainq create jobs)
+$ ./plainq send -message='{"job":"resize"}' "$QID"
+$ ./plainq receive -ack "$QID"`;
 ---
 
-<section class="border-b border-[var(--color-border)]">
-  <div class="mx-auto max-w-4xl px-4 py-24 text-center sm:px-6">
-    <h2 class="text-balance text-3xl font-bold tracking-tight sm:text-4xl">
-      Put jobs and events on the same simple broker.
-    </h2>
-    <p
-      class="text-balance mx-auto mt-4 max-w-xl text-lg text-[var(--color-muted-foreground)]"
-    >
-      Start one process, send a job through a queue, then add a topic when more
-      than one consumer needs the event. No broker fleet to provision.
-    </p>
-
-    <div class="mx-auto mt-8 max-w-2xl text-left">
-      <Terminal code={oneLiner} title="get started" />
-    </div>
-
-    <div class="mt-8 flex flex-wrap items-center justify-center gap-3">
-      <a
-        href="/docs/getting-started/quickstart/"
-        class="inline-flex h-11 items-center justify-center rounded-md bg-[var(--color-primary)] px-6 text-base font-medium text-[var(--color-primary-foreground)] transition-opacity hover:opacity-90"
-      >
-        Follow the quickstart
-      </a>
-      <a
-        href="/docs/"
-        class="inline-flex h-11 items-center justify-center rounded-md border border-[var(--color-border)] bg-[var(--color-background)] px-6 text-base font-medium text-[var(--color-foreground)] transition-colors hover:bg-[var(--color-muted)]"
-      >
-        Browse the docs
-      </a>
+<section id="get-started" class="border-b border-[var(--color-border)] bg-[var(--color-accent-soft)]">
+  <div class="section-shell py-20 sm:py-28">
+    <div class="grid items-center gap-12 lg:grid-cols-[.8fr_1.2fr] lg:gap-20">
+      <div>
+        <span class="section-label">Quickstart</span>
+        <h2 class="font-display mt-7 max-w-xl text-4xl font-semibold leading-[1.02] tracking-[-0.055em] sm:text-6xl">
+          Run the queue.<br />Skip the broker fleet.
+        </h2>
+        <p class="mt-6 max-w-lg text-base leading-7 text-[var(--color-muted-foreground)] sm:text-lg">
+          Start with one process and one SQLite file. Keep the same queue API as
+          the deployment grows around it.
+        </p>
+        <div class="mt-8 flex flex-wrap gap-3">
+          <a href="/docs/getting-started/quickstart/" class="inline-flex h-11 items-center bg-[var(--color-primary)] px-5 text-sm font-semibold text-[var(--color-primary-foreground)] transition-transform hover:-translate-y-px">
+            Follow the quickstart&nbsp; →
+          </a>
+          <a href="/docs/" class="inline-flex h-11 items-center border border-[#cbd3ee] bg-white px-5 text-sm font-semibold transition-colors hover:border-[var(--color-accent)]">
+            Read the docs
+          </a>
+        </div>
+      </div>
+      <div class="min-w-0"><Terminal code={quickstart} title="quickstart" /></div>
     </div>
   </div>
 </section>

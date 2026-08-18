@@ -7,8 +7,8 @@ interface Props {
 }
 
 const {
-  title = "PlainQ — Simple Queues and Pub/Sub",
-  description = "PlainQ is a self-hosted message broker for reliable work queues and topic-based pub/sub. Run one Go binary with gRPC and HTTP APIs, SQLite, Turso, or PostgreSQL.",
+  title = "PlainQ — Reliable queues. One simple binary.",
+  description = "PlainQ is a self-hosted work queue written in Go. Get durable delivery, retries, dead-lettering, a typed gRPC API, and an admin UI in one small system.",
 } = Astro.props;
 
 const canonical = new URL(Astro.url.pathname, Astro.site).toString();
@@ -21,12 +21,12 @@ const canonical = new URL(Astro.url.pathname, Astro.site).toString();
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="generator" content={Astro.generator} />
+    <meta name="theme-color" content="#fdfdfc" />
 
     <title>{title}</title>
     <meta name="description" content={description} />
     <link rel="canonical" href={canonical} />
 
-    <!-- Open Graph / Twitter -->
     <meta property="og:type" content="website" />
     <meta property="og:title" content={title} />
     <meta property="og:description" content={description} />
@@ -35,38 +35,18 @@ const canonical = new URL(Astro.url.pathname, Astro.site).toString();
     <meta name="twitter:title" content={title} />
     <meta name="twitter:description" content={description} />
 
-    <!-- Fonts: Inter + JetBrains Mono, matching the Houston admin UI -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
       rel="stylesheet"
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&family=Manrope:wght@500;600;700&display=swap"
     />
-
-    <!-- Apply the saved/system theme before paint to avoid a flash. -->
-    <script is:inline>
-      (function () {
-        try {
-          // Light is the default; only go dark if the user has chosen it.
-          const stored = localStorage.getItem("plainq-theme");
-          document.documentElement.classList.toggle("dark", stored === "dark");
-        } catch (e) {
-          /* default: light */
-        }
-      })();
-    </script>
   </head>
   <body class="min-h-screen bg-[var(--color-background)] text-[var(--color-foreground)]">
+    <a class="skip-link" href="#main-content">Skip to content</a>
     <slot />
 
-    {/*
-      Agentation visual-feedback widget (https://www.agentation.com/).
-
-      A dev-time tool: click any element, add a note, and copy structured
-      context that AI coding agents can act on. The `if (import.meta.env.DEV)`
-      guard lets Vite tree-shake the agentation dependency out of the production
-      build entirely — it only loads during `astro dev`.
-    */}
+    {/* Dev-only visual feedback; Vite removes this branch in production. */}
     <script>
       if (import.meta.env.DEV) {
         const [{ Agentation }, { createRoot }, { createElement }] =

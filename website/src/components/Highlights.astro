@@ -1,24 +1,28 @@
 ---
 const items = [
-  { value: "1", label: "binary — no broker fleet" },
-  { value: "2", label: "patterns — queues + pub/sub" },
-  { value: "3", label: "backends — SQLite · Turso · Postgres" },
-  { value: "0", label: "external dependencies to run" },
+  { value: "1", label: "binary", detail: "server · CLI · UI" },
+  { value: "3", label: "backends", detail: "SQLite · Turso · Postgres" },
+  { value: "14", label: "gRPC methods", detail: "queues · messages · topics" },
+  { value: "/metrics", label: "included", detail: "health · logs · dashboards" },
 ];
 ---
 
-<section class="border-b border-[var(--color-border)] bg-[var(--color-muted)]">
-  <div
-    class="mx-auto grid max-w-6xl grid-cols-2 divide-x divide-[var(--color-border)] px-4 sm:px-6 md:grid-cols-4"
-  >
+<section class="border-b border-[var(--color-border)] bg-[var(--color-muted)]" aria-label="PlainQ at a glance">
+  <div class="section-shell grid grid-cols-2 divide-x divide-[var(--color-border)] md:grid-cols-4">
     {
-      items.map((item) => (
-        <div class="px-4 py-8 text-center">
-          <div class="font-mono text-3xl font-bold tracking-tight">
+      items.map((item, index) => (
+        <div class:list={[
+          "min-w-0 px-4 py-7 sm:px-6 sm:py-9",
+          index === 1 && "border-l border-[var(--color-border)]",
+          index === 2 && "border-t border-[var(--color-border)] md:border-l md:border-t-0",
+          index === 3 && "border-l border-t border-[var(--color-border)] md:border-t-0",
+        ]}>
+          <div class="font-display text-2xl font-semibold tracking-[-0.04em] sm:text-3xl">
             {item.value}
           </div>
-          <div class="mt-1 text-sm text-[var(--color-muted-foreground)]">
-            {item.label}
+          <div class="mt-2 text-sm font-semibold">{item.label}</div>
+          <div class="mt-1 hidden font-mono text-[10px] text-[var(--color-muted-foreground)] sm:block">
+            {item.detail}
           </div>
         </div>
       ))

@@ -1,0 +1,121 @@
+<div
+  class="queue-window"
+  role="img"
+  aria-label="A producer sends a message into the media jobs queue, where one of two workers receives it"
+>
+  <div class="queue-titlebar">
+    <div class="queue-title">
+      <span class="status-dot"></span>
+      <span>queue / media-jobs</span>
+    </div>
+    <div class="queue-health">healthy</div>
+  </div>
+
+  <div class="queue-map">
+    <div class="map-node source-node">
+      <span class="node-label">Producer</span>
+      <strong>send()</strong>
+      <code>job_4021</code>
+    </div>
+
+    <div class="message-rail first-rail" aria-hidden="true">
+      <span class="rail-arrow">›</span>
+      <i class="packet packet-one"></i>
+      <i class="packet packet-two"></i>
+    </div>
+
+    <div class="queue-node">
+      <div class="queue-node-head">
+        <span>media-jobs</span>
+        <span class="queue-state">ready</span>
+      </div>
+      <div class="queue-numbers">
+        <div><strong>04</strong><span>ready</span></div>
+        <div><strong>01</strong><span>in flight</span></div>
+        <div><strong>00</strong><span>dead</span></div>
+      </div>
+      <div class="queue-bar"><span></span></div>
+    </div>
+
+    <div class="message-rail second-rail" aria-hidden="true">
+      <span class="rail-arrow">›</span>
+      <i class="packet packet-three"></i>
+    </div>
+
+    <div class="worker-stack">
+      <div class="map-node worker-node active-worker">
+        <span class="worker-light"></span>
+        <span><span class="node-label">Worker 01</span><strong>processing</strong></span>
+      </div>
+      <div class="map-node worker-node">
+        <span class="worker-light"></span>
+        <span><span class="node-label">Worker 02</span><strong>ready</strong></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="queue-events">
+    <div><time>09:41:02.114</time><span class="event-name">received</span><code>job_4020</code><span>worker-01</span></div>
+    <div><time>09:41:02.290</time><span class="event-name">enqueued</span><code>job_4021</code><span>attempt 1</span></div>
+    <div><time>09:41:03.008</time><span class="event-name success">acknowledged</span><code>job_4020</code><span>176 ms</span></div>
+  </div>
+</div>
+
+<style>
+  .queue-window { overflow: hidden; border: 1px solid var(--color-border); background: rgba(255,255,255,.94); box-shadow: 0 32px 80px rgba(17,19,16,.08), 0 2px 8px rgba(17,19,16,.04); }
+  .queue-titlebar { display:flex; align-items:center; justify-content:space-between; min-height:52px; padding:0 18px; border-bottom:1px solid var(--color-border); font:500 11px/1 var(--font-mono); letter-spacing:.04em; color:var(--color-muted-foreground); }
+  .queue-title,.queue-health { display:flex; align-items:center; gap:9px; }
+  .status-dot,.worker-light { width:7px; height:7px; border-radius:999px; background:var(--color-success); box-shadow:0 0 0 4px rgba(14,159,110,.1); }
+  .queue-health { color:#0a7652; }
+  .queue-map { display:grid; grid-template-columns:minmax(126px,.8fr) minmax(70px,.55fr) minmax(280px,1.5fr) minmax(70px,.55fr) minmax(150px,.9fr); align-items:center; min-height:286px; padding:40px 42px; background-image:radial-gradient(var(--color-border) .75px,transparent .75px); background-size:18px 18px; }
+  .map-node,.queue-node { position:relative; border:1px solid var(--color-border); background:#fff; }
+  .map-node { padding:16px; }
+  .map-node strong { display:block; margin-top:6px; font:600 14px/1.2 var(--font-display); color:var(--color-foreground); }
+  .map-node code { display:block; margin-top:12px; font:500 10px/1 var(--font-mono); color:var(--color-accent); }
+  .node-label { display:block; font:500 10px/1 var(--font-mono); text-transform:uppercase; letter-spacing:.08em; color:var(--color-muted-foreground); }
+  .message-rail { position:relative; height:1px; overflow:visible; background:var(--color-border); }
+  .rail-arrow { position:absolute; right:-2px; top:-11px; font:300 18px/1 var(--font-sans); color:var(--color-muted-foreground); }
+  .packet { position:absolute; top:-4px; left:0; width:9px; height:9px; border:2px solid white; border-radius:999px; background:var(--color-accent); box-shadow:0 0 0 1px rgba(49,92,255,.2); animation:packet-travel 3.6s linear infinite; }
+  .packet-two { animation-delay:-1.8s; }
+  .packet-three { animation-duration:2.8s; animation-delay:-.7s; }
+  .queue-node { box-shadow:0 12px 30px rgba(17,19,16,.06); }
+  .queue-node-head { display:flex; align-items:center; justify-content:space-between; padding:16px 18px; border-bottom:1px solid var(--color-border); font:600 13px/1 var(--font-display); }
+  .queue-state { padding:5px 7px; background:var(--color-accent-soft); font:500 9px/1 var(--font-mono); text-transform:uppercase; letter-spacing:.08em; color:var(--color-accent); }
+  .queue-numbers { display:grid; grid-template-columns:repeat(3,1fr); }
+  .queue-numbers div { padding:18px; border-right:1px solid var(--color-border); }
+  .queue-numbers div:last-child { border-right:0; }
+  .queue-numbers strong { display:block; font:600 22px/1 var(--font-display); letter-spacing:-.04em; }
+  .queue-numbers span { display:block; margin-top:7px; font:500 9px/1 var(--font-mono); text-transform:uppercase; color:var(--color-muted-foreground); }
+  .queue-bar { height:4px; background:var(--color-muted); }
+  .queue-bar span { display:block; width:72%; height:100%; background:var(--color-accent); }
+  .worker-stack { display:grid; gap:10px; }
+  .worker-node { display:flex; align-items:center; gap:12px; padding:14px; }
+  .worker-node .worker-light { width:6px; height:6px; background:#a9aea7; box-shadow:none; }
+  .active-worker { border-color:#bfc9ff; }
+  .active-worker .worker-light { background:var(--color-success); box-shadow:0 0 0 4px rgba(14,159,110,.1); }
+  .worker-node strong { margin-top:4px; font-size:12px; }
+  .queue-events { display:grid; grid-template-columns:repeat(3,1fr); border-top:1px solid var(--color-border); background:var(--color-muted); }
+  .queue-events > div { display:grid; grid-template-columns:auto 1fr; gap:7px 12px; padding:15px 18px; border-right:1px solid var(--color-border); font:500 10px/1.2 var(--font-mono); color:var(--color-muted-foreground); }
+  .queue-events > div:last-child { border-right:0; }
+  .queue-events .event-name { color:var(--color-accent); }
+  .queue-events .success { color:#0a7652; }
+  .queue-events code { color:var(--color-foreground); }
+  .queue-events div > span:last-child { text-align:right; }
+  @keyframes packet-travel { 0%{left:0;opacity:0} 12%{opacity:1} 88%{opacity:1} 100%{left:calc(100% - 8px);opacity:0} }
+  @media (max-width:900px) {
+    .queue-map { grid-template-columns:1fr 52px 1.5fr; padding:32px 24px; }
+    .second-rail,.worker-stack { display:none; }
+    .queue-events { grid-template-columns:1fr; }
+    .queue-events > div { grid-template-columns:auto 1fr auto auto; border-right:0; border-bottom:1px solid var(--color-border); }
+    .queue-events > div:last-child { border-bottom:0; }
+  }
+  @media (max-width:620px) {
+    .queue-titlebar { padding:0 14px; }
+    .queue-map { grid-template-columns:1fr; gap:18px; padding:24px 18px; }
+    .message-rail { width:1px; height:28px; margin:-9px 0 -9px 26px; background:var(--color-border); }
+    .first-rail .rail-arrow { right:-5px; top:16px; transform:rotate(90deg); }
+    .packet { display:none; }
+    .queue-events > div { grid-template-columns:auto 1fr; padding:13px 14px; }
+    .queue-events div > span:last-child { text-align:left; }
+  }
+</style>

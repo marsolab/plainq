@@ -1,0 +1,80 @@
+---
+const cases = [
+  {
+    tag: "media-jobs",
+    title: "Image and video processing",
+    body: "Buffer uploads, add workers when demand rises, and retry a conversion if a worker exits halfway through.",
+    flow: ["upload", "resize", "store"],
+  },
+  {
+    tag: "webhook-inbox",
+    title: "Webhook buffering",
+    body: "Accept an event quickly, process it off the request path, and keep transient downstream failures recoverable.",
+    flow: ["accept", "verify", "deliver"],
+  },
+  {
+    tag: "order-events",
+    title: "Independent fan-out",
+    body: "Give notifications, analytics, and audit processing their own queues and retry policies behind one topic.",
+    flow: ["email", "analytics", "audit"],
+  },
+  {
+    tag: "agent-runs",
+    title: "Automation and agent work",
+    body: "Queue long-running tasks and inspect the system through stable JSON, explicit effects, and predictable exit codes.",
+    flow: ["plan", "run", "report"],
+  },
+];
+---
+
+<section class="border-b border-[var(--color-border)]">
+  <div class="section-shell py-24 sm:py-32">
+    <div class="grid gap-8 lg:grid-cols-[1.15fr_.85fr] lg:items-end">
+      <div>
+        <span class="section-label">Common jobs</span>
+        <h2 class="font-display mt-7 max-w-3xl text-4xl font-semibold leading-[1.03] tracking-[-0.05em] sm:text-6xl">
+          Built for the work your app already has.
+        </h2>
+      </div>
+      <p class="max-w-lg text-base leading-7 text-[var(--color-muted-foreground)] sm:text-lg lg:justify-self-end">
+        Keep slow, bursty, and failure-prone work outside the request path. Use
+        familiar queue names instead of building a messaging platform first.
+      </p>
+    </div>
+
+    <div class="mt-14 grid border-l border-t border-[var(--color-border)] md:grid-cols-2">
+      {
+        cases.map((item) => (
+          <article class="case-card border-b border-r border-[var(--color-border)] p-6 sm:p-8">
+            <code class="font-mono text-[10px] text-[var(--color-accent)]">queue / {item.tag}</code>
+            <h3 class="font-display mt-8 text-2xl font-semibold tracking-[-.035em]">{item.title}</h3>
+            <p class="mt-3 max-w-xl text-sm leading-6 text-[var(--color-muted-foreground)]">{item.body}</p>
+            <div class="case-flow" aria-hidden="true">
+              {item.flow.map((step, index) => (
+                <>
+                  <span>{step}</span>
+                  {index < item.flow.length - 1 && <i>→</i>}
+                </>
+              ))}
+            </div>
+          </article>
+        ))
+      }
+    </div>
+  </div>
+</section>
+
+<style>
+  .case-card { min-height:310px; transition:background-color .2s ease; }
+  .case-card:hover { background:var(--color-muted); }
+  .case-flow { display:flex; align-items:center; gap:9px; margin-top:42px; }
+  .case-flow span { min-width:0; border:1px solid var(--color-border); background:#fff; padding:9px 10px; font:500 9px/1 var(--font-mono); color:var(--color-muted-foreground); }
+  .case-flow i { font-style:normal; font-size:12px; color:var(--color-accent); }
+  @media (max-width:420px) {
+    .case-flow { gap:5px; }
+    .case-flow span { padding-inline:7px; font-size:8px; }
+  }
+  @media (max-width:767px) {
+    .case-card { min-height:0; }
+  }
+</style>
