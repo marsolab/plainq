@@ -241,3 +241,27 @@ func TestListQueuesAppliesPrefixToPageAndTotal(t *testing.T) {
 		t.Fatalf("list result queues=%d total=%d, want 2 and 2", len(listed.GetQueues()), listed.GetTotalCount())
 	}
 }
+
+func TestListQueuesTreatsPrefixAsLiteral(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStorage(t, newMigratedConn(t))
+
+	for _, name := range []string{"literal%queue", "literalXqueue", "literal_queue", "literalAqueue"} {
+		if _, err := store.CreateQueue(ctx, &v1.CreateQueueRequest{QueueName: name}); err != nil {
+			t.Fatalf("create queue %q: %v", name, err)
+		}
+	}
+
+	for _, prefix := range []string{"literal%", "literal_"} {
+		t.Run(prefix, func(t *testing.T) {
+			listed, err := store.ListQueues(ctx, &v1.ListQueuesRequest{QueuePrefix: prefix})
+			if err != nil {
+				t.Fatalf("list queues: %v", err)
+			}
+
+			if len(listed.GetQueues()) != 1 || listed.GetTotalCount() != 1 {
+				t.Fatalf("prefix %q queues=%d total=%d, want 1 and 1", prefix, len(listed.GetQueues()), listed.GetTotalCount())
+			}
+		})
+	}
+}

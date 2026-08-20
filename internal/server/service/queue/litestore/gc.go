@@ -82,7 +82,7 @@ func (s *Storage) collect(ctx context.Context) error {
 		return fmt.Errorf("get queue IDs for GC: %w", queuesErr)
 	}
 
-	runSweepBatch(ctx, queues, func(ctx context.Context, queueID string) error {
+	cErr = runSweepBatch(ctx, queues, func(ctx context.Context, queueID string) error {
 		s.logger.Debug("Running garbage collection for queue",
 			slog.String("queue_id", queueID),
 		)
@@ -109,12 +109,17 @@ func (s *Storage) collect(ctx context.Context) error {
 	return cErr
 }
 
-func runSweepBatch(ctx context.Context, queueIDs []string, sweep func(context.Context, string) error, logger *slog.Logger) {
+func runSweepBatch(ctx context.Context, queueIDs []string, sweep func(context.Context, string) error, logger *slog.Logger) error {
+	errs := make([]error, 0)
+
 	for _, queueID := range queueIDs {
 		if err := sweep(ctx, queueID); err != nil {
 			logger.Error("queue sweep failed", slog.String("queue_id", queueID), slog.Any("error", err))
+			errs = append(errs, err)
 		}
 	}
+
+	return errors.Join(errs...)
 }
 
 func (s *Storage) queuesForGC(ctx context.Context) (_ []string, sErr error) {

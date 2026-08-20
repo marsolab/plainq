@@ -268,8 +268,8 @@ func queryListQueues(
 	args := make([]any, 0, 4)
 
 	if prefix != "" {
-		clauses = append(clauses, "queue_name like ?")
-		args = append(args, prefix+"%")
+		clauses = append(clauses, "queue_name LIKE ? ESCAPE '\\'")
+		args = append(args, queuePrefixPattern(prefix))
 	}
 
 	if rawCursor != "" {
@@ -307,7 +307,13 @@ func queryCountQueues(prefix string) (string, []any) {
 		return "select count(*) from queue_properties;", nil
 	}
 
-	return "select count(*) from queue_properties where queue_name like ?;", []any{prefix + "%"}
+	return "select count(*) from queue_properties where queue_name LIKE ? ESCAPE '\\';", []any{queuePrefixPattern(prefix)}
+}
+
+func queuePrefixPattern(prefix string) string {
+	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(prefix)
+
+	return escaped + "%"
 }
 
 func queueOrder(orderBy v1.ListQueuesRequest_OrderBy, sortBy v1.ListQueuesRequest_SortBy) (string, string) {

@@ -22,9 +22,13 @@ func (s *scriptedSweeper) Sweep(_ context.Context, queueID string) error {
 }
 
 func TestGCContinuesAfterOneQueueFails(t *testing.T) {
-	sweeper := &scriptedSweeper{results: []error{errors.New("broken queue"), nil}}
+	broken := errors.New("broken queue")
+	sweeper := &scriptedSweeper{results: []error{broken, nil}}
 
-	runSweepBatch(context.Background(), []string{"broken", "healthy"}, sweeper.Sweep, slog.Default())
+	err := runSweepBatch(context.Background(), []string{"broken", "healthy"}, sweeper.Sweep, slog.Default())
+	if !errors.Is(err, broken) {
+		t.Fatalf("sweep error = %v, want broken queue", err)
+	}
 
 	if !reflect.DeepEqual(sweeper.seen, []string{"broken", "healthy"}) {
 		t.Fatalf("swept queues = %v, want [broken healthy]", sweeper.seen)
