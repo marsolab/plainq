@@ -361,8 +361,7 @@ func (c *CounterVec) Add(n uint64, values ...string) {
 		return
 	}
 
-	//nolint:gosec // maxCounterAdd is well below the sign bit, so the conversion cannot wrap.
-	c.vec.with(values...).AddInt64(int64(min(n, maxCounterAdd)))
+	c.vec.with(values...).AddInt64(int64(min(n, maxCounterAdd) & (1<<63 - 1)))
 }
 
 // maxCounterAdd caps a single Add so an implausible count cannot wrap the

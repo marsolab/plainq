@@ -330,6 +330,10 @@ func (p *GenericOAuthProvider) ValidateToken(ctx context.Context, tokenString st
 
 // GetPublicKey retrieves a public key for token verification.
 func (p *GenericOAuthProvider) GetPublicKey(ctx context.Context, keyID string) (*rsa.PublicKey, error) {
+	if key, ok := p.keyCache[keyID]; ok {
+		return key, nil
+	}
+
 	// This is a simplified implementation
 	// In practice, you would fetch from JWKS endpoint and cache the keys.
 	return nil, errors.New("JWKS key fetching not implemented - use a proper JWKS library")

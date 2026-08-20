@@ -85,54 +85,58 @@ type snapshot struct {
 }
 
 // Persist implements raft.FSMSnapshot.
-//
-//nolint:nonamedreturns // the deferred recorder has to know whether the snapshot failed.
-func (s *snapshot) Persist(sink hraft.SnapshotSink) (pErr error) {
+func (s *snapshot) Persist(sink hraft.SnapshotSink) error {
 	started := time.Now()
 
 	writer := newSnapshotWriter(sink)
 
-	//nolint:gosec // a snapshot cannot reach the sign bit of an int64.
-	defer func() { metrics.RecordSnapshot(started, int64(writer.written), pErr) }()
+	var persistErr error
+	defer func() {
+		metrics.RecordSnapshot(started, int64(writer.written&(1<<63-1)), persistErr)
+	}()
 
-	if err := writer.header(); err != nil {
-		cancelSink(sink, s.logger)
+	persistErr = func() error {
+		if err := writer.header(); err != nil {
+			cancelSink(sink, s.logger)
 
-		return err
-	}
+			return err
+		}
 
-	// The stream is written with a generous ceiling rather than the caller's
-	// deadline: abandoning a half-written snapshot costs the cluster a full
-	// log replay later.
-	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
-	defer cancel()
+		// The stream is written with a generous ceiling rather than the caller's
+		// deadline: abandoning a half-written snapshot costs the cluster a full
+		// log replay later.
+		ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+		defer cancel()
 
-	if err := s.view.Stream(ctx, writer); err != nil {
-		cancelSink(sink, s.logger)
+		if err := s.view.Stream(ctx, writer); err != nil {
+			cancelSink(sink, s.logger)
 
-		return fmt.Errorf("stream state into snapshot: %w", err)
-	}
+			return fmt.Errorf("stream state into snapshot: %w", err)
+		}
 
-	if err := writer.flush(); err != nil {
-		cancelSink(sink, s.logger)
+		if err := writer.flush(); err != nil {
+			cancelSink(sink, s.logger)
 
-		return err
-	}
+			return err
+		}
 
-	if err := sink.Close(); err != nil {
-		return fmt.Errorf("close snapshot sink: %w", err)
-	}
+		if err := sink.Close(); err != nil {
+			return fmt.Errorf("close snapshot sink: %w", err)
+		}
 
-	metrics.RecordSnapshotRecords(writer.queues, writer.messages, writer.topics, writer.subscriptions)
+		metrics.RecordSnapshotRecords(writer.queues, writer.messages, writer.topics, writer.subscriptions)
 
-	s.logger.Info("Wrote cluster state snapshot",
-		slog.String("id", sink.ID()),
-		slog.Uint64("queues", writer.queues),
-		slog.Uint64("messages", writer.messages),
-		slog.String("duration", time.Since(started).String()),
-	)
+		s.logger.Info("Wrote cluster state snapshot",
+			slog.String("id", sink.ID()),
+			slog.Uint64("queues", writer.queues),
+			slog.Uint64("messages", writer.messages),
+			slog.String("duration", time.Since(started).String()),
+		)
 
-	return nil
+		return nil
+	}()
+
+	return persistErr
 }
 
 // cancelSink discards a half-written snapshot. There is nothing to do about a
@@ -163,57 +167,63 @@ func (s *snapshot) Release() {
 // Raft calls it when this node is too far behind to catch up from the log —
 // on a fresh node joining, or one that was down long enough for the leader to
 // have compacted past it. It replaces everything the store holds.
-//
-//nolint:nonamedreturns // the deferred abort has to know whether the restore failed.
-func (f *FSM) Restore(reader io.ReadCloser) (rErr error) {
+func (f *FSM) Restore(reader io.ReadCloser) error {
 	defer func() { _ = reader.Close() }()
 
 	started := time.Now()
 
-	defer func() { metrics.RecordRestore(started, rErr) }()
+	var restoreErr error
+	defer func() { metrics.RecordRestore(started, restoreErr) }()
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
 	defer cancel()
 
-	if err := f.storage.BeginRestore(ctx); err != nil {
-		return fmt.Errorf("begin state restore: %w", err)
-	}
-
-	defer func() {
-		if rErr == nil {
-			return
+	restoreErr = func() error {
+		if err := f.storage.BeginRestore(ctx); err != nil {
+			return fmt.Errorf("begin state restore: %w", err)
 		}
 
-		// A failed restore must leave the previous state intact. A node with
-		// stale state can still be caught up; a node holding half a snapshot
-		// is holding a state the cluster was never in.
-		if err := f.storage.AbortRestore(ctx); err != nil {
-			f.logger.Error("Failed to abort a partial state restore",
-				slog.String("error", err.Error()),
-			)
+		committed := false
+		defer func() {
+			if committed {
+				return
+			}
+
+			// A failed restore must leave the previous state intact. A node with
+			// stale state can still be caught up; a node holding half a snapshot
+			// is holding a state the cluster was never in.
+			if err := f.storage.AbortRestore(ctx); err != nil {
+				f.logger.Error("Failed to abort a partial state restore",
+					slog.String("error", err.Error()),
+				)
+			}
+		}()
+
+		stats, readErr := f.readSnapshot(ctx, reader)
+		if readErr != nil {
+			return readErr
 		}
+
+		if err := f.storage.CommitRestore(ctx); err != nil {
+			return fmt.Errorf("commit state restore: %w", err)
+		}
+
+		committed = true
+
+		metrics.RecordRestoreRecords(stats.queues, stats.messages, stats.topics, stats.subscriptions)
+
+		f.logger.Info("Restored cluster state from snapshot",
+			slog.Uint64("queues", stats.queues),
+			slog.Uint64("messages", stats.messages),
+			slog.Uint64("topics", stats.topics),
+			slog.Uint64("subscriptions", stats.subscriptions),
+			slog.String("duration", time.Since(started).String()),
+		)
+
+		return nil
 	}()
 
-	stats, readErr := f.readSnapshot(ctx, reader)
-	if readErr != nil {
-		return readErr
-	}
-
-	if err := f.storage.CommitRestore(ctx); err != nil {
-		return fmt.Errorf("commit state restore: %w", err)
-	}
-
-	metrics.RecordRestoreRecords(stats.queues, stats.messages, stats.topics, stats.subscriptions)
-
-	f.logger.Info("Restored cluster state from snapshot",
-		slog.Uint64("queues", stats.queues),
-		slog.Uint64("messages", stats.messages),
-		slog.Uint64("topics", stats.topics),
-		slog.Uint64("subscriptions", stats.subscriptions),
-		slog.String("duration", time.Since(started).String()),
-	)
-
-	return nil
+	return restoreErr
 }
 
 // snapshotStats counts what a restore installed.

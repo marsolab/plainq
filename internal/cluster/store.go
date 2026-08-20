@@ -378,62 +378,67 @@ func (s *Store) readBarrier(ctx context.Context) error {
 // ever proposed, or the local engine rejected the proposal outright. A
 // forwarded command whose reply was lost may well have been committed, and
 // re-sending that would enqueue the same message twice.
-//
-//nolint:nonamedreturns // the deferred recorder has to know whether the write failed.
-func (s *Store) apply(ctx context.Context, cmd *command.Command) (_ any, aErr error) {
+func (s *Store) apply(ctx context.Context, cmd *command.Command) (any, error) {
 	// The timer covers the whole write, retries included, because that is the
 	// latency the client actually waited: a write that spent 400ms waiting out
 	// an election was a 400ms write, however briefly the winning attempt took.
 	start := time.Now()
 	op := cmd.Op.String()
 
-	defer func() { metrics.RecordClusterApply(op, start, aErr) }()
+	var applyErr error
+	defer func() { metrics.RecordClusterApply(op, start, applyErr) }()
 
-	encoded, encodeErr := cmd.Encode()
-	if encodeErr != nil {
-		return nil, fmt.Errorf("encode %s command: %w", cmd.Op, encodeErr)
-	}
+	var response any
 
-	ctx, cancel := context.WithTimeout(ctx, s.applyTimeout)
-	defer cancel()
-
-	backoff := electionBackoff
-
-	for attempt := 0; ; attempt++ {
-		response, err := s.applyOnce(ctx, cmd, encoded)
-		if err == nil {
-			return response, nil
+	response, applyErr = func() (any, error) {
+		encoded, encodeErr := cmd.Encode()
+		if encodeErr != nil {
+			return nil, fmt.Errorf("encode %s command: %w", cmd.Op, encodeErr)
 		}
 
-		// Both retryable cases are ones where nothing was proposed: no leader
-		// was known, or the peer we asked answered that it is not the leader.
-		// A transport failure carries neither class — the leader may well have
-		// committed before the reply was lost — and re-sending that would
-		// enqueue the same message twice.
-		if !errors.Is(err, consensus.ErrNoLeader) && !errors.Is(err, consensus.ErrNotLeader) {
-			return nil, err
+		ctx, cancel := context.WithTimeout(ctx, s.applyTimeout)
+		defer cancel()
+
+		backoff := electionBackoff
+
+		for attempt := 0; ; attempt++ {
+			response, err := s.applyOnce(ctx, cmd, encoded)
+			if err == nil {
+				return response, nil
+			}
+
+			// Both retryable cases are ones where nothing was proposed: no leader
+			// was known, or the peer we asked answered that it is not the leader.
+			// A transport failure carries neither class — the leader may well have
+			// committed before the reply was lost — and re-sending that would
+			// enqueue the same message twice.
+			if !errors.Is(err, consensus.ErrNoLeader) && !errors.Is(err, consensus.ErrNotLeader) {
+				return nil, err
+			}
+
+			metrics.RecordNotLeader()
+
+			s.logger.Debug("Waiting for a leader before retrying a write",
+				slog.String("op", cmd.Op.String()),
+				slog.Int("attempt", attempt+1),
+			)
+
+			select {
+			case <-ctx.Done():
+				// Report the reason the write could not be made, not the fact that
+				// waiting for it timed out.
+				return nil, err
+
+			case <-time.After(backoff):
+			}
+
+			if backoff < maxElectionBackoff {
+				backoff *= 2
+			}
 		}
+	}()
 
-		metrics.RecordNotLeader()
-
-		s.logger.Debug("Waiting for a leader before retrying a write",
-			slog.String("op", cmd.Op.String()),
-			slog.Int("attempt", attempt+1),
-		)
-
-		select {
-		case <-ctx.Done():
-			// Report the reason the write could not be made, not the fact that
-			// waiting for it timed out.
-			return nil, err
-
-		case <-time.After(backoff):
-		}
-
-		if backoff < maxElectionBackoff {
-			backoff *= 2
-		}
-	}
+	return response, applyErr
 }
 
 // applyOnce makes one attempt to commit a command.
@@ -458,31 +463,37 @@ func (s *Store) applyOnce(ctx context.Context, cmd *command.Command, encoded []b
 	return s.forward(ctx, cmd, encoded)
 }
 
-//nolint:nonamedreturns // the deferred recorder has to know whether the hop failed.
-func (s *Store) forward(ctx context.Context, cmd *command.Command, encoded []byte) (_ any, fErr error) {
+func (s *Store) forward(ctx context.Context, cmd *command.Command, encoded []byte) (any, error) {
 	// Forwarding is timed apart from the write as a whole: the difference
 	// between the two is the network hop clustering added, which is the number
 	// to look at when a follower's writes are slower than the leader's.
 	start := time.Now()
 	op := cmd.Op.String()
 
-	defer func() { metrics.RecordClusterForward(op, start, fErr) }()
+	var forwardErr error
+	defer func() { metrics.RecordClusterForward(op, start, forwardErr) }()
 
-	if s.forwarder == nil {
-		return nil, fmt.Errorf("%w: this node cannot forward writes", consensus.ErrNotLeader)
-	}
+	var response any
 
-	_, addr, leaderErr := s.consensus.Leader()
-	if leaderErr != nil {
-		return nil, fmt.Errorf("locate the leader for %s: %w", cmd.Op, leaderErr)
-	}
+	response, forwardErr = func() (any, error) {
+		if s.forwarder == nil {
+			return nil, fmt.Errorf("%w: this node cannot forward writes", consensus.ErrNotLeader)
+		}
 
-	raw, err := s.forwarder.Forward(ctx, addr, encoded)
-	if err != nil {
-		return nil, fmt.Errorf("forward %s to leader %s: %w", cmd.Op, addr, err)
-	}
+		_, addr, leaderErr := s.consensus.Leader()
+		if leaderErr != nil {
+			return nil, fmt.Errorf("locate the leader for %s: %w", cmd.Op, leaderErr)
+		}
 
-	return raw, nil
+		raw, err := s.forwarder.Forward(ctx, addr, encoded)
+		if err != nil {
+			return nil, fmt.Errorf("forward %s to leader %s: %w", cmd.Op, addr, err)
+		}
+
+		return raw, nil
+	}()
+
+	return response, forwardErr
 }
 
 // applyProto replicates a command whose request is a schema message.
