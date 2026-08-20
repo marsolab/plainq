@@ -1,0 +1,113 @@
+package pgstore
+
+import (
+	"context"
+	"fmt"
+	"io/fs"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/marsolab/plainq/internal/server/mutations"
+	"github.com/marsolab/plainq/internal/server/service/agent/conformance"
+)
+
+type registryFixture struct {
+	*Storage
+	pool *pgxpool.Pool
+}
+
+func (f *registryFixture) SeedOrganization(ctx context.Context, tenantID string) error {
+	_, err := f.pool.Exec(ctx, `
+		INSERT INTO organizations (org_id, org_code, org_name)
+		VALUES ($1, $2, $3)`, tenantID, tenantID, tenantID)
+	return err
+}
+
+func (f *registryFixture) SeedAgentPrincipal(ctx context.Context, tenantID, agentID string) error {
+	_, err := f.pool.Exec(ctx, `
+		INSERT INTO security_principals (
+			tenant_id, principal_kind, principal_id, status, roles_json, auth_version, updated_at_ns
+		) VALUES ($1, 'agent', $2, 'active', '["agent"]'::jsonb, 1, 0)`, tenantID, agentID)
+	return err
+}
+
+func (f *registryFixture) AgentPrincipal(ctx context.Context, tenantID, agentID string) (string, uint64, error) {
+	var status string
+	var authVersion int64
+	err := f.pool.QueryRow(ctx, `
+		SELECT status, auth_version
+		FROM security_principals
+		WHERE tenant_id = $1 AND principal_kind = 'agent' AND principal_id = $2`, tenantID, agentID,
+	).Scan(&status, &authVersion)
+	return status, uint64(authVersion), err
+}
+
+func newRegistryFixture(t *testing.T) conformance.RegistryFixture {
+	t.Helper()
+
+	dsn := os.Getenv("PLAINQ_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("PLAINQ_TEST_POSTGRES_DSN is not set")
+	}
+
+	ctx := context.Background()
+	admin, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("open postgres admin pool: %v", err)
+	}
+	t.Cleanup(admin.Close)
+
+	schema := fmt.Sprintf("agent_registry_%d", time.Now().UnixNano())
+	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+pgx.Identifier{schema}.Sanitize()); err != nil {
+		t.Fatalf("create postgres schema: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := admin.Exec(context.Background(), "DROP SCHEMA "+pgx.Identifier{schema}.Sanitize()+" CASCADE"); err != nil {
+			t.Errorf("drop postgres schema: %v", err)
+		}
+	})
+
+	config, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatalf("parse postgres DSN: %v", err)
+	}
+	config.ConnConfig.RuntimeParams["search_path"] = schema
+
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatalf("open postgres fixture pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+
+	storageFS, err := mutations.ValidatedStorageFS(mutations.PostgresStorageMutations())
+	if err != nil {
+		t.Fatalf("validate postgres migrations: %v", err)
+	}
+	entries, err := fs.ReadDir(storageFS, ".")
+	if err != nil {
+		t.Fatalf("read postgres migrations: %v", err)
+	}
+	for _, entry := range entries {
+		changes, err := fs.ReadFile(storageFS, entry.Name())
+		if err != nil {
+			t.Fatalf("read postgres migration %s: %v", entry.Name(), err)
+		}
+		if _, err := pool.Exec(ctx, string(changes)); err != nil {
+			t.Fatalf("apply postgres migration %s: %v", entry.Name(), err)
+		}
+	}
+
+	store, err := NewStorage(pool)
+	if err != nil {
+		t.Fatalf("new postgres registry storage: %v", err)
+	}
+
+	return &registryFixture{Storage: store, pool: pool}
+}
+
+func TestRegistry(t *testing.T) {
+	conformance.Registry(t, newRegistryFixture)
+}

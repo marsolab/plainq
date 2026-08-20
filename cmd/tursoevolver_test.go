@@ -152,9 +152,9 @@ func TestTursoEvolverStopsOnFailedMutation(t *testing.T) {
 	t.Parallel()
 
 	broken := fstest.MapFS{
-		"1_ok.sql":     &fstest.MapFile{Data: []byte(`CREATE TABLE IF NOT EXISTS first (id TEXT NOT NULL);`)},
-		"2_broken.sql": &fstest.MapFile{Data: []byte(`CREATE TABLE second (;`)},
-		"3_never.sql":  &fstest.MapFile{Data: []byte(`CREATE TABLE IF NOT EXISTS third (id TEXT NOT NULL);`)},
+		"001_ok.sql":     &fstest.MapFile{Data: []byte(`CREATE TABLE IF NOT EXISTS first (id TEXT NOT NULL);`)},
+		"002_broken.sql": &fstest.MapFile{Data: []byte(`CREATE TABLE second (;`)},
+		"003_never.sql":  &fstest.MapFile{Data: []byte(`CREATE TABLE IF NOT EXISTS third (id TEXT NOT NULL);`)},
 	}
 
 	db := openLocalSQLite(t)

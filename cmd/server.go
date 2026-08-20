@@ -612,13 +612,33 @@ func initSQLiteBackend(cfg *config.Config, logger *slog.Logger) (*litekit.Conn, 
 		slog.String("path", cfg.StorageDBPath),
 	)
 
-	evolver, evolverErr := litekit.NewEvolver(conn, mutations.SqliteStorageMutations())
+	validated, validationErr := mutations.ValidatedStorageFS(mutations.SqliteStorageMutations())
+	if validationErr != nil {
+		_ = conn.Close()
+
+		return nil, fmt.Errorf("validate sqlite schema mutations: %w", validationErr)
+	}
+
+	evolver, evolverErr := litekit.NewEvolver(conn, validated)
 	if evolverErr != nil {
+		_ = conn.Close()
+
 		return nil, fmt.Errorf("create schema evolver: %w", evolverErr)
 	}
 
 	if err := evolver.MutateSchema(); err != nil {
+		_ = conn.Close()
+
 		return nil, fmt.Errorf("schema mutation: %w", err)
+	}
+
+	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer verifyCancel()
+
+	if err := verifySQLiteForeignKeys(verifyCtx, conn); err != nil {
+		_ = conn.Close()
+
+		return nil, fmt.Errorf("verify sqlite foreign keys: %w", err)
 	}
 
 	logger.Info("SQLite schema has been initialized",
@@ -680,9 +700,80 @@ func initTursoBackend(cfg *config.Config, logger *slog.Logger) (*sql.DB, error) 
 		return nil, fmt.Errorf("turso schema mutation: %w", err)
 	}
 
+	if err := verifySQLiteForeignKeys(ctx, db); err != nil {
+		if closeErr := db.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close turso connection: %w", closeErr))
+		}
+
+		return nil, fmt.Errorf("verify turso foreign keys: %w", err)
+	}
+
 	logger.Info("Turso schema has been initialized")
 
 	return db, nil
+}
+
+// verifySQLiteForeignKeys proves that connection-local FK enforcement is
+// active on two concurrently acquired pool connections. The orphan probes run
+// in rolled-back transactions and therefore never leave startup data behind.
+//
+//nolint:cyclop // Both pooled connections are independently proven and cleaned up.
+func verifySQLiteForeignKeys(ctx context.Context, db pqlite.DB) (vErr error) {
+	connections := make([]*sql.Conn, 0, 2)
+	defer func() {
+		for _, conn := range connections {
+			if err := conn.Close(); err != nil {
+				vErr = errors.Join(vErr, fmt.Errorf("close foreign-key probe connection: %w", err))
+			}
+		}
+	}()
+
+	for range 2 {
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			return fmt.Errorf("acquire foreign-key probe connection: %w", err)
+		}
+
+		connections = append(connections, conn)
+	}
+
+	for index, conn := range connections {
+		if err := pqlite.EnforceForeignKeys(ctx, conn); err != nil {
+			return fmt.Errorf("connection %d: %w", index+1, err)
+		}
+
+		tx, err := conn.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("connection %d begin orphan probe: %w", index+1, err)
+		}
+
+		_, insertErr := tx.ExecContext(ctx, `
+			INSERT INTO agents (
+				agent_id, tenant_id, agent_name, status, auth_version,
+				created_by_kind, created_by_id, created_at_ns, updated_at_ns
+			) VALUES (?, ?, ?, 1, 1, 'system', 'startup-probe', 0, 0)`,
+			fmt.Sprintf("plainq-fk-probe-%d", index+1),
+			fmt.Sprintf("plainq-missing-tenant-%d", index+1),
+			fmt.Sprintf("plainq-fk-probe-%d", index+1),
+		)
+
+		rollbackErr := tx.Rollback()
+		if rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			return fmt.Errorf("connection %d rollback orphan probe: %w", index+1, rollbackErr)
+		}
+
+		if insertErr == nil {
+			return fmt.Errorf("connection %d accepted an orphan agent insert", index+1)
+		}
+
+		message := strings.ToUpper(insertErr.Error())
+		if !strings.Contains(message, "FOREIGN KEY") &&
+			!strings.Contains(message, "SQLITE_CONSTRAINT_FOREIGNKEY") {
+			return fmt.Errorf("connection %d orphan probe failed unexpectedly: %w", index+1, insertErr)
+		}
+	}
+
+	return nil
 }
 
 func initPostgresBackend(cfg *config.Config, logger *slog.Logger) (*pgxpool.Pool, error) {
