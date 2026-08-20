@@ -28,6 +28,7 @@ type TokenManager interface {
 // ServiceConfig supplies persistence, token, time, identity, entropy, and admission dependencies.
 type ServiceConfig struct {
 	Registry         RegistryStore
+	Principals       PrincipalStore
 	Credentials      CredentialStore
 	Tokens           TokenManager
 	Clock            func() time.Time
@@ -40,6 +41,7 @@ type ServiceConfig struct {
 // Service implements tenant-scoped agent registry and credential lifecycle rules.
 type Service struct {
 	registry         RegistryStore
+	principals       PrincipalStore
 	credentials      CredentialStore
 	tokens           TokenManager
 	clock            func() time.Time
@@ -57,6 +59,10 @@ func NewService(config ServiceConfig) (*Service, error) {
 
 	if config.Credentials == nil {
 		return nil, errors.New("agent credential store is required")
+	}
+
+	if config.Principals == nil {
+		return nil, errors.New("agent principal store is required")
 	}
 
 	if config.Tokens == nil {
@@ -93,7 +99,7 @@ func NewService(config ServiceConfig) (*Service, error) {
 	}
 
 	return &Service{
-		registry: config.Registry, credentials: config.Credentials, tokens: config.Tokens,
+		registry: config.Registry, principals: config.Principals, credentials: config.Credentials, tokens: config.Tokens,
 		clock: clock, nextID: nextID, random: random,
 		maxCredentialTTL: maxCredentialTTL, preAuth: preAuth,
 	}, nil

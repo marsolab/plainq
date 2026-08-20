@@ -24,6 +24,11 @@ type RegistryStore interface {
 	SetAgentStatus(ctx context.Context, input SetAgentStatusInput) (AgentRecord, error)
 }
 
+// PrincipalStore reads the security projection that is authoritative for live authentication state.
+type PrincipalStore interface {
+	GetAgentPrincipal(ctx context.Context, tenantID, agentID string) (AgentPrincipalRecord, error)
+}
+
 // CredentialStore persists only bootstrap credential hashes and lifecycle metadata.
 type CredentialStore interface {
 	CreateCredential(ctx context.Context, input CreateCredentialInput) (CredentialRecord, error)
@@ -37,5 +42,6 @@ type CredentialStore interface {
 // Store is the complete registry and credential persistence surface.
 type Store interface {
 	RegistryStore
+	PrincipalStore
 	CredentialStore
 }

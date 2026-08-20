@@ -11,6 +11,7 @@ import (
 
 	"github.com/marsolab/plainq/internal/server/principal"
 	agentv1 "github.com/marsolab/plainq/internal/server/schema/agent/v1"
+	"github.com/marsolab/plainq/internal/server/security"
 	"github.com/marsolab/plainq/internal/server/service/agent"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
 )
@@ -35,6 +36,14 @@ type RegistryFixture interface {
 type CredentialFixture interface {
 	RegistryFixture
 	agent.CredentialStore
+	agent.PrincipalStore
+	SetAgentPrincipalProjection(
+		ctx context.Context,
+		tenantID string,
+		agentID string,
+		status agentv1.AgentStatus,
+		authVersion uint64,
+	) error
 }
 
 // Factory constructs an isolated registry fixture for a conformance test.
@@ -169,6 +178,140 @@ func Credentials(t *testing.T, newStore Factory) {
 					t.Fatalf("register conflict error = %v, want %v", err, agent.ErrAlreadyExists)
 				}
 			})
+		}
+	})
+
+	t.Run("concurrent identical registration converges on the canonical credential", func(t *testing.T) {
+		ctx := context.Background()
+		store := requireCredentialFixture(t, newStore(t))
+		createdAt := time.Unix(2_500, 0).UTC()
+		createdAgent := seedCredentialAgent(
+			t, ctx, store, tenantA, "01J00000000000000000000123", "concurrent-register", createdAt,
+		)
+		expiresAt := createdAt.Add(2 * time.Hour)
+		input := agent.RegisterCredentialInput{
+			CredentialID: "01J00000000000000000000124", TenantID: tenantA, AgentID: createdAgent.AgentID,
+			Name: "concurrent-external", Prefix: "pqac_01J00000000000000000000124", SecretHash: [32]byte{7, 8, 9},
+			CreatedAt: createdAt, ExpiresAt: &expiresAt,
+		}
+
+		const registrations = 8
+		type registrationResult struct {
+			result agent.RegisterCredentialResult
+			err    error
+		}
+		start := make(chan struct{})
+		results := make(chan registrationResult, registrations)
+		for range registrations {
+			go func() {
+				<-start
+				result, err := store.RegisterCredential(ctx, input)
+				results <- registrationResult{result: result, err: err}
+			}()
+		}
+		close(start)
+
+		fresh := 0
+		var firstErr error
+		var wrongCredential *agent.CredentialRecord
+		for range registrations {
+			registration := <-results
+			if registration.err != nil {
+				if firstErr == nil {
+					firstErr = registration.err
+				}
+
+				continue
+			}
+			if registration.result.Credential.CredentialID != input.CredentialID {
+				if wrongCredential == nil {
+					record := registration.result.Credential
+					wrongCredential = &record
+				}
+
+				continue
+			}
+			if !registration.result.AlreadyExisted {
+				fresh++
+			}
+		}
+		if firstErr != nil {
+			t.Fatalf("concurrent register error = %v", firstErr)
+		}
+		if wrongCredential != nil {
+			t.Fatalf("concurrent register credential = %#v", *wrongCredential)
+		}
+		if fresh != 1 {
+			t.Fatalf("fresh concurrent registrations = %d, want 1", fresh)
+		}
+	})
+
+	t.Run("authentication immediately observes principal projection changes", func(t *testing.T) {
+		ctx := context.Background()
+		store := requireCredentialFixture(t, newStore(t))
+		now := time.Unix(2_750, 0).UTC()
+		createdAgent := seedCredentialAgent(
+			t, ctx, store, tenantA, "01J00000000000000000000125", "projection-auth", now,
+		)
+		credentialID := "01J00000000000000000000126"
+		_, err := store.CreateCredential(ctx, agent.CreateCredentialInput{
+			CredentialID: credentialID, TenantID: tenantA, AgentID: createdAgent.AgentID,
+			Name: "projection-runtime", Prefix: "pqac_" + credentialID, SecretHash: [32]byte{1}, CreatedAt: now,
+		})
+		if err != nil {
+			t.Fatalf("create projection credential: %v", err)
+		}
+
+		tokens, err := security.NewAgentTokenManager(security.AgentTokenConfig{
+			Issuer: "plainq-conformance", Audience: "plainq-agent",
+			Secret: []byte("0123456789abcdef0123456789abcdef"),
+			Clock:  func() time.Time { return now },
+			NextID: func() string { return "01J00000000000000000000127" },
+		})
+		if err != nil {
+			t.Fatalf("create token manager: %v", err)
+		}
+		svc, err := agent.NewService(agent.ServiceConfig{
+			Registry: store, Principals: store, Credentials: store, Tokens: tokens,
+			Clock: func() time.Time { return now },
+		})
+		if err != nil {
+			t.Fatalf("create agent service: %v", err)
+		}
+		raw, _, err := tokens.Issue(principal.Principal{
+			Kind: principal.KindAgent, ID: createdAgent.AgentID, TenantID: tenantA,
+			Roles: []string{"agent"}, CredentialID: credentialID, AuthVersion: 1,
+		})
+		if err != nil {
+			t.Fatalf("issue token: %v", err)
+		}
+		if _, err := svc.Authenticate(ctx, raw); err != nil {
+			t.Fatalf("authenticate current projection: %v", err)
+		}
+
+		if err := store.SetAgentPrincipalProjection(
+			ctx, tenantA, createdAgent.AgentID, agentv1.AgentStatus_AGENT_STATUS_DISABLED, 1,
+		); err != nil {
+			t.Fatalf("disable principal projection: %v", err)
+		}
+		registryRecord, err := store.GetAgent(ctx, tenantA, createdAgent.AgentID)
+		if err != nil {
+			t.Fatalf("read unchanged registry record: %v", err)
+		}
+		if registryRecord.Status != agentv1.AgentStatus_AGENT_STATUS_ACTIVE || registryRecord.AuthVersion != 1 {
+			t.Fatalf("registry changed with projection-only mutation: %#v", registryRecord)
+		}
+		if _, err := svc.Authenticate(ctx, raw); !errors.Is(err, agent.ErrUnauthenticated) {
+			t.Fatalf("authenticate disabled projection error = %v, want %v", err, agent.ErrUnauthenticated)
+		}
+
+		if err := store.SetAgentPrincipalProjection(
+			ctx, tenantA, createdAgent.AgentID, agentv1.AgentStatus_AGENT_STATUS_ACTIVE, 2,
+		); err != nil {
+			t.Fatalf("bump principal projection auth version: %v", err)
+		}
+		if _, err := svc.Authenticate(ctx, raw); !errors.Is(err, agent.ErrUnauthenticated) {
+			t.Fatalf("authenticate stale projection version error = %v, want %v", err, agent.ErrUnauthenticated)
 		}
 	})
 

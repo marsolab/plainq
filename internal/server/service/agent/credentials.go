@@ -390,7 +390,15 @@ func (s *Service) verifiedCredential(
 
 func (s *Service) activeCredentialAgent(ctx context.Context, record CredentialRecord) (AgentRecord, error) {
 	agentRecord, err := s.registry.GetAgent(ctx, record.TenantID, record.AgentID)
-	if err != nil || agentRecord.Status != agentv1.AgentStatus_AGENT_STATUS_ACTIVE {
+	if errors.Is(err, ErrNotFound) {
+		return AgentRecord{}, ErrUnauthenticated
+	}
+
+	if err != nil {
+		return AgentRecord{}, fmt.Errorf("lookup credential agent: %w", err)
+	}
+
+	if agentRecord.Status != agentv1.AgentStatus_AGENT_STATUS_ACTIVE {
 		return AgentRecord{}, ErrUnauthenticated
 	}
 
@@ -405,14 +413,30 @@ func (s *Service) Authenticate(ctx context.Context, raw string) (principal.Princ
 	}
 
 	record, err := s.credentials.GetCredentialByPrefix(ctx, credentialPrefixMarker+p.CredentialID)
-	if err != nil || record.TenantID != p.TenantID || record.AgentID != p.ID ||
+	if errors.Is(err, ErrNotFound) {
+		return principal.Principal{}, ErrUnauthenticated
+	}
+
+	if err != nil {
+		return principal.Principal{}, fmt.Errorf("lookup token credential: %w", err)
+	}
+
+	if record.TenantID != p.TenantID || record.AgentID != p.ID ||
 		record.CredentialID != p.CredentialID || !credentialActive(record, s.clock().UTC()) {
 		return principal.Principal{}, ErrUnauthenticated
 	}
 
-	agentRecord, err := s.registry.GetAgent(ctx, p.TenantID, p.ID)
-	if err != nil || agentRecord.Status != agentv1.AgentStatus_AGENT_STATUS_ACTIVE ||
-		agentRecord.AuthVersion != p.AuthVersion {
+	projection, err := s.principals.GetAgentPrincipal(ctx, p.TenantID, p.ID)
+	if errors.Is(err, ErrNotFound) {
+		return principal.Principal{}, ErrUnauthenticated
+	}
+
+	if err != nil {
+		return principal.Principal{}, fmt.Errorf("lookup token principal: %w", err)
+	}
+
+	if projection.TenantID != p.TenantID || projection.AgentID != p.ID ||
+		projection.Status != agentv1.AgentStatus_AGENT_STATUS_ACTIVE || projection.AuthVersion != p.AuthVersion {
 		return principal.Principal{}, ErrUnauthenticated
 	}
 

@@ -21,6 +21,7 @@ import (
 	"github.com/marsolab/plainq/internal/server/principal"
 	agentv1 "github.com/marsolab/plainq/internal/server/schema/agent/v1"
 	"github.com/marsolab/plainq/internal/server/security"
+	"github.com/marsolab/plainq/internal/shared/pqerr"
 )
 
 func TestCredentialIsReturnedOnceAndRevocationStopsExchange(t *testing.T) {
@@ -183,6 +184,91 @@ func TestAgentAuthenticationRechecksCredentialStatusAgentStatusAndAuthVersion(t 
 	store.BumpAuthVersion("tenant-a", created.Agent.AgentId)
 	if _, err := svc.Authenticate(context.Background(), secondToken); !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("authenticate stale auth version error = %v, want %v", err, ErrUnauthenticated)
+	}
+}
+
+func TestAgentAuthenticationUsesPrincipalProjection(t *testing.T) {
+	t.Parallel()
+
+	svc, store := newAgentServiceForTest(t)
+	adminCtx := testAdminContext("tenant-a")
+	created, err := svc.CreateAgent(adminCtx, &agentv1.CreateAgentRequest{AgentName: "planner"})
+	if err != nil {
+		t.Fatalf("CreateAgent() error = %v", err)
+	}
+	credential, err := svc.CreateAgentCredential(adminCtx, &agentv1.CreateAgentCredentialRequest{
+		AgentId: created.Agent.AgentId, CredentialName: "runtime",
+	})
+	if err != nil {
+		t.Fatalf("CreateAgentCredential() error = %v", err)
+	}
+	token := exchangeForTest(t, svc, credential.BootstrapCredential)
+
+	store.SetPrincipalStatusOnly("tenant-a", created.Agent.AgentId, agentv1.AgentStatus_AGENT_STATUS_DISABLED)
+	if _, err := svc.Authenticate(context.Background(), token); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("Authenticate() disabled projection error = %v, want %v", err, ErrUnauthenticated)
+	}
+
+	store.SetPrincipalStatusOnly("tenant-a", created.Agent.AgentId, agentv1.AgentStatus_AGENT_STATUS_ACTIVE)
+	store.BumpAuthVersion("tenant-a", created.Agent.AgentId)
+	agentRecord, err := store.GetAgent(context.Background(), "tenant-a", created.Agent.AgentId)
+	if err != nil {
+		t.Fatalf("GetAgent() error = %v", err)
+	}
+	if agentRecord.Status != agentv1.AgentStatus_AGENT_STATUS_ACTIVE || agentRecord.AuthVersion != 1 {
+		t.Fatalf("registry record changed with projection-only mutation: %#v", agentRecord)
+	}
+	if _, err := svc.Authenticate(context.Background(), token); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("Authenticate() stale projection auth version error = %v, want %v", err, ErrUnauthenticated)
+	}
+}
+
+func TestStoreFailuresRemainUnavailableDuringCredentialAuthentication(t *testing.T) {
+	t.Parallel()
+
+	svc, _ := newAgentServiceForTest(t)
+	adminCtx := testAdminContext("tenant-a")
+	created, err := svc.CreateAgent(adminCtx, &agentv1.CreateAgentRequest{AgentName: "planner"})
+	if err != nil {
+		t.Fatalf("CreateAgent() error = %v", err)
+	}
+	credential, err := svc.CreateAgentCredential(adminCtx, &agentv1.CreateAgentCredentialRequest{
+		AgentId: created.Agent.AgentId, CredentialName: "runtime",
+	})
+	if err != nil {
+		t.Fatalf("CreateAgentCredential() error = %v", err)
+	}
+	token := exchangeForTest(t, svc, credential.BootstrapCredential)
+
+	originalRegistry := svc.registry
+	svc.registry = failingRegistryStore{RegistryStore: originalRegistry, err: pqerr.ErrUnavailable}
+	transport, err := NewGRPCTransport(svc)
+	if err != nil {
+		t.Fatalf("NewGRPCTransport() error = %v", err)
+	}
+	if _, err := transport.ExchangeAgentCredential(context.Background(), &agentv1.ExchangeAgentCredentialRequest{
+		BootstrapCredential: credential.BootstrapCredential,
+	}); status.Code(err) != codes.Unavailable {
+		t.Fatalf("ExchangeAgentCredential() status = %s, want %s", status.Code(err), codes.Unavailable)
+	}
+	svc.registry = originalRegistry
+
+	originalCredentials := svc.credentials
+	svc.credentials = failingCredentialStore{CredentialStore: originalCredentials, err: pqerr.ErrUnavailable}
+	if _, err := transport.ExchangeAgentCredential(context.Background(), &agentv1.ExchangeAgentCredentialRequest{
+		BootstrapCredential: credential.BootstrapCredential,
+	}); status.Code(err) != codes.Unavailable {
+		t.Fatalf("ExchangeAgentCredential() credential status = %s, want %s", status.Code(err), codes.Unavailable)
+	}
+	if _, err := svc.Authenticate(context.Background(), token); !errors.Is(err, pqerr.ErrUnavailable) {
+		t.Fatalf("Authenticate() credential lookup error = %v, want %v", err, pqerr.ErrUnavailable)
+	}
+	svc.credentials = originalCredentials
+
+	originalPrincipals := svc.principals
+	svc.principals = failingPrincipalStore{PrincipalStore: originalPrincipals, err: pqerr.ErrUnavailable}
+	if _, err := svc.Authenticate(context.Background(), token); !errors.Is(err, pqerr.ErrUnavailable) {
+		t.Fatalf("Authenticate() principal lookup error = %v, want %v", err, pqerr.ErrUnavailable)
 	}
 }
 
@@ -410,7 +496,7 @@ func newAgentServiceForTest(t *testing.T) (*Service, *memoryStore) {
 	}
 	var idIndex int
 	svc, err := NewService(ServiceConfig{
-		Registry: store, Credentials: store, Tokens: tokens,
+		Registry: store, Principals: store, Credentials: store, Tokens: tokens,
 		Clock: func() time.Time { return store.now },
 		NextID: func() string {
 			id := ids[idIndex]
@@ -432,6 +518,8 @@ type memoryStore struct {
 	now                time.Time
 	agents             map[string]AgentRecord
 	agentNames         map[string]string
+	principalStatuses  map[string]agentv1.AgentStatus
+	principalVersions  map[string]uint64
 	credentialsByID    map[string]CredentialRecord
 	credentialByPrefix map[string]string
 	credentialLookups  int
@@ -440,6 +528,7 @@ type memoryStore struct {
 func newMemoryStore() *memoryStore {
 	return &memoryStore{
 		agents: make(map[string]AgentRecord), agentNames: make(map[string]string),
+		principalStatuses: make(map[string]agentv1.AgentStatus), principalVersions: make(map[string]uint64),
 		credentialsByID: make(map[string]CredentialRecord), credentialByPrefix: make(map[string]string),
 	}
 }
@@ -460,6 +549,8 @@ func (s *memoryStore) CreateAgent(_ context.Context, input CreateAgentInput) (Ag
 	}
 	s.agents[key] = record
 	s.agentNames[nameKey] = input.AgentID
+	s.principalStatuses[key] = input.Status
+	s.principalVersions[key] = input.AuthVersion
 	return record, nil
 }
 
@@ -471,6 +562,24 @@ func (s *memoryStore) GetAgent(_ context.Context, tenantID, agentID string) (Age
 		return AgentRecord{}, ErrNotFound
 	}
 	return record, nil
+}
+
+func (s *memoryStore) GetAgentPrincipal(
+	_ context.Context,
+	tenantID string,
+	agentID string,
+) (AgentPrincipalRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := memoryKey(tenantID, agentID)
+	status, ok := s.principalStatuses[key]
+	if !ok {
+		return AgentPrincipalRecord{}, ErrNotFound
+	}
+
+	return AgentPrincipalRecord{
+		AgentID: agentID, TenantID: tenantID, Status: status, AuthVersion: s.principalVersions[key],
+	}, nil
 }
 
 func (s *memoryStore) GetAgentByName(_ context.Context, tenantID, name string) (AgentRecord, error) {
@@ -533,6 +642,7 @@ func (s *memoryStore) SetAgentStatus(_ context.Context, input SetAgentStatusInpu
 		record.DisabledAt = nil
 	}
 	s.agents[key] = record
+	s.principalStatuses[key] = input.Status
 	return record, nil
 }
 
@@ -657,9 +767,13 @@ func (s *memoryStore) BumpAuthVersion(tenantID, agentID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := memoryKey(tenantID, agentID)
-	record := s.agents[key]
-	record.AuthVersion++
-	s.agents[key] = record
+	s.principalVersions[key]++
+}
+
+func (s *memoryStore) SetPrincipalStatusOnly(tenantID, agentID string, status agentv1.AgentStatus) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.principalStatuses[memoryKey(tenantID, agentID)] = status
 }
 
 func (s *memoryStore) Advance(duration time.Duration) {
@@ -673,4 +787,31 @@ func testTimesEqual(left, right *time.Time) bool {
 		return left == nil && right == nil
 	}
 	return left.Equal(*right)
+}
+
+type failingRegistryStore struct {
+	RegistryStore
+	err error
+}
+
+func (s failingRegistryStore) GetAgent(context.Context, string, string) (AgentRecord, error) {
+	return AgentRecord{}, s.err
+}
+
+type failingCredentialStore struct {
+	CredentialStore
+	err error
+}
+
+func (s failingCredentialStore) GetCredentialByPrefix(context.Context, string) (CredentialRecord, error) {
+	return CredentialRecord{}, s.err
+}
+
+type failingPrincipalStore struct {
+	PrincipalStore
+	err error
+}
+
+func (s failingPrincipalStore) GetAgentPrincipal(context.Context, string, string) (AgentPrincipalRecord, error) {
+	return AgentPrincipalRecord{}, s.err
 }

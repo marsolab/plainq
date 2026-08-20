@@ -12,6 +12,11 @@ INSERT INTO security_principals (
 )
 VALUES ($1, 'agent', $2, 'active', '["agent"]'::jsonb, $3, $4);
 
+-- name: GetAgentPrincipal :one
+SELECT tenant_id, principal_id, status, auth_version
+FROM security_principals
+WHERE tenant_id = $1 AND principal_kind = 'agent' AND principal_id = $2;
+
 -- name: GetAgent :one
 SELECT agent_id, tenant_id, agent_name, status, auth_version,
        created_at_ns, updated_at_ns, disabled_at_ns

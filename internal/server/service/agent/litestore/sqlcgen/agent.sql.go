@@ -224,6 +224,36 @@ func (q *Queries) GetAgentByName(ctx context.Context, arg GetAgentByNameParams) 
 	return i, err
 }
 
+const getAgentPrincipal = `-- name: GetAgentPrincipal :one
+SELECT tenant_id, principal_id, status, auth_version
+FROM security_principals
+WHERE tenant_id = ? AND principal_kind = 'agent' AND principal_id = ?
+`
+
+type GetAgentPrincipalParams struct {
+	TenantID    string
+	PrincipalID string
+}
+
+type GetAgentPrincipalRow struct {
+	TenantID    string
+	PrincipalID string
+	Status      string
+	AuthVersion int64
+}
+
+func (q *Queries) GetAgentPrincipal(ctx context.Context, arg GetAgentPrincipalParams) (GetAgentPrincipalRow, error) {
+	row := q.db.QueryRowContext(ctx, getAgentPrincipal, arg.TenantID, arg.PrincipalID)
+	var i GetAgentPrincipalRow
+	err := row.Scan(
+		&i.TenantID,
+		&i.PrincipalID,
+		&i.Status,
+		&i.AuthVersion,
+	)
+	return i, err
+}
+
 const getCredentialByID = `-- name: GetCredentialByID :one
 SELECT credential_id, tenant_id, agent_id, credential_name, credential_prefix,
        secret_hash, created_at_ns, expires_at_ns, expired_accounted_at_ns,

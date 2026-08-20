@@ -17,6 +17,7 @@ import (
 )
 
 var _ agent.RegistryStore = (*Storage)(nil)
+var _ agent.PrincipalStore = (*Storage)(nil)
 var _ agent.CredentialStore = (*Storage)(nil)
 
 // Storage is the SQLite/libSQL-backed agent registry.
@@ -118,6 +119,30 @@ func (s *Storage) GetAgent(ctx context.Context, tenantID, agentID string) (agent
 	)
 	if err != nil {
 		return agent.AgentRecord{}, fmt.Errorf("decode agent: %w", err)
+	}
+
+	return record, nil
+}
+
+func (s *Storage) GetAgentPrincipal(
+	ctx context.Context,
+	tenantID string,
+	agentID string,
+) (agent.AgentPrincipalRecord, error) {
+	row, err := s.queries.GetAgentPrincipal(ctx, sqlcgen.GetAgentPrincipalParams{
+		TenantID: tenantID, PrincipalID: agentID,
+	})
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return agent.AgentPrincipalRecord{}, agent.ErrNotFound
+		}
+
+		return agent.AgentPrincipalRecord{}, fmt.Errorf("get agent principal: %w", err)
+	}
+
+	record, err := sqlitePrincipalRecord(row.TenantID, row.PrincipalID, row.Status, row.AuthVersion)
+	if err != nil {
+		return agent.AgentPrincipalRecord{}, fmt.Errorf("decode agent principal: %w", err)
 	}
 
 	return record, nil
@@ -298,6 +323,37 @@ func sqliteRecord(
 	}
 
 	return record, nil
+}
+
+func sqlitePrincipalRecord(
+	tenantID string,
+	agentID string,
+	status string,
+	authVersion int64,
+) (agent.AgentPrincipalRecord, error) {
+	decodedStatus, err := decodedPrincipalStatus(status)
+	if err != nil {
+		return agent.AgentPrincipalRecord{}, err
+	}
+
+	if authVersion < 0 {
+		return agent.AgentPrincipalRecord{}, fmt.Errorf("negative stored principal auth version %d", authVersion)
+	}
+
+	return agent.AgentPrincipalRecord{
+		AgentID: agentID, TenantID: tenantID, Status: decodedStatus, AuthVersion: uint64(authVersion),
+	}, nil
+}
+
+func decodedPrincipalStatus(status string) (agentv1.AgentStatus, error) {
+	switch status {
+	case "active":
+		return agentv1.AgentStatus_AGENT_STATUS_ACTIVE, nil
+	case "disabled":
+		return agentv1.AgentStatus_AGENT_STATUS_DISABLED, nil
+	default:
+		return agentv1.AgentStatus_AGENT_STATUS_UNSPECIFIED, fmt.Errorf("unknown stored principal status %q", status)
+	}
 }
 
 func storedAuthVersion(version uint64) (int64, error) {

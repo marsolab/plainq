@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/marsolab/plainq/internal/server/mutations"
+	agentv1 "github.com/marsolab/plainq/internal/server/schema/agent/v1"
 	"github.com/marsolab/plainq/internal/server/service/agent/conformance"
 	"github.com/marsolab/plainq/internal/shared/pqlite"
 	"github.com/marsolab/servekit/dbkit/litekit"
@@ -43,6 +44,28 @@ func (f *registryFixture) AgentPrincipal(ctx context.Context, tenantID, agentID 
 		WHERE tenant_id = ? AND principal_kind = 'agent' AND principal_id = ?`, tenantID, agentID,
 	).Scan(&status, &authVersion)
 	return status, uint64(authVersion), err
+}
+
+func (f *registryFixture) SetAgentPrincipalProjection(
+	ctx context.Context,
+	tenantID string,
+	agentID string,
+	status agentv1.AgentStatus,
+	authVersion uint64,
+) error {
+	storedStatus := "active"
+	if status == agentv1.AgentStatus_AGENT_STATUS_DISABLED {
+		storedStatus = "disabled"
+	}
+
+	return pqlite.WithWriteTx(ctx, f.db, pqlite.DefaultWriteRetry(), func(tx pqlite.Tx) error {
+		_, err := tx.ExecContext(ctx, `
+			UPDATE security_principals
+			SET status = ?, auth_version = ?
+			WHERE tenant_id = ? AND principal_kind = 'agent' AND principal_id = ?`,
+			storedStatus, int64(authVersion), tenantID, agentID)
+		return err
+	})
 }
 
 func newRegistryFixture(t *testing.T) conformance.RegistryFixture {

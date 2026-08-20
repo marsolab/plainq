@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/marsolab/plainq/internal/server/mutations"
+	agentv1 "github.com/marsolab/plainq/internal/server/schema/agent/v1"
 	"github.com/marsolab/plainq/internal/server/service/agent/conformance"
 )
 
@@ -43,6 +44,27 @@ func (f *registryFixture) AgentPrincipal(ctx context.Context, tenantID, agentID 
 		WHERE tenant_id = $1 AND principal_kind = 'agent' AND principal_id = $2`, tenantID, agentID,
 	).Scan(&status, &authVersion)
 	return status, uint64(authVersion), err
+}
+
+func (f *registryFixture) SetAgentPrincipalProjection(
+	ctx context.Context,
+	tenantID string,
+	agentID string,
+	status agentv1.AgentStatus,
+	authVersion uint64,
+) error {
+	storedStatus := "active"
+	if status == agentv1.AgentStatus_AGENT_STATUS_DISABLED {
+		storedStatus = "disabled"
+	}
+
+	_, err := f.pool.Exec(ctx, `
+		UPDATE security_principals
+		SET status = $1, auth_version = $2
+		WHERE tenant_id = $3 AND principal_kind = 'agent' AND principal_id = $4`,
+		storedStatus, int64(authVersion), tenantID, agentID)
+
+	return err
 }
 
 func newRegistryFixture(t *testing.T) conformance.RegistryFixture {

@@ -22,6 +22,14 @@ type AgentRecord struct {
 	DisabledAt  *time.Time
 }
 
+// AgentPrincipalRecord is the security projection consulted for stateful token checks.
+type AgentPrincipalRecord struct {
+	AgentID     string
+	TenantID    string
+	Status      agentv1.AgentStatus
+	AuthVersion uint64
+}
+
 // CredentialRecord is the backend-neutral persisted credential representation.
 // Clear bootstrap credentials are intentionally absent from this record.
 type CredentialRecord struct {

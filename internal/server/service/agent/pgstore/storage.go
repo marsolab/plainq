@@ -18,11 +18,14 @@ import (
 )
 
 var _ agent.RegistryStore = (*Storage)(nil)
+var _ agent.PrincipalStore = (*Storage)(nil)
 var _ agent.CredentialStore = (*Storage)(nil)
 
 const (
-	pgForeignKeyViolation = "23503"
-	pgUniqueViolation     = "23505"
+	pgForeignKeyViolation          = "23503"
+	pgUniqueViolation              = "23505"
+	pgSerializationFailure         = "40001"
+	maxCredentialRegistrationTries = 8
 )
 
 // Storage is the PostgreSQL-backed agent registry.
@@ -137,6 +140,30 @@ func (s *Storage) GetAgent(ctx context.Context, tenantID, agentID string) (agent
 	)
 	if err != nil {
 		return agent.AgentRecord{}, fmt.Errorf("decode agent: %w", err)
+	}
+
+	return record, nil
+}
+
+func (s *Storage) GetAgentPrincipal(
+	ctx context.Context,
+	tenantID string,
+	agentID string,
+) (agent.AgentPrincipalRecord, error) {
+	row, err := s.queries.GetAgentPrincipal(ctx, sqlcgen.GetAgentPrincipalParams{
+		TenantID: tenantID, PrincipalID: agentID,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return agent.AgentPrincipalRecord{}, agent.ErrNotFound
+		}
+
+		return agent.AgentPrincipalRecord{}, fmt.Errorf("get agent principal: %w", err)
+	}
+
+	record, err := postgresPrincipalRecord(row.TenantID, row.PrincipalID, row.Status, row.AuthVersion)
+	if err != nil {
+		return agent.AgentPrincipalRecord{}, fmt.Errorf("decode agent principal: %w", err)
 	}
 
 	return record, nil
@@ -320,6 +347,37 @@ func postgresRecord(
 	return record, nil
 }
 
+func postgresPrincipalRecord(
+	tenantID string,
+	agentID string,
+	status string,
+	authVersion int64,
+) (agent.AgentPrincipalRecord, error) {
+	decodedStatus, err := decodedPrincipalStatus(status)
+	if err != nil {
+		return agent.AgentPrincipalRecord{}, err
+	}
+
+	if authVersion < 0 {
+		return agent.AgentPrincipalRecord{}, fmt.Errorf("negative stored principal auth version %d", authVersion)
+	}
+
+	return agent.AgentPrincipalRecord{
+		AgentID: agentID, TenantID: tenantID, Status: decodedStatus, AuthVersion: uint64(authVersion),
+	}, nil
+}
+
+func decodedPrincipalStatus(status string) (agentv1.AgentStatus, error) {
+	switch status {
+	case "active":
+		return agentv1.AgentStatus_AGENT_STATUS_ACTIVE, nil
+	case "disabled":
+		return agentv1.AgentStatus_AGENT_STATUS_DISABLED, nil
+	default:
+		return agentv1.AgentStatus_AGENT_STATUS_UNSPECIFIED, fmt.Errorf("unknown stored principal status %q", status)
+	}
+}
+
 func storedAgentStatus(status agentv1.AgentStatus) (int16, error) {
 	switch status {
 	case agentv1.AgentStatus_AGENT_STATUS_ACTIVE:
@@ -403,6 +461,48 @@ func (s *Storage) RegisterCredential(
 	ctx context.Context,
 	input agent.RegisterCredentialInput,
 ) (agent.RegisterCredentialResult, error) {
+	var lastErr error
+
+	for range maxCredentialRegistrationTries {
+		result, err := s.registerCredentialOnce(ctx, input)
+		if err == nil {
+			return result, nil
+		}
+
+		if !credentialRegistrationConflict(err) {
+			return agent.RegisterCredentialResult{}, err
+		}
+
+		lastErr = err
+
+		canonical, found, err := s.reconcileRegisteredCredential(ctx, input)
+		if err != nil {
+			return agent.RegisterCredentialResult{}, err
+		}
+
+		if found {
+			return canonical, nil
+		}
+
+		if errors.Is(lastErr, agent.ErrAlreadyExists) {
+			return agent.RegisterCredentialResult{}, lastErr
+		}
+
+		if err := ctx.Err(); err != nil {
+			return agent.RegisterCredentialResult{}, fmt.Errorf("register credential retry: %w", err)
+		}
+	}
+
+	return agent.RegisterCredentialResult{}, fmt.Errorf(
+		"register credential conflicts exhausted: %w",
+		errors.Join(pqerr.ErrUnavailable, lastErr),
+	)
+}
+
+func (s *Storage) registerCredentialOnce(
+	ctx context.Context,
+	input agent.RegisterCredentialInput,
+) (agent.RegisterCredentialResult, error) {
 	var result agent.RegisterCredentialResult
 
 	err := s.withinTx(ctx, func(tx pgx.Tx) error {
@@ -458,6 +558,44 @@ func (s *Storage) RegisterCredential(
 	}
 
 	return result, nil
+}
+
+func (s *Storage) reconcileRegisteredCredential(
+	ctx context.Context,
+	input agent.RegisterCredentialInput,
+) (agent.RegisterCredentialResult, bool, error) {
+	row, err := s.queries.GetCredentialByID(ctx, input.CredentialID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return agent.RegisterCredentialResult{}, false, nil
+	}
+
+	if err != nil {
+		return agent.RegisterCredentialResult{}, false, fmt.Errorf("reconcile registered credential: %w", err)
+	}
+
+	record, err := postgresCredentialRecord(row)
+	if err != nil {
+		return agent.RegisterCredentialResult{}, false, fmt.Errorf("decode reconciled credential: %w", err)
+	}
+
+	if !sameRegisteredCredential(record, input) {
+		return agent.RegisterCredentialResult{}, false, fmt.Errorf(
+			"registered credential differs from canonical record: %w",
+			agent.ErrAlreadyExists,
+		)
+	}
+
+	return agent.RegisterCredentialResult{Credential: record, AlreadyExisted: true}, true, nil
+}
+
+func credentialRegistrationConflict(err error) bool {
+	if errors.Is(err, agent.ErrAlreadyExists) {
+		return true
+	}
+
+	var pgErr *pgconn.PgError
+
+	return errors.As(err, &pgErr) && pgErr.Code == pgSerializationFailure
 }
 
 func (s *Storage) ListCredentials(
