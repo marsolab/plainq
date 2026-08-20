@@ -41,6 +41,11 @@ func (s *Storage) withinTx(ctx context.Context, fn func(pqlite.Tx) error) error 
 }
 
 func (s *Storage) CreateAgent(ctx context.Context, input agent.CreateAgentInput) (agent.AgentRecord, error) {
+	status, err := storedAgentStatus(input.Status)
+	if err != nil {
+		return agent.AgentRecord{}, err
+	}
+
 	authVersion, err := storedAuthVersion(input.AuthVersion)
 	if err != nil {
 		return agent.AgentRecord{}, err
@@ -54,7 +59,7 @@ func (s *Storage) CreateAgent(ctx context.Context, input agent.CreateAgentInput)
 			AgentID:       input.AgentID,
 			TenantID:      input.TenantID,
 			AgentName:     input.Name,
-			Status:        int64(input.Status),
+			Status:        status,
 			AuthVersion:   authVersion,
 			CreatedByKind: string(input.CreatedBy.Kind),
 			CreatedByID:   input.CreatedBy.ID,
@@ -201,12 +206,17 @@ func (s *Storage) ListAgents(ctx context.Context, input agent.ListAgentsInput) (
 }
 
 func (s *Storage) SetAgentStatus(ctx context.Context, input agent.SetAgentStatusInput) (agent.AgentRecord, error) {
+	status, err := storedAgentStatus(input.Status)
+	if err != nil {
+		return agent.AgentRecord{}, err
+	}
+
 	var updated agent.AgentRecord
 
-	err := s.withinTx(ctx, func(tx pqlite.Tx) error {
+	err = s.withinTx(ctx, func(tx pqlite.Tx) error {
 		queries := sqlcgen.New(tx)
 		params := sqlcgen.UpdateAgentStatusParams{
-			Status:      int64(input.Status),
+			Status:      status,
 			UpdatedAtNs: input.UpdatedAt.UnixNano(),
 			TenantID:    input.TenantID,
 			AgentID:     input.AgentID,
@@ -296,6 +306,19 @@ func storedAuthVersion(version uint64) (int64, error) {
 	}
 
 	return int64(version), nil
+}
+
+func storedAgentStatus(status agentv1.AgentStatus) (int64, error) {
+	switch status {
+	case agentv1.AgentStatus_AGENT_STATUS_ACTIVE:
+		return 1, nil
+	case agentv1.AgentStatus_AGENT_STATUS_DISABLED:
+		return 2, nil
+	case agentv1.AgentStatus_AGENT_STATUS_UNSPECIFIED:
+		return 0, fmt.Errorf("unsupported agent status %d: %w", status, pqerr.ErrInvalidInput)
+	default:
+		return 0, fmt.Errorf("unsupported agent status %d: %w", status, pqerr.ErrInvalidInput)
+	}
 }
 
 func classifyWrite(operation string, err error) error {

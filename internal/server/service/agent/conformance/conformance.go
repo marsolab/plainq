@@ -10,6 +10,7 @@ import (
 	"github.com/marsolab/plainq/internal/server/principal"
 	agentv1 "github.com/marsolab/plainq/internal/server/schema/agent/v1"
 	"github.com/marsolab/plainq/internal/server/service/agent"
+	"github.com/marsolab/plainq/internal/shared/pqerr"
 )
 
 const (
@@ -144,6 +145,102 @@ func Registry(t *testing.T, newStore Factory) {
 		}
 		if _, err := store.GetAgent(ctx, tenantA, "01J00000000000000000000012"); !errors.Is(err, agent.ErrNotFound) {
 			t.Fatalf("agent half persisted after projection conflict: %v", err)
+		}
+	})
+
+	t.Run("create rejects unspecified and unknown statuses", func(t *testing.T) {
+		ctx := context.Background()
+		store := newStore(t)
+		if err := store.SeedOrganization(ctx, tenantA); err != nil {
+			t.Fatalf("seed tenant: %v", err)
+		}
+
+		for _, testCase := range []struct {
+			name    string
+			agentID string
+			status  agentv1.AgentStatus
+		}{
+			{
+				name:    "unspecified",
+				agentID: "01J00000000000000000000013",
+				status:  agentv1.AgentStatus_AGENT_STATUS_UNSPECIFIED,
+			},
+			{
+				name:    "unknown",
+				agentID: "01J00000000000000000000014",
+				status:  agentv1.AgentStatus(99),
+			},
+		} {
+			t.Run(testCase.name, func(t *testing.T) {
+				createdAt := time.Unix(250, 0).UTC()
+				_, err := store.CreateAgent(ctx, agent.CreateAgentInput{
+					AgentID:     testCase.agentID,
+					TenantID:    tenantA,
+					Name:        "invalid-" + testCase.name,
+					Status:      testCase.status,
+					AuthVersion: 1,
+					CreatedBy:   principal.Ref{Kind: principal.KindSystem, ID: conformancePrincipalID},
+					CreatedAt:   createdAt,
+					UpdatedAt:   createdAt,
+				})
+				if !errors.Is(err, pqerr.ErrInvalidInput) {
+					t.Fatalf("create status %d error = %v, want %v", testCase.status, err, pqerr.ErrInvalidInput)
+				}
+				if _, err := store.GetAgent(ctx, tenantA, testCase.agentID); !errors.Is(err, agent.ErrNotFound) {
+					t.Fatalf("invalid-status agent persisted: %v", err)
+				}
+			})
+		}
+	})
+
+	t.Run("status updates reject unspecified and unknown statuses", func(t *testing.T) {
+		ctx := context.Background()
+		store := newStore(t)
+		if err := store.SeedOrganization(ctx, tenantA); err != nil {
+			t.Fatalf("seed tenant: %v", err)
+		}
+
+		createdAt := time.Unix(275, 0).UTC()
+		created, err := store.CreateAgent(ctx, agent.CreateAgentInput{
+			AgentID:     "01J00000000000000000000015",
+			TenantID:    tenantA,
+			Name:        "status-validation",
+			Status:      agentv1.AgentStatus_AGENT_STATUS_ACTIVE,
+			AuthVersion: 1,
+			CreatedBy:   principal.Ref{Kind: principal.KindSystem, ID: conformancePrincipalID},
+			CreatedAt:   createdAt,
+			UpdatedAt:   createdAt,
+		})
+		if err != nil {
+			t.Fatalf("create agent: %v", err)
+		}
+
+		for _, status := range []agentv1.AgentStatus{
+			agentv1.AgentStatus_AGENT_STATUS_UNSPECIFIED,
+			agentv1.AgentStatus(99),
+		} {
+			_, err := store.SetAgentStatus(ctx, agent.SetAgentStatusInput{
+				TenantID:  tenantA,
+				AgentID:   created.AgentID,
+				Status:    status,
+				UpdatedAt: time.Unix(276, 0).UTC(),
+			})
+			if !errors.Is(err, pqerr.ErrInvalidInput) {
+				t.Fatalf("update status %d error = %v, want %v", status, err, pqerr.ErrInvalidInput)
+			}
+		}
+
+		unchanged, err := store.GetAgent(ctx, tenantA, created.AgentID)
+		if err != nil {
+			t.Fatalf("read unchanged agent: %v", err)
+		}
+		if unchanged.Status != agentv1.AgentStatus_AGENT_STATUS_ACTIVE ||
+			!unchanged.UpdatedAt.Equal(createdAt) || unchanged.DisabledAt != nil {
+			t.Fatalf("agent changed after invalid status update: %#v", unchanged)
+		}
+		principalStatus, _, err := store.AgentPrincipal(ctx, tenantA, created.AgentID)
+		if err != nil || principalStatus != "active" {
+			t.Fatalf("principal changed after invalid status update: status %q error %v", principalStatus, err)
 		}
 	})
 
