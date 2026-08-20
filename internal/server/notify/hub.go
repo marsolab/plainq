@@ -55,16 +55,11 @@ func (h *Hub) Watch(keys ...string) *Watch {
 
 func (h *Hub) Notify(key string) {
 	h.mu.Lock()
-	channels := make([]chan struct{}, 0, len(h.waiters[key]))
 	for ch := range h.waiters[key] {
-		channels = append(channels, ch)
-	}
-	h.mu.Unlock()
-
-	for _, ch := range channels {
 		select {
 		case ch <- struct{}{}:
 		default:
 		}
 	}
+	h.mu.Unlock()
 }

@@ -63,5 +63,38 @@ func (c Config) Validate() error {
 		c.DirectDeadLetterRetention <= 0 || c.SecurityAuditRetention <= 0 {
 		return errors.New("agent messaging limits must be positive and max lease must cover default lease")
 	}
+
+	maximum := Default()
+	if c.MaxMessageBytes > maximum.MaxMessageBytes ||
+		c.MaxBatchBytes > maximum.MaxBatchBytes ||
+		c.MaxAttributeBytes > maximum.MaxAttributeBytes ||
+		c.MaxAttributes > maximum.MaxAttributes ||
+		c.MaxAttributeKeyBytes > maximum.MaxAttributeKeyBytes ||
+		c.MaxAttributeValueBytes > maximum.MaxAttributeValueBytes ||
+		c.MaxEnvelopeFieldBytes > maximum.MaxEnvelopeFieldBytes ||
+		c.MaxContentTypeBytes > maximum.MaxContentTypeBytes ||
+		c.MaxSendBatch > maximum.MaxSendBatch ||
+		c.MaxReceiveBatch > maximum.MaxReceiveBatch ||
+		c.MaxLongPoll > maximum.MaxLongPoll ||
+		c.DefaultLease > maximum.DefaultLease ||
+		c.MaxLease > maximum.MaxLease ||
+		c.MaxNackDelay > maximum.MaxNackDelay ||
+		c.MaxRetention > maximum.MaxRetention ||
+		c.MaxInflight > maximum.MaxInflight ||
+		c.MaxAgentsPerTenant > maximum.MaxAgentsPerTenant ||
+		c.MaxTopicsPerTenant > maximum.MaxTopicsPerTenant ||
+		c.MaxSubscriptionsPerAgent > maximum.MaxSubscriptionsPerAgent ||
+		c.MaxActiveCredentials > maximum.MaxActiveCredentials ||
+		c.MaxPendingMessages > maximum.MaxPendingMessages ||
+		c.MaxPendingBytes > maximum.MaxPendingBytes ||
+		c.MaxStoredBytesPerTenant > maximum.MaxStoredBytesPerTenant ||
+		c.MaxDirectAttempts > maximum.MaxDirectAttempts ||
+		c.MessageUnitsPerSecond > maximum.MessageUnitsPerSecond ||
+		c.IdempotencyTTL > maximum.IdempotencyTTL ||
+		c.DirectDeadLetterRetention > maximum.DirectDeadLetterRetention ||
+		c.SecurityAuditRetention > maximum.SecurityAuditRetention {
+		return errors.New("agent messaging limits exceed global safety caps")
+	}
+
 	return nil
 }

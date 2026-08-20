@@ -47,6 +47,20 @@ func TestHubWatchCloseStopsNotifications(t *testing.T) {
 	watch.Close()
 }
 
+func TestHubWatchClosePreventsNotificationAfterCloseReturns(t *testing.T) {
+	hub := NewHub()
+	watch := hub.Watch("topic:tenant-a:topic-a")
+
+	watch.Close()
+	hub.Notify("topic:tenant-a:topic-a")
+
+	select {
+	case <-watch.C():
+		t.Fatal("watch received a notification after Close returned")
+	case <-time.After(25 * time.Millisecond):
+	}
+}
+
 func TestHubWatchAndNotifyAreRaceSafe(t *testing.T) {
 	hub := NewHub()
 	const workers = 16
