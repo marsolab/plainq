@@ -71,6 +71,8 @@ jobs:
       schema_bsr_commit: ${{ steps.publish.outputs.schema_bsr_commit }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: bufbuild/buf-setup-action@v1
       - name: Publish and resolve immutable schema commit
         id: publish
