@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 
+	"github.com/marsolab/plainq/internal/server/principal"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
 )
 
@@ -39,9 +40,52 @@ type CredentialStore interface {
 	TouchCredential(ctx context.Context, input TouchCredentialInput) error
 }
 
+// AuthorizationResourceKind is the storage representation of an agent policy resource.
+type AuthorizationResourceKind string
+
+const (
+	AuthorizationResourceAgent        AuthorizationResourceKind = "agent"
+	AuthorizationResourceTopic        AuthorizationResourceKind = "topic"
+	AuthorizationResourceSubscription AuthorizationResourceKind = "subscription"
+)
+
+// AuthorizationResourceSelector resolves one resource inside an authenticated tenant.
+type AuthorizationResourceSelector struct {
+	Kind AuthorizationResourceKind
+	ID   string
+	Name string
+}
+
+// AuthorizationResource is the minimum projection needed by policy checks.
+type AuthorizationResource struct {
+	ID           string
+	OwnerAgentID string
+}
+
+// ResourceGrantCheck identifies one direct persisted grant.
+type ResourceGrantCheck struct {
+	TenantID     string
+	SubjectKind  principal.Kind
+	SubjectID    string
+	ResourceKind AuthorizationResourceKind
+	ResourceID   string
+	Action       string
+}
+
+// AuthorizationStore serves tenant-scoped resource and direct-grant reads.
+type AuthorizationStore interface {
+	ResolveAuthorizationResource(
+		ctx context.Context,
+		tenantID string,
+		selector AuthorizationResourceSelector,
+	) (AuthorizationResource, error)
+	HasResourceGrant(ctx context.Context, check ResourceGrantCheck) (bool, error)
+}
+
 // Store is the complete registry and credential persistence surface.
 type Store interface {
 	RegistryStore
 	PrincipalStore
 	CredentialStore
+	AuthorizationStore
 }

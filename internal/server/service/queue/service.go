@@ -7,8 +7,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/marsolab/plainq/internal/server/config"
+	"github.com/marsolab/plainq/internal/server/grpccodec"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
-	vtgrpc "github.com/planetscale/vtprotobuf/codec/grpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/encoding"
 )
@@ -77,7 +77,7 @@ type Service struct {
 
 // NewService creates a new queue service.
 func NewService(cfg *config.Config, logger *slog.Logger, storage Storage) *Service {
-	encoding.RegisterCodec(vtgrpc.Codec{})
+	encoding.RegisterCodec(grpccodec.Codec{})
 
 	s := Service{
 		cfg:     cfg,

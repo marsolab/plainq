@@ -1,6 +1,8 @@
 package config
 
 import (
+	"errors"
+	"math"
 	"time"
 )
 
@@ -13,8 +15,15 @@ type Config struct {
 	LogAccessEnableAll bool
 	LogLevel           string
 
-	GRPCAddr string
-	HTTPAddr string
+	GRPCAddr            string
+	GRPCAdvertiseAddr   string
+	GRPCProxyServerName string
+	GRPCProtectLegacy   bool
+	GRPCTLSMode         string
+	GRPCTLSCertFile     string
+	GRPCTLSKeyFile      string
+	GRPCTLSClientCAFile string
+	HTTPAddr            string
 
 	HTTPReadTimeout       time.Duration
 	HTTPReadHeaderTimeout time.Duration
@@ -40,6 +49,16 @@ type Config struct {
 	AuthRefreshTokenTTL         time.Duration
 	AuthEmailVerificationEnable bool
 	AuthJWTSecret               string // HMAC secret used to sign access/refresh tokens; required when AuthEnable.
+
+	// Agent authentication, transport, and node-local overload protection.
+	AgentEnable                       bool
+	AgentDevelopmentInsecureTransport bool
+	AgentAuthIssuer                   string
+	AgentAuthAudience                 string
+	AgentAuthJWTSecret                string
+	AgentAccessTokenTTL               time.Duration
+	AgentRateRequestsPerSecond        float64
+	AgentRateBurst                    int
 
 	// OAuth configuration.
 	OAuthEnable           bool
@@ -89,4 +108,14 @@ type Config struct {
 	MetricsRoute        string
 
 	ProfilerEnabled bool
+}
+
+// ValidateAgentAdmission rejects rates that cannot form a finite token bucket.
+func (c *Config) ValidateAgentAdmission() error {
+	if c.AgentRateRequestsPerSecond <= 0 || math.IsNaN(c.AgentRateRequestsPerSecond) ||
+		math.IsInf(c.AgentRateRequestsPerSecond, 0) || c.AgentRateBurst < 1 {
+		return errors.New("agent admission requires a finite positive request rate and burst")
+	}
+
+	return nil
 }

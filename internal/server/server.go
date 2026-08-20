@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -15,6 +17,7 @@ import (
 	"github.com/marsolab/plainq/internal/server/config"
 	"github.com/marsolab/plainq/internal/server/interceptor"
 	"github.com/marsolab/plainq/internal/server/middleware"
+	agentv1 "github.com/marsolab/plainq/internal/server/schema/agent/v1"
 	"github.com/marsolab/plainq/internal/server/service/account"
 	"github.com/marsolab/plainq/internal/server/service/oauth"
 	"github.com/marsolab/plainq/internal/server/service/onboarding"
@@ -25,9 +28,11 @@ import (
 	"github.com/marsolab/plainq/internal/shared/pqlite"
 	"github.com/marsolab/servekit"
 	"github.com/marsolab/servekit/authkit/jwtkit"
-	"github.com/marsolab/servekit/grpckit"
 	"github.com/marsolab/servekit/httpkit"
+	"google.golang.org/grpc"
 	_ "google.golang.org/grpc/encoding/proto"
+	"google.golang.org/grpc/health"
+	healthv1 "google.golang.org/grpc/health/grpc_health_v1"
 )
 
 // PlainQ represents plainq logic.
@@ -41,6 +46,12 @@ type PlainQ struct {
 	oauth        *oauth.Service
 	observer     *telemetry.Observer
 	tokenManager jwtkit.TokenManager
+
+	agentTransport GRPCEndpointRegistrator
+	authenticator  interceptor.Authenticator
+	resources      interceptor.ResourceAuthorizer
+	admission      *interceptor.PrincipalAdmissionLimiter
+	serverVersion  string
 
 	// Telemetry components.
 	metricsCollector *collector.Collector
@@ -88,6 +99,11 @@ func NewServer(
 
 	if pq.clusterNode != nil {
 		pq.clusterHandler = NewClusterHandler(pq.clusterNode, logger)
+	}
+
+	if cfg.AgentEnable && (pq.agentTransport == nil || pq.authenticator == nil ||
+		pq.resources == nil || pq.admission == nil) {
+		return nil, errors.New("agent APIs require transport, authentication, authorization, and admission dependencies")
 	}
 
 	// Initialize metrics collector if telemetry database is provided.
@@ -275,15 +291,53 @@ func NewServer(
 	// Register the HTTP listener with a server.
 	server.RegisterListener("HTTP", httpListener)
 
-	grpcListener, grpcListenerErr := grpckit.NewListenerGRPC(cfg.GRPCAddr,
-		grpckit.WithUnaryInterceptors(interceptor.Metrics()),
+	var grpcTLSConfig *tls.Config
+
+	if cfg.AgentEnable && !cfg.AgentDevelopmentInsecureTransport {
+		loaded, err := LoadGRPCTLSConfig(
+			cfg.GRPCTLSMode, cfg.GRPCTLSCertFile, cfg.GRPCTLSKeyFile, cfg.GRPCTLSClientCAFile,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		grpcTLSConfig = loaded
+	}
+
+	grpcListener, grpcListenerErr := NewGRPCListener(
+		cfg.GRPCAddr,
+		grpcTLSConfig,
+		[]grpc.UnaryServerInterceptor{
+			interceptor.Metrics(),
+			interceptor.Logging(logger),
+			interceptor.UnaryAuth(pq.authenticator, interceptor.PublicMethods()),
+			interceptor.UnaryAdmission(pq.admission),
+			interceptor.UnaryAuthorize(pq.resources),
+		},
+		[]grpc.StreamServerInterceptor{
+			interceptor.StreamLogging(logger),
+			interceptor.StreamAuth(pq.authenticator, interceptor.PublicMethods()),
+			interceptor.StreamAdmission(pq.admission),
+			interceptor.StreamAuthorize(pq.resources),
+		},
 	)
 	if grpcListenerErr != nil {
 		return nil, fmt.Errorf("create gRPC listener: %w", grpcListenerErr)
 	}
 
+	grpcListener.SetLogger(logger)
+
 	// Mount the queue gRPC routes to the gRPC listener.
 	grpcListener.Mount(pq.queue)
+
+	healthServer := health.NewServer()
+	healthServer.SetServingStatus("", healthv1.HealthCheckResponse_SERVING)
+	grpcListener.Mount(&grpcHealthMount{server: healthServer})
+	grpcListener.Mount(newCapabilitiesService(&pq))
+
+	if cfg.AgentEnable {
+		grpcListener.Mount(pq.agentTransport)
+	}
 
 	// Register the gRPC listener with a server.
 	server.RegisterListener("GRPC", grpcListener)
@@ -420,6 +474,27 @@ func listenerHTTP(cfg *config.Config, logger *slog.Logger, checker hc.HealthChec
 // Option configures the PlainQ server.
 type Option func(*PlainQ)
 
+// WithAgentMessaging installs the generated AgentService transport and every
+// security dependency needed by its protected routes.
+func WithAgentMessaging(
+	transport GRPCEndpointRegistrator,
+	authenticator interceptor.Authenticator,
+	resources interceptor.ResourceAuthorizer,
+	admission *interceptor.PrincipalAdmissionLimiter,
+) Option {
+	return func(pq *PlainQ) {
+		pq.agentTransport = transport
+		pq.authenticator = authenticator
+		pq.resources = resources
+		pq.admission = admission
+	}
+}
+
+// WithServerVersion reports the current build in agent capabilities.
+func WithServerVersion(version string) Option {
+	return func(pq *PlainQ) { pq.serverVersion = version }
+}
+
 // WithMetricsStore sets the metrics store for telemetry collection.
 func WithMetricsStore(db pqlite.DB) Option {
 	return func(pq *PlainQ) {
@@ -443,4 +518,57 @@ func WithObserver(observer *telemetry.Observer) Option {
 // GetMetricsCollector returns the metrics collector for external use.
 func (s *PlainQ) GetMetricsCollector() *collector.Collector {
 	return s.metricsCollector
+}
+
+type grpcHealthMount struct {
+	server *health.Server
+}
+
+func (m *grpcHealthMount) Mount(server *grpc.Server) {
+	healthv1.RegisterHealthServer(server, m.server)
+}
+
+type capabilitiesService struct {
+	agentv1.UnimplementedSystemServiceServer
+	serverVersion   string
+	apiServices     []string
+	agentEnabled    bool
+	transportSecure bool
+	clusterEnabled  bool
+}
+
+func newCapabilitiesService(pq *PlainQ) *capabilitiesService {
+	services := []string{"schema.v1.PlainQService", "agent.v1.SystemService", "grpc.health.v1.Health"}
+	if pq.cfg.AgentEnable {
+		services = append(services, "agent.v1.AgentService")
+	}
+
+	return &capabilitiesService{
+		serverVersion:   pq.serverVersion,
+		apiServices:     services,
+		agentEnabled:    pq.cfg.AgentEnable,
+		transportSecure: pq.cfg.AgentEnable && !pq.cfg.AgentDevelopmentInsecureTransport,
+		clusterEnabled:  pq.clusterNode != nil,
+	}
+}
+
+func (s *capabilitiesService) Mount(server *grpc.Server) {
+	agentv1.RegisterSystemServiceServer(server, s)
+}
+
+func (s *capabilitiesService) GetCapabilities(
+	context.Context,
+	*agentv1.GetCapabilitiesRequest,
+) (*agentv1.GetCapabilitiesResponse, error) {
+	return &agentv1.GetCapabilitiesResponse{
+		ServerVersion:     s.serverVersion,
+		ApiServices:       append([]string(nil), s.apiServices...),
+		AgentAuthRequired: s.agentEnabled,
+		TransportSecure:   s.transportSecure,
+		ClusterEnabled:    s.clusterEnabled,
+		// Task 9 activates durable messaging; Task 7 can make the parsed
+		// legacy-protection flag effective after tenant backfill.
+		AgentMessagingFeatureActive: false,
+		LegacyV1AuthRequired:        false,
+	}, nil
 }

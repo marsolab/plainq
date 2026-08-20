@@ -308,6 +308,42 @@ func (q *Queries) GetCredentialByPrefix(ctx context.Context, credentialPrefix st
 	return i, err
 }
 
+const hasResourceGrant = `-- name: HasResourceGrant :one
+SELECT EXISTS (
+    SELECT 1
+    FROM agent_resource_grants
+    WHERE tenant_id = $1::text
+      AND subject_kind = $2::text
+      AND subject_id = $3::text
+      AND resource_kind = $4::text
+      AND resource_id = $5::text
+      AND action = $6::text
+)
+`
+
+type HasResourceGrantParams struct {
+	TenantID     string
+	SubjectKind  string
+	SubjectID    string
+	ResourceKind string
+	ResourceID   string
+	Action       string
+}
+
+func (q *Queries) HasResourceGrant(ctx context.Context, arg HasResourceGrantParams) (bool, error) {
+	row := q.db.QueryRow(ctx, hasResourceGrant,
+		arg.TenantID,
+		arg.SubjectKind,
+		arg.SubjectID,
+		arg.ResourceKind,
+		arg.ResourceID,
+		arg.Action,
+	)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const listAgents = `-- name: ListAgents :many
 SELECT agent_id, tenant_id, agent_name, status, auth_version,
        created_at_ns, updated_at_ns, disabled_at_ns

@@ -239,6 +239,49 @@ auth:
   # -- Key within the Secret (generated or existing) that holds the JWT secret.
   secretKey: jwt-secret
 
+# Agent-first gRPC APIs. Disabled by default for compatibility; when enabled,
+# authentication and TLS are mandatory unless the explicit loopback-only
+# development transport is selected.
+agent:
+  # -- Enable the generated agent.v1 gRPC API.
+  enabled: false
+  # -- Permit plaintext only on a loopback listener. Never use in a cluster.
+  developmentInsecureTransport: false
+
+  auth:
+    # -- Required agent access-token issuer and audience.
+    issuer: plainq
+    audience: plainq-agents
+    # -- Short agent access-token lifetime; the server rejects values above 15m.
+    accessTokenTTL: 5m
+    # -- HMAC secret for agent access tokens (at least 32 bytes). Prefer existingSecret.
+    jwtSecret: ""
+    # -- Existing Secret containing the agent JWT HMAC secret.
+    existingSecret: ""
+    secretKey: agent-jwt-secret
+
+  rate:
+    # -- Node-local authenticated requests per second for each tenant/principal.
+    requestsPerSecond: 100
+    # -- Node-local burst for each tenant/principal.
+    burst: 200
+
+  tls:
+    # -- server verifies the server only; mutual also verifies client certificates.
+    mode: server
+    # -- Existing Secret containing the gRPC certificate and key.
+    existingSecret: ""
+    certKey: tls.crt
+    keyKey: tls.key
+    clientCAKey: ca.crt
+
+  # -- TLS server name clustered followers use when proxying agent RPCs.
+  proxyServerName: ""
+
+  # -- Parsed now for a staged rollout; becomes effective with the Task 7
+  # tenant migration for legacy v1 resources.
+  protectLegacy: false
+
 # -- Non-secret server configuration mapped to CLI flags.
 config:
   # -- Log level: "debug", "info", "warning", "error".

@@ -29,6 +29,18 @@ SELECT agent_id, tenant_id, agent_name, status, auth_version,
 FROM agents
 WHERE tenant_id = $1 AND agent_name = $2;
 
+-- name: HasResourceGrant :one
+SELECT EXISTS (
+    SELECT 1
+    FROM agent_resource_grants
+    WHERE tenant_id = @tenant_id::text
+      AND subject_kind = @subject_kind::text
+      AND subject_id = @subject_id::text
+      AND resource_kind = @resource_kind::text
+      AND resource_id = @resource_id::text
+      AND action = @action::text
+);
+
 -- name: ListAgents :many
 SELECT agent_id, tenant_id, agent_name, status, auth_version,
        created_at_ns, updated_at_ns, disabled_at_ns

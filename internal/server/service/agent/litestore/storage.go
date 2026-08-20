@@ -19,6 +19,7 @@ import (
 var _ agent.RegistryStore = (*Storage)(nil)
 var _ agent.PrincipalStore = (*Storage)(nil)
 var _ agent.CredentialStore = (*Storage)(nil)
+var _ agent.AuthorizationStore = (*Storage)(nil)
 
 // Storage is the SQLite/libSQL-backed agent registry.
 type Storage struct {
@@ -169,6 +170,63 @@ func (s *Storage) GetAgentByName(ctx context.Context, tenantID, name string) (ag
 	}
 
 	return record, nil
+}
+
+// ResolveAuthorizationResource performs the tenant predicate in SQL. Topic
+// and subscription projections are intentionally unavailable until their
+// tenant-owned stores land; returning NotFound keeps those routes fail-closed.
+func (s *Storage) ResolveAuthorizationResource(
+	ctx context.Context,
+	tenantID string,
+	selector agent.AuthorizationResourceSelector,
+) (agent.AuthorizationResource, error) {
+	if selector.Kind != agent.AuthorizationResourceAgent || tenantID == "" ||
+		(selector.ID == "") == (selector.Name == "") {
+		return agent.AuthorizationResource{}, agent.ErrNotFound
+	}
+
+	var agentID string
+
+	if selector.ID != "" {
+		row, err := s.queries.GetAgent(ctx, sqlcgen.GetAgentParams{TenantID: tenantID, AgentID: selector.ID})
+		if err != nil {
+			return agent.AuthorizationResource{}, mapAuthorizationResourceError(err)
+		}
+
+		agentID = row.AgentID
+	} else {
+		row, err := s.queries.GetAgentByName(ctx, sqlcgen.GetAgentByNameParams{
+			TenantID: tenantID, AgentName: selector.Name,
+		})
+		if err != nil {
+			return agent.AuthorizationResource{}, mapAuthorizationResourceError(err)
+		}
+
+		agentID = row.AgentID
+	}
+
+	return agent.AuthorizationResource{ID: agentID, OwnerAgentID: agentID}, nil
+}
+
+// HasResourceGrant checks the complete unique grant key, including tenant.
+func (s *Storage) HasResourceGrant(ctx context.Context, check agent.ResourceGrantCheck) (bool, error) {
+	exists, err := s.queries.HasResourceGrant(ctx, sqlcgen.HasResourceGrantParams{
+		TenantID: check.TenantID, SubjectKind: string(check.SubjectKind), SubjectID: check.SubjectID,
+		ResourceKind: string(check.ResourceKind), ResourceID: check.ResourceID, Action: check.Action,
+	})
+	if err != nil {
+		return false, fmt.Errorf("check agent resource grant: %w", err)
+	}
+
+	return exists, nil
+}
+
+func mapAuthorizationResourceError(err error) error {
+	if errors.Is(err, sql.ErrNoRows) {
+		return agent.ErrNotFound
+	}
+
+	return fmt.Errorf("resolve authorization agent: %w", err)
 }
 
 func (s *Storage) ListAgents(ctx context.Context, input agent.ListAgentsInput) (agent.ListAgentsResult, error) {

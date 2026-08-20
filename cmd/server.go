@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -19,10 +20,15 @@ import (
 	"github.com/marsolab/plainq/internal/cluster"
 	"github.com/marsolab/plainq/internal/server"
 	"github.com/marsolab/plainq/internal/server/config"
+	"github.com/marsolab/plainq/internal/server/interceptor"
 	"github.com/marsolab/plainq/internal/server/mutations"
+	"github.com/marsolab/plainq/internal/server/security"
 	"github.com/marsolab/plainq/internal/server/service/account"
 	accountstore "github.com/marsolab/plainq/internal/server/service/account/litestore"
 	accountpg "github.com/marsolab/plainq/internal/server/service/account/pgstore"
+	"github.com/marsolab/plainq/internal/server/service/agent"
+	agentstore "github.com/marsolab/plainq/internal/server/service/agent/litestore"
+	agentpg "github.com/marsolab/plainq/internal/server/service/agent/pgstore"
 	"github.com/marsolab/plainq/internal/server/service/oauth"
 	oauthstore "github.com/marsolab/plainq/internal/server/service/oauth/litestore"
 	oauthpg "github.com/marsolab/plainq/internal/server/service/oauth/pgstore"
@@ -247,6 +253,69 @@ func serverCommand() *commandSpec {
 				"set gRPC listener address",
 			)
 
+			f.StringVar(&cfg.GRPCAdvertiseAddr, "grpc.advertise.addr", "",
+				"routable gRPC address advertised to clustered followers",
+			)
+
+			f.StringVar(&cfg.GRPCProxyServerName, "grpc.proxy.server-name", "",
+				"TLS server name used by clustered gRPC followers",
+			)
+
+			f.BoolVar(&cfg.GRPCProtectLegacy, "grpc.protect-legacy", false,
+				"protect legacy v1 gRPC methods after their tenant migration is installed",
+			)
+
+			f.StringVar(&cfg.GRPCTLSMode, "grpc.tls.mode", "server",
+				"gRPC TLS mode for agent APIs: server or mutual",
+			)
+
+			f.StringVar(&cfg.GRPCTLSCertFile, "grpc.tls.cert-file", "",
+				"PEM certificate for the gRPC listener",
+			)
+
+			f.StringVar(&cfg.GRPCTLSKeyFile, "grpc.tls.key-file", "",
+				"PEM private key for the gRPC listener certificate",
+			)
+
+			f.StringVar(&cfg.GRPCTLSClientCAFile, "grpc.tls.client-ca-file", "",
+				"PEM client CA required by mutual gRPC TLS",
+			)
+
+			// Agent API. Enabling it is secure by default: unless the
+			// development-only loopback exception is selected, TLS material is
+			// required before any listener or storage is opened.
+			f.BoolVar(&cfg.AgentEnable, "agent.enable", false,
+				"enable agent-first gRPC messaging APIs",
+			)
+
+			f.BoolVar(&cfg.AgentDevelopmentInsecureTransport, "agent.development-insecure-transport", false,
+				"allow plaintext agent gRPC transport only on an explicit loopback address",
+			)
+
+			f.StringVar(&cfg.AgentAuthIssuer, "agent.auth.issuer", "plainq",
+				"issuer required in signed agent access tokens",
+			)
+
+			f.StringVar(&cfg.AgentAuthAudience, "agent.auth.audience", "plainq-agents",
+				"audience required in signed agent access tokens",
+			)
+
+			f.StringVar(&cfg.AgentAuthJWTSecret, "agent.auth.jwt-secret", "",
+				"HMAC secret for agent access tokens (at least 32 bytes)",
+			)
+
+			f.DurationVar(&cfg.AgentAccessTokenTTL, "agent.auth.access-token-ttl", 5*time.Minute,
+				"short lifetime for agent access tokens (maximum 15 minutes)",
+			)
+
+			f.Float64Var(&cfg.AgentRateRequestsPerSecond, "agent.rate.requests-per-second", 100,
+				"node-local authenticated request rate per tenant/principal",
+			)
+
+			f.IntVar(&cfg.AgentRateBurst, "agent.rate.burst", 200,
+				"node-local authenticated request burst per tenant/principal",
+			)
+
 			f.StringVar(&cfg.HTTPAddr, "http.addr", ":8081",
 				"set HTTP listener address",
 			)
@@ -334,6 +403,10 @@ func serverCommand() *commandSpec {
 			}
 
 			logger.Info("Starting plainq server")
+
+			if err := validateAgentSecurity(&cfg, &clusterCfg); err != nil {
+				return err
+			}
 
 			var checker hc.HealthChecker = hc.NewNopChecker()
 
@@ -469,6 +542,16 @@ func serverCommand() *commandSpec {
 			var serverOpts []server.Option
 
 			serverOpts = append(serverOpts, server.WithObserver(observer))
+			serverOpts = append(serverOpts, server.WithServerVersion(Commit))
+
+			if cfg.AgentEnable {
+				agentOption, agentOptionErr := initAgentServerOption(&cfg, backend, tokenManager, accountStorage)
+				if agentOptionErr != nil {
+					return agentOptionErr
+				}
+
+				serverOpts = append(serverOpts, agentOption)
+			}
 
 			if clusterNode != nil {
 				serverOpts = append(serverOpts, server.WithClusterNode(clusterNode))
@@ -501,6 +584,122 @@ func serverCommand() *commandSpec {
 			return plainqServer.Serve(ctx)
 		},
 	}
+}
+
+//nolint:gocyclo,cyclop // validation mirrors the explicit security contract one rule at a time.
+func validateAgentSecurity(cfg *config.Config, clusterCfg *cluster.Config) error {
+	if !cfg.AgentEnable {
+		return nil
+	}
+
+	if len(cfg.AgentAuthJWTSecret) < 32 {
+		return errors.New("agent JWT secret must be at least 32 bytes")
+	}
+
+	if cfg.AgentAuthIssuer == "" || cfg.AgentAuthAudience == "" {
+		return errors.New("agent token issuer and audience are required")
+	}
+
+	if cfg.AgentAccessTokenTTL <= 0 || cfg.AgentAccessTokenTTL > 15*time.Minute {
+		return errors.New("agent access token TTL must be between zero and 15 minutes")
+	}
+
+	if err := cfg.ValidateAgentAdmission(); err != nil {
+		return fmt.Errorf("validate agent admission: %w", err)
+	}
+
+	if cfg.AgentDevelopmentInsecureTransport {
+		host, _, err := net.SplitHostPort(cfg.GRPCAddr)
+		if err != nil || (host != "127.0.0.1" && host != "localhost" && host != "::1") {
+			return errors.New("insecure agent transport requires a loopback gRPC address")
+		}
+
+		return nil
+	}
+
+	if cfg.GRPCTLSMode != "server" && cfg.GRPCTLSMode != "mutual" {
+		return errors.New("agent APIs require server or mutual gRPC TLS mode")
+	}
+
+	if cfg.GRPCTLSCertFile == "" || cfg.GRPCTLSKeyFile == "" {
+		return errors.New("agent APIs require a gRPC TLS certificate and key")
+	}
+
+	if cfg.GRPCTLSMode == "mutual" && cfg.GRPCTLSClientCAFile == "" {
+		return errors.New("mutual gRPC TLS requires a client CA")
+	}
+
+	if clusterCfg != nil && clusterCfg.Enabled &&
+		(cfg.GRPCAdvertiseAddr == "" || isWildcardAddress(cfg.GRPCAdvertiseAddr)) {
+		return errors.New("clustered agent APIs require a routable gRPC advertise address")
+	}
+
+	return nil
+}
+
+func initAgentServerOption(
+	cfg *config.Config,
+	backend *storageBackend,
+	humanTokens jwtkit.TokenManager,
+	accountStorage account.Storage,
+) (server.Option, error) {
+	agentStorage, err := initAgentStorage(backend)
+	if err != nil {
+		return nil, err
+	}
+
+	agentTokens, err := security.NewAgentTokenManager(security.AgentTokenConfig{
+		Issuer: cfg.AgentAuthIssuer, Audience: cfg.AgentAuthAudience,
+		Secret: []byte(cfg.AgentAuthJWTSecret), TTL: cfg.AgentAccessTokenTTL,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create agent token manager: %w", err)
+	}
+
+	agentService, err := agent.NewService(agent.ServiceConfig{
+		Registry: agentStorage, Principals: agentStorage, Credentials: agentStorage, Tokens: agentTokens,
+		PreAuth: agent.PreAuthConfig{RequestsPerSecond: 5, Burst: 10, MaxEntries: 4096},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create agent service: %w", err)
+	}
+
+	agentTransport, err := agent.NewGRPCTransport(agentService)
+	if err != nil {
+		return nil, fmt.Errorf("create agent gRPC transport: %w", err)
+	}
+
+	authenticator, err := interceptor.NewCompositeAuthenticator(
+		agentService, humanTokens, accountStorage, accountStorage,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create gRPC authenticator: %w", err)
+	}
+
+	resourceAuthorizer, err := interceptor.NewStoreResourceAuthorizer(agentStorage)
+	if err != nil {
+		return nil, fmt.Errorf("create resource authorizer: %w", err)
+	}
+
+	admission, err := interceptor.NewPrincipalAdmissionLimiter(
+		cfg.AgentRateRequestsPerSecond, cfg.AgentRateBurst,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create principal admission limiter: %w", err)
+	}
+
+	return server.WithAgentMessaging(agentTransport, authenticator, resourceAuthorizer, admission), nil
+}
+
+func isWildcardAddress(address string) bool {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil || host == "" {
+		return true
+	}
+
+	ip := net.ParseIP(host)
+
+	return ip != nil && ip.IsUnspecified()
 }
 
 func initLogger(cfg *config.Config) (*slog.Logger, error) {
@@ -965,6 +1164,26 @@ func initAccountStorage(cfg *config.Config, logger *slog.Logger, backend *storag
 		store, err := accountstore.NewStorage(backend.lite(), logger, opts...)
 		if err != nil {
 			return nil, fmt.Errorf("create %s account storage: %w", backend.driver, err)
+		}
+
+		return store, nil
+	}
+}
+
+func initAgentStorage(backend *storageBackend) (agent.Store, error) {
+	switch backend.driver {
+	case storageDriverPostgres:
+		store, err := agentpg.NewStorage(backend.pgpool)
+		if err != nil {
+			return nil, fmt.Errorf("create postgres agent storage: %w", err)
+		}
+
+		return store, nil
+
+	default:
+		store, err := agentstore.NewStorage(backend.lite())
+		if err != nil {
+			return nil, fmt.Errorf("create %s agent storage: %w", backend.driver, err)
 		}
 
 		return store, nil

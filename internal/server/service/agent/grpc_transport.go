@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/marsolab/servekit/grpckit"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -27,6 +28,11 @@ func NewGRPCTransport(service *Service) (*GRPCTransport, error) {
 	}
 
 	return &GRPCTransport{service: service}, nil
+}
+
+// Mount registers the generated AgentService on a gRPC server.
+func (t *GRPCTransport) Mount(server *grpc.Server) {
+	agentv1.RegisterAgentServiceServer(server, t)
 }
 
 // CreateAgent maps the registry operation onto the generated transport.

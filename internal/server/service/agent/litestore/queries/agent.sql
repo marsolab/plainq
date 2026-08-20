@@ -29,6 +29,18 @@ SELECT agent_id, tenant_id, agent_name, status, auth_version,
 FROM agents
 WHERE tenant_id = ? AND agent_name = ?;
 
+-- name: HasResourceGrant :one
+SELECT EXISTS (
+    SELECT 1
+    FROM agent_resource_grants
+    WHERE tenant_id = cast(sqlc.arg('tenant_id') AS text)
+      AND subject_kind = cast(sqlc.arg('subject_kind') AS text)
+      AND subject_id = cast(sqlc.arg('subject_id') AS text)
+      AND resource_kind = cast(sqlc.arg('resource_kind') AS text)
+      AND resource_id = cast(sqlc.arg('resource_id') AS text)
+      AND action = cast(sqlc.arg('action') AS text)
+);
+
 -- name: ListAgents :many
 SELECT agent_id, tenant_id, agent_name, status, auth_version,
        created_at_ns, updated_at_ns, disabled_at_ns

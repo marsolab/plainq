@@ -2,11 +2,15 @@ package litestore
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/marsolab/plainq/internal/server/mutations"
+	"github.com/marsolab/plainq/internal/server/principal"
 	agentv1 "github.com/marsolab/plainq/internal/server/schema/agent/v1"
+	"github.com/marsolab/plainq/internal/server/service/agent"
 	"github.com/marsolab/plainq/internal/server/service/agent/conformance"
 	"github.com/marsolab/plainq/internal/shared/pqlite"
 	"github.com/marsolab/servekit/dbkit/litekit"
@@ -107,4 +111,79 @@ func TestRegistry(t *testing.T) {
 
 func TestCredentials(t *testing.T) {
 	conformance.Credentials(t, newRegistryFixture)
+}
+
+func TestAuthorizationStoreScopesAgentAndGrantByTenant(t *testing.T) {
+	t.Parallel()
+
+	fixture, ok := newRegistryFixture(t).(*registryFixture)
+	if !ok {
+		t.Fatal("newRegistryFixture returned unexpected type")
+	}
+	ctx := context.Background()
+	for _, tenantID := range []string{"tenant-a", "tenant-b"} {
+		if err := fixture.SeedOrganization(ctx, tenantID); err != nil {
+			t.Fatalf("seed organization %q: %v", tenantID, err)
+		}
+	}
+
+	createdAt := time.Date(2026, 8, 21, 0, 0, 0, 0, time.UTC)
+	_, err := fixture.CreateAgent(ctx, agent.CreateAgentInput{
+		AgentID: "agent-a", TenantID: "tenant-a", Name: "worker-a",
+		Status: agentv1.AgentStatus_AGENT_STATUS_ACTIVE, AuthVersion: 1,
+		CreatedBy: principal.Ref{Kind: principal.KindHuman, ID: "admin-a"},
+		CreatedAt: createdAt, UpdatedAt: createdAt,
+	})
+	if err != nil {
+		t.Fatalf("CreateAgent() error = %v", err)
+	}
+
+	resource, err := fixture.ResolveAuthorizationResource(ctx, "tenant-a", agent.AuthorizationResourceSelector{
+		Kind: agent.AuthorizationResourceAgent, Name: "worker-a",
+	})
+	if err != nil {
+		t.Fatalf("ResolveAuthorizationResource() error = %v", err)
+	}
+	if resource.ID != "agent-a" || resource.OwnerAgentID != "agent-a" {
+		t.Fatalf("resource = %#v", resource)
+	}
+
+	_, err = fixture.ResolveAuthorizationResource(ctx, "tenant-b", agent.AuthorizationResourceSelector{
+		Kind: agent.AuthorizationResourceAgent, ID: "agent-a",
+	})
+	if !errors.Is(err, agent.ErrNotFound) {
+		t.Fatalf("cross-tenant ResolveAuthorizationResource() error = %v, want NotFound", err)
+	}
+
+	_, err = fixture.db.ExecContext(ctx, `
+		INSERT INTO agent_resource_grants (
+			grant_id, tenant_id, subject_kind, subject_id, resource_kind, resource_id, action, created_at_ns
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		"grant-a", "tenant-a", "agent", "agent-sender", "agent", "agent-a", "send", createdAt.UnixNano(),
+	)
+	if err != nil {
+		t.Fatalf("insert grant: %v", err)
+	}
+
+	granted, err := fixture.HasResourceGrant(ctx, agent.ResourceGrantCheck{
+		TenantID: "tenant-a", SubjectKind: principal.KindAgent, SubjectID: "agent-sender",
+		ResourceKind: agent.AuthorizationResourceAgent, ResourceID: "agent-a", Action: "send",
+	})
+	if err != nil {
+		t.Fatalf("HasResourceGrant() error = %v", err)
+	}
+	if !granted {
+		t.Fatal("HasResourceGrant() = false, want true")
+	}
+
+	granted, err = fixture.HasResourceGrant(ctx, agent.ResourceGrantCheck{
+		TenantID: "tenant-b", SubjectKind: principal.KindAgent, SubjectID: "agent-sender",
+		ResourceKind: agent.AuthorizationResourceAgent, ResourceID: "agent-a", Action: "send",
+	})
+	if err != nil {
+		t.Fatalf("cross-tenant HasResourceGrant() error = %v", err)
+	}
+	if granted {
+		t.Fatal("cross-tenant HasResourceGrant() = true, want false")
+	}
 }
