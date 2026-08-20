@@ -12,6 +12,7 @@ import (
 	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	healthv1 "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 )
 
@@ -35,8 +36,9 @@ func TestPublicMethodInventoryIsExact(t *testing.T) {
 	want := map[string]struct{}{
 		agentv1.AgentService_ExchangeAgentCredential_FullMethodName: {},
 		agentv1.SystemService_GetCapabilities_FullMethodName:        {},
-		"/grpc.health.v1.Health/Check":                              {},
-		"/grpc.health.v1.Health/Watch":                              {},
+		healthv1.Health_Check_FullMethodName:                        {},
+		healthv1.Health_List_FullMethodName:                         {},
+		healthv1.Health_Watch_FullMethodName:                        {},
 	}
 
 	got := PublicMethods()
@@ -46,6 +48,30 @@ func TestPublicMethodInventoryIsExact(t *testing.T) {
 	for method := range want {
 		if _, ok := got[method]; !ok {
 			t.Fatalf("public method %q is missing", method)
+		}
+	}
+}
+
+func TestEveryGeneratedHealthMethodIsPublic(t *testing.T) {
+	t.Parallel()
+
+	public := PublicMethods()
+	methods := make([]string, 0, len(healthv1.Health_ServiceDesc.Methods)+len(healthv1.Health_ServiceDesc.Streams))
+
+	for _, method := range healthv1.Health_ServiceDesc.Methods {
+		methods = append(methods, fmt.Sprintf(
+			"/%s/%s", healthv1.Health_ServiceDesc.ServiceName, method.MethodName,
+		))
+	}
+	for _, stream := range healthv1.Health_ServiceDesc.Streams {
+		methods = append(methods, fmt.Sprintf(
+			"/%s/%s", healthv1.Health_ServiceDesc.ServiceName, stream.StreamName,
+		))
+	}
+
+	for _, method := range methods {
+		if _, ok := public[method]; !ok {
+			t.Errorf("generated health route %q is not public", method)
 		}
 	}
 }

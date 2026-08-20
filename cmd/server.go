@@ -630,7 +630,7 @@ func validateAgentSecurity(cfg *config.Config, clusterCfg *cluster.Config) error
 	}
 
 	if clusterCfg != nil && clusterCfg.Enabled &&
-		(cfg.GRPCAdvertiseAddr == "" || isWildcardAddress(cfg.GRPCAdvertiseAddr)) {
+		(cfg.GRPCAdvertiseAddr == "" || isWildcardOrLoopbackAddress(cfg.GRPCAdvertiseAddr)) {
 		return errors.New("clustered agent APIs require a routable gRPC advertise address")
 	}
 
@@ -691,15 +691,19 @@ func initAgentServerOption(
 	return server.WithAgentMessaging(agentTransport, authenticator, resourceAuthorizer, admission), nil
 }
 
-func isWildcardAddress(address string) bool {
+func isWildcardOrLoopbackAddress(address string) bool {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil || host == "" {
 		return true
 	}
 
+	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
+		return true
+	}
+
 	ip := net.ParseIP(host)
 
-	return ip != nil && ip.IsUnspecified()
+	return ip != nil && (ip.IsUnspecified() || ip.IsLoopback())
 }
 
 func initLogger(cfg *config.Config) (*slog.Logger, error) {

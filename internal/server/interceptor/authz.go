@@ -11,6 +11,7 @@ import (
 	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	healthv1 "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
 )
 
@@ -83,8 +84,9 @@ var routePolicies = map[string]routePolicy{
 	agentv1.PubSubService_NackSubscription_FullMethodName:        {authentication: authenticationProtected},
 	agentv1.PubSubService_ExtendSubscriptionLease_FullMethodName: {authentication: authenticationProtected},
 	agentv1.SystemService_GetCapabilities_FullMethodName:         {authentication: authenticationPublic},
-	"/grpc.health.v1.Health/Check":                               {authentication: authenticationPublic},
-	"/grpc.health.v1.Health/Watch":                               {authentication: authenticationPublic},
+	healthv1.Health_Check_FullMethodName:                         {authentication: authenticationPublic},
+	healthv1.Health_List_FullMethodName:                          {authentication: authenticationPublic},
+	healthv1.Health_Watch_FullMethodName:                         {authentication: authenticationPublic},
 	legacyv1.PlainQService_ListQueues_FullMethodName:             {authentication: authenticationLegacyCompatibility},
 	legacyv1.PlainQService_DescribeQueue_FullMethodName:          {authentication: authenticationLegacyCompatibility},
 	legacyv1.PlainQService_CreateQueue_FullMethodName:            {authentication: authenticationLegacyCompatibility},

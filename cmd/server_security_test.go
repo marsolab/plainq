@@ -77,6 +77,18 @@ func TestValidateAgentSecurity(t *testing.T) {
 			clusterCfg.Enabled = true
 			cfg.GRPCAdvertiseAddr = "0.0.0.0:8080"
 		},
+		"cluster IPv4 loopback advertise": func(cfg *config.Config, clusterCfg *cluster.Config) {
+			clusterCfg.Enabled = true
+			cfg.GRPCAdvertiseAddr = "127.0.0.1:8080"
+		},
+		"cluster IPv6 loopback advertise": func(cfg *config.Config, clusterCfg *cluster.Config) {
+			clusterCfg.Enabled = true
+			cfg.GRPCAdvertiseAddr = "[::1]:8080"
+		},
+		"cluster localhost advertise": func(cfg *config.Config, clusterCfg *cluster.Config) {
+			clusterCfg.Enabled = true
+			cfg.GRPCAdvertiseAddr = "localhost:8080"
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -147,22 +159,25 @@ func TestValidateAgentSecurity(t *testing.T) {
 	})
 }
 
-func TestIsWildcardAddress(t *testing.T) {
+func TestIsWildcardOrLoopbackAddress(t *testing.T) {
 	t.Parallel()
 
 	for address, want := range map[string]bool{
 		":8080":               true,
 		"0.0.0.0:8080":        true,
 		"[::]:8080":           true,
-		"127.0.0.1:8080":      false,
+		"127.0.0.1:8080":      true,
+		"[::1]:8080":          true,
+		"localhost:8080":      true,
+		"LOCALHOST.:8080":     true,
 		"plainq-0.local:8080": false,
 		"malformed":           true,
 	} {
 		t.Run(address, func(t *testing.T) {
 			t.Parallel()
 
-			if got := isWildcardAddress(address); got != want {
-				t.Fatalf("isWildcardAddress(%q) = %v, want %v", address, got, want)
+			if got := isWildcardOrLoopbackAddress(address); got != want {
+				t.Fatalf("isWildcardOrLoopbackAddress(%q) = %v, want %v", address, got, want)
 			}
 		})
 	}
