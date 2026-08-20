@@ -1,10 +1,14 @@
 package litestore
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
+	"github.com/marsolab/plainq/internal/shared/pqerr"
 )
 
 // queueCreateQueueTable returns SQLite DDL that creates the per-queue message
@@ -131,7 +135,7 @@ func queryStampQueueGCAt() string {
 // Placeholders: now, max retries, limit.
 func querySelectMessages(queueID string) string {
 	return `select msg_id, msg_body, retries from ` + queueID +
-		` where visible_at <= ? and retries <= ? order by created_at, msg_id limit ?;`
+		` where visible_at <= ? and retries < ? order by created_at, msg_id limit ?;`
 }
 
 // queryPeekMessages reads a window of messages oldest-first WITHOUT touching
@@ -219,45 +223,123 @@ func queryDeleteMessagesNoReturning(queueID string, n int) string {
 // queryListQueues builds a SQLite SELECT for the queue_properties table with
 // dynamic ORDER BY and cursor-based WHERE. sqlc cannot generate this shape
 // because the ORDER BY column and sort direction are chosen at runtime.
-func queryListQueues(pageSize int32, cursor string, orderBy v1.ListQueuesRequest_OrderBy, sortBy v1.ListQueuesRequest_SortBy) string {
-	var (
-		orderByStr = "queue_id"
-		sortByStr  = "desc"
-		where      = ""
-	)
+type queueCursor struct {
+	Version uint8  `json:"v"`
+	Order   int32  `json:"o"`
+	Value   string `json:"x"`
+	ID      string `json:"id"`
+}
 
+func encodeQueueCursor(c queueCursor) string {
+	b, err := json.Marshal(c)
+	if err != nil {
+		panic(fmt.Errorf("marshal queue cursor: %w", err))
+	}
+
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+func decodeQueueCursor(raw string) (queueCursor, error) {
+	var c queueCursor
+
+	b, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return c, fmt.Errorf("%w: invalid queue cursor", pqerr.ErrInvalidInput)
+	}
+
+	if err := json.Unmarshal(b, &c); err != nil || c.Version != 1 || c.ID == "" {
+		return c, fmt.Errorf("%w: invalid queue cursor", pqerr.ErrInvalidInput)
+	}
+
+	return c, nil
+}
+
+// queryListQueues uses the only dynamic SQL fragments needed by queue list:
+// an allow-listed order column and direction. All request values, including
+// cursor data, are bound parameters.
+func queryListQueues(
+	pageSize int32,
+	prefix, rawCursor string,
+	orderBy v1.ListQueuesRequest_OrderBy,
+	sortBy v1.ListQueuesRequest_SortBy,
+) (string, []any, error) {
+	column, direction := queueOrder(orderBy, sortBy)
+	clauses := make([]string, 0, 2)
+	args := make([]any, 0, 4)
+
+	if prefix != "" {
+		clauses = append(clauses, "queue_name like ?")
+		args = append(args, prefix+"%")
+	}
+
+	if rawCursor != "" {
+		cursor, err := decodeQueueCursor(rawCursor)
+		if err != nil || cursor.Order != int32(orderBy) {
+			return "", nil, fmt.Errorf("%w: invalid queue cursor", pqerr.ErrInvalidInput)
+		}
+
+		value, valueErr := queueCursorValue(cursor.Value, orderBy)
+		if valueErr != nil {
+			return "", nil, valueErr
+		}
+
+		comparison := ">"
+		if direction == "desc" {
+			comparison = "<"
+		}
+
+		clauses = append(clauses, fmt.Sprintf("(%[1]s %[2]s ? or (%[1]s = ? and queue_id %[2]s ?))", column, comparison))
+		args = append(args, value, value, cursor.ID)
+	}
+
+	where := ""
+	if len(clauses) > 0 {
+		where = " where " + strings.Join(clauses, " and ")
+	}
+
+	args = append(args, pageSize)
+
+	return fmt.Sprintf(`select * from queue_properties%s order by %s %s, queue_id %s limit ?;`, where, column, direction, direction), args, nil
+}
+
+func queryCountQueues(prefix string) (string, []any) {
+	if prefix == "" {
+		return "select count(*) from queue_properties;", nil
+	}
+
+	return "select count(*) from queue_properties where queue_name like ?;", []any{prefix + "%"}
+}
+
+func queueOrder(orderBy v1.ListQueuesRequest_OrderBy, sortBy v1.ListQueuesRequest_SortBy) (string, string) {
+	column := "queue_id"
 	switch orderBy {
-	case v1.ListQueuesRequest_ORDER_BY_ID:
-		orderByStr = "queue_id"
-
 	case v1.ListQueuesRequest_ORDER_BY_NAME:
-		orderByStr = "queue_name"
-
+		column = "queue_name"
 	case v1.ListQueuesRequest_ORDER_BY_CREATED_AT:
-		orderByStr = "created_at"
-
-	default:
-		// Use default orderByStr ("queue_id").
+		// SQLite stores timestamps as text, and rows written by column defaults
+		// omit fractional seconds while replicated rows include them. Normalize
+		// before comparing so the keyset cursor sees both representations as the
+		// same instant.
+		column = "strftime('%Y-%m-%d %H:%M:%f', created_at)"
 	}
 
-	switch sortBy {
-	case v1.ListQueuesRequest_SORT_BY_ASC:
-		sortByStr = "asc"
-
-		if cursor != "" {
-			where = fmt.Sprintf("where %s > '%s'", orderByStr, cursor)
-		}
-
-	case v1.ListQueuesRequest_SORT_BY_DESC:
-		sortByStr = "desc"
-
-		if cursor != "" {
-			where = fmt.Sprintf("where %s < '%s'", orderByStr, cursor)
-		}
-
-	default:
-		// Use default sortByStr ("desc").
+	direction := "asc"
+	if sortBy == v1.ListQueuesRequest_SORT_BY_DESC {
+		direction = "desc"
 	}
 
-	return fmt.Sprintf(`select * from queue_properties %s order by %s %s limit %d;`, where, orderByStr, sortByStr, pageSize)
+	return column, direction
+}
+
+func queueCursorValue(value string, orderBy v1.ListQueuesRequest_OrderBy) (any, error) {
+	if orderBy != v1.ListQueuesRequest_ORDER_BY_CREATED_AT {
+		return value, nil
+	}
+
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid queue cursor", pqerr.ErrInvalidInput)
+	}
+
+	return sqliteTime(parsed), nil
 }

@@ -6,6 +6,8 @@ import (
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/marsolab/servekit/grpckit"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -46,6 +48,10 @@ func (s *Service) DeleteQueue(ctx context.Context, r *v1.DeleteQueueRequest) (*v
 	}
 
 	if _, err := s.storage.DeleteQueue(ctx, r); err != nil {
+		if pqerr.IsFailedPrecondition(err) {
+			return nil, status.Error(codes.FailedPrecondition, err.Error())
+		}
+
 		return grpckit.ErrorGRPC[*v1.DeleteQueueResponse](ctx, err)
 	}
 

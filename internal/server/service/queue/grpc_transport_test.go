@@ -178,6 +178,19 @@ func TestServer_DescribeQueue(t *testing.T) {
 	}
 }
 
+func TestServer_DeleteQueueFailedPrecondition(t *testing.T) {
+	server := &Service{storage: &mockStorage{
+		deleteQueueFunc: func(context.Context, *v1.DeleteQueueRequest) (*v1.DeleteQueueResponse, error) {
+			return nil, pqerr.ErrFailedPrecondition
+		},
+	}}
+
+	_, err := server.DeleteQueue(context.Background(), &v1.DeleteQueueRequest{QueueId: validXID})
+	if got := status.Code(err); got != codes.FailedPrecondition {
+		t.Fatalf("DeleteQueue status = %s, want %s", got, codes.FailedPrecondition)
+	}
+}
+
 func TestServer_TopicRPCs(t *testing.T) {
 	createdAt := time.Unix(1_709_000_000, 0).UTC()
 	topic := Topic{

@@ -206,11 +206,20 @@ func (s *Storage) ListQueues(ctx context.Context, input *v1.ListQueuesRequest) (
 
 	limit := pageSize + 1
 
-	query := queryListQueues(limit, input.Cursor, input.OrderBy, input.SortBy)
+	query, args, queryErr := queryListQueues(limit, input.QueuePrefix, input.Cursor, input.OrderBy, input.SortBy)
+	if queryErr != nil {
+		return nil, queryErr
+	}
 
-	queues, err := s.listQueues(ctx, query, uint32(limit))
+	queues, err := s.listQueues(ctx, query, args, uint32(limit))
 	if err != nil {
 		return nil, fmt.Errorf("list queues: %w", err)
+	}
+
+	var totalCount int64
+	countQuery, countArgs := queryCountQueues(input.QueuePrefix)
+	if err := s.pool.QueryRow(ctx, countQuery, countArgs...).Scan(&totalCount); err != nil {
+		return nil, fmt.Errorf("count queues: %w", err)
 	}
 
 	var (
@@ -219,7 +228,13 @@ func (s *Storage) ListQueues(ctx context.Context, input *v1.ListQueuesRequest) (
 	)
 
 	if len(queues) > int(pageSize) {
-		nextCursor = queues[len(queues)-2].QueueId
+		lastItem := queues[len(queues)-2]
+		nextCursor = encodeQueueCursor(queueCursor{
+			Version: 1,
+			Order:   int32(input.OrderBy),
+			Value:   queueCursorValueFor(lastItem, input.OrderBy),
+			ID:      lastItem.QueueId,
+		})
 		queues = queues[:len(queues)-1]
 		hasMore = true
 	}
@@ -228,6 +243,7 @@ func (s *Storage) ListQueues(ctx context.Context, input *v1.ListQueuesRequest) (
 		Queues:     queues,
 		NextCursor: nextCursor,
 		HasMore:    hasMore,
+		TotalCount: totalCount,
 	}, nil
 }
 
@@ -321,6 +337,15 @@ func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest)
 
 	defer func() { sErr = errors.Join(sErr, rollback(ctx, tx)) }()
 
+	var messageCount uint64
+	if err := tx.QueryRow(ctx, queryCountMessages(queueID)).Scan(&messageCount); err != nil {
+		return nil, fmt.Errorf("count queue %q messages: %w", queueID, err)
+	}
+
+	if err := canDeleteQueue(input.GetForce(), messageCount); err != nil {
+		return nil, err
+	}
+
 	rows, delErr := s.queries.WithTx(tx).DeleteQueueProperties(ctx, queueID)
 	if delErr != nil {
 		return nil, fmt.Errorf("delete queue %q info record: %w", queueID, delErr)
@@ -343,6 +368,14 @@ func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest)
 	s.observer.QueueDeleted(queueID)
 
 	return &v1.DeleteQueueResponse{}, nil
+}
+
+func canDeleteQueue(force bool, messageCount uint64) error {
+	if messageCount > 0 && !force {
+		return fmt.Errorf("%w: queue contains %d messages", pqerr.ErrFailedPrecondition, messageCount)
+	}
+
+	return nil
 }
 
 func (s *Storage) Send(ctx context.Context, input *v1.SendRequest) (*v1.SendResponse, error) {
@@ -628,8 +661,8 @@ func (s *Storage) Close() error {
 	return nil
 }
 
-func (s *Storage) listQueues(ctx context.Context, query string, pageSize uint32) ([]*v1.DescribeQueueResponse, error) {
-	rows, err := s.pool.Query(ctx, query)
+func (s *Storage) listQueues(ctx context.Context, query string, args []any, pageSize uint32) ([]*v1.DescribeQueueResponse, error) {
+	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("execute query: %w", err)
 	}
@@ -675,6 +708,17 @@ func (s *Storage) listQueues(ctx context.Context, query string, pageSize uint32)
 	}
 
 	return queues, nil
+}
+
+func queueCursorValueFor(queue *v1.DescribeQueueResponse, orderBy v1.ListQueuesRequest_OrderBy) string {
+	switch orderBy {
+	case v1.ListQueuesRequest_ORDER_BY_NAME:
+		return queue.QueueName
+	case v1.ListQueuesRequest_ORDER_BY_CREATED_AT:
+		return queue.CreatedAt.AsTime().UTC().Format(time.RFC3339Nano)
+	default:
+		return queue.QueueId
+	}
 }
 
 func (s *Storage) fillCache(ctx context.Context, cursor string) error {

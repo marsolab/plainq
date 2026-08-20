@@ -298,11 +298,20 @@ func (s *Storage) ListQueues(ctx context.Context, input *v1.ListQueuesRequest) (
 	// The +1 is used to fetch one extra item to determine if there are more results.
 	limit := pageSize + 1
 
-	query := queryListQueues(limit, input.Cursor, input.OrderBy, input.SortBy)
+	query, args, queryErr := queryListQueues(limit, input.QueuePrefix, input.Cursor, input.OrderBy, input.SortBy)
+	if queryErr != nil {
+		return nil, queryErr
+	}
 
-	queues, listErr := s.listQueues(ctx, query, uint32(limit))
+	queues, listErr := s.listQueues(ctx, query, args, uint32(limit))
 	if listErr != nil {
 		return nil, fmt.Errorf("list queues: %w", listErr)
+	}
+
+	var totalCount int64
+	countQuery, countArgs := queryCountQueues(input.QueuePrefix)
+	if err := s.db.QueryRowContext(ctx, countQuery, countArgs...).Scan(&totalCount); err != nil {
+		return nil, fmt.Errorf("count queues: %w", err)
 	}
 
 	var (
@@ -315,7 +324,12 @@ func (s *Storage) ListQueues(ctx context.Context, input *v1.ListQueuesRequest) (
 	if len(queues) > int(pageSize) {
 		// Remove the extra item before returning.
 		lastItem := queues[len(queues)-2]
-		nextCursor = lastItem.QueueId
+		nextCursor = encodeQueueCursor(queueCursor{
+			Version: 1,
+			Order:   int32(input.OrderBy),
+			Value:   queueCursorValueFor(lastItem, input.OrderBy),
+			ID:      lastItem.QueueId,
+		})
 		queues = queues[:len(queues)-1]
 		hasMore = true
 	}
@@ -324,6 +338,7 @@ func (s *Storage) ListQueues(ctx context.Context, input *v1.ListQueuesRequest) (
 		Queues:     queues,
 		NextCursor: nextCursor,
 		HasMore:    hasMore,
+		TotalCount: totalCount,
 	}
 
 	return &output, nil
@@ -434,6 +449,15 @@ func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest)
 		}
 	}()
 
+	var messageCount uint64
+	if err := tx.QueryRowContext(ctx, queryCountMessages(queueID)).Scan(&messageCount); err != nil {
+		return nil, fmt.Errorf("count queue %q messages: %w", queueID, err)
+	}
+
+	if err := canDeleteQueue(input.GetForce(), messageCount); err != nil {
+		return nil, err
+	}
+
 	rows, queueHeaderErr := s.queries.WithTx(tx).DeleteQueueProperties(ctx, queueID)
 	if queueHeaderErr != nil {
 		return nil, fmt.Errorf("delete queue %q info record: %w", queueID, queueHeaderErr)
@@ -458,6 +482,14 @@ func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest)
 	s.observer.QueueDeleted(queueID)
 
 	return &output, nil
+}
+
+func canDeleteQueue(force bool, messageCount uint64) error {
+	if messageCount > 0 && !force {
+		return fmt.Errorf("%w: queue contains %d messages", pqerr.ErrFailedPrecondition, messageCount)
+	}
+
+	return nil
 }
 
 func (s *Storage) Send(ctx context.Context, input *v1.SendRequest) (_ *v1.SendResponse, sErr error) {
@@ -872,7 +904,7 @@ func (s *Storage) Close() error {
 }
 
 //nolint:cyclop // sErr is set by deferred rollback; covers the full SQL fetch path.
-func (s *Storage) listQueues(ctx context.Context, query string, pageSize uint32) (_ []*v1.DescribeQueueResponse, sErr error) {
+func (s *Storage) listQueues(ctx context.Context, query string, args []any, pageSize uint32) (_ []*v1.DescribeQueueResponse, sErr error) {
 	tx, txErr := pqlite.BeginTx(ctx, s.db)
 	if txErr != nil {
 		return nil, fmt.Errorf("begin transaction: %w", txErr)
@@ -884,7 +916,7 @@ func (s *Storage) listQueues(ctx context.Context, query string, pageSize uint32)
 		}
 	}()
 
-	rows, txQueryErr := s.db.QueryContext(ctx, query)
+	rows, txQueryErr := tx.QueryContext(ctx, query, args...)
 	if txQueryErr != nil {
 		return nil, fmt.Errorf("execute query (query: %q): %w", query, txQueryErr)
 	}
@@ -943,6 +975,17 @@ func (s *Storage) listQueues(ctx context.Context, query string, pageSize uint32)
 	}
 
 	return queues, nil
+}
+
+func queueCursorValueFor(queue *v1.DescribeQueueResponse, orderBy v1.ListQueuesRequest_OrderBy) string {
+	switch orderBy {
+	case v1.ListQueuesRequest_ORDER_BY_NAME:
+		return queue.QueueName
+	case v1.ListQueuesRequest_ORDER_BY_CREATED_AT:
+		return queue.CreatedAt.AsTime().UTC().Format(time.RFC3339Nano)
+	default:
+		return queue.QueueId
+	}
 }
 
 // repairQueueTables brings queue tables created by older versions up to the

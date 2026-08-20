@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
+	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/marsolab/servekit/errkit"
 	"github.com/marsolab/servekit/httpkit"
 )
@@ -123,6 +124,12 @@ func (s *Service) deleteQueueHandler(w http.ResponseWriter, r *http.Request) {
 
 	output, deleteErr := s.storage.DeleteQueue(r.Context(), &input)
 	if deleteErr != nil {
+		if pqerr.IsFailedPrecondition(deleteErr) {
+			httpkit.ErrorHTTP(w, r, deleteErr, httpkit.WithStatus(http.StatusConflict))
+
+			return
+		}
+
 		httpkit.ErrorHTTP(w, r, deleteErr)
 
 		return

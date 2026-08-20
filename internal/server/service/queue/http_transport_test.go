@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
+	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/marsolab/servekit/logkit"
 	"github.com/maxatome/go-testdeep/td"
 )
@@ -131,6 +132,19 @@ func TestService_ReceiveMessagesHandler(t *testing.T) {
 			rec := doRequest(t, newTestService(tc.storage), http.MethodPost, tc.target, "")
 			td.Cmp(t, rec.Code, tc.wantStatus)
 		})
+	}
+}
+
+func TestService_DeleteQueueHandlerFailedPrecondition(t *testing.T) {
+	svc := newTestService(&mockStorage{
+		deleteQueueFunc: func(context.Context, *v1.DeleteQueueRequest) (*v1.DeleteQueueResponse, error) {
+			return nil, pqerr.ErrFailedPrecondition
+		},
+	})
+
+	rec := doRequest(t, svc, http.MethodDelete, "/"+validXID, "")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("DeleteQueue status = %d, want %d", rec.Code, http.StatusConflict)
 	}
 }
 
