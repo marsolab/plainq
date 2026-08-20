@@ -27,7 +27,8 @@ if ! git cat-file -e "$expected_sha^{commit}" ||
   exit 1
 fi
 
-if ! git log -m --no-renames --format= --name-only -z "$expected_sha..$remote_main_sha" -- |
+if ! git log --first-parent --diff-merges=first-parent --no-renames --format= --name-only -z \
+  "$expected_sha..$remote_main_sha" -- |
   while IFS= read -r -d '' changed_path; do
     case "$changed_path" in
       (schema/*|internal/server/schema/*|scripts/check-schema-*.sh|Makefile|.github/workflows/schema-release.yaml)

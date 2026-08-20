@@ -50,17 +50,37 @@ git -C "$writer" push --quiet origin main
 expect_rejected "$unrelated_sha" "stale SHA followed by a relevant schema change" 'publication-relevant'
 run_guard "$relevant_sha" >/dev/null
 
+git -C "$writer" switch --quiet -c docs-branch "$unrelated_sha"
+printf '%s\n' side-branch-unrelated > "$writer/README.md"
+git -C "$writer" add README.md
+git -C "$writer" commit --quiet -m side-branch-unrelated
+git -C "$writer" switch --quiet main
+git -C "$writer" merge --quiet --no-ff --no-edit docs-branch
+git -C "$writer" push --quiet origin main
+run_guard "$relevant_sha" >/dev/null
+merged_unrelated_sha="$(git -C "$writer" rev-parse HEAD)"
+
+printf '%s\n' newer-relevant > "$writer/schema/v1/schema.proto"
+git -C "$writer" add schema/v1/schema.proto
+git -C "$writer" commit --quiet -m newer-relevant
+git -C "$writer" revert --quiet --no-edit HEAD >/dev/null
+reverted_sha="$(git -C "$writer" rev-parse HEAD)"
+git -C "$writer" push --quiet origin main
+expect_rejected "$merged_unrelated_sha" "stale SHA followed by a reverted schema change" 'publication-relevant'
+run_guard "$reverted_sha" >/dev/null
+
 git -C "$writer" switch --quiet -c divergent "$initial_sha"
 printf '%s\n' divergent > "$writer/divergent.txt"
 git -C "$writer" add divergent.txt
 git -C "$writer" commit --quiet -m divergent
 git -C "$writer" push --quiet --force origin divergent:main
-expect_rejected "$relevant_sha" "non-ancestor SHA" 'not an ancestor'
+expect_rejected "$reverted_sha" "non-ancestor SHA" 'not an ancestor'
 expect_rejected invalid-sha "invalid SHA" 'invalid expected git SHA'
 
 rg -U -q 'concurrency:\n      group: plainq-schema-bsr-main-publish\n      cancel-in-progress: false' "$workflow"
 rg -U -q "paths:\n      - 'schema/\\*\\*'\n      - 'internal/server/schema/\\*\\*'\n      - 'scripts/check-schema-\\*\\.sh'\n      - 'Makefile'\n      - '\\.github/workflows/schema-release\\.yaml'" "$workflow"
 rg -F -q 'schema/*|internal/server/schema/*|scripts/check-schema-*.sh|Makefile|.github/workflows/schema-release.yaml)' "$guard"
+rg -F -q -- 'git log --first-parent --diff-merges=first-parent' "$guard"
 rg -U -q -- '- uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n      - uses: bufbuild/buf-setup-action@v1' "$workflow"
 rg -U -q '\./scripts/check-schema-publish-head\.sh "\$server_git_sha" origin >/dev/null\n          buf push schema' "$workflow"
-echo "schema publication guard accepted exact and irrelevant-descendant heads, rejected relevant/divergent/invalid heads, and is immediately before buf push"
+echo "schema publication guard accepted exact, linear-unrelated, and merged-unrelated descendants; rejected relevant/reverted/divergent/invalid heads; and is immediately before buf push"
