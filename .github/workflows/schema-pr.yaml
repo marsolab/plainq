@@ -12,7 +12,7 @@ on:
     paths:
       - 'schema/**'
       - 'internal/server/schema/**'
-      - 'scripts/check-schema-generation.sh'
+      - 'scripts/check-schema-*.sh'
       - 'Makefile'
       - '.github/workflows/schema-pr.yaml'
 
@@ -30,6 +30,10 @@ jobs:
           input: schema
       - name: Generate local schema artifacts
         run: make schema-local
+      - name: Check schema lint exception scope
+        run: ./scripts/check-schema-lint-scope.sh
+      - name: Test schema publication head guard
+        run: ./scripts/check-schema-publish-head_test.sh
       - name: Check tracked generated artifacts
         run: git diff --exit-code -- schema/docs internal/server/schema
       - name: Check public SDK generation
