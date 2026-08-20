@@ -11,6 +11,29 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countActiveCredentials = `-- name: CountActiveCredentials :one
+SELECT count(*)
+FROM agent_credentials
+WHERE tenant_id = $1::text
+  AND agent_id = $2::text
+  AND revoked_at_ns IS NULL
+  AND expired_accounted_at_ns IS NULL
+  AND (expires_at_ns IS NULL OR expires_at_ns > $3::bigint)
+`
+
+type CountActiveCredentialsParams struct {
+	TenantID string
+	AgentID  string
+	NowNs    int64
+}
+
+func (q *Queries) CountActiveCredentials(ctx context.Context, arg CountActiveCredentialsParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countActiveCredentials, arg.TenantID, arg.AgentID, arg.NowNs)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countAgents = `-- name: CountAgents :one
 SELECT count(*)
 FROM agents
@@ -86,6 +109,39 @@ func (q *Queries) CreateAgentPrincipal(ctx context.Context, arg CreateAgentPrinc
 		arg.PrincipalID,
 		arg.AuthVersion,
 		arg.UpdatedAtNs,
+	)
+	return err
+}
+
+const createCredential = `-- name: CreateCredential :exec
+INSERT INTO agent_credentials (
+    credential_id, tenant_id, agent_id, credential_name, credential_prefix,
+    secret_hash, created_at_ns, expires_at_ns
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+`
+
+type CreateCredentialParams struct {
+	CredentialID     string
+	TenantID         string
+	AgentID          string
+	CredentialName   string
+	CredentialPrefix string
+	SecretHash       []byte
+	CreatedAtNs      int64
+	ExpiresAtNs      pgtype.Int8
+}
+
+func (q *Queries) CreateCredential(ctx context.Context, arg CreateCredentialParams) error {
+	_, err := q.db.Exec(ctx, createCredential,
+		arg.CredentialID,
+		arg.TenantID,
+		arg.AgentID,
+		arg.CredentialName,
+		arg.CredentialPrefix,
+		arg.SecretHash,
+		arg.CreatedAtNs,
+		arg.ExpiresAtNs,
 	)
 	return err
 }
@@ -168,6 +224,60 @@ func (q *Queries) GetAgentByName(ctx context.Context, arg GetAgentByNameParams) 
 	return i, err
 }
 
+const getCredentialByID = `-- name: GetCredentialByID :one
+SELECT credential_id, tenant_id, agent_id, credential_name, credential_prefix,
+       secret_hash, created_at_ns, expires_at_ns, expired_accounted_at_ns,
+       revoked_at_ns, last_used_at_ns
+FROM agent_credentials
+WHERE credential_id = $1
+`
+
+func (q *Queries) GetCredentialByID(ctx context.Context, credentialID string) (AgentCredential, error) {
+	row := q.db.QueryRow(ctx, getCredentialByID, credentialID)
+	var i AgentCredential
+	err := row.Scan(
+		&i.CredentialID,
+		&i.TenantID,
+		&i.AgentID,
+		&i.CredentialName,
+		&i.CredentialPrefix,
+		&i.SecretHash,
+		&i.CreatedAtNs,
+		&i.ExpiresAtNs,
+		&i.ExpiredAccountedAtNs,
+		&i.RevokedAtNs,
+		&i.LastUsedAtNs,
+	)
+	return i, err
+}
+
+const getCredentialByPrefix = `-- name: GetCredentialByPrefix :one
+SELECT credential_id, tenant_id, agent_id, credential_name, credential_prefix,
+       secret_hash, created_at_ns, expires_at_ns, expired_accounted_at_ns,
+       revoked_at_ns, last_used_at_ns
+FROM agent_credentials
+WHERE credential_prefix = $1
+`
+
+func (q *Queries) GetCredentialByPrefix(ctx context.Context, credentialPrefix string) (AgentCredential, error) {
+	row := q.db.QueryRow(ctx, getCredentialByPrefix, credentialPrefix)
+	var i AgentCredential
+	err := row.Scan(
+		&i.CredentialID,
+		&i.TenantID,
+		&i.AgentID,
+		&i.CredentialName,
+		&i.CredentialPrefix,
+		&i.SecretHash,
+		&i.CreatedAtNs,
+		&i.ExpiresAtNs,
+		&i.ExpiredAccountedAtNs,
+		&i.RevokedAtNs,
+		&i.LastUsedAtNs,
+	)
+	return i, err
+}
+
 const listAgents = `-- name: ListAgents :many
 SELECT agent_id, tenant_id, agent_name, status, auth_version,
        created_at_ns, updated_at_ns, disabled_at_ns
@@ -233,6 +343,122 @@ func (q *Queries) ListAgents(ctx context.Context, arg ListAgentsParams) ([]ListA
 		return nil, err
 	}
 	return items, nil
+}
+
+const listCredentials = `-- name: ListCredentials :many
+SELECT credential_id, tenant_id, agent_id, credential_name, credential_prefix,
+       secret_hash, created_at_ns, expires_at_ns, expired_accounted_at_ns,
+       revoked_at_ns, last_used_at_ns
+FROM agent_credentials
+WHERE tenant_id = $1::text
+  AND agent_id = $2::text
+  AND ($3::text = '' OR credential_id > $3::text)
+ORDER BY credential_id
+LIMIT $4::bigint
+`
+
+type ListCredentialsParams struct {
+	TenantID  string
+	AgentID   string
+	AfterID   string
+	PageLimit int64
+}
+
+func (q *Queries) ListCredentials(ctx context.Context, arg ListCredentialsParams) ([]AgentCredential, error) {
+	rows, err := q.db.Query(ctx, listCredentials,
+		arg.TenantID,
+		arg.AgentID,
+		arg.AfterID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AgentCredential{}
+	for rows.Next() {
+		var i AgentCredential
+		if err := rows.Scan(
+			&i.CredentialID,
+			&i.TenantID,
+			&i.AgentID,
+			&i.CredentialName,
+			&i.CredentialPrefix,
+			&i.SecretHash,
+			&i.CreatedAtNs,
+			&i.ExpiresAtNs,
+			&i.ExpiredAccountedAtNs,
+			&i.RevokedAtNs,
+			&i.LastUsedAtNs,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const revokeCredential = `-- name: RevokeCredential :execrows
+UPDATE agent_credentials
+SET revoked_at_ns = $1::bigint
+WHERE tenant_id = $2::text
+  AND agent_id = $3::text
+  AND credential_id = $4::text
+  AND revoked_at_ns IS NULL
+`
+
+type RevokeCredentialParams struct {
+	RevokedAtNs  int64
+	TenantID     string
+	AgentID      string
+	CredentialID string
+}
+
+func (q *Queries) RevokeCredential(ctx context.Context, arg RevokeCredentialParams) (int64, error) {
+	result, err := q.db.Exec(ctx, revokeCredential,
+		arg.RevokedAtNs,
+		arg.TenantID,
+		arg.AgentID,
+		arg.CredentialID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const touchCredential = `-- name: TouchCredential :execrows
+UPDATE agent_credentials
+SET last_used_at_ns = $1::bigint
+WHERE tenant_id = $2::text
+  AND agent_id = $3::text
+  AND credential_id = $4::text
+  AND revoked_at_ns IS NULL
+  AND expired_accounted_at_ns IS NULL
+  AND (expires_at_ns IS NULL OR expires_at_ns > $1::bigint)
+`
+
+type TouchCredentialParams struct {
+	UsedAtNs     int64
+	TenantID     string
+	AgentID      string
+	CredentialID string
+}
+
+func (q *Queries) TouchCredential(ctx context.Context, arg TouchCredentialParams) (int64, error) {
+	result, err := q.db.Exec(ctx, touchCredential,
+		arg.UsedAtNs,
+		arg.TenantID,
+		arg.AgentID,
+		arg.CredentialID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const updateAgentPrincipalStatus = `-- name: UpdateAgentPrincipalStatus :execrows

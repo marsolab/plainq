@@ -3,3 +3,21 @@
 //   sqlc v1.31.1
 
 package sqlcgen
+
+import (
+	"github.com/jackc/pgx/v5/pgtype"
+)
+
+type AgentCredential struct {
+	CredentialID         string
+	TenantID             string
+	AgentID              string
+	CredentialName       string
+	CredentialPrefix     string
+	SecretHash           []byte
+	CreatedAtNs          int64
+	ExpiresAtNs          pgtype.Int8
+	ExpiredAccountedAtNs pgtype.Int8
+	RevokedAtNs          pgtype.Int8
+	LastUsedAtNs         pgtype.Int8
+}

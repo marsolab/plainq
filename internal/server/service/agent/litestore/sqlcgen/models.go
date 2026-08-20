@@ -3,3 +3,21 @@
 //   sqlc v1.31.1
 
 package sqlcgen
+
+import (
+	"database/sql"
+)
+
+type AgentCredential struct {
+	CredentialID         string
+	TenantID             string
+	AgentID              string
+	CredentialName       string
+	CredentialPrefix     string
+	SecretHash           []byte
+	CreatedAtNs          int64
+	ExpiresAtNs          sql.NullInt64
+	ExpiredAccountedAtNs sql.NullInt64
+	RevokedAtNs          sql.NullInt64
+	LastUsedAtNs         sql.NullInt64
+}

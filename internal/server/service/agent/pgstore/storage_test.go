@@ -111,3 +111,7 @@ func newRegistryFixture(t *testing.T) conformance.RegistryFixture {
 func TestRegistry(t *testing.T) {
 	conformance.Registry(t, newRegistryFixture)
 }
+
+func TestCredentials(t *testing.T) {
+	conformance.Credentials(t, newRegistryFixture)
+}

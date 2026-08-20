@@ -7,6 +7,9 @@ import (
 	agentv1 "github.com/marsolab/plainq/internal/server/schema/agent/v1"
 )
 
+// DefaultMaxActiveCredentials permits one overlapping rotation credential.
+const DefaultMaxActiveCredentials int64 = 2
+
 // AgentRecord is the backend-neutral persisted agent representation.
 type AgentRecord struct {
 	AgentID     string
@@ -70,4 +73,65 @@ type SetAgentStatusInput struct {
 	AgentID   string
 	Status    agentv1.AgentStatus
 	UpdatedAt time.Time
+}
+
+// CreateCredentialInput carries a newly generated bootstrap credential hash into storage.
+type CreateCredentialInput struct {
+	CredentialID string
+	TenantID     string
+	AgentID      string
+	Name         string
+	Prefix       string
+	SecretHash   [32]byte
+	CreatedAt    time.Time
+	ExpiresAt    *time.Time
+}
+
+// RegisterCredentialInput carries an externally generated credential hash into storage.
+type RegisterCredentialInput struct {
+	CredentialID string
+	TenantID     string
+	AgentID      string
+	Name         string
+	Prefix       string
+	SecretHash   [32]byte
+	CreatedAt    time.Time
+	ExpiresAt    *time.Time
+}
+
+// RegisterCredentialResult identifies a canonical idempotent registration replay.
+type RegisterCredentialResult struct {
+	Credential     CredentialRecord
+	AlreadyExisted bool
+}
+
+// ListCredentialsInput describes an agent-scoped credential ID page.
+type ListCredentialsInput struct {
+	TenantID string
+	AgentID  string
+	AfterID  string
+	Limit    uint32
+}
+
+// ListCredentialsResult is an agent-scoped credential ID page.
+type ListCredentialsResult struct {
+	Credentials []CredentialRecord
+	NextCursor  string
+	HasMore     bool
+}
+
+// RevokeCredentialInput revokes one tenant-owned credential.
+type RevokeCredentialInput struct {
+	TenantID     string
+	AgentID      string
+	CredentialID string
+	RevokedAt    time.Time
+}
+
+// TouchCredentialInput records successful credential use.
+type TouchCredentialInput struct {
+	TenantID     string
+	AgentID      string
+	CredentialID string
+	UsedAt       time.Time
 }

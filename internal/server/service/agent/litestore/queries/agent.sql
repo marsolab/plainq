@@ -63,3 +63,63 @@ SET status = CASE WHEN cast(sqlc.arg('status') AS integer) = 1 THEN 'active' ELS
 WHERE tenant_id = cast(sqlc.arg('tenant_id') AS text)
   AND principal_kind = 'agent'
   AND principal_id = cast(sqlc.arg('agent_id') AS text);
+
+-- name: CreateCredential :exec
+INSERT INTO agent_credentials (
+    credential_id, tenant_id, agent_id, credential_name, credential_prefix,
+    secret_hash, created_at_ns, expires_at_ns
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+
+-- name: GetCredentialByID :one
+SELECT credential_id, tenant_id, agent_id, credential_name, credential_prefix,
+       secret_hash, created_at_ns, expires_at_ns, expired_accounted_at_ns,
+       revoked_at_ns, last_used_at_ns
+FROM agent_credentials
+WHERE credential_id = ?;
+
+-- name: GetCredentialByPrefix :one
+SELECT credential_id, tenant_id, agent_id, credential_name, credential_prefix,
+       secret_hash, created_at_ns, expires_at_ns, expired_accounted_at_ns,
+       revoked_at_ns, last_used_at_ns
+FROM agent_credentials
+WHERE credential_prefix = ?;
+
+-- name: ListCredentials :many
+SELECT credential_id, tenant_id, agent_id, credential_name, credential_prefix,
+       secret_hash, created_at_ns, expires_at_ns, expired_accounted_at_ns,
+       revoked_at_ns, last_used_at_ns
+FROM agent_credentials
+WHERE tenant_id = cast(sqlc.arg('tenant_id') AS text)
+  AND agent_id = cast(sqlc.arg('agent_id') AS text)
+  AND (cast(sqlc.arg('after_id') AS text) = ''
+       OR credential_id > cast(sqlc.arg('after_id') AS text))
+ORDER BY credential_id
+LIMIT cast(sqlc.arg('page_limit') AS integer);
+
+-- name: CountActiveCredentials :one
+SELECT count(*)
+FROM agent_credentials
+WHERE tenant_id = cast(sqlc.arg('tenant_id') AS text)
+  AND agent_id = cast(sqlc.arg('agent_id') AS text)
+  AND revoked_at_ns IS NULL
+  AND expired_accounted_at_ns IS NULL
+  AND (expires_at_ns IS NULL OR expires_at_ns > cast(sqlc.arg('now_ns') AS integer));
+
+-- name: RevokeCredential :execrows
+UPDATE agent_credentials
+SET revoked_at_ns = cast(sqlc.arg('revoked_at_ns') AS integer)
+WHERE tenant_id = cast(sqlc.arg('tenant_id') AS text)
+  AND agent_id = cast(sqlc.arg('agent_id') AS text)
+  AND credential_id = cast(sqlc.arg('credential_id') AS text)
+  AND revoked_at_ns IS NULL;
+
+-- name: TouchCredential :execrows
+UPDATE agent_credentials
+SET last_used_at_ns = cast(sqlc.arg('used_at_ns') AS integer)
+WHERE tenant_id = cast(sqlc.arg('tenant_id') AS text)
+  AND agent_id = cast(sqlc.arg('agent_id') AS text)
+  AND credential_id = cast(sqlc.arg('credential_id') AS text)
+  AND revoked_at_ns IS NULL
+  AND expired_accounted_at_ns IS NULL
+  AND (expires_at_ns IS NULL OR expires_at_ns > cast(sqlc.arg('used_at_ns') AS integer));

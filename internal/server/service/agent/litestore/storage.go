@@ -2,6 +2,7 @@ package litestore
 
 import (
 	"context"
+	"crypto/subtle"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 )
 
 var _ agent.RegistryStore = (*Storage)(nil)
+var _ agent.CredentialStore = (*Storage)(nil)
 
 // Storage is the SQLite/libSQL-backed agent registry.
 type Storage struct {
@@ -338,4 +340,279 @@ func classifyWrite(operation string, err error) error {
 	default:
 		return fmt.Errorf("%s: %w", operation, err)
 	}
+}
+
+func (s *Storage) CreateCredential(
+	ctx context.Context,
+	input agent.CreateCredentialInput,
+) (agent.CredentialRecord, error) {
+	var created agent.CredentialRecord
+
+	err := s.withinTx(ctx, func(tx pqlite.Tx) error {
+		queries := sqlcgen.New(tx)
+
+		if err := sqliteCredentialCapacity(ctx, queries, input.TenantID, input.AgentID, input.CreatedAt); err != nil {
+			return err
+		}
+
+		if err := queries.CreateCredential(ctx, sqliteCreateCredentialParams(
+			input.CredentialID, input.TenantID, input.AgentID, input.Name, input.Prefix,
+			input.SecretHash, input.CreatedAt, input.ExpiresAt,
+		)); err != nil {
+			return classifyWrite("create credential", err)
+		}
+
+		row, err := queries.GetCredentialByID(ctx, input.CredentialID)
+		if err != nil {
+			return fmt.Errorf("read created credential: %w", err)
+		}
+
+		created, err = sqliteCredentialRecord(row)
+
+		return err
+	})
+	if err != nil {
+		return agent.CredentialRecord{}, err
+	}
+
+	return created, nil
+}
+
+func (s *Storage) RegisterCredential(
+	ctx context.Context,
+	input agent.RegisterCredentialInput,
+) (agent.RegisterCredentialResult, error) {
+	var result agent.RegisterCredentialResult
+
+	err := s.withinTx(ctx, func(tx pqlite.Tx) error {
+		queries := sqlcgen.New(tx)
+
+		existing, err := queries.GetCredentialByID(ctx, input.CredentialID)
+		if err == nil {
+			record, decodeErr := sqliteCredentialRecord(existing)
+			if decodeErr != nil {
+				return decodeErr
+			}
+
+			if !sameRegisteredCredential(record, input) {
+				return agent.ErrAlreadyExists
+			}
+
+			result = agent.RegisterCredentialResult{Credential: record, AlreadyExisted: true}
+
+			return nil
+		}
+
+		if !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("get registered credential: %w", err)
+		}
+
+		if err := sqliteCredentialCapacity(ctx, queries, input.TenantID, input.AgentID, input.CreatedAt); err != nil {
+			return err
+		}
+
+		if err := queries.CreateCredential(ctx, sqliteCreateCredentialParams(
+			input.CredentialID, input.TenantID, input.AgentID, input.Name, input.Prefix,
+			input.SecretHash, input.CreatedAt, input.ExpiresAt,
+		)); err != nil {
+			return classifyWrite("register credential", err)
+		}
+
+		row, err := queries.GetCredentialByID(ctx, input.CredentialID)
+		if err != nil {
+			return fmt.Errorf("read registered credential: %w", err)
+		}
+
+		record, err := sqliteCredentialRecord(row)
+		if err != nil {
+			return err
+		}
+
+		result = agent.RegisterCredentialResult{Credential: record}
+
+		return nil
+	})
+	if err != nil {
+		return agent.RegisterCredentialResult{}, err
+	}
+
+	return result, nil
+}
+
+func (s *Storage) ListCredentials(
+	ctx context.Context,
+	input agent.ListCredentialsInput,
+) (agent.ListCredentialsResult, error) {
+	rows, err := s.queries.ListCredentials(ctx, sqlcgen.ListCredentialsParams{
+		TenantID: input.TenantID, AgentID: input.AgentID, AfterID: input.AfterID,
+		PageLimit: int64(input.Limit) + 1,
+	})
+	if err != nil {
+		return agent.ListCredentialsResult{}, fmt.Errorf("list credentials: %w", err)
+	}
+
+	result := agent.ListCredentialsResult{Credentials: make([]agent.CredentialRecord, 0, len(rows))}
+	if len(rows) > int(input.Limit) {
+		result.HasMore = true
+		rows = rows[:input.Limit]
+	}
+
+	for _, row := range rows {
+		record, err := sqliteCredentialRecord(row)
+		if err != nil {
+			return agent.ListCredentialsResult{}, fmt.Errorf("decode listed credential: %w", err)
+		}
+
+		result.Credentials = append(result.Credentials, record)
+	}
+
+	if result.HasMore && len(result.Credentials) > 0 {
+		result.NextCursor = result.Credentials[len(result.Credentials)-1].CredentialID
+	}
+
+	return result, nil
+}
+
+func (s *Storage) GetCredentialByPrefix(ctx context.Context, prefix string) (agent.CredentialRecord, error) {
+	row, err := s.queries.GetCredentialByPrefix(ctx, prefix)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return agent.CredentialRecord{}, agent.ErrNotFound
+		}
+
+		return agent.CredentialRecord{}, fmt.Errorf("get credential by prefix: %w", err)
+	}
+
+	record, err := sqliteCredentialRecord(row)
+	if err != nil {
+		return agent.CredentialRecord{}, fmt.Errorf("decode credential by prefix: %w", err)
+	}
+
+	return record, nil
+}
+
+func (s *Storage) RevokeCredential(ctx context.Context, input agent.RevokeCredentialInput) error {
+	return s.withinTx(ctx, func(tx pqlite.Tx) error {
+		queries := sqlcgen.New(tx)
+
+		rows, err := queries.RevokeCredential(ctx, sqlcgen.RevokeCredentialParams{
+			RevokedAtNs: input.RevokedAt.UnixNano(), TenantID: input.TenantID,
+			AgentID: input.AgentID, CredentialID: input.CredentialID,
+		})
+		if err != nil {
+			return fmt.Errorf("revoke credential: %w", err)
+		}
+
+		if rows > 0 {
+			return nil
+		}
+
+		existing, err := queries.GetCredentialByID(ctx, input.CredentialID)
+		if errors.Is(err, sql.ErrNoRows) || (err == nil &&
+			(existing.TenantID != input.TenantID || existing.AgentID != input.AgentID)) {
+			return agent.ErrNotFound
+		}
+
+		if err != nil {
+			return fmt.Errorf("check revoked credential: %w", err)
+		}
+
+		return nil
+	})
+}
+
+func (s *Storage) TouchCredential(ctx context.Context, input agent.TouchCredentialInput) error {
+	rows, err := s.queries.TouchCredential(ctx, sqlcgen.TouchCredentialParams{
+		UsedAtNs: input.UsedAt.UnixNano(), TenantID: input.TenantID,
+		AgentID: input.AgentID, CredentialID: input.CredentialID,
+	})
+	if err != nil {
+		return fmt.Errorf("touch credential: %w", err)
+	}
+
+	if rows == 0 {
+		return agent.ErrUnauthenticated
+	}
+
+	return nil
+}
+
+func sqliteCredentialCapacity(
+	ctx context.Context,
+	queries *sqlcgen.Queries,
+	tenantID, agentID string,
+	now time.Time,
+) error {
+	count, err := queries.CountActiveCredentials(ctx, sqlcgen.CountActiveCredentialsParams{
+		TenantID: tenantID, AgentID: agentID, NowNs: now.UnixNano(),
+	})
+	if err != nil {
+		return fmt.Errorf("count active credentials: %w", err)
+	}
+
+	if count >= agent.DefaultMaxActiveCredentials {
+		return agent.ErrFailedPrecondition
+	}
+
+	return nil
+}
+
+func sqliteCreateCredentialParams(
+	credentialID, tenantID, agentID, name, prefix string,
+	hash [32]byte,
+	createdAt time.Time,
+	expiresAt *time.Time,
+) sqlcgen.CreateCredentialParams {
+	return sqlcgen.CreateCredentialParams{
+		CredentialID: credentialID, TenantID: tenantID, AgentID: agentID,
+		CredentialName: name, CredentialPrefix: prefix, SecretHash: append([]byte(nil), hash[:]...),
+		CreatedAtNs: createdAt.UnixNano(), ExpiresAtNs: sqliteNullableTime(expiresAt),
+	}
+}
+
+func sqliteCredentialRecord(row sqlcgen.AgentCredential) (agent.CredentialRecord, error) {
+	if len(row.SecretHash) != 32 {
+		return agent.CredentialRecord{}, fmt.Errorf("credential hash length %d", len(row.SecretHash))
+	}
+
+	return agent.CredentialRecord{
+		CredentialID: row.CredentialID, TenantID: row.TenantID, AgentID: row.AgentID,
+		Name: row.CredentialName, Prefix: row.CredentialPrefix,
+		SecretHash: append([]byte(nil), row.SecretHash...), CreatedAt: time.Unix(0, row.CreatedAtNs).UTC(),
+		ExpiresAt: sqliteTimePointer(row.ExpiresAtNs), ExpiredAccountedAt: sqliteTimePointer(row.ExpiredAccountedAtNs),
+		RevokedAt: sqliteTimePointer(row.RevokedAtNs), LastUsedAt: sqliteTimePointer(row.LastUsedAtNs),
+	}, nil
+}
+
+func sqliteNullableTime(value *time.Time) sql.NullInt64 {
+	if value == nil {
+		return sql.NullInt64{}
+	}
+
+	return sql.NullInt64{Int64: value.UnixNano(), Valid: true}
+}
+
+func sqliteTimePointer(value sql.NullInt64) *time.Time {
+	if !value.Valid {
+		return nil
+	}
+
+	decoded := time.Unix(0, value.Int64).UTC()
+
+	return &decoded
+}
+
+func sameRegisteredCredential(record agent.CredentialRecord, input agent.RegisterCredentialInput) bool {
+	return record.CredentialID == input.CredentialID && record.TenantID == input.TenantID &&
+		record.AgentID == input.AgentID && record.Name == input.Name && record.Prefix == input.Prefix &&
+		len(record.SecretHash) == len(input.SecretHash) && subtle.ConstantTimeCompare(record.SecretHash, input.SecretHash[:]) == 1 &&
+		sameOptionalTime(record.ExpiresAt, input.ExpiresAt)
+}
+
+func sameOptionalTime(left, right *time.Time) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+
+	return left.Equal(*right)
 }

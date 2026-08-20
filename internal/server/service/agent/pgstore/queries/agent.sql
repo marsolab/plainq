@@ -56,3 +56,62 @@ SET status = CASE WHEN @status::smallint = 1 THEN 'active' ELSE 'disabled' END,
 WHERE tenant_id = @tenant_id::text
   AND principal_kind = 'agent'
   AND principal_id = @agent_id::text;
+
+-- name: CreateCredential :exec
+INSERT INTO agent_credentials (
+    credential_id, tenant_id, agent_id, credential_name, credential_prefix,
+    secret_hash, created_at_ns, expires_at_ns
+)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8);
+
+-- name: GetCredentialByID :one
+SELECT credential_id, tenant_id, agent_id, credential_name, credential_prefix,
+       secret_hash, created_at_ns, expires_at_ns, expired_accounted_at_ns,
+       revoked_at_ns, last_used_at_ns
+FROM agent_credentials
+WHERE credential_id = $1;
+
+-- name: GetCredentialByPrefix :one
+SELECT credential_id, tenant_id, agent_id, credential_name, credential_prefix,
+       secret_hash, created_at_ns, expires_at_ns, expired_accounted_at_ns,
+       revoked_at_ns, last_used_at_ns
+FROM agent_credentials
+WHERE credential_prefix = $1;
+
+-- name: ListCredentials :many
+SELECT credential_id, tenant_id, agent_id, credential_name, credential_prefix,
+       secret_hash, created_at_ns, expires_at_ns, expired_accounted_at_ns,
+       revoked_at_ns, last_used_at_ns
+FROM agent_credentials
+WHERE tenant_id = @tenant_id::text
+  AND agent_id = @agent_id::text
+  AND (@after_id::text = '' OR credential_id > @after_id::text)
+ORDER BY credential_id
+LIMIT @page_limit::bigint;
+
+-- name: CountActiveCredentials :one
+SELECT count(*)
+FROM agent_credentials
+WHERE tenant_id = @tenant_id::text
+  AND agent_id = @agent_id::text
+  AND revoked_at_ns IS NULL
+  AND expired_accounted_at_ns IS NULL
+  AND (expires_at_ns IS NULL OR expires_at_ns > @now_ns::bigint);
+
+-- name: RevokeCredential :execrows
+UPDATE agent_credentials
+SET revoked_at_ns = @revoked_at_ns::bigint
+WHERE tenant_id = @tenant_id::text
+  AND agent_id = @agent_id::text
+  AND credential_id = @credential_id::text
+  AND revoked_at_ns IS NULL;
+
+-- name: TouchCredential :execrows
+UPDATE agent_credentials
+SET last_used_at_ns = @used_at_ns::bigint
+WHERE tenant_id = @tenant_id::text
+  AND agent_id = @agent_id::text
+  AND credential_id = @credential_id::text
+  AND revoked_at_ns IS NULL
+  AND expired_accounted_at_ns IS NULL
+  AND (expires_at_ns IS NULL OR expires_at_ns > @used_at_ns::bigint);
