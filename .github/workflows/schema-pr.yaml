@@ -11,6 +11,9 @@ on:
       - main
     paths:
       - 'schema/**'
+      - 'internal/server/schema/**'
+      - 'scripts/check-schema-generation.sh'
+      - 'Makefile'
       - '.github/workflows/schema-pr.yaml'
 
 jobs:
@@ -19,9 +22,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: bufbuild/buf-setup-action@v1
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
       - uses: bufbuild/buf-lint-action@v1
         with:
           input: schema
+      - name: Generate local schema artifacts
+        run: make schema-local
+      - name: Check tracked generated artifacts
+        run: git diff --exit-code -- schema/docs internal/server/schema
+      - name: Check public SDK generation
+        run: ./scripts/check-schema-generation.sh
+      - name: Test schema compatibility
+        run: go test ./internal/server/schema/... -count=1
 
   breaking:
     runs-on: ubuntu-latest

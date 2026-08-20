@@ -6,6 +6,15 @@ deps:
 schema:
 	cd internal/server/schema && buf generate buf.build/plainq/schema
 
+.PHONY: schema-local
+schema-local:
+	cd schema && buf lint && buf generate --template buf.docs.gen.yaml && perl -pi -e 's/[ \t]+$$//' docs/index.html
+	cd internal/server/schema && buf generate ../../../schema --template buf.gen.yaml
+
+.PHONY: schema-breaking
+schema-breaking:
+	cd schema && buf breaking --against 'https://github.com/marsolab/plainq.git#branch=main,subdir=schema'
+
 .PHONY: sqlc-generate
 sqlc-generate:
 	sqlc generate
