@@ -265,3 +265,22 @@ func TestListQueuesTreatsPrefixAsLiteral(t *testing.T) {
 		})
 	}
 }
+
+func TestListQueuesTreatsPrefixAsCaseSensitive(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStorage(t, newMigratedConn(t))
+
+	for _, name := range []string{"CaseQueue", "caseQueue"} {
+		if _, err := store.CreateQueue(ctx, &v1.CreateQueueRequest{QueueName: name}); err != nil {
+			t.Fatalf("create queue %q: %v", name, err)
+		}
+	}
+
+	listed, err := store.ListQueues(ctx, &v1.ListQueuesRequest{QueuePrefix: "Case"})
+	if err != nil {
+		t.Fatalf("list queues: %v", err)
+	}
+	if len(listed.GetQueues()) != 1 || listed.GetTotalCount() != 1 || listed.GetQueues()[0].GetQueueName() != "CaseQueue" {
+		t.Fatalf("case-sensitive prefix queues=%v total=%d, want CaseQueue only", listed.GetQueues(), listed.GetTotalCount())
+	}
+}

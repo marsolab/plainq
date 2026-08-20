@@ -2,6 +2,7 @@ package pgstore
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -47,15 +48,34 @@ func TestListQueuesQueryBindsCursorAndLiteralPrefix(t *testing.T) {
 			if strings.Contains(query, tc.value) {
 				t.Fatalf("cursor value was interpolated into query: %s", query)
 			}
-			if !strings.Contains(query, "LIKE $1 ESCAPE") {
-				t.Fatalf("query does not escape literal prefix: %s", query)
+			if !strings.Contains(query, "left(queue_name, char_length($1)) = $2 COLLATE \"C\"") {
+				t.Fatalf("query does not use a literal prefix: %s", query)
 			}
-			if got := args[0]; got != `literal\%\_%` {
-				t.Fatalf("prefix argument = %#v, want literal LIKE pattern", got)
+			if got := args[0]; got != "literal%_" {
+				t.Fatalf("prefix argument = %#v, want literal prefix", got)
 			}
 			if got := args[len(args)-1]; got != int32(2) {
 				t.Fatalf("limit argument = %#v, want 2", got)
 			}
 		})
+	}
+}
+
+func TestListQueuesQueryUsesCaseSensitiveLiteralPrefix(t *testing.T) {
+	query, args, err := queryListQueues(
+		2,
+		"Case%_",
+		"",
+		v1.ListQueuesRequest_ORDER_BY_NAME,
+		v1.ListQueuesRequest_SORT_BY_ASC,
+	)
+	if err != nil {
+		t.Fatalf("build query: %v", err)
+	}
+	if !strings.Contains(query, "left(queue_name, char_length($1)) = $2 COLLATE \"C\"") {
+		t.Fatalf("query does not use a case-sensitive literal prefix: %s", query)
+	}
+	if got, want := args, []any{"Case%_", "Case%_", int32(2)}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("prefix arguments = %#v, want %#v", got, want)
 	}
 }

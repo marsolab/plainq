@@ -200,6 +200,22 @@ func TestPostgresListQueuesParity(t *testing.T) {
 	if len(literal.GetQueues()) != 1 || literal.GetTotalCount() != 1 {
 		t.Fatalf("literal prefix queues=%d total=%d, want 1 and 1", len(literal.GetQueues()), literal.GetTotalCount())
 	}
+
+	for _, name := range []string{"CaseQueue", "caseQueue"} {
+		queue, err := store.CreateQueue(ctx, &v1.CreateQueueRequest{QueueName: prefix + name})
+		if err != nil {
+			t.Fatalf("create mixed-case queue %q: %v", name, err)
+		}
+		created = append(created, queue)
+	}
+
+	caseSensitive, err := store.ListQueues(ctx, &v1.ListQueuesRequest{QueuePrefix: prefix + "Case"})
+	if err != nil {
+		t.Fatalf("case-sensitive prefix: %v", err)
+	}
+	if len(caseSensitive.GetQueues()) != 1 || caseSensitive.GetTotalCount() != 1 || caseSensitive.GetQueues()[0].GetQueueName() != prefix+"CaseQueue" {
+		t.Fatalf("case-sensitive prefix queues=%v total=%d, want %q only", caseSensitive.GetQueues(), caseSensitive.GetTotalCount(), prefix+"CaseQueue")
+	}
 }
 
 func TestPostgresDeleteQueueRequiresForceWhenNonEmpty(t *testing.T) {
