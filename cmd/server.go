@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -701,9 +702,14 @@ func isWildcardOrLoopbackAddress(address string) bool {
 		return true
 	}
 
-	ip := net.ParseIP(host)
+	ip, parseErr := netip.ParseAddr(host)
+	if parseErr != nil {
+		return false
+	}
 
-	return ip != nil && (ip.IsUnspecified() || ip.IsLoopback())
+	ip = ip.WithZone("")
+
+	return ip.IsUnspecified() || ip.IsLoopback()
 }
 
 func initLogger(cfg *config.Config) (*slog.Logger, error) {

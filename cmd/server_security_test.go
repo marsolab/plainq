@@ -85,6 +85,14 @@ func TestValidateAgentSecurity(t *testing.T) {
 			clusterCfg.Enabled = true
 			cfg.GRPCAdvertiseAddr = "[::1]:8080"
 		},
+		"cluster zoned IPv6 loopback advertise": func(cfg *config.Config, clusterCfg *cluster.Config) {
+			clusterCfg.Enabled = true
+			cfg.GRPCAdvertiseAddr = "[::1%lo0]:8080"
+		},
+		"cluster zoned IPv6 unspecified advertise": func(cfg *config.Config, clusterCfg *cluster.Config) {
+			clusterCfg.Enabled = true
+			cfg.GRPCAdvertiseAddr = "[::%lo0]:8080"
+		},
 		"cluster localhost advertise": func(cfg *config.Config, clusterCfg *cluster.Config) {
 			clusterCfg.Enabled = true
 			cfg.GRPCAdvertiseAddr = "localhost:8080"
@@ -148,30 +156,40 @@ func TestValidateAgentSecurity(t *testing.T) {
 		}
 	})
 
-	t.Run("cluster routable advertise", func(t *testing.T) {
-		t.Parallel()
+	for _, address := range []string{
+		"plainq-0.plainq:8080",
+		"[2001:db8::1]:8080",
+		"[2001:db8::1%eth0]:8080",
+	} {
+		t.Run("cluster routable advertise "+address, func(t *testing.T) {
+			t.Parallel()
 
-		cfg := valid()
-		cfg.GRPCAdvertiseAddr = "plainq-0.plainq:8080"
-		if err := validateAgentSecurity(&cfg, &cluster.Config{Enabled: true}); err != nil {
-			t.Fatalf("validateAgentSecurity() error = %v", err)
-		}
-	})
+			cfg := valid()
+			cfg.GRPCAdvertiseAddr = address
+			if err := validateAgentSecurity(&cfg, &cluster.Config{Enabled: true}); err != nil {
+				t.Fatalf("validateAgentSecurity() error = %v", err)
+			}
+		})
+	}
 }
 
 func TestIsWildcardOrLoopbackAddress(t *testing.T) {
 	t.Parallel()
 
 	for address, want := range map[string]bool{
-		":8080":               true,
-		"0.0.0.0:8080":        true,
-		"[::]:8080":           true,
-		"127.0.0.1:8080":      true,
-		"[::1]:8080":          true,
-		"localhost:8080":      true,
-		"LOCALHOST.:8080":     true,
-		"plainq-0.local:8080": false,
-		"malformed":           true,
+		":8080":                   true,
+		"0.0.0.0:8080":            true,
+		"[::]:8080":               true,
+		"127.0.0.1:8080":          true,
+		"[::1]:8080":              true,
+		"[::1%lo0]:8080":          true,
+		"[::%lo0]:8080":           true,
+		"localhost:8080":          true,
+		"LOCALHOST.:8080":         true,
+		"[2001:db8::1]:8080":      false,
+		"[2001:db8::1%eth0]:8080": false,
+		"plainq-0.local:8080":     false,
+		"malformed":               true,
 	} {
 		t.Run(address, func(t *testing.T) {
 			t.Parallel()
