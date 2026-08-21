@@ -115,6 +115,7 @@ services:
       DURATION: "${DURATION:-2m}"
       BATCH_SIZE: "${BATCH_SIZE:-1}"
       MSG_BYTES: "${MSG_BYTES:-256}"
+      WORK_SLOT_MS: "${WORK_SLOT_MS:-25}"
       RUN_ID: "${RUN_ID:-local}"
     volumes:
       - ./k6:/k6:ro

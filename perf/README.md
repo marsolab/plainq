@@ -104,7 +104,11 @@ shows the run under the `load` variant.
    (so disk noise doesn't skew results), and the Prometheus `/metrics`
    endpoint enabled.
 3. **Load test.** k6 runs two `constant-vus` scenarios in parallel — one per
-   variant — performing a full message lifecycle each iteration:
+   variant — with an isolated queue slot for every global k6 VU id. (k6 assigns
+   ids arbitrarily across concurrent scenarios, so each variant provisions the
+   full two-scenario id range.) Variant-local time slots serialize SQLite
+   writers, so the comparison measures successful service work instead of
+   shared-queue lease races. Each iteration performs a full lifecycle:
    `Send → Receive → Delete`. Every sample is tagged `variant=baseline|candidate`
    (scenario tag) and `op=send|receive|delete|total` (per call).
 4. **Store.** k6 streams metrics to VictoriaMetrics via Prometheus
@@ -123,6 +127,7 @@ All knobs are environment variables (forwarded by `make`/`run.sh`):
 | `DURATION`     | `2m`         | Load duration.                           |
 | `BATCH_SIZE`   | `1`          | `Receive` batch size (1–10).             |
 | `MSG_BYTES`    | `256`        | Message body size.                       |
+| `WORK_SLOT_MS` | `25`         | Per-VU SQLite writer slot in milliseconds. |
 | `RUN_ID`       | git short sha| Label applied to metrics & result files. |
 | `KEEP_UP`      | `1`          | Keep the stack up after the run.         |
 

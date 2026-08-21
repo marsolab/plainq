@@ -20,9 +20,15 @@
 
 import grpc from 'k6/net/grpc';
 import encoding from 'k6/encoding';
-import { check } from 'k6';
+import { check, sleep } from 'k6';
 import { Counter, Trend } from 'k6/metrics';
 import { boundedCode, boundedReason, statusName } from './status.mjs';
+import {
+  ownsReceivedMessage,
+  queueIndex,
+  queueName,
+  slotDelayMilliseconds,
+} from './workload.mjs';
 
 const BASELINE_ADDR = __ENV.BASELINE_ADDR || 'localhost:18080';
 const CANDIDATE_ADDR = __ENV.CANDIDATE_ADDR || 'localhost:28080';
@@ -30,6 +36,8 @@ const VUS = parseInt(__ENV.VUS || '20', 10);
 const DURATION = __ENV.DURATION || '2m';
 const BATCH_SIZE = parseInt(__ENV.BATCH_SIZE || '1', 10);
 const MSG_BYTES = parseInt(__ENV.MSG_BYTES || '256', 10);
+const WORK_SLOT_MS = parseInt(__ENV.WORK_SLOT_MS || '25', 10);
+const TOTAL_VUS = VUS * 2;
 
 // A fixed payload of the requested size, base64-encoded for the proto `bytes`
 // field (k6 represents bytes fields as base64 strings).
@@ -68,19 +76,18 @@ export const options = {
       tags: { variant: 'candidate' },
     },
   },
-  // Loose absolute guard rail only. The real verdict is the *relative*
-  // candidate-vs-baseline comparison produced by scripts/report.py from
-  // VictoriaMetrics. Absolute error/latency thresholds are intentionally not
-  // enforced here: under load both variants share the same backend contention
-  // (e.g. SQLite is single-writer, so concurrent writes raise SQLITE_BUSY),
-  // which is real and equal across variants — it should not fail the run.
+  // Absolute latency is only a guard rail. scripts/report.py first requires a
+  // valid successful lifecycle rate, then makes the relative AB verdict.
   thresholds: {
     'plainq_latency{op:total}': ['p(95) < 2000'],
   },
 };
 
-// setup runs once. Create one dedicated queue per variant and hand the ids to
-// the VU functions.
+// setup runs once. k6 allocates global VU ids across concurrent scenarios in
+// an arbitrary order, so each variant provisions the complete 2*VUS id range.
+// Every active VU can then select its exact id without a collision. A shared
+// queue lets one VU receive another VU's message and causes competing SQLite
+// read-to-write lease upgrades; neither represents one comparable lifecycle.
 export function setup() {
   const targets = [
     ['baseline', BASELINE_ADDR],
@@ -92,22 +99,25 @@ export function setup() {
   for (const [variant, addr] of targets) {
     client.connect(addr, { plaintext: true, timeout: '15s' });
 
-    const res = client.invoke(`${SERVICE}/CreateQueue`, {
-      queue_name: `perf-${variant}-${__ENV.RUN_ID || 'local'}`,
-      visibility_timeout_seconds: 30,
-      max_receive_attempts: 10,
-    });
+    queues[variant] = [];
+    for (let index = 0; index < TOTAL_VUS; index += 1) {
+      const res = client.invoke(`${SERVICE}/CreateQueue`, {
+        queue_name: queueName(variant, __ENV.RUN_ID || 'local', index),
+        visibility_timeout_seconds: 30,
+        max_receive_attempts: 10,
+      });
 
-    if (res.status !== grpc.StatusOK) {
-      throw new Error(`CreateQueue(${variant}) failed: ${JSON.stringify(res)}`);
+      if (res.status !== grpc.StatusOK) {
+        throw new Error(`CreateQueue(${variant}, VU ${index + 1}) failed: ${JSON.stringify(res)}`);
+      }
+
+      const msg = res.message || {};
+      queues[variant].push(msg.queueId || msg.queue_id);
     }
-
-    const msg = res.message || {};
-    queues[variant] = msg.queueId || msg.queue_id;
     client.close();
   }
 
-  console.log(`queues: baseline=${queues.baseline} candidate=${queues.candidate}`);
+  console.log(`isolated queue id slots per variant: ${TOTAL_VUS} (${VUS} active VUs)`);
   return queues;
 }
 
@@ -176,11 +186,18 @@ function timed(variant, op, fn) {
 }
 
 // workload performs one full message lifecycle: Send -> Receive -> Delete.
-function workload(addr, variant, queueID) {
+function workload(addr, variant, queues) {
   if (!connected) {
     client.connect(addr, { plaintext: true, timeout: '15s' });
     connected = true;
   }
+
+  const index = queueIndex(__VU, queues.length);
+  const delayMs = slotDelayMilliseconds(Date.now(), index, queues.length, WORK_SLOT_MS);
+  if (delayMs > 0) {
+    sleep(delayMs / 1000);
+  }
+  const queueID = queues[index];
 
   const t0 = Date.now();
   let failed = false;
@@ -193,19 +210,30 @@ function workload(addr, variant, queueID) {
   );
   failed = failed || !isOK(sendRes);
 
-  const recv = timed(variant, 'receive', () =>
-    client.invoke(`${SERVICE}/Receive`, {
-      queue_id: queueID,
-      batch_size: BATCH_SIZE,
-    }),
-  );
-  failed = failed || !isOK(recv);
+  const sentIDs = isOK(sendRes) && sendRes.message
+    ? (sendRes.message.messageIds || sendRes.message.message_ids || [])
+    : [];
+
+  let recv;
+  if (isOK(sendRes)) {
+    recv = timed(variant, 'receive', () =>
+      client.invoke(`${SERVICE}/Receive`, {
+        queue_id: queueID,
+        batch_size: BATCH_SIZE,
+      }),
+    );
+    failed = failed || !isOK(recv);
+  }
 
   const ids = [];
   if (isOK(recv) && recv.message && recv.message.messages) {
     for (const m of recv.message.messages) {
       ids.push(m.id);
     }
+  }
+  if (isOK(recv) && !ownsReceivedMessage(sentIDs, recv.message && recv.message.messages)) {
+    errs.add(1, { variant, op: 'receive' });
+    failed = true;
   }
 
   if (ids.length > 0) {

@@ -20,13 +20,15 @@ VUS          ?= 20
 DURATION     ?= 2m
 BATCH_SIZE   ?= 1
 MSG_BYTES    ?= 256
+WORK_SLOT_MS ?= 25
 TARGET       ?= host.docker.internal:8080
 
-export VUS DURATION BATCH_SIZE MSG_BYTES
+export VUS DURATION BATCH_SIZE MSG_BYTES WORK_SLOT_MS
 
 .PHONY: test
 test: ## Test bounded status classification and report verdict logic
 	node k6/status_test.mjs
+	node k6/workload_test.mjs
 	cd scripts && python3 -m unittest discover -v -p '*_test.py'
 
 .PHONY: cli
