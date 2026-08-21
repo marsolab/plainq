@@ -21,9 +21,11 @@
 import grpc from 'k6/net/grpc';
 import encoding from 'k6/encoding';
 import { check, sleep } from 'k6';
+import exec from 'k6/execution';
 import { Counter, Trend } from 'k6/metrics';
 import { boundedCode, boundedReason, statusName } from './status.mjs';
 import {
+  elapsedMilliseconds,
   ownsReceivedMessage,
   queueIndex,
   queueName,
@@ -163,14 +165,14 @@ function recordRPCStatus(variant, op, res) {
 
 // timed invokes fn, records req/err/latency under {variant, op}, and asserts OK.
 function timed(variant, op, fn) {
-  const t0 = Date.now();
+  const t0 = exec.instance.currentTestRunDuration;
   let res;
   try {
     res = fn();
   } catch (error) {
     res = { status: grpc.StatusUnknown, error };
   }
-  const dt = Date.now() - t0;
+  const dt = elapsedMilliseconds(t0, exec.instance.currentTestRunDuration);
 
   const tags = { variant, op };
 
@@ -199,7 +201,7 @@ function workload(addr, variant, queues) {
   }
   const queueID = queues[index];
 
-  const t0 = Date.now();
+  const t0 = exec.instance.currentTestRunDuration;
   let failed = false;
 
   const sendRes = timed(variant, 'send', () =>
@@ -249,7 +251,7 @@ function workload(addr, variant, queues) {
   // Record the end-to-end lifecycle outcome under op=total. The error sample
   // is what report.py uses for its regression error-rate verdict.
   const tags = { variant, op: 'total' };
-  latency.add(Date.now() - t0, tags);
+  latency.add(elapsedMilliseconds(t0, exec.instance.currentTestRunDuration), tags);
   reqs.add(1, tags);
   if (failed) {
     errs.add(1, tags);

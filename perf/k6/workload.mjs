@@ -56,3 +56,14 @@ export function ownsReceivedMessage(sentIDs, receivedMessages) {
   const receivedIDs = new Set(receivedMessages.map((message) => message && message.id).filter(Boolean));
   return sentIDs.every((id) => receivedIDs.has(id));
 }
+
+// elapsedMilliseconds preserves k6's sub-millisecond monotonic clock. Using
+// Date.now() rounds each fast local RPC to whole milliseconds and can turn a
+// few hundred microseconds of real work into a multi-millisecond p95 delta.
+export function elapsedMilliseconds(start, end) {
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) {
+    throw new Error('monotonic timestamps must be finite and ordered');
+  }
+
+  return end - start;
+}

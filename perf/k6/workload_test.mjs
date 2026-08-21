@@ -1,11 +1,15 @@
 import assert from 'node:assert/strict';
 
 import {
+  elapsedMilliseconds,
   ownsReceivedMessage,
   queueIndex,
   queueName,
   slotDelayMilliseconds,
 } from './workload.mjs';
+
+assert.equal(elapsedMilliseconds(10.125, 10.875), 0.75);
+assert.throws(() => elapsedMilliseconds(2, 1), /ordered/);
 
 assert.equal(queueIndex(1, 20), 0);
 assert.equal(queueIndex(10, 20), 9);
