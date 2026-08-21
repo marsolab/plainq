@@ -1,14 +1,14 @@
 -- name: CreateAccount :exec
-INSERT INTO users (user_id, email, password, verified, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6);
+INSERT INTO users (user_id, email, password, verified, created_at, updated_at, org_id, auth_version, status)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9);
 
 -- name: GetAccountByID :one
-SELECT user_id, email, password, verified, created_at, updated_at
+SELECT user_id, email, password, verified, created_at, updated_at, org_id, auth_version, status
 FROM users
 WHERE user_id = $1;
 
 -- name: GetAccountByEmail :one
-SELECT user_id, email, password, verified, created_at, updated_at
+SELECT user_id, email, password, verified, created_at, updated_at, org_id, auth_version, status
 FROM users
 WHERE email = $1;
 
@@ -29,12 +29,12 @@ DELETE FROM users
 WHERE user_id = $1;
 
 -- name: CreateRefreshToken :exec
-INSERT INTO refresh_tokens (id, aid, token, created_at, expires_at)
-VALUES ($1, $2, $3, $4, $5);
+INSERT INTO refresh_tokens (id, aid, token_hash, created_at_ns, expires_at_ns, last_used_at_ns)
+VALUES ($1, $2, $3, $4, $5, $6);
 
 -- name: DeleteRefreshToken :execrows
 DELETE FROM refresh_tokens
-WHERE token = $1;
+WHERE token_hash = $1;
 
 -- name: DeleteRefreshTokenByTokenID :exec
 DELETE FROM refresh_tokens
@@ -45,14 +45,39 @@ DELETE FROM refresh_tokens
 WHERE aid = $1;
 
 -- name: DenyAccessToken :exec
-INSERT INTO denylist (token, denied_until)
-VALUES ($1, $2);
+INSERT INTO denylist (token_id, aid, expires_at_ns, created_at_ns, reason)
+VALUES ($1, $2, $3, $4, $5);
 
 -- name: IsAccessTokenDenied :one
 SELECT count(*)
 FROM denylist
-WHERE token = $1
-  AND denied_until > $2;
+WHERE token_id = $1
+  AND expires_at_ns > $2;
+
+-- name: GetAccountSecurity :one
+SELECT org_id, status, auth_version
+FROM users
+WHERE user_id = $1;
+
+-- name: UpsertHumanSecurityPrincipal :exec
+INSERT INTO security_principals (
+    tenant_id, principal_kind, principal_id, status, roles_json, auth_version, updated_at_ns
+)
+SELECT u.org_id, 'human', u.user_id, u.status,
+       coalesce((
+           SELECT jsonb_agg(r.role_name ORDER BY r.role_name)
+           FROM user_roles ur
+           JOIN roles r ON r.role_id = ur.role_id
+           WHERE ur.user_id = u.user_id
+       ), '[]'::jsonb),
+       u.auth_version, $1
+FROM users u
+WHERE u.user_id = $2
+ON CONFLICT (tenant_id, principal_kind, principal_id) DO UPDATE SET
+    status = excluded.status,
+    roles_json = excluded.roles_json,
+    auth_version = excluded.auth_version,
+    updated_at_ns = excluded.updated_at_ns;
 
 -- name: GetUserRoles :many
 SELECT r.role_name
@@ -67,7 +92,7 @@ SELECT u.user_id,
        u.verified,
        u.created_at,
        u.updated_at,
-       u.org_id,
+       coalesce(u.org_id, '')::text AS org_id,
        u.oauth_provider,
        u.is_oauth_user,
        u.last_sync_at,

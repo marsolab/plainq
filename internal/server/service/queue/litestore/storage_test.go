@@ -7,11 +7,125 @@ import (
 	"testing"
 	"time"
 
+	"github.com/marsolab/plainq/internal/server/principal"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
+	queueservice "github.com/marsolab/plainq/internal/server/service/queue"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/marsolab/servekit/dbkit/litekit"
+	"github.com/marsolab/servekit/errkit"
 	"github.com/maxatome/go-testdeep/td"
 )
+
+func TestTenantScopedQueuesAndLegacyCompatibility(t *testing.T) {
+	ctx := context.Background()
+	conn := newMigratedConn(t)
+	store := newTestStorage(t, conn)
+	if _, err := conn.ExecContext(ctx, `
+INSERT INTO organizations (org_id, org_code, org_name, is_active)
+VALUES ('tenant-b', 'tenant-b', 'Tenant B', TRUE)`); err != nil {
+		t.Fatalf("seed tenant B: %v", err)
+	}
+
+	legacyCtx := principal.With(ctx, principal.Principal{
+		Kind: principal.KindSystem, ID: "legacy-v1", TenantID: principal.LegacyTenantID,
+	})
+	humanACtx := principal.With(ctx, principal.Principal{
+		Kind: principal.KindHuman, ID: "human-a", TenantID: principal.LegacyTenantID,
+	})
+	humanBCtx := principal.With(ctx, principal.Principal{
+		Kind: principal.KindHuman, ID: "human-b", TenantID: "tenant-b",
+	})
+
+	legacyQueue, err := store.CreateQueue(legacyCtx, &v1.CreateQueueRequest{QueueName: "shared"})
+	if err != nil {
+		t.Fatalf("create legacy queue: %v", err)
+	}
+	privateQueue, err := store.CreateQueue(humanACtx, &v1.CreateQueueRequest{QueueName: "private-a"})
+	if err != nil {
+		t.Fatalf("create human A queue: %v", err)
+	}
+	if _, err := store.CreateQueue(humanBCtx, &v1.CreateQueueRequest{QueueName: "shared"}); err != nil {
+		t.Fatalf("same queue name in another tenant: %v", err)
+	}
+
+	legacyList, err := store.ListQueues(legacyCtx, &v1.ListQueuesRequest{Limit: 10})
+	if err != nil {
+		t.Fatalf("list legacy queues: %v", err)
+	}
+	if len(legacyList.GetQueues()) != 1 || legacyList.GetQueues()[0].GetQueueId() != legacyQueue.GetQueueId() {
+		t.Fatalf("legacy queues = %#v, want only migration/legacy rows", legacyList.GetQueues())
+	}
+	if _, err := store.DescribeQueue(legacyCtx, &v1.DescribeQueueRequest{QueueId: privateQueue.GetQueueId()}); !errors.Is(err, pqerr.ErrNotFound) {
+		t.Fatalf("legacy describe private queue error = %v, want not found", err)
+	}
+	if _, err := store.Send(humanBCtx, &v1.SendRequest{
+		QueueId: privateQueue.GetQueueId(), Messages: []*v1.SendMessage{{Body: []byte("cross tenant")}},
+	}); !errors.Is(err, pqerr.ErrNotFound) {
+		t.Fatalf("cross-tenant send error = %v, want not found", err)
+	}
+}
+
+func TestTenantScopedTopicsAndSubscriptions(t *testing.T) {
+	ctx := context.Background()
+	conn := newMigratedConn(t)
+	store := newTestStorage(t, conn)
+	if _, err := conn.ExecContext(ctx, `
+INSERT INTO organizations (org_id, org_code, org_name, is_active)
+VALUES ('tenant-b', 'tenant-b', 'Tenant B', TRUE)`); err != nil {
+		t.Fatalf("seed tenant B: %v", err)
+	}
+
+	legacyCtx := principal.With(ctx, principal.Principal{
+		Kind: principal.KindSystem, ID: "legacy-v1", TenantID: principal.LegacyTenantID,
+	})
+	humanACtx := principal.With(ctx, principal.Principal{
+		Kind: principal.KindHuman, ID: "human-a", TenantID: principal.LegacyTenantID,
+	})
+	humanBCtx := principal.With(ctx, principal.Principal{
+		Kind: principal.KindHuman, ID: "human-b", TenantID: "tenant-b",
+	})
+
+	legacyQueue, err := store.CreateQueue(legacyCtx, &v1.CreateQueueRequest{QueueName: "legacy-destination"})
+	if err != nil {
+		t.Fatalf("create legacy queue: %v", err)
+	}
+	privateQueue, err := store.CreateQueue(humanACtx, &v1.CreateQueueRequest{QueueName: "private-destination"})
+	if err != nil {
+		t.Fatalf("create human A queue: %v", err)
+	}
+	legacyTopic, err := store.CreateTopic(legacyCtx, &queueservice.CreateTopicRequest{TopicName: "shared"})
+	if err != nil {
+		t.Fatalf("create legacy topic: %v", err)
+	}
+	privateTopic, err := store.CreateTopic(humanACtx, &queueservice.CreateTopicRequest{TopicName: "private-a"})
+	if err != nil {
+		t.Fatalf("create human A topic: %v", err)
+	}
+	if _, err := store.CreateTopic(humanBCtx, &queueservice.CreateTopicRequest{TopicName: "shared"}); err != nil {
+		t.Fatalf("same topic name in another tenant: %v", err)
+	}
+	if _, err := store.Subscribe(legacyCtx, legacyTopic.TopicID, &queueservice.SubscribeRequest{QueueID: legacyQueue.GetQueueId()}); err != nil {
+		t.Fatalf("subscribe legacy destination: %v", err)
+	}
+
+	legacyList, err := store.ListTopics(legacyCtx)
+	if err != nil {
+		t.Fatalf("list legacy topics: %v", err)
+	}
+	if len(legacyList.Topics) != 1 || legacyList.Topics[0].TopicID != legacyTopic.TopicID {
+		t.Fatalf("legacy topics = %#v, want only migration/legacy rows", legacyList.Topics)
+	}
+	if _, err := store.Publish(humanBCtx, privateTopic.TopicID, &queueservice.PublishRequest{
+		Messages: []queueservice.PublishMessage{{Body: []byte("cross tenant")}},
+	}); !errors.Is(err, errkit.ErrNotFound) {
+		t.Fatalf("cross-tenant publish error = %v, want not found", err)
+	}
+	if _, err := store.Subscribe(humanBCtx, privateTopic.TopicID, &queueservice.SubscribeRequest{
+		QueueID: privateQueue.GetQueueId(),
+	}); !errors.Is(err, errkit.ErrNotFound) {
+		t.Fatalf("cross-tenant subscribe error = %v, want not found", err)
+	}
+}
 
 func TestStorageListQueuesHandlesNullableDeadLetterQueue(t *testing.T) {
 	ctx := context.Background()

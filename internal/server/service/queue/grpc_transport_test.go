@@ -8,6 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/marsolab/plainq/internal/server/config"
+	"github.com/marsolab/plainq/internal/server/middleware"
+	"github.com/marsolab/plainq/internal/server/principal"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/maxatome/go-testdeep/td"
@@ -188,6 +191,82 @@ func TestServer_DeleteQueueFailedPrecondition(t *testing.T) {
 	_, err := server.DeleteQueue(context.Background(), &v1.DeleteQueueRequest{QueueId: validXID})
 	if got := status.Code(err); got != codes.FailedPrecondition {
 		t.Fatalf("DeleteQueue status = %s, want %s", got, codes.FailedPrecondition)
+	}
+}
+
+func TestProtectedLegacyGRPCQueueOperationsUseTenantRBAC(t *testing.T) {
+	const queueID = "c5s8b4p9e8rg5u5fgq10"
+	ctx := principal.With(context.Background(), principal.Principal{
+		Kind: principal.KindHuman, ID: "human-a", TenantID: "tenant-a",
+	})
+
+	tests := []struct {
+		name       string
+		permission middleware.PermissionType
+		invoke     func(*Service) error
+	}{
+		{
+			name: "delete queue", permission: middleware.PermissionDelete,
+			invoke: func(service *Service) error {
+				_, err := service.DeleteQueue(ctx, &v1.DeleteQueueRequest{QueueId: queueID})
+
+				return err
+			},
+		},
+		{
+			name: "purge queue", permission: middleware.PermissionPurge,
+			invoke: func(service *Service) error {
+				_, err := service.PurgeQueue(ctx, &v1.PurgeQueueRequest{QueueId: queueID})
+
+				return err
+			},
+		},
+		{
+			name: "send", permission: middleware.PermissionSend,
+			invoke: func(service *Service) error {
+				_, err := service.Send(ctx, &v1.SendRequest{QueueId: queueID})
+
+				return err
+			},
+		},
+		{
+			name: "receive", permission: middleware.PermissionReceive,
+			invoke: func(service *Service) error {
+				_, err := service.Receive(ctx, &v1.ReceiveRequest{QueueId: queueID})
+
+				return err
+			},
+		},
+		{
+			name: "acknowledge", permission: middleware.PermissionDelete,
+			invoke: func(service *Service) error {
+				_, err := service.Delete(ctx, &v1.DeleteRequest{QueueId: queueID})
+
+				return err
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := &Service{cfg: &config.Config{GRPCProtectLegacy: true}, storage: &mockStorage{}}
+			service.SetPermissionChecker(testPermissionCheckerFunc(func(
+				_ context.Context,
+				userID, gotQueueID string,
+				permission middleware.PermissionType,
+			) (bool, error) {
+				if userID != "human-a" || gotQueueID != queueID || permission != test.permission {
+					t.Fatalf("permission check = user %q queue %q permission %q", userID, gotQueueID, permission)
+				}
+
+				return false, nil
+			}))
+
+			err := test.invoke(service)
+			if got := status.Code(err); got != codes.PermissionDenied {
+				t.Fatalf("operation code = %s, want %s (error %v)", got, codes.PermissionDenied, err)
+			}
+		})
 	}
 }
 

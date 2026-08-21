@@ -37,6 +37,7 @@ func (h *Hub) Watch(keys ...string) *Watch {
 		if h.waiters[key] == nil {
 			h.waiters[key] = make(map[chan struct{}]struct{})
 		}
+
 		h.waiters[key][ch] = struct{}{}
 	}
 	h.mu.Unlock()
@@ -44,8 +45,10 @@ func (h *Hub) Watch(keys ...string) *Watch {
 	return &Watch{ch: ch, done: func() {
 		h.mu.Lock()
 		defer h.mu.Unlock()
+
 		for _, key := range keys {
 			delete(h.waiters[key], ch)
+
 			if len(h.waiters[key]) == 0 {
 				delete(h.waiters, key)
 			}

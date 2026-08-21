@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -13,6 +15,15 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/marsolab/plainq/internal/server/mutations"
+	"github.com/marsolab/plainq/internal/server/principal"
+	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
+	"github.com/marsolab/plainq/internal/server/service/oauth"
+	oauthpg "github.com/marsolab/plainq/internal/server/service/oauth/pgstore"
+	"github.com/marsolab/plainq/internal/server/service/onboarding"
+	onboardpg "github.com/marsolab/plainq/internal/server/service/onboarding/pgstore"
+	queueservice "github.com/marsolab/plainq/internal/server/service/queue"
+	queuepg "github.com/marsolab/plainq/internal/server/service/queue/pgstore"
+	"github.com/marsolab/plainq/internal/shared/pqerr"
 )
 
 func openPGEvolverTestPool(t *testing.T) *pgxpool.Pool {
@@ -171,6 +182,7 @@ func TestPGEvolverUpgradeFromVersionFourPreservesData(t *testing.T) {
 	const (
 		orgID   = "01J00000000000000000000001"
 		userID  = "01J00000000000000000000002"
+		userID2 = "01J00000000000000000000007"
 		queueID = "01J00000000000000000000003"
 		topicID = "01J00000000000000000000004"
 	)
@@ -185,6 +197,25 @@ func TestPGEvolverUpgradeFromVersionFourPreservesData(t *testing.T) {
 		{
 			query: `INSERT INTO users (user_id, email, password, org_id) VALUES ($1, 'upgrade@example.test', 'existing-hash', $2)`,
 			args:  []any{userID, orgID},
+		},
+		{
+			query: `INSERT INTO users (user_id, email, password) VALUES ($1, 'legacy@example.test', 'existing-hash-2')`,
+			args:  []any{userID2},
+		},
+		{
+			query: `INSERT INTO user_roles (user_id, role_id) VALUES ($1, '01HQ5RJNXS6TPXK89PQWY4N8JD')`,
+			args:  []any{userID},
+		},
+		{
+			query: `INSERT INTO user_teams (user_id, team_id) VALUES ($1, '01HQ5RJNXS6TPXK89PQWY4N8JI')`,
+			args:  []any{userID},
+		},
+		{
+			query: `INSERT INTO refresh_tokens (id, aid, token) VALUES ('01J00000000000000000000008', $1, 'clear-refresh')`,
+			args:  []any{userID},
+		},
+		{
+			query: `INSERT INTO denylist (token, denied_until) VALUES ('clear-access', 9999999999)`,
 		},
 		{
 			query: `INSERT INTO queue_properties (queue_id, queue_name, retention_period_seconds, visibility_timeout_seconds, max_receive_attempts) VALUES ($1, 'upgrade-queue', 3600, 30, 5)`,
@@ -210,7 +241,7 @@ func TestPGEvolverUpgradeFromVersionFourPreservesData(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	var version, users, subscriptions int
+	var version, users, subscriptions, roles, teams, sessions, denied, principals int
 	if err := pool.QueryRow(ctx, `SELECT version FROM schema_version WHERE id = 0`).Scan(&version); err != nil {
 		t.Fatalf("read upgraded schema version: %v", err)
 	}
@@ -220,8 +251,43 @@ func TestPGEvolverUpgradeFromVersionFourPreservesData(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM topic_subscriptions WHERE topic_id = $1 AND queue_id = $2`, topicID, queueID).Scan(&subscriptions); err != nil {
 		t.Fatalf("read preserved subscription: %v", err)
 	}
-	if version != 5 || users != 1 || subscriptions != 1 {
-		t.Fatalf("upgrade state = version %d users %d subscriptions %d, want version 5 users 1 subscriptions 1", version, users, subscriptions)
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM user_roles WHERE user_id = $1`, userID).Scan(&roles); err != nil {
+		t.Fatalf("read preserved roles: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM user_teams WHERE user_id = $1`, userID).Scan(&teams); err != nil {
+		t.Fatalf("read preserved teams: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM refresh_tokens`).Scan(&sessions); err != nil {
+		t.Fatalf("read revoked refresh sessions: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM denylist`).Scan(&denied); err != nil {
+		t.Fatalf("read rebuilt denylist: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM security_principals WHERE principal_kind = 'human'`).Scan(&principals); err != nil {
+		t.Fatalf("read projected human principals: %v", err)
+	}
+	if version != 6 || users != 1 || subscriptions != 1 || roles != 1 || teams != 1 || sessions != 0 ||
+		denied != 0 || principals != 2 {
+		t.Fatalf("upgrade state = version %d users %d subscriptions %d roles %d teams %d sessions %d denied %d principals %d",
+			version, users, subscriptions, roles, teams, sessions, denied, principals)
+	}
+
+	const legacyTenantID = "01HQ5RJNXS6TPXK89PQWY4N8JH"
+	var legacyUserTenant, queueTenant, topicTenant string
+	if err := pool.QueryRow(ctx, `SELECT org_id FROM users WHERE user_id = $1`, userID2).Scan(&legacyUserTenant); err != nil {
+		t.Fatalf("read backfilled user tenant: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT tenant_id FROM queue_properties WHERE queue_id = $1`, queueID).Scan(&queueTenant); err != nil {
+		t.Fatalf("read migrated queue tenant: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT tenant_id FROM topic_properties WHERE topic_id = $1`, topicID).Scan(&topicTenant); err != nil {
+		t.Fatalf("read migrated topic tenant: %v", err)
+	}
+	if legacyUserTenant != legacyTenantID || queueTenant != legacyTenantID || topicTenant != legacyTenantID {
+		t.Fatalf("backfilled tenants = user %q queue %q topic %q", legacyUserTenant, queueTenant, topicTenant)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO users (user_id, email, password, org_id) VALUES ('orphan-user', 'orphan@example.test', 'hash', 'missing-tenant')`); err == nil {
+		t.Fatal("upgraded users accepted a missing organization")
 	}
 
 	if _, err := pool.Exec(ctx, `INSERT INTO agents (
@@ -229,5 +295,319 @@ func TestPGEvolverUpgradeFromVersionFourPreservesData(t *testing.T) {
 		created_by_id, created_at_ns, updated_at_ns
 	) VALUES ($1, $2, 'upgrade-agent', 1, 1, 'system', 'upgrade-test', 1, 1)`, "01J00000000000000000000006", orgID); err != nil {
 		t.Fatalf("write new version-five table after upgrade: %v", err)
+	}
+}
+
+func TestPGEvolverTenantSecurityRejectsConflictingDefaultTenant(t *testing.T) {
+	pool := openPGEvolverTestPool(t)
+	all := mutations.PostgresStorageMutations()
+	versionFive := make(fstest.MapFS, 5)
+	for _, name := range []string{
+		"001_schema.sql", "002_user.sql", "003_organizations.sql", "004_pubsub.sql", "005_agent_messaging.sql",
+	} {
+		data, err := fs.ReadFile(all, name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		versionFive[name] = &fstest.MapFile{Data: data}
+	}
+	if err := newPgEvolver(pool, versionFive).MutateSchema(); err != nil {
+		t.Fatalf("apply version-five schema: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(), `
+		UPDATE organizations SET org_code = 'occupied', org_name = 'Conflicting Tenant'
+		WHERE org_id = '01HQ5RJNXS6TPXK89PQWY4N8JH'`); err != nil {
+		t.Fatalf("create fixed tenant conflict: %v", err)
+	}
+
+	if err := newPgEvolver(pool, all).MutateSchema(); err == nil {
+		t.Fatal("tenant security migration succeeded with a conflicting fixed tenant")
+	}
+	var version int
+	if err := pool.QueryRow(context.Background(), `SELECT version FROM schema_version WHERE id = 0`).Scan(&version); err != nil {
+		t.Fatalf("read schema version: %v", err)
+	}
+	if version != 5 {
+		t.Fatalf("schema version after rejected conflict = %d, want 5", version)
+	}
+}
+
+func TestPGEvolverTenantSecurityCreatesMissingDefaultTenant(t *testing.T) {
+	pool := openPGEvolverTestPool(t)
+	all := mutations.PostgresStorageMutations()
+	versionFive := make(fstest.MapFS, 5)
+	for _, name := range []string{
+		"001_schema.sql", "002_user.sql", "003_organizations.sql", "004_pubsub.sql", "005_agent_messaging.sql",
+	} {
+		data, err := fs.ReadFile(all, name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		versionFive[name] = &fstest.MapFile{Data: data}
+	}
+	if err := newPgEvolver(pool, versionFive).MutateSchema(); err != nil {
+		t.Fatalf("apply version-five schema: %v", err)
+	}
+
+	const tenantID = "01HQ5RJNXS6TPXK89PQWY4N8JH"
+	if _, err := pool.Exec(context.Background(), `DELETE FROM organizations WHERE org_id = $1`, tenantID); err != nil {
+		t.Fatalf("delete default tenant: %v", err)
+	}
+	if _, err := pool.Exec(context.Background(), `INSERT INTO users (user_id, email, password) VALUES ('orphan-user', 'orphan@example.test', 'hash')`); err != nil {
+		t.Fatalf("seed tenantless user: %v", err)
+	}
+
+	if err := newPgEvolver(pool, all).MutateSchema(); err != nil {
+		t.Fatalf("apply tenant security migration: %v", err)
+	}
+
+	var organizations, users int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM organizations WHERE org_id = $1 AND org_code = 'default' AND org_name = 'Default Organization' AND org_domain IS NULL`, tenantID).Scan(&organizations); err != nil {
+		t.Fatalf("read recreated default tenant: %v", err)
+	}
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM users WHERE user_id = 'orphan-user' AND org_id = $1`, tenantID).Scan(&users); err != nil {
+		t.Fatalf("read backfilled user tenant: %v", err)
+	}
+	if organizations != 1 || users != 1 {
+		t.Fatalf("recreated migration state = organizations %d users %d", organizations, users)
+	}
+}
+
+func TestPGEvolverTenantSecurityBackfillsExactUsageLedgers(t *testing.T) {
+	pool := openPGEvolverTestPool(t)
+	all := mutations.PostgresStorageMutations()
+	versionFive := make(fstest.MapFS, 5)
+	for _, name := range []string{
+		"001_schema.sql", "002_user.sql", "003_organizations.sql", "004_pubsub.sql", "005_agent_messaging.sql",
+	} {
+		data, err := fs.ReadFile(all, name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		versionFive[name] = &fstest.MapFile{Data: data}
+	}
+	if err := newPgEvolver(pool, versionFive).MutateSchema(); err != nil {
+		t.Fatalf("apply version-five schema: %v", err)
+	}
+
+	const tenantID = "01HQ5RJNXS6TPXK89PQWY4N8JH"
+	for _, statement := range []string{
+		`INSERT INTO queue_properties (queue_id, queue_name, retention_period_seconds, visibility_timeout_seconds, max_receive_attempts) VALUES ('usage-queue', 'usage-queue', 3600, 30, 5)`,
+		`INSERT INTO topic_properties (topic_id, topic_name) VALUES ('usage-topic', 'usage-topic')`,
+		`INSERT INTO topic_subscriptions (subscription_id, topic_id, queue_id) VALUES ('usage-sub', 'usage-topic', 'usage-queue')`,
+		`INSERT INTO agents (agent_id, tenant_id, agent_name, status, auth_version, created_by_kind, created_by_id, created_at_ns, updated_at_ns) VALUES ('usage-agent', '` + tenantID + `', 'usage-agent', 1, 1, 'system', 'test', 1, 1)`,
+		`INSERT INTO security_principals (tenant_id, principal_kind, principal_id, status, roles_json, auth_version, updated_at_ns) VALUES ('` + tenantID + `', 'agent', 'usage-agent', 'active', '[]', 1, 1)`,
+		`INSERT INTO agent_credentials (credential_id, tenant_id, agent_id, credential_name, credential_prefix, secret_hash, created_at_ns) VALUES ('active-credential', '` + tenantID + `', 'usage-agent', 'active', 'active-prefix', decode(repeat('00', 32), 'hex'), 1)`,
+		`INSERT INTO agent_credentials (credential_id, tenant_id, agent_id, credential_name, credential_prefix, secret_hash, created_at_ns, revoked_at_ns) VALUES ('revoked-credential', '` + tenantID + `', 'usage-agent', 'revoked', 'revoked-prefix', decode(repeat('00', 32), 'hex'), 1, 2)`,
+		`INSERT INTO direct_messages (message_id, tenant_id, sender_principal_kind, sender_principal_id, kind, schema_version, content_type, attributes_json, correlation_id, causation_id, conversation_id, reply_to_agent_id, body, stored_bytes, created_at_ns) VALUES ('usage-message', '` + tenantID + `', 'agent', 'usage-agent', 'test', 1, 'application/octet-stream', '{}', '', '', '', '', decode('0102', 'hex'), 7, 1)`,
+		`INSERT INTO direct_deliveries (delivery_id, tenant_id, recipient_agent_id, message_id, state, available_at_ns) VALUES ('available-delivery', '` + tenantID + `', 'usage-agent', 'usage-message', 'available', 1)`,
+		`INSERT INTO direct_deliveries (delivery_id, tenant_id, recipient_agent_id, message_id, state, available_at_ns) VALUES ('leased-delivery', '` + tenantID + `', 'usage-agent', 'usage-message', 'leased', 1)`,
+		`INSERT INTO direct_deliveries (delivery_id, tenant_id, recipient_agent_id, message_id, state, available_at_ns, acked_at_ns) VALUES ('acked-delivery', '` + tenantID + `', 'usage-agent', 'usage-message', 'acked', 1, 2)`,
+	} {
+		if _, err := pool.Exec(context.Background(), statement); err != nil {
+			t.Fatalf("seed version-five usage data: %v", err)
+		}
+	}
+
+	if err := newPgEvolver(pool, all).MutateSchema(); err != nil {
+		t.Fatalf("apply tenant security migration: %v", err)
+	}
+
+	var agents, topics, subscriptions, storedBytes int
+	if err := pool.QueryRow(context.Background(), `SELECT agent_count, topic_count, subscription_count, stored_messaging_bytes FROM tenant_resource_usage WHERE tenant_id = $1`, tenantID).
+		Scan(&agents, &topics, &subscriptions, &storedBytes); err != nil {
+		t.Fatalf("read tenant usage ledger: %v", err)
+	}
+	if agents != 1 || topics != 1 || subscriptions != 1 || storedBytes != 7 {
+		t.Fatalf("tenant usage = agents %d topics %d subscriptions %d bytes %d", agents, topics, subscriptions, storedBytes)
+	}
+
+	var pending, pendingBytes, agentSubscriptions, activeCredentials int
+	if err := pool.QueryRow(context.Background(), `SELECT pending_direct_count, pending_direct_bytes, subscription_count, active_credential_count FROM agent_resource_usage WHERE tenant_id = $1 AND agent_id = 'usage-agent'`, tenantID).
+		Scan(&pending, &pendingBytes, &agentSubscriptions, &activeCredentials); err != nil {
+		t.Fatalf("read agent usage ledger: %v", err)
+	}
+	if pending != 2 || pendingBytes != 14 || agentSubscriptions != 0 || activeCredentials != 1 {
+		t.Fatalf("agent usage = pending %d bytes %d subscriptions %d credentials %d", pending, pendingBytes, agentSubscriptions, activeCredentials)
+	}
+}
+
+func TestPostgresConcurrentBootstrapCreatesExactlyOneAdmin(t *testing.T) {
+	pool := openPGEvolverTestPool(t)
+	if err := newPgEvolver(pool, mutations.PostgresStorageMutations()).MutateSchema(); err != nil {
+		t.Fatalf("apply storage schema: %v", err)
+	}
+	storage, err := onboardpg.NewStorage(pool, nil)
+	if err != nil {
+		t.Fatalf("create onboarding storage: %v", err)
+	}
+
+	start := make(chan struct{})
+	var successes atomic.Int32
+	var group sync.WaitGroup
+	for index := range 10 {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			<-start
+
+			now := time.Now().UTC()
+			id := fmt.Sprintf("bootstrap-%02d", index)
+			record := onboarding.BootstrapRecord{
+				Admin: onboarding.InitialAdmin{
+					UserID: id, Email: id + "@example.test", Password: "password-hash", Verified: true,
+					CreatedAt: now, TenantID: principal.LegacyTenantID, AuthVersion: 1, Status: "active",
+				},
+				RefreshToken: onboarding.RefreshTokenRecord{
+					ID: id, AccountID: id, TokenHash: make([]byte, 32), CreatedAt: now,
+					ExpiresAt: now.Add(time.Hour), LastUsedAt: now,
+				},
+				Audit: onboarding.AuditEvent{
+					ID: id, TenantID: principal.LegacyTenantID, PrincipalKind: string(principal.KindHuman),
+					PrincipalID: id, Action: "onboarding.bootstrap", ResourceKind: "tenant",
+					ResourceID: principal.LegacyTenantID, Outcome: "success", MetadataJSON: []byte(`{}`),
+					CreatedAt: now,
+				},
+			}
+			record.RefreshToken.TokenHash[31] = byte(index + 1)
+			if err := storage.Bootstrap(context.Background(), record); err == nil {
+				successes.Add(1)
+			}
+		}()
+	}
+	close(start)
+	group.Wait()
+
+	if got := successes.Load(); got != 1 {
+		t.Fatalf("successful bootstraps = %d, want 1", got)
+	}
+	var users, assignments, principals, sessions, audits int
+	for query, destination := range map[string]*int{
+		`SELECT count(*) FROM users`:                                                       &users,
+		`SELECT count(*) FROM user_roles`:                                                  &assignments,
+		`SELECT count(*) FROM security_principals WHERE principal_kind = 'human'`:          &principals,
+		`SELECT count(*) FROM refresh_tokens`:                                              &sessions,
+		`SELECT count(*) FROM security_audit_events WHERE action = 'onboarding.bootstrap'`: &audits,
+	} {
+		if err := pool.QueryRow(context.Background(), query).Scan(destination); err != nil {
+			t.Fatalf("read bootstrap effects: %v", err)
+		}
+	}
+	if users != 1 || assignments != 1 || principals != 1 || sessions != 1 || audits != 1 {
+		t.Fatalf("bootstrap effects = users %d assignments %d principals %d sessions %d audits %d",
+			users, assignments, principals, sessions, audits)
+	}
+}
+
+func TestPostgresOAuthSyncUpsertsHumanSecurityPrincipal(t *testing.T) {
+	pool := openPGEvolverTestPool(t)
+	if err := newPgEvolver(pool, mutations.PostgresStorageMutations()).MutateSchema(); err != nil {
+		t.Fatalf("apply storage schema: %v", err)
+	}
+	storage, err := oauthpg.NewStorage(pool, nil)
+	if err != nil {
+		t.Fatalf("create OAuth storage: %v", err)
+	}
+
+	ctx := context.Background()
+	user := oauth.OAuthUser{Subject: "subject-1", Email: "oauth@example.test"}
+	if err := storage.SyncOAuthUser(ctx, user, "example", principal.LegacyTenantID); err != nil {
+		t.Fatalf("sync OAuth user: %v", err)
+	}
+	synced, err := storage.GetUserByOAuthSub(ctx, "example", user.Subject)
+	if err != nil {
+		t.Fatalf("get synchronized user: %v", err)
+	}
+
+	var tenantID, kind, status, rolesJSON string
+	var authVersion int64
+	if err := pool.QueryRow(ctx, `
+		SELECT tenant_id, principal_kind, status, roles_json::text, auth_version
+		FROM security_principals
+		WHERE principal_id = $1`, synced.UserID,
+	).Scan(&tenantID, &kind, &status, &rolesJSON, &authVersion); err != nil {
+		t.Fatalf("get human security principal: %v", err)
+	}
+	if tenantID != principal.LegacyTenantID || kind != "human" || status != "active" ||
+		rolesJSON != "[]" || authVersion != 1 {
+		t.Fatalf(
+			"security principal = (%q, %q, %q, %s, %d), want (%q, human, active, [], 1)",
+			tenantID, kind, status, rolesJSON, authVersion, principal.LegacyTenantID,
+		)
+	}
+}
+
+func TestPostgresLegacyQueueAndTopicTenantIsolation(t *testing.T) {
+	pool := openPGEvolverTestPool(t)
+	if err := newPgEvolver(pool, mutations.PostgresStorageMutations()).MutateSchema(); err != nil {
+		t.Fatalf("apply storage schema: %v", err)
+	}
+	store, err := queuepg.New(pool, queuepg.WithGCTimeout(time.Hour))
+	if err != nil {
+		t.Fatalf("create queue storage: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if _, err := pool.Exec(context.Background(), `
+		INSERT INTO organizations (org_id, org_code, org_name)
+		VALUES ('tenant-b', 'tenant-b', 'Tenant B')`); err != nil {
+		t.Fatalf("seed tenant B: %v", err)
+	}
+
+	legacyCtx := principal.With(context.Background(), principal.Principal{
+		Kind: principal.KindSystem, ID: principal.LegacyPrincipalID, TenantID: principal.LegacyTenantID,
+	})
+	humanACtx := principal.With(context.Background(), principal.Principal{
+		Kind: principal.KindHuman, ID: "human-a", TenantID: principal.LegacyTenantID,
+	})
+	humanBCtx := principal.With(context.Background(), principal.Principal{
+		Kind: principal.KindHuman, ID: "human-b", TenantID: "tenant-b",
+	})
+
+	legacyQueue, err := store.CreateQueue(legacyCtx, &v1.CreateQueueRequest{QueueName: "shared"})
+	if err != nil {
+		t.Fatalf("create legacy queue: %v", err)
+	}
+	privateQueue, err := store.CreateQueue(humanACtx, &v1.CreateQueueRequest{QueueName: "private-a"})
+	if err != nil {
+		t.Fatalf("create tenant-A queue: %v", err)
+	}
+	if _, err := store.CreateQueue(humanBCtx, &v1.CreateQueueRequest{QueueName: "shared"}); err != nil {
+		t.Fatalf("create same-name tenant-B queue: %v", err)
+	}
+	legacyList, err := store.ListQueues(legacyCtx, &v1.ListQueuesRequest{Limit: 10})
+	if err != nil {
+		t.Fatalf("list legacy queues: %v", err)
+	}
+	if len(legacyList.GetQueues()) != 1 || legacyList.GetQueues()[0].GetQueueId() != legacyQueue.GetQueueId() {
+		t.Fatalf("legacy queues = %#v", legacyList.GetQueues())
+	}
+	if _, err := store.Send(humanBCtx, &v1.SendRequest{
+		QueueId: privateQueue.GetQueueId(), Messages: []*v1.SendMessage{{Body: []byte("cross-tenant")}},
+	}); !errors.Is(err, pqerr.ErrNotFound) {
+		t.Fatalf("cross-tenant send error = %v, want not found", err)
+	}
+
+	legacyTopic, err := store.CreateTopic(legacyCtx, &queueservice.CreateTopicRequest{TopicName: "shared"})
+	if err != nil {
+		t.Fatalf("create legacy topic: %v", err)
+	}
+	privateTopic, err := store.CreateTopic(humanACtx, &queueservice.CreateTopicRequest{TopicName: "private-a"})
+	if err != nil {
+		t.Fatalf("create tenant-A topic: %v", err)
+	}
+	if _, err := store.CreateTopic(humanBCtx, &queueservice.CreateTopicRequest{TopicName: "shared"}); err != nil {
+		t.Fatalf("create same-name tenant-B topic: %v", err)
+	}
+	legacyTopics, err := store.ListTopics(legacyCtx)
+	if err != nil {
+		t.Fatalf("list legacy topics: %v", err)
+	}
+	if len(legacyTopics.Topics) != 1 || legacyTopics.Topics[0].TopicID != legacyTopic.TopicID {
+		t.Fatalf("legacy topics = %#v", legacyTopics.Topics)
+	}
+	if _, err := store.Publish(humanBCtx, privateTopic.TopicID, &queueservice.PublishRequest{
+		Messages: []queueservice.PublishMessage{{Body: []byte("cross-tenant")}},
+	}); err == nil {
+		t.Fatal("cross-tenant publish unexpectedly succeeded")
 	}
 }

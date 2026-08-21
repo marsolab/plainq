@@ -12,11 +12,15 @@ import (
 )
 
 func (s *Storage) ListTopics(ctx context.Context) (*queue.ListTopicsResponse, error) {
+	scope := queue.ScopeFromContext(ctx)
+
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT topic_id, topic_name, created_at
 		FROM topic_properties
+		WHERE tenant_id = ?
+		  AND (? = FALSE OR (created_by_kind = 'system' AND created_by_id IN ('migration', 'legacy-v1')))
 		ORDER BY created_at DESC;
-	`)
+	`, scope.TenantID, scope.Compatibility)
 	if err != nil {
 		return nil, fmt.Errorf("list topics: %w", err)
 	}
@@ -55,12 +59,19 @@ func (s *Storage) CreateTopic(ctx context.Context, input *queue.CreateTopicReque
 	// reads the local clock, and two replicas applying the same CreateTopic
 	// would then disagree about when the topic appeared.
 	id := queue.NextID(ctx, idkit.XID)
+
+	scope := queue.ScopeFromContext(ctx)
 	if _, err := s.db.ExecContext(
 		ctx,
-		`INSERT INTO topic_properties (topic_id, topic_name, created_at) VALUES (?, ?, ?);`,
+		`INSERT INTO topic_properties (
+			topic_id, topic_name, created_at, tenant_id, created_by_kind, created_by_id
+		) VALUES (?, ?, ?, ?, ?, ?);`,
 		id,
 		input.TopicName,
 		writeTime(ctx),
+		scope.TenantID,
+		scope.CreatorKind,
+		scope.CreatorID,
 	); err != nil {
 		return nil, fmt.Errorf("create topic: %w", err)
 	}
@@ -69,7 +80,14 @@ func (s *Storage) CreateTopic(ctx context.Context, input *queue.CreateTopicReque
 }
 
 func (s *Storage) DeleteTopic(ctx context.Context, topicID string) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM topic_properties WHERE topic_id = ?;`, topicID)
+	scope := queue.ScopeFromContext(ctx)
+
+	res, err := s.db.ExecContext(ctx, `
+		DELETE FROM topic_properties
+		WHERE topic_id = ?
+		  AND tenant_id = ?
+		  AND (? = FALSE OR (created_by_kind = 'system' AND created_by_id IN ('migration', 'legacy-v1')));
+	`, topicID, scope.TenantID, scope.Compatibility)
 	if err != nil {
 		return fmt.Errorf("delete topic: %w", err)
 	}
@@ -87,6 +105,10 @@ func (s *Storage) DeleteTopic(ctx context.Context, topicID string) error {
 }
 
 func (s *Storage) Subscribe(ctx context.Context, topicID string, input *queue.SubscribeRequest) (*queue.SubscribeResponse, error) {
+	if err := s.ensureTopicExists(ctx, topicID); err != nil {
+		return nil, err
+	}
+
 	if _, err := s.DescribeQueue(ctx, &v1.DescribeQueueRequest{QueueId: input.QueueID}); err != nil {
 		return nil, fmt.Errorf("describe subscription queue: %w", err)
 	}
@@ -107,11 +129,24 @@ func (s *Storage) Subscribe(ctx context.Context, topicID string, input *queue.Su
 }
 
 func (s *Storage) Unsubscribe(ctx context.Context, topicID, subscriptionID string) error {
+	scope := queue.ScopeFromContext(ctx)
+
 	res, err := s.db.ExecContext(
 		ctx,
-		`DELETE FROM topic_subscriptions WHERE topic_id = ? AND subscription_id = ?;`,
+		`DELETE FROM topic_subscriptions
+		 WHERE topic_id = ?
+		   AND subscription_id = ?
+		   AND EXISTS (
+		       SELECT 1
+		       FROM topic_properties t
+		       WHERE t.topic_id = topic_subscriptions.topic_id
+		         AND t.tenant_id = ?
+		         AND (? = FALSE OR (t.created_by_kind = 'system' AND t.created_by_id IN ('migration', 'legacy-v1')))
+		   );`,
 		topicID,
 		subscriptionID,
+		scope.TenantID,
+		scope.Compatibility,
 	)
 	if err != nil {
 		return fmt.Errorf("unsubscribe queue: %w", err)
@@ -176,10 +211,20 @@ func (s *Storage) Publish(ctx context.Context, topicID string, input *queue.Publ
 func (s *Storage) ensureTopicExists(ctx context.Context, topicID string) error {
 	var exists bool
 
+	scope := queue.ScopeFromContext(ctx)
+
 	if err := s.db.QueryRowContext(
 		ctx,
-		`SELECT EXISTS(SELECT 1 FROM topic_properties WHERE topic_id = ?);`,
+		`SELECT EXISTS(
+			SELECT 1
+			FROM topic_properties
+			WHERE topic_id = ?
+			  AND tenant_id = ?
+			  AND (? = FALSE OR (created_by_kind = 'system' AND created_by_id IN ('migration', 'legacy-v1')))
+		);`,
 		topicID,
+		scope.TenantID,
+		scope.Compatibility,
 	).Scan(&exists); err != nil {
 		return fmt.Errorf("check topic exists: %w", err)
 	}
@@ -192,6 +237,8 @@ func (s *Storage) ensureTopicExists(ctx context.Context, topicID string) error {
 }
 
 func (s *Storage) listSubscriptions(ctx context.Context, topicID string) ([]queue.Subscription, error) {
+	scope := queue.ScopeFromContext(ctx)
+
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT s.subscription_id,
 		       s.topic_id,
@@ -199,10 +246,17 @@ func (s *Storage) listSubscriptions(ctx context.Context, topicID string) ([]queu
 		       COALESCE(q.queue_name, ''),
 		       s.created_at
 		FROM topic_subscriptions s
-		LEFT JOIN queue_properties q ON q.queue_id = s.queue_id
+		JOIN topic_properties t ON t.topic_id = s.topic_id
+		JOIN queue_properties q ON q.queue_id = s.queue_id
 		WHERE s.topic_id = ?
+		  AND t.tenant_id = ?
+		  AND q.tenant_id = ?
+		  AND (? = FALSE OR (
+		      t.created_by_kind = 'system' AND t.created_by_id IN ('migration', 'legacy-v1')
+		      AND q.created_by_kind = 'system' AND q.created_by_id IN ('migration', 'legacy-v1')
+		  ))
 		ORDER BY s.created_at DESC;
-	`, topicID)
+	`, topicID, scope.TenantID, scope.TenantID, scope.Compatibility)
 	if err != nil {
 		return nil, fmt.Errorf("list subscriptions: %w", err)
 	}

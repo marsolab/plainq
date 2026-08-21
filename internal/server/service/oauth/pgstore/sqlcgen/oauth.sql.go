@@ -199,7 +199,7 @@ type GetUserByOAuthSubParams struct {
 type GetUserByOAuthSubRow struct {
 	UserID        string
 	Email         string
-	OrgID         pgtype.Text
+	OrgID         string
 	OauthProvider pgtype.Text
 	OauthSub      pgtype.Text
 	IsOauthUser   bool
@@ -283,7 +283,7 @@ VALUES ($1, $2, '', TRUE, $3, $4, $5, TRUE, $6, $7, $8)
 type InsertOAuthUserParams struct {
 	UserID        string
 	Email         string
-	OrgID         pgtype.Text
+	OrgID         string
 	OauthProvider pgtype.Text
 	OauthSub      pgtype.Text
 	LastSyncAt    pgtype.Timestamptz
@@ -550,7 +550,7 @@ WHERE user_id = $5
 
 type UpdateOAuthUserParams struct {
 	Email      string
-	OrgID      pgtype.Text
+	OrgID      string
 	LastSyncAt pgtype.Timestamptz
 	UpdatedAt  pgtype.Timestamptz
 	UserID     string
@@ -582,5 +582,41 @@ type UpdateUserLastSyncParams struct {
 
 func (q *Queries) UpdateUserLastSync(ctx context.Context, arg UpdateUserLastSyncParams) error {
 	_, err := q.db.Exec(ctx, updateUserLastSync, arg.LastSyncAt, arg.UpdatedAt, arg.UserID)
+	return err
+}
+
+const upsertHumanSecurityPrincipal = `-- name: UpsertHumanSecurityPrincipal :exec
+INSERT INTO security_principals (
+    tenant_id, principal_kind, principal_id, status, roles_json,
+    auth_version, updated_at_ns
+)
+SELECT u.org_id,
+       'human',
+       u.user_id,
+       u.status,
+       coalesce((
+           SELECT jsonb_agg(r.role_name ORDER BY r.role_name)
+           FROM user_roles ur
+           JOIN roles r ON r.role_id = ur.role_id
+           WHERE ur.user_id = u.user_id
+       ), '[]'::jsonb),
+       u.auth_version,
+       $1
+FROM users u
+WHERE u.user_id = $2
+ON CONFLICT (tenant_id, principal_kind, principal_id) DO UPDATE SET
+    status = excluded.status,
+    roles_json = excluded.roles_json,
+    auth_version = excluded.auth_version,
+    updated_at_ns = excluded.updated_at_ns
+`
+
+type UpsertHumanSecurityPrincipalParams struct {
+	UpdatedAtNs int64
+	UserID      string
+}
+
+func (q *Queries) UpsertHumanSecurityPrincipal(ctx context.Context, arg UpsertHumanSecurityPrincipalParams) error {
+	_, err := q.db.Exec(ctx, upsertHumanSecurityPrincipal, arg.UpdatedAtNs, arg.UserID)
 	return err
 }

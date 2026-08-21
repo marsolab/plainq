@@ -200,7 +200,7 @@ type GetUserByOAuthSubParams struct {
 type GetUserByOAuthSubRow struct {
 	UserID        string
 	Email         string
-	OrgID         sql.NullString
+	OrgID         string
 	OauthProvider sql.NullString
 	OauthSub      sql.NullString
 	IsOauthUser   bool
@@ -284,7 +284,7 @@ VALUES (?, ?, '', TRUE, ?, ?, ?, TRUE, ?, ?, ?)
 type InsertOAuthUserParams struct {
 	UserID        string
 	Email         string
-	OrgID         sql.NullString
+	OrgID         string
 	OauthProvider sql.NullString
 	OauthSub      sql.NullString
 	LastSyncAt    sql.NullTime
@@ -568,7 +568,7 @@ WHERE user_id = ?
 
 type UpdateOAuthUserParams struct {
 	Email      string
-	OrgID      sql.NullString
+	OrgID      string
 	LastSyncAt sql.NullTime
 	UpdatedAt  time.Time
 	UserID     string
@@ -600,5 +600,45 @@ type UpdateUserLastSyncParams struct {
 
 func (q *Queries) UpdateUserLastSync(ctx context.Context, arg UpdateUserLastSyncParams) error {
 	_, err := q.db.ExecContext(ctx, updateUserLastSync, arg.LastSyncAt, arg.UpdatedAt, arg.UserID)
+	return err
+}
+
+const upsertHumanSecurityPrincipal = `-- name: UpsertHumanSecurityPrincipal :exec
+INSERT INTO security_principals (
+    tenant_id, principal_kind, principal_id, status, roles_json,
+    auth_version, updated_at_ns
+)
+SELECT u.org_id,
+       'human',
+       u.user_id,
+       u.status,
+       coalesce((
+           SELECT json_group_array(role_name)
+           FROM (
+               SELECT r.role_name AS role_name
+               FROM user_roles ur
+               JOIN roles r ON r.role_id = ur.role_id
+               WHERE ur.user_id = u.user_id
+               ORDER BY r.role_name
+           )
+       ), '[]'),
+       u.auth_version,
+       ?
+FROM users u
+WHERE u.user_id = ?
+ON CONFLICT (tenant_id, principal_kind, principal_id) DO UPDATE SET
+    status = excluded.status,
+    roles_json = excluded.roles_json,
+    auth_version = excluded.auth_version,
+    updated_at_ns = excluded.updated_at_ns
+`
+
+type UpsertHumanSecurityPrincipalParams struct {
+	UpdatedAtNs int64
+	UserID      string
+}
+
+func (q *Queries) UpsertHumanSecurityPrincipal(ctx context.Context, arg UpsertHumanSecurityPrincipalParams) error {
+	_, err := q.db.ExecContext(ctx, upsertHumanSecurityPrincipal, arg.UpdatedAtNs, arg.UserID)
 	return err
 }

@@ -2,6 +2,7 @@ package litestore
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -16,6 +17,19 @@ import (
 // foreign key from a grant to a queue — the constraint that turns a grant on a
 // queue that does not exist into a rejected request rather than a stored row.
 const permissionsSchema = `
+create table if not exists organizations
+(
+    org_id text not null primary key
+);
+
+create table if not exists users
+(
+    user_id text not null primary key,
+    org_id text not null,
+    auth_version integer not null default 1,
+    status text not null default 'active'
+);
+
 create table if not exists roles
 (
     role_id    text      not null primary key,
@@ -34,7 +48,22 @@ create table if not exists user_roles
 create table if not exists queue_properties
 (
     queue_id   text not null primary key,
-    queue_name text not null
+    queue_name text not null,
+    tenant_id text not null,
+    created_by_kind text not null,
+    created_by_id text not null
+);
+
+create table if not exists security_principals
+(
+    tenant_id text not null,
+    principal_kind text not null,
+    principal_id text not null,
+    status text not null,
+    roles_json text not null,
+    auth_version integer not null,
+    updated_at_ns integer not null,
+    primary key (tenant_id, principal_kind, principal_id)
 );
 
 create table if not exists queue_permissions
@@ -80,15 +109,53 @@ func newPermissionsStorage(t *testing.T) (*Storage, context.Context) {
 	td.Require(t).CmpNoError(err, "create storage")
 
 	for _, statement := range []string{
+		`insert into organizations (org_id) values ('tenant-1')`,
+		`insert into users (user_id, org_id) values ('user-1', 'tenant-1')`,
+		`insert into users (user_id, org_id) values ('user-2', 'tenant-1')`,
 		`insert into roles (role_id, role_name) values ('role-consumer', 'consumer')`,
-		`insert into queue_properties (queue_id, queue_name) values ('queue-1', 'orders')`,
-		`insert into queue_properties (queue_id, queue_name) values ('queue-2', 'billing')`,
+		`insert into queue_properties (queue_id, queue_name, tenant_id, created_by_kind, created_by_id) values ('queue-1', 'orders', 'tenant-1', 'system', 'migration')`,
+		`insert into queue_properties (queue_id, queue_name, tenant_id, created_by_kind, created_by_id) values ('queue-2', 'billing', 'tenant-1', 'system', 'migration')`,
 	} {
 		_, err := conn.ExecContext(ctx, statement)
 		td.Require(t).CmpNoError(err, "seed: %s", statement)
 	}
 
 	return storage, ctx
+}
+
+func TestRoleMutationBumpsAuthVersionAndProjectsPrincipal(t *testing.T) {
+	storage, ctx := newPermissionsStorage(t)
+
+	td.Require(t).CmpNoError(storage.AssignRoleToUser(ctx, "user-1", "role-consumer"), "assign role")
+	assertHumanSecurityProjection(t, storage.db, 2, `["consumer"]`)
+
+	td.Require(t).CmpNoError(storage.UpdateRole(ctx, rbac.Role{
+		RoleID: "role-consumer", RoleName: "reader",
+	}), "rename role")
+	assertHumanSecurityProjection(t, storage.db, 3, `["reader"]`)
+
+	td.Require(t).CmpNoError(storage.RemoveRoleFromUser(ctx, "user-1", "role-consumer"), "remove role")
+	assertHumanSecurityProjection(t, storage.db, 4, `[]`)
+}
+
+func assertHumanSecurityProjection(t *testing.T, db interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, wantVersion int64, wantRoles string) {
+	t.Helper()
+	var userVersion, principalVersion int64
+	var roles string
+	if err := db.QueryRowContext(context.Background(), `
+SELECT u.auth_version, sp.auth_version, sp.roles_json
+FROM users u
+JOIN security_principals sp
+  ON sp.tenant_id = u.org_id AND sp.principal_kind = 'human' AND sp.principal_id = u.user_id
+WHERE u.user_id = 'user-1'`).Scan(&userVersion, &principalVersion, &roles); err != nil {
+		t.Fatalf("read human security projection: %v", err)
+	}
+	if userVersion != wantVersion || principalVersion != wantVersion || roles != wantRoles {
+		t.Fatalf("security projection = user_version %d principal_version %d roles %s, want %d/%d/%s",
+			userVersion, principalVersion, roles, wantVersion, wantVersion, wantRoles)
+	}
 }
 
 func TestReplaceRoleQueuePermissionsStoresExactlyTheGivenSet(t *testing.T) {
@@ -121,6 +188,38 @@ func TestReplaceRoleQueuePermissionsStoresExactlyTheGivenSet(t *testing.T) {
 	stored, err = storage.GetRoleQueuePermissions(ctx, "role-consumer")
 	td.Require(t).CmpNoError(err, "read back")
 	td.Cmp(t, len(stored), 0)
+}
+
+func TestQueuePermissionsResolveAdminAndTenantInStorage(t *testing.T) {
+	storage, ctx := newPermissionsStorage(t)
+
+	for _, statement := range []string{
+		`insert into organizations (org_id) values ('tenant-2')`,
+		`insert into users (user_id, org_id) values ('admin-1', 'tenant-1')`,
+		`insert into roles (role_id, role_name) values ('role-admin', 'admin')`,
+		`insert into user_roles (user_id, role_id) values ('admin-1', 'role-admin')`,
+		`insert into queue_properties (queue_id, queue_name, tenant_id, created_by_kind, created_by_id) values ('queue-other', 'private', 'tenant-2', 'human', 'other')`,
+	} {
+		if _, err := storage.db.ExecContext(ctx, statement); err != nil {
+			t.Fatalf("seed: %s: %v", statement, err)
+		}
+	}
+
+	allowed, err := storage.HasQueuePermission(ctx, "admin-1", "queue-1", rbac.PermissionSend)
+	if err != nil {
+		t.Fatalf("check same-tenant admin: %v", err)
+	}
+	if !allowed {
+		t.Fatal("same-tenant administrator was denied without an explicit queue grant")
+	}
+
+	allowed, err = storage.HasQueuePermission(ctx, "admin-1", "queue-other", rbac.PermissionSend)
+	if err != nil {
+		t.Fatalf("check cross-tenant admin: %v", err)
+	}
+	if allowed {
+		t.Fatal("cross-tenant administrator was allowed")
+	}
 }
 
 // A save that fails partway has to leave the previous matrix intact: a role

@@ -78,7 +78,7 @@ func UnaryAdmission(limiter *PrincipalAdmissionLimiter) grpc.UnaryServerIntercep
 		info *grpc.UnaryServerInfo,
 		handler grpc.UnaryHandler,
 	) (any, error) {
-		if methodAllowsAnonymous(info.FullMethod, PublicMethods()) {
+		if methodAllowsAnonymous(info.FullMethod, PublicMethods()) || isLegacyCompatibilityMethod(info.FullMethod) {
 			return handler(ctx, req)
 		}
 
@@ -103,7 +103,7 @@ func StreamAdmission(limiter *PrincipalAdmissionLimiter) grpc.StreamServerInterc
 		info *grpc.StreamServerInfo,
 		handler grpc.StreamHandler,
 	) error {
-		if methodAllowsAnonymous(info.FullMethod, PublicMethods()) {
+		if methodAllowsAnonymous(info.FullMethod, PublicMethods()) || isLegacyCompatibilityMethod(info.FullMethod) {
 			return handler(srv, stream)
 		}
 

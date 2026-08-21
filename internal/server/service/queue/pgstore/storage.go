@@ -137,7 +137,9 @@ func New(pool *pgxpool.Pool, options ...Option) (*Storage, error) {
 	return &s, nil
 }
 
+//nolint:cyclop // Queue creation keeps validation, SQL, cache, and cleanup failures distinct.
 func (s *Storage) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest) (_ *v1.CreateQueueResponse, sErr error) {
+	scope := queue.ScopeFromContext(ctx)
 	queueID := idkit.XID()
 
 	if input.QueueName == "" {
@@ -156,6 +158,12 @@ func (s *Storage) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest)
 		input.VisibilityTimeoutSeconds = uint64(msgVisibilityTimeout.Seconds())
 	}
 
+	if input.DeadLetterQueueId != "" {
+		if err := s.ensureQueueAccessible(ctx, input.DeadLetterQueueId); err != nil {
+			return nil, fmt.Errorf("resolve dead-letter queue: %w", err)
+		}
+	}
+
 	tx, txErr := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if txErr != nil {
 		return nil, fmt.Errorf(fmtBeginTxError, txErr)
@@ -171,6 +179,9 @@ func (s *Storage) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest)
 		MaxReceiveAttempts:       int32(input.MaxReceiveAttempts),       //nolint:gosec // max receive attempts is bounded by validation.
 		DropPolicy:               int32(input.EvictionPolicy),
 		DeadLetterQueueID:        toPgText(input.DeadLetterQueueId),
+		TenantID:                 scope.TenantID,
+		CreatedByKind:            string(scope.CreatorKind),
+		CreatedByID:              scope.CreatorID,
 	}); err != nil {
 		return nil, fmt.Errorf("create queue properties record: %w", err)
 	}
@@ -199,6 +210,8 @@ func (s *Storage) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest)
 }
 
 func (s *Storage) ListQueues(ctx context.Context, input *v1.ListQueuesRequest) (*v1.ListQueuesResponse, error) {
+	scope := queue.ScopeFromContext(ctx)
+
 	pageSize := input.Limit
 	if pageSize <= 0 {
 		pageSize = int32(defaultPageSize)
@@ -206,7 +219,7 @@ func (s *Storage) ListQueues(ctx context.Context, input *v1.ListQueuesRequest) (
 
 	limit := pageSize + 1
 
-	query, args, queryErr := queryListQueues(limit, input.QueuePrefix, input.Cursor, input.OrderBy, input.SortBy)
+	query, args, queryErr := queryListQueues(limit, input.QueuePrefix, input.Cursor, input.OrderBy, input.SortBy, scope)
 	if queryErr != nil {
 		return nil, queryErr
 	}
@@ -217,7 +230,8 @@ func (s *Storage) ListQueues(ctx context.Context, input *v1.ListQueuesRequest) (
 	}
 
 	var totalCount int64
-	countQuery, countArgs := queryCountQueues(input.QueuePrefix)
+
+	countQuery, countArgs := queryCountQueues(input.QueuePrefix, scope)
 	if err := s.pool.QueryRow(ctx, countQuery, countArgs...).Scan(&totalCount); err != nil {
 		return nil, fmt.Errorf("count queues: %w", err)
 	}
@@ -248,17 +262,7 @@ func (s *Storage) ListQueues(ctx context.Context, input *v1.ListQueuesRequest) (
 }
 
 func (s *Storage) DescribeQueue(ctx context.Context, input *v1.DescribeQueueRequest) (*v1.DescribeQueueResponse, error) {
-	switch {
-	case input.QueueId != "":
-		if p, ok := s.cache.getByID(input.QueueId); ok {
-			return propsToProto(p), nil
-		}
-
-	case input.QueueName != "":
-		if p, ok := s.cache.getByName(input.QueueName); ok {
-			return propsToProto(p), nil
-		}
-	}
+	scope := queue.ScopeFromContext(ctx)
 
 	var (
 		row sqlcgen.QueueProperty
@@ -267,10 +271,14 @@ func (s *Storage) DescribeQueue(ctx context.Context, input *v1.DescribeQueueRequ
 
 	switch {
 	case input.QueueId != "":
-		row, err = s.queries.GetQueuePropertiesByID(ctx, input.QueueId)
+		row, err = s.queries.GetQueuePropertiesByID(ctx, sqlcgen.GetQueuePropertiesByIDParams{
+			QueueID: input.QueueId, TenantID: scope.TenantID, LegacyCompat: scope.Compatibility,
+		})
 
 	case input.QueueName != "":
-		row, err = s.queries.GetQueuePropertiesByName(ctx, input.QueueName)
+		row, err = s.queries.GetQueuePropertiesByName(ctx, sqlcgen.GetQueuePropertiesByNameParams{
+			QueueName: input.QueueName, TenantID: scope.TenantID, LegacyCompat: scope.Compatibility,
+		})
 
 	default:
 		return nil, fmt.Errorf("%w: queue_id or queue_name should be specified", pqerr.ErrInvalidInput)
@@ -293,6 +301,9 @@ func (s *Storage) DescribeQueue(ctx context.Context, input *v1.DescribeQueueRequ
 
 func (s *Storage) PurgeQueue(ctx context.Context, input *v1.PurgeQueueRequest) (_ *v1.PurgeQueueResponse, sErr error) {
 	queueID := input.GetQueueId()
+	if err := s.ensureQueueAccessible(ctx, queueID); err != nil {
+		return nil, err
+	}
 
 	tx, txErr := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if txErr != nil {
@@ -325,10 +336,13 @@ func (s *Storage) PurgeQueue(ctx context.Context, input *v1.PurgeQueueRequest) (
 func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest) (_ *v1.DeleteQueueResponse, sErr error) {
 	queueID := input.GetQueueId()
 
-	props, ok := s.cache.getByID(queueID)
-	if !ok {
-		return nil, fmt.Errorf("queue props (id: %q) not cached", queueID)
+	described, err := s.DescribeQueue(ctx, &v1.DescribeQueueRequest{QueueId: queueID})
+	if err != nil {
+		return nil, err
 	}
+
+	props := propsFromProto(described)
+	scope := queue.ScopeFromContext(ctx)
 
 	tx, txErr := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if txErr != nil {
@@ -346,7 +360,9 @@ func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest)
 		return nil, err
 	}
 
-	rows, delErr := s.queries.WithTx(tx).DeleteQueueProperties(ctx, queueID)
+	rows, delErr := s.queries.WithTx(tx).DeleteQueueProperties(ctx, sqlcgen.DeleteQueuePropertiesParams{
+		QueueID: queueID, TenantID: scope.TenantID, LegacyCompat: scope.Compatibility,
+	})
 	if delErr != nil {
 		return nil, fmt.Errorf("delete queue %q info record: %w", queueID, delErr)
 	}
@@ -380,6 +396,9 @@ func canDeleteQueue(force bool, messageCount uint64) error {
 
 func (s *Storage) Send(ctx context.Context, input *v1.SendRequest) (*v1.SendResponse, error) {
 	queueID := input.GetQueueId()
+	if err := s.ensureQueueAccessible(ctx, queueID); err != nil {
+		return nil, err
+	}
 
 	messages := input.GetMessages()
 
@@ -451,6 +470,9 @@ func (s *Storage) insertMessages(ctx context.Context, queueID string, count int,
 
 func (s *Storage) Receive(ctx context.Context, input *v1.ReceiveRequest) (*v1.ReceiveResponse, error) {
 	queueID := input.GetQueueId()
+	if err := s.ensureQueueAccessible(ctx, queueID); err != nil {
+		return nil, err
+	}
 
 	info, describeErr := s.DescribeQueue(ctx, &v1.DescribeQueueRequest{QueueId: queueID})
 	if describeErr != nil {
@@ -513,6 +535,9 @@ func (s *Storage) Receive(ctx context.Context, input *v1.ReceiveRequest) (*v1.Re
 
 func (s *Storage) Delete(ctx context.Context, input *v1.DeleteRequest) (*v1.DeleteResponse, error) {
 	queueID := input.GetQueueId()
+	if err := s.ensureQueueAccessible(ctx, queueID); err != nil {
+		return nil, err
+	}
 
 	ids := input.GetMessageIds()
 
@@ -575,6 +600,9 @@ func (s *Storage) Delete(ctx context.Context, input *v1.DeleteRequest) (*v1.Dele
 // a pure read for the admin UI; the queue's created_at index backs the scan.
 func (s *Storage) Peek(ctx context.Context, input *queue.PeekRequest) (*queue.PeekResponse, error) {
 	queueID := input.QueueID
+	if err := s.ensureQueueAccessible(ctx, queueID); err != nil {
+		return nil, err
+	}
 
 	if _, describeErr := s.DescribeQueue(ctx, &v1.DescribeQueueRequest{QueueId: queueID}); describeErr != nil {
 		return nil, fmt.Errorf("describe queue (id: %q): %w", queueID, describeErr)
@@ -644,6 +672,29 @@ func recordTimeInQueue(observer *telemetry.Observer, queueID, msgID string) {
 	}
 }
 
+func (s *Storage) ensureQueueAccessible(ctx context.Context, queueID string) error {
+	if queueID == "" {
+		return fmt.Errorf("queue not found: %w", pqerr.ErrNotFound)
+	}
+
+	scope := queue.ScopeFromContext(ctx)
+
+	_, err := s.queries.GetQueuePropertiesByID(ctx, sqlcgen.GetQueuePropertiesByIDParams{
+		QueueID:      queueID,
+		TenantID:     scope.TenantID,
+		LegacyCompat: scope.Compatibility,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("queue not found: %w", pqerr.ErrNotFound)
+	}
+
+	if err != nil {
+		return fmt.Errorf("resolve queue tenant scope: %w", err)
+	}
+
+	return nil
+}
+
 // Health implements hc.HealthChecker.
 func (s *Storage) Health(ctx context.Context) error {
 	if err := s.pool.Ping(ctx); err != nil {
@@ -710,14 +761,16 @@ func (s *Storage) listQueues(ctx context.Context, query string, args []any, page
 	return queues, nil
 }
 
-func queueCursorValueFor(queue *v1.DescribeQueueResponse, orderBy v1.ListQueuesRequest_OrderBy) string {
+func queueCursorValueFor(queueInfo *v1.DescribeQueueResponse, orderBy v1.ListQueuesRequest_OrderBy) string {
 	switch orderBy {
+	case v1.ListQueuesRequest_ORDER_BY_ID:
+		return queueInfo.QueueId
 	case v1.ListQueuesRequest_ORDER_BY_NAME:
-		return queue.QueueName
+		return queueInfo.QueueName
 	case v1.ListQueuesRequest_ORDER_BY_CREATED_AT:
-		return queue.CreatedAt.AsTime().UTC().Format(time.RFC3339Nano)
+		return queueInfo.CreatedAt.AsTime().UTC().Format(time.RFC3339Nano)
 	default:
-		return queue.QueueId
+		return queueInfo.QueueId
 	}
 }
 

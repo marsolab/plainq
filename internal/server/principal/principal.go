@@ -12,6 +12,14 @@ const (
 	KindHuman  Kind = "human"
 	KindAgent  Kind = "agent"
 	KindSystem Kind = "system"
+
+	// LegacyTenantID owns every queue and queue-fan-out topic created before
+	// tenant-aware storage shipped. Compatibility mode can access only this
+	// tenant's migration-owned rows.
+	LegacyTenantID = "01HQ5RJNXS6TPXK89PQWY4N8JH"
+	// LegacyPrincipalID is injected only for anonymous schema.v1 gRPC
+	// compatibility calls while grpc.protect-legacy remains disabled.
+	LegacyPrincipalID = "legacy-v1"
 )
 
 type Principal struct {
@@ -42,6 +50,7 @@ func With(ctx context.Context, p Principal) context.Context {
 
 func From(ctx context.Context) (Principal, bool) {
 	p, ok := ctx.Value(contextKey{}).(Principal)
+
 	return p, ok
 }
 
@@ -52,6 +61,7 @@ func Require(ctx context.Context) (Principal, error) {
 	if !ok || p.ID == "" || p.TenantID == "" {
 		return Principal{}, ErrUnauthenticated
 	}
+
 	return p, nil
 }
 
@@ -61,5 +71,6 @@ func (p Principal) HasRole(want string) bool {
 			return true
 		}
 	}
+
 	return false
 }

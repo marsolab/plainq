@@ -14,11 +14,15 @@ import (
 var _ queue.Storage = (*Storage)(nil)
 
 func (s *Storage) ListTopics(ctx context.Context) (*queue.ListTopicsResponse, error) {
+	scope := queue.ScopeFromContext(ctx)
+
 	rows, err := s.pool.Query(ctx, `
 		SELECT topic_id, topic_name, created_at
 		FROM topic_properties
+		WHERE tenant_id = $1
+		  AND (NOT $2::boolean OR (created_by_kind = 'system' AND created_by_id IN ('migration', 'legacy-v1')))
 		ORDER BY created_at DESC;
-	`)
+	`, scope.TenantID, scope.Compatibility)
 	if err != nil {
 		return nil, fmt.Errorf("list topics: %w", err)
 	}
@@ -54,7 +58,14 @@ func (s *Storage) CreateTopic(ctx context.Context, input *queue.CreateTopicReque
 	}
 
 	id := idkit.XID()
-	if _, err := s.pool.Exec(ctx, `INSERT INTO topic_properties (topic_id, topic_name) VALUES ($1, $2);`, id, input.TopicName); err != nil {
+
+	scope := queue.ScopeFromContext(ctx)
+
+	if _, err := s.pool.Exec(ctx, `
+		INSERT INTO topic_properties (
+			topic_id, topic_name, tenant_id, created_by_kind, created_by_id
+		) VALUES ($1, $2, $3, $4, $5);
+	`, id, input.TopicName, scope.TenantID, scope.CreatorKind, scope.CreatorID); err != nil {
 		return nil, fmt.Errorf("create topic: %w", err)
 	}
 
@@ -62,7 +73,14 @@ func (s *Storage) CreateTopic(ctx context.Context, input *queue.CreateTopicReque
 }
 
 func (s *Storage) DeleteTopic(ctx context.Context, topicID string) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM topic_properties WHERE topic_id = $1;`, topicID)
+	scope := queue.ScopeFromContext(ctx)
+
+	tag, err := s.pool.Exec(ctx, `
+		DELETE FROM topic_properties
+		WHERE topic_id = $1
+		  AND tenant_id = $2
+		  AND (NOT $3::boolean OR (created_by_kind = 'system' AND created_by_id IN ('migration', 'legacy-v1')));
+	`, topicID, scope.TenantID, scope.Compatibility)
 	if err != nil {
 		return fmt.Errorf("delete topic: %w", err)
 	}
@@ -75,6 +93,10 @@ func (s *Storage) DeleteTopic(ctx context.Context, topicID string) error {
 }
 
 func (s *Storage) Subscribe(ctx context.Context, topicID string, input *queue.SubscribeRequest) (*queue.SubscribeResponse, error) {
+	if err := s.ensureTopicExists(ctx, topicID); err != nil {
+		return nil, err
+	}
+
 	if _, err := s.DescribeQueue(ctx, &v1.DescribeQueueRequest{QueueId: input.QueueID}); err != nil {
 		return nil, fmt.Errorf("describe subscription queue: %w", err)
 	}
@@ -94,11 +116,24 @@ func (s *Storage) Subscribe(ctx context.Context, topicID string, input *queue.Su
 }
 
 func (s *Storage) Unsubscribe(ctx context.Context, topicID, subscriptionID string) error {
+	scope := queue.ScopeFromContext(ctx)
+
 	tag, err := s.pool.Exec(
 		ctx,
-		`DELETE FROM topic_subscriptions WHERE topic_id = $1 AND subscription_id = $2;`,
+		`DELETE FROM topic_subscriptions
+		 WHERE topic_id = $1
+		   AND subscription_id = $2
+		   AND EXISTS (
+		       SELECT 1
+		       FROM topic_properties t
+		       WHERE t.topic_id = topic_subscriptions.topic_id
+		         AND t.tenant_id = $3
+		         AND (NOT $4::boolean OR (t.created_by_kind = 'system' AND t.created_by_id IN ('migration', 'legacy-v1')))
+		   );`,
 		topicID,
 		subscriptionID,
+		scope.TenantID,
+		scope.Compatibility,
 	)
 	if err != nil {
 		return fmt.Errorf("unsubscribe queue: %w", err)
@@ -160,10 +195,20 @@ func (s *Storage) Publish(ctx context.Context, topicID string, input *queue.Publ
 func (s *Storage) ensureTopicExists(ctx context.Context, topicID string) error {
 	var exists bool
 
+	scope := queue.ScopeFromContext(ctx)
+
 	if err := s.pool.QueryRow(
 		ctx,
-		`SELECT EXISTS(SELECT 1 FROM topic_properties WHERE topic_id = $1);`,
+		`SELECT EXISTS(
+			SELECT 1
+			FROM topic_properties
+			WHERE topic_id = $1
+			  AND tenant_id = $2
+			  AND (NOT $3::boolean OR (created_by_kind = 'system' AND created_by_id IN ('migration', 'legacy-v1')))
+		);`,
 		topicID,
+		scope.TenantID,
+		scope.Compatibility,
 	).Scan(&exists); err != nil {
 		return fmt.Errorf("check topic exists: %w", err)
 	}
@@ -176,6 +221,8 @@ func (s *Storage) ensureTopicExists(ctx context.Context, topicID string) error {
 }
 
 func (s *Storage) listSubscriptions(ctx context.Context, topicID string) ([]queue.Subscription, error) {
+	scope := queue.ScopeFromContext(ctx)
+
 	rows, err := s.pool.Query(ctx, `
 		SELECT s.subscription_id,
 		       s.topic_id,
@@ -183,10 +230,17 @@ func (s *Storage) listSubscriptions(ctx context.Context, topicID string) ([]queu
 		       COALESCE(q.queue_name, ''),
 		       s.created_at
 		FROM topic_subscriptions s
-		LEFT JOIN queue_properties q ON q.queue_id = s.queue_id
+		JOIN topic_properties t ON t.topic_id = s.topic_id
+		JOIN queue_properties q ON q.queue_id = s.queue_id
 		WHERE s.topic_id = $1
+		  AND t.tenant_id = $2
+		  AND q.tenant_id = $2
+		  AND (NOT $3::boolean OR (
+		      t.created_by_kind = 'system' AND t.created_by_id IN ('migration', 'legacy-v1')
+		      AND q.created_by_kind = 'system' AND q.created_by_id IN ('migration', 'legacy-v1')
+		  ))
 		ORDER BY s.created_at DESC;
-	`, topicID)
+	`, topicID, scope.TenantID, scope.Compatibility)
 	if err != nil {
 		return nil, fmt.Errorf("list subscriptions: %w", err)
 	}

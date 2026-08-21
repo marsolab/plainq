@@ -2,13 +2,18 @@ package queue
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/marsolab/plainq/internal/server/config"
 	"github.com/marsolab/plainq/internal/server/grpccodec"
+	"github.com/marsolab/plainq/internal/server/middleware"
+	"github.com/marsolab/plainq/internal/server/principal"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
+	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/encoding"
 )
@@ -73,6 +78,32 @@ type Service struct {
 	router       chi.Router
 	storage      Storage
 	topicMetrics TopicMetricsRecorder
+	permissions  middleware.PermissionChecker
+}
+
+// SetPermissionChecker wires the tenant-aware RBAC resolver used by queue
+// mutation routes. It is set after both services are constructed to avoid a
+// package cycle between queue and RBAC.
+func (s *Service) SetPermissionChecker(checker middleware.PermissionChecker) {
+	s.permissions = checker
+}
+
+// HasQueuePermission delegates through the currently configured checker. The
+// service itself is installed in route middleware so construction order does
+// not create a window where handlers capture a nil checker.
+func (s *Service) HasQueuePermission(
+	ctx context.Context, userID, queueID string, permission middleware.PermissionType,
+) (bool, error) {
+	if s.permissions == nil {
+		return false, errors.New("queue permission checker is not configured")
+	}
+
+	allowed, err := s.permissions.HasQueuePermission(ctx, userID, queueID, permission)
+	if err != nil {
+		return false, fmt.Errorf("resolve queue permission: %w", err)
+	}
+
+	return allowed, nil
 }
 
 // NewService creates a new queue service.
@@ -90,16 +121,16 @@ func NewService(cfg *config.Config, logger *slog.Logger, storage Storage) *Servi
 		r.Post("/", s.createQueueHandler)
 		r.Get("/", s.listQueuesHandler)
 		r.Get("/{id}", s.describeQueueHandler)
-		r.Post("/{id}/purge", s.purgeQueueHandler)
-		r.Delete("/{id}", s.deleteQueueHandler)
+		r.With(s.requireQueuePermission(middleware.PermissionPurge)).Post("/{id}/purge", s.purgeQueueHandler)
+		r.With(s.requireQueuePermission(middleware.PermissionDelete)).Delete("/{id}", s.deleteQueueHandler)
 
 		// Message-level operations for the Houston admin UI. Browse is
 		// non-consuming (peek); receive claims with a visibility timeout; ack
 		// deletes by id; send enqueues.
-		r.Get("/{id}/messages", s.peekMessagesHandler)
-		r.Post("/{id}/messages", s.sendMessagesHandler)
-		r.Post("/{id}/messages/receive", s.receiveMessagesHandler)
-		r.Post("/{id}/messages/ack", s.ackMessagesHandler)
+		r.With(s.requireQueuePermission(middleware.PermissionReceive)).Get("/{id}/messages", s.peekMessagesHandler)
+		r.With(s.requireQueuePermission(middleware.PermissionSend)).Post("/{id}/messages", s.sendMessagesHandler)
+		r.With(s.requireQueuePermission(middleware.PermissionReceive)).Post("/{id}/messages/receive", s.receiveMessagesHandler)
+		r.With(s.requireQueuePermission(middleware.PermissionDelete)).Post("/{id}/messages/ack", s.ackMessagesHandler)
 	})
 
 	s.router.Route("/topics", func(r chi.Router) {
@@ -112,6 +143,42 @@ func NewService(cfg *config.Config, logger *slog.Logger, storage Storage) *Servi
 	})
 
 	return &s
+}
+
+func (s *Service) requireQueuePermission(permission middleware.PermissionType) func(http.Handler) http.Handler {
+	// Authentication disabled is an explicit open-server mode. Keep its HTTP
+	// behavior compatible while using the full RBAC path whenever auth is on.
+	if s.cfg != nil && !s.cfg.AuthEnable {
+		return func(next http.Handler) http.Handler { return next }
+	}
+
+	return middleware.RequireQueuePermission(s, permission)
+}
+
+func (s *Service) requireProtectedLegacyQueuePermission(
+	ctx context.Context,
+	queueID string,
+	permission middleware.PermissionType,
+) error {
+	if s.cfg == nil || !s.cfg.GRPCProtectLegacy {
+		return nil
+	}
+
+	p, err := principal.Require(ctx)
+	if err != nil {
+		return fmt.Errorf("%w: authenticated principal is required", pqerr.ErrUnauthenticated)
+	}
+
+	allowed, err := s.HasQueuePermission(ctx, p.ID, queueID, permission)
+	if err != nil {
+		return err
+	}
+
+	if !allowed {
+		return pqerr.ErrUnauthorized
+	}
+
+	return nil
 }
 
 func (s *Service) SetTopicMetricsRecorder(recorder TopicMetricsRecorder) {

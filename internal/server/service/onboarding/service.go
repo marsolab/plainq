@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/marsolab/plainq/internal/server/config"
+	serversecurity "github.com/marsolab/plainq/internal/server/security"
 	"github.com/marsolab/servekit/authkit/hashkit"
 	"github.com/marsolab/servekit/authkit/jwtkit"
 	"github.com/marsolab/servekit/idkit"
@@ -19,21 +20,61 @@ type Storage interface {
 	// HasAdminUsers checks if there are any users with admin role.
 	HasAdminUsers(ctx context.Context) (bool, error)
 
-	// CreateInitialAdmin creates the first admin user and assigns admin role.
-	CreateInitialAdmin(ctx context.Context, admin InitialAdmin) error
-
-	// GetAdminRoleID gets the admin role ID.
-	GetAdminRoleID(ctx context.Context) (string, error)
+	// Bootstrap atomically creates the first administrator, role projection,
+	// hashed refresh session, and security audit record. The implementation
+	// must serialize the no-admin check with those writes.
+	Bootstrap(ctx context.Context, record BootstrapRecord) error
 }
 
 // InitialAdmin represents the initial admin user to be created.
 type InitialAdmin struct {
-	UserID    string    `json:"user_id"`
-	Email     string    `json:"email"`
-	Password  string    `json:"password"`
-	Name      string    `json:"name,omitempty"`
-	Verified  bool      `json:"verified"`
-	CreatedAt time.Time `json:"created_at"`
+	UserID      string    `json:"user_id"`
+	Email       string    `json:"email"`
+	Password    string    `json:"-"`
+	Name        string    `json:"name,omitempty"`
+	Verified    bool      `json:"verified"`
+	CreatedAt   time.Time `json:"created_at"`
+	TenantID    string    `json:"tenant_id"`
+	AuthVersion uint64    `json:"auth_version"`
+	Status      string    `json:"status"`
+}
+
+// RefreshTokenRecord is the persisted half of the initial administrator's
+// session. TokenHash is SHA-256(raw signed refresh token); raw credentials
+// never cross the storage boundary.
+type RefreshTokenRecord struct {
+	ID         string
+	AccountID  string
+	TokenHash  []byte
+	CreatedAt  time.Time
+	ExpiresAt  time.Time
+	LastUsedAt time.Time
+}
+
+// AuditEvent captures the bootstrap mutation in the same transaction as the
+// administrator and session.
+type AuditEvent struct {
+	ID            string
+	TenantID      string
+	PrincipalKind string
+	PrincipalID   string
+	Action        string
+	ResourceKind  string
+	ResourceID    string
+	Outcome       string
+	RequestID     string
+	Reason        string
+	SourceIP      string
+	UserAgent     string
+	MetadataJSON  []byte
+	CreatedAt     time.Time
+}
+
+// BootstrapRecord is the complete transaction input for first-admin setup.
+type BootstrapRecord struct {
+	Admin        InitialAdmin
+	RefreshToken RefreshTokenRecord
+	Audit        AuditEvent
 }
 
 // OnboardingStatus represents the current onboarding state.
@@ -44,12 +85,13 @@ type OnboardingStatus struct {
 
 // Service handles the onboarding process.
 type Service struct {
-	cfg     *config.Config
-	logger  *slog.Logger
-	router  *chi.Mux
-	hasher  hashkit.Hasher
-	tokman  jwtkit.TokenManager
-	storage Storage
+	cfg         *config.Config
+	logger      *slog.Logger
+	router      *chi.Mux
+	hasher      hashkit.Hasher
+	tokman      jwtkit.TokenManager
+	storage     Storage
+	rateLimiter *serversecurity.KeyedLimiter
 }
 
 // NewService creates a new onboarding service.
@@ -61,12 +103,13 @@ func NewService(
 	storage Storage,
 ) *Service {
 	s := Service{
-		cfg:     cfg,
-		logger:  logger,
-		router:  chi.NewRouter(),
-		hasher:  hasher,
-		tokman:  tokenManager,
-		storage: storage,
+		cfg:         cfg,
+		logger:      logger,
+		router:      chi.NewRouter(),
+		hasher:      hasher,
+		tokman:      tokenManager,
+		storage:     storage,
+		rateLimiter: newBootstrapRateLimiter(cfg),
 	}
 
 	// Setup routes - these are public routes that don't require authentication.
@@ -101,33 +144,6 @@ func (s *Service) IsOnboardingComplete(ctx context.Context) (bool, error) {
 	}
 
 	return hasAdmins, nil
-}
-
-// CreateInitialAdmin creates the first admin user during onboarding.
-func (s *Service) CreateInitialAdmin(ctx context.Context, email, password, name string) (*InitialAdmin, error) {
-	// Hash the password.
-	hashedPassword, err := s.hasher.HashPassword(password)
-	if err != nil {
-		return nil, fmt.Errorf("hash password: %w", err)
-	}
-
-	admin := InitialAdmin{
-		UserID:    generateUserID(),
-		Email:     email,
-		Password:  hashedPassword,
-		Name:      name,
-		Verified:  true, // Initial admin is auto-verified.
-		CreatedAt: time.Now(),
-	}
-
-	if err := s.storage.CreateInitialAdmin(ctx, admin); err != nil {
-		return nil, fmt.Errorf("create initial admin: %w", err)
-	}
-
-	// Don't return the hashed password.
-	admin.Password = ""
-
-	return &admin, nil
 }
 
 // generateUserID generates a new ULID for user ID.

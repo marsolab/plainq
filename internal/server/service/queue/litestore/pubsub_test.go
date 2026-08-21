@@ -57,6 +57,9 @@ create table if not exists "queue_properties"
     max_receive_attempts       integer                             not null,
     drop_policy                integer   default 0                 not null,
     dead_letter_queue_id       varchar(26),
+	tenant_id                   varchar(26) default '01HQ5RJNXS6TPXK89PQWY4N8JH' not null,
+	created_by_kind             text default 'system' not null,
+	created_by_id               varchar(64) default 'migration' not null,
 
     constraint queue_pk primary key (queue_id)
 );
@@ -66,6 +69,9 @@ create table if not exists "topic_properties"
     topic_id   varchar(26)                         not null,
     topic_name text                                not null,
     created_at timestamp default current_timestamp not null,
+	tenant_id varchar(26) default '01HQ5RJNXS6TPXK89PQWY4N8JH' not null,
+	created_by_kind text default 'system' not null,
+	created_by_id varchar(64) default 'migration' not null,
 
     constraint topic_pk primary key (topic_id)
 );

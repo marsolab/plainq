@@ -16,11 +16,12 @@ import (
 const refreshTokensSchema = `
 create table if not exists refresh_tokens
 (
-    id         text      not null,
-    aid        text      not null,
-    token      text      not null,
-    created_at timestamp not null default current_timestamp,
-    expires_at timestamp not null default current_timestamp,
+    id              text    not null,
+    aid             text    not null,
+    token_hash      blob    not null,
+    created_at_ns   integer not null,
+    expires_at_ns   integer not null,
+    last_used_at_ns integer not null,
     constraint refresh_tokens_pk primary key (id)
 );
 `
@@ -47,11 +48,8 @@ func sampleRefreshToken() account.RefreshToken {
 	now := time.Now()
 
 	return account.RefreshToken{
-		ID:        "token-id-1",
-		AID:       "account-1",
-		Token:     "refresh-token-string",
-		CreatedAt: now,
-		ExpiresAt: now.Add(time.Hour),
+		ID: "token-id-1", AID: "account-1", TokenHash: []byte("01234567890123456789012345678901"),
+		CreatedAt: now, ExpiresAt: now.Add(time.Hour), LastUsedAt: now,
 	}
 }
 
@@ -64,8 +62,8 @@ func TestDeleteRefreshTokenIsSingleUse(t *testing.T) {
 	rt := sampleRefreshToken()
 	td.Require(t).CmpNoError(storage.CreateRefreshToken(ctx, rt), "create refresh token")
 
-	td.CmpNoError(t, storage.DeleteRefreshToken(ctx, rt.Token), "first delete consumes the token")
-	td.Cmp(t, storage.DeleteRefreshToken(ctx, rt.Token), account.ErrRefreshTokenNotFound,
+	td.CmpNoError(t, storage.DeleteRefreshToken(ctx, rt.TokenHash), "first delete consumes the token")
+	td.Cmp(t, storage.DeleteRefreshToken(ctx, rt.TokenHash), account.ErrRefreshTokenNotFound,
 		"replaying the consumed token is rejected")
 }
 
@@ -79,6 +77,6 @@ func TestDeleteRefreshTokenByTokenIDRevokesRefresh(t *testing.T) {
 	td.Require(t).CmpNoError(storage.CreateRefreshToken(ctx, rt), "create refresh token")
 
 	td.CmpNoError(t, storage.DeleteRefreshTokenByTokenID(ctx, rt.ID), "sign-out revokes the session's refresh token")
-	td.Cmp(t, storage.DeleteRefreshToken(ctx, rt.Token), account.ErrRefreshTokenNotFound,
+	td.Cmp(t, storage.DeleteRefreshToken(ctx, rt.TokenHash), account.ErrRefreshTokenNotFound,
 		"retained refresh token cannot mint a new session after sign-out")
 }

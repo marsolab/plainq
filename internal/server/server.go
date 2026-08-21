@@ -65,7 +65,7 @@ type PlainQ struct {
 
 // NewServer returns a pointer to a new instance of the PlainQ.
 //
-//nolint:funlen,cyclop // server wiring assembles the full HTTP/gRPC stack in one place.
+//nolint:funlen,cyclop,gocognit,gocyclo // Server wiring assembles the full HTTP/gRPC stack in one place.
 func NewServer(
 	cfg *config.Config,
 	logger *slog.Logger,
@@ -165,7 +165,12 @@ func NewServer(
 			// open by deliberate configuration rather than by omission.
 			protect := func(r chi.Router) {
 				if cfg.AuthEnable {
-					r.Use(middleware.AuthenticateJWT(pq.tokenManager, pq.account))
+					r.Use(middleware.AuthenticateJWT(
+						pq.tokenManager,
+						pq.account,
+						middleware.WithHumanSecurityResolver(pq.account),
+						middleware.WithHumanTokenPolicy(cfg.AuthJWTIssuer, cfg.AuthJWTAudience),
+					))
 				}
 			}
 
@@ -310,13 +315,19 @@ func NewServer(
 		[]grpc.UnaryServerInterceptor{
 			interceptor.Metrics(),
 			interceptor.Logging(logger),
-			interceptor.UnaryAuth(pq.authenticator, interceptor.PublicMethods()),
+			interceptor.UnaryAuth(
+				pq.authenticator, interceptor.PublicMethods(),
+				interceptor.WithUnaryLegacyProtection(cfg.GRPCProtectLegacy),
+			),
 			interceptor.UnaryAdmission(pq.admission),
 			interceptor.UnaryAuthorize(pq.resources),
 		},
 		[]grpc.StreamServerInterceptor{
 			interceptor.StreamLogging(logger),
-			interceptor.StreamAuth(pq.authenticator, interceptor.PublicMethods()),
+			interceptor.StreamAuth(
+				pq.authenticator, interceptor.PublicMethods(),
+				interceptor.WithStreamLegacyProtection(cfg.GRPCProtectLegacy),
+			),
 			interceptor.StreamAdmission(pq.admission),
 			interceptor.StreamAuthorize(pq.resources),
 		},
@@ -490,6 +501,13 @@ func WithAgentMessaging(
 	}
 }
 
+// WithGRPCAuthenticator installs human-session authentication for protected
+// legacy gRPC when the agent API (and therefore its composite authenticator)
+// is disabled.
+func WithGRPCAuthenticator(authenticator interceptor.Authenticator) Option {
+	return func(pq *PlainQ) { pq.authenticator = authenticator }
+}
+
 // WithServerVersion reports the current build in agent capabilities.
 func WithServerVersion(version string) Option {
 	return func(pq *PlainQ) { pq.serverVersion = version }
@@ -535,6 +553,7 @@ type capabilitiesService struct {
 	agentEnabled    bool
 	transportSecure bool
 	clusterEnabled  bool
+	protectLegacy   bool
 }
 
 func newCapabilitiesService(pq *PlainQ) *capabilitiesService {
@@ -549,6 +568,7 @@ func newCapabilitiesService(pq *PlainQ) *capabilitiesService {
 		agentEnabled:    pq.cfg.AgentEnable,
 		transportSecure: pq.cfg.AgentEnable && !pq.cfg.AgentDevelopmentInsecureTransport,
 		clusterEnabled:  pq.clusterNode != nil,
+		protectLegacy:   pq.cfg.GRPCProtectLegacy,
 	}
 }
 
@@ -561,14 +581,12 @@ func (s *capabilitiesService) GetCapabilities(
 	*agentv1.GetCapabilitiesRequest,
 ) (*agentv1.GetCapabilitiesResponse, error) {
 	return &agentv1.GetCapabilitiesResponse{
-		ServerVersion:     s.serverVersion,
-		ApiServices:       append([]string(nil), s.apiServices...),
-		AgentAuthRequired: s.agentEnabled,
-		TransportSecure:   s.transportSecure,
-		ClusterEnabled:    s.clusterEnabled,
-		// Task 9 activates durable messaging; Task 7 can make the parsed
-		// legacy-protection flag effective after tenant backfill.
+		ServerVersion:               s.serverVersion,
+		ApiServices:                 append([]string(nil), s.apiServices...),
+		AgentAuthRequired:           s.agentEnabled,
+		TransportSecure:             s.transportSecure,
+		ClusterEnabled:              s.clusterEnabled,
 		AgentMessagingFeatureActive: false,
-		LegacyV1AuthRequired:        false,
+		LegacyV1AuthRequired:        s.protectLegacy,
 	}, nil
 }

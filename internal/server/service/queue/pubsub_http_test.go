@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/marsolab/plainq/internal/server/config"
+	"github.com/marsolab/plainq/internal/server/middleware"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/servekit/logkit"
 )
@@ -212,10 +213,13 @@ func TestDeleteQueueReconcilesTopicSubscriptionMetrics(t *testing.T) {
 		},
 	}
 	recorder := &fakeTopicMetricsRecorder{}
-	svc := NewService(&config.Config{}, logkit.NewNop(), storage)
+	svc := newTestService(storage)
 	svc.SetTopicMetricsRecorder(recorder)
 
 	req := httptest.NewRequest(http.MethodDelete, "/c5s8b4p9e8rg5u5fgq10?force=true", nil)
+	req = req.WithContext(context.WithValue(req.Context(), middleware.UserContextKey, middleware.UserInfo{
+		UserID: "user-1", Roles: []string{"member"}, TenantID: "tenant-1",
+	}))
 	rec := httptest.NewRecorder()
 
 	svc.ServeHTTP(rec, req)

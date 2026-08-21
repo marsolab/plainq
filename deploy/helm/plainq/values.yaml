@@ -278,9 +278,10 @@ agent:
   # -- TLS server name clustered followers use when proxying agent RPCs.
   proxyServerName: ""
 
-  # -- Parsed now for a staged rollout; becomes effective with the Task 7
-  # tenant migration for legacy v1 resources.
-  protectLegacy: false
+  # -- Require bearer authentication for legacy schema.v1 gRPC. Null selects
+  # the safe rollout default: true on a new install, false on an upgrade so old
+  # clients are not broken until the operator explicitly opts in.
+  protectLegacy: null
 
 # -- Non-secret server configuration mapped to CLI flags.
 config:

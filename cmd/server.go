@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/netip"
 	"os"
@@ -23,6 +24,7 @@ import (
 	"github.com/marsolab/plainq/internal/server/config"
 	"github.com/marsolab/plainq/internal/server/interceptor"
 	"github.com/marsolab/plainq/internal/server/mutations"
+	"github.com/marsolab/plainq/internal/server/principal"
 	"github.com/marsolab/plainq/internal/server/security"
 	"github.com/marsolab/plainq/internal/server/service/account"
 	accountstore "github.com/marsolab/plainq/internal/server/service/account/litestore"
@@ -210,12 +212,36 @@ func serverCommand() *commandSpec {
 				"set refresh token TTL",
 			)
 
-			f.BoolVar(&cfg.AuthEmailVerificationEnable, "auth.email.verification.enable", true,
+			f.BoolVar(&cfg.AuthEmailVerificationEnable, "auth.email.verification.enable", false,
 				"enable email verification",
 			)
 
 			f.StringVar(&cfg.AuthJWTSecret, "auth.jwt.secret", "",
 				"HMAC secret used to sign access/refresh tokens (required when auth.enable)",
+			)
+
+			f.StringVar(&cfg.AuthJWTIssuer, "auth.jwt.issuer", "plainq-server",
+				"issuer required in signed human access tokens",
+			)
+
+			f.StringVar(&cfg.AuthJWTAudience, "auth.jwt.audience", "plainq-human",
+				"audience required in signed human access tokens",
+			)
+
+			f.StringVar(&cfg.AuthBootstrapSecret, "auth.bootstrap.secret", "",
+				"constant-time shared secret required to create the first remote administrator",
+			)
+
+			f.Int64Var(&cfg.AuthRequestMaxBytes, "auth.request.max-bytes", 32<<10,
+				"maximum signup, signin, refresh, and bootstrap request size",
+			)
+
+			f.Float64Var(&cfg.AuthRateRequestsPerSecond, "auth.rate.requests-per-second", 5,
+				"per-IP and per-account authentication request rate",
+			)
+
+			f.IntVar(&cfg.AuthRateBurst, "auth.rate.burst", 10,
+				"per-IP and per-account authentication request burst",
 			)
 
 			// Telemetry.
@@ -409,6 +435,10 @@ func serverCommand() *commandSpec {
 				return err
 			}
 
+			if err := validateHumanSecurity(&cfg); err != nil {
+				return err
+			}
+
 			var checker hc.HealthChecker = hc.NewNopChecker()
 
 			if cfg.HealthEnable {
@@ -442,6 +472,15 @@ func serverCommand() *commandSpec {
 			backend, backendErr := initStorageBackend(&cfg, logger)
 			if backendErr != nil {
 				return backendErr
+			}
+
+			if !cfg.GRPCProtectLegacy {
+				logger.Warn(
+					"Legacy schema.v1 gRPC compatibility is enabled; anonymous access is limited to fixed-tenant legacy-owned rows",
+					slog.String("principal", principal.LegacyPrincipalID),
+					slog.String("tenant_id", principal.LegacyTenantID),
+					slog.String("removal_target", "after two releases"),
+				)
 			}
 
 			// One observer, shared by the storage layer and — once the
@@ -531,6 +570,7 @@ func serverCommand() *commandSpec {
 			}
 
 			rbacService := rbac.NewService(&cfg, logger, rbacStorage)
+			queueService.SetPermissionChecker(rbacService)
 
 			oauthStorage, oauthStorageErr := initOAuthStorage(&cfg, logger, backend)
 			if oauthStorageErr != nil {
@@ -544,6 +584,18 @@ func serverCommand() *commandSpec {
 
 			serverOpts = append(serverOpts, server.WithObserver(observer))
 			serverOpts = append(serverOpts, server.WithServerVersion(Commit))
+
+			if cfg.AuthEnable && !cfg.AgentEnable {
+				grpcAuthenticator, grpcAuthenticatorErr := interceptor.NewCompositeAuthenticator(
+					nil, tokenManager, accountStorage, accountStorage,
+					interceptor.WithCompositeHumanTokenPolicy(cfg.AuthJWTIssuer, cfg.AuthJWTAudience),
+				)
+				if grpcAuthenticatorErr != nil {
+					return fmt.Errorf("create human gRPC authenticator: %w", grpcAuthenticatorErr)
+				}
+
+				serverOpts = append(serverOpts, server.WithGRPCAuthenticator(grpcAuthenticator))
+			}
 
 			if cfg.AgentEnable {
 				agentOption, agentOptionErr := initAgentServerOption(&cfg, backend, tokenManager, accountStorage)
@@ -585,6 +637,54 @@ func serverCommand() *commandSpec {
 			return plainqServer.Serve(ctx)
 		},
 	}
+}
+
+// validateHumanSecurity rejects configurations that would make human or
+// bootstrap authentication look enabled while silently weakening the
+// security boundary. Email verification is deliberately fail-closed until a
+// verifier and delivery backend are configured; mounting placeholder routes
+// would create a false security promise.
+//
+//nolint:cyclop,gocyclo // Each branch validates one explicit security invariant.
+func validateHumanSecurity(cfg *config.Config) error {
+	if cfg.GRPCProtectLegacy && !cfg.AuthEnable && !cfg.AgentEnable {
+		return errors.New("protected legacy gRPC requires human or agent authentication")
+	}
+
+	if !cfg.AuthEnable {
+		return nil
+	}
+
+	if len(cfg.AuthJWTSecret) < 32 {
+		return errors.New("human JWT secret must be at least 32 bytes")
+	}
+
+	if strings.TrimSpace(cfg.AuthJWTIssuer) == "" || strings.TrimSpace(cfg.AuthJWTAudience) == "" {
+		return errors.New("human token issuer and audience are required")
+	}
+
+	if len(cfg.AuthBootstrapSecret) < 32 {
+		return errors.New("bootstrap secret must be at least 32 bytes")
+	}
+
+	if cfg.AuthAccessTokenTTL <= 0 || cfg.AuthRefreshTokenTTL <= 0 {
+		return errors.New("human access and refresh token TTLs must be positive")
+	}
+
+	if cfg.AuthRequestMaxBytes <= 0 || cfg.AuthRequestMaxBytes > 1<<20 {
+		return errors.New("auth request max bytes must be between 1 and 1048576")
+	}
+
+	if math.IsNaN(cfg.AuthRateRequestsPerSecond) || math.IsInf(cfg.AuthRateRequestsPerSecond, 0) ||
+		cfg.AuthRateRequestsPerSecond <= 0 || cfg.AuthRateBurst <= 0 {
+		return errors.New("auth rate and burst must be finite and positive")
+	}
+
+	if cfg.AuthEmailVerificationEnable {
+		return errors.New("email verification requires a verifier and delivery backend; none is configured")
+	}
+
+	return nil
 }
 
 //nolint:gocyclo,cyclop // validation mirrors the explicit security contract one rule at a time.
@@ -672,6 +772,7 @@ func initAgentServerOption(
 
 	authenticator, err := interceptor.NewCompositeAuthenticator(
 		agentService, humanTokens, accountStorage, accountStorage,
+		interceptor.WithCompositeHumanTokenPolicy(cfg.AuthJWTIssuer, cfg.AuthJWTAudience),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create gRPC authenticator: %w", err)
@@ -821,21 +922,10 @@ func initSQLiteBackend(cfg *config.Config, logger *slog.Logger) (*litekit.Conn, 
 		slog.String("path", cfg.StorageDBPath),
 	)
 
-	validated, validationErr := mutations.ValidatedStorageFS(mutations.SqliteStorageMutations())
-	if validationErr != nil {
-		_ = conn.Close()
+	migrationCtx, migrationCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer migrationCancel()
 
-		return nil, fmt.Errorf("validate sqlite schema mutations: %w", validationErr)
-	}
-
-	evolver, evolverErr := litekit.NewEvolver(conn, validated)
-	if evolverErr != nil {
-		_ = conn.Close()
-
-		return nil, fmt.Errorf("create schema evolver: %w", evolverErr)
-	}
-
-	if err := evolver.MutateSchema(); err != nil {
+	if err := mutations.ApplySQLiteStorage(migrationCtx, conn); err != nil {
 		_ = conn.Close()
 
 		return nil, fmt.Errorf("schema mutation: %w", err)

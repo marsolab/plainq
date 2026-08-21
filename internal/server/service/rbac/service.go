@@ -215,6 +215,15 @@ func (s *Service) HasPermission(ctx context.Context, userID, queueID string, per
 	return ok, nil
 }
 
+// HasQueuePermission implements middleware.PermissionChecker. Keeping the
+// transport-facing permission enum at this boundary prevents queue from
+// depending on the RBAC domain package.
+func (s *Service) HasQueuePermission(
+	ctx context.Context, userID, queueID string, permission middleware.PermissionType,
+) (bool, error) {
+	return s.HasPermission(ctx, userID, queueID, PermissionType(permission))
+}
+
 // GetUserRoles returns all roles assigned to a user.
 func (s *Service) GetUserRoles(ctx context.Context, userID string) ([]Role, error) {
 	roles, err := s.storage.GetUserRoles(ctx, userID)

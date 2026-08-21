@@ -9,10 +9,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cristalhq/jwt/v5"
 	"github.com/marsolab/plainq/internal/server/principal"
 	agentv1 "github.com/marsolab/plainq/internal/server/schema/agent/v1"
+	legacyv1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/security"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
+	"github.com/marsolab/servekit/authkit/jwtkit"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -21,6 +24,256 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/grpc/test/bufconn"
 )
+
+type rejectingAuthenticator struct{}
+
+func (rejectingAuthenticator) Authenticate(context.Context, string) (principal.Principal, error) {
+	return principal.Principal{}, errors.New("not an agent token")
+}
+
+type humanVerifierStub struct{ token *jwtkit.Token }
+
+func (s humanVerifierStub) ParseVerify(string) (*jwtkit.Token, error) { return s.token, nil }
+
+type accessDenylistStub struct{ seen *string }
+
+func (s accessDenylistStub) IsAccessTokenDenied(_ context.Context, tokenID string) (bool, error) {
+	if s.seen != nil {
+		*s.seen = tokenID
+	}
+
+	return false, nil
+}
+
+type humanSecurityStub struct {
+	tenantID    string
+	status      string
+	authVersion uint64
+}
+
+func (s humanSecurityStub) ResolveHumanSecurity(context.Context, string) (string, string, uint64, error) {
+	return s.tenantID, s.status, s.authVersion, nil
+}
+
+func TestCompositeAuthenticatorUsesJTIAndLiveHumanVersion(t *testing.T) {
+	now := time.Now()
+	token := &jwtkit.Token{
+		Claims: jwtkit.Claims{
+			ID: "human-jti", Issuer: "plainq-server", Audience: []string{"plainq-human"},
+			Subject: "user-1", ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour)),
+		},
+		Meta: map[string]any{
+			"uid": "user-1", "tenant_id": "tenant-1", "auth_version": float64(2),
+			"token_use": "access", "roles": []any{"admin"},
+		},
+	}
+	seen := ""
+	authenticator, err := NewCompositeAuthenticator(
+		rejectingAuthenticator{}, humanVerifierStub{token: token}, accessDenylistStub{seen: &seen},
+		humanSecurityStub{tenantID: "tenant-1", status: "active", authVersion: 3},
+	)
+	if err != nil {
+		t.Fatalf("NewCompositeAuthenticator() error = %v", err)
+	}
+
+	if _, err := authenticator.Authenticate(context.Background(), "raw-human-token"); err == nil {
+		t.Fatal("Authenticate() accepted stale human auth_version")
+	}
+	if seen != "human-jti" {
+		t.Fatalf("denylist key = %q, want jti", seen)
+	}
+}
+
+func TestUnaryAuthLegacyCompatibilityIsExplicitAndAgentV1AlwaysProtected(t *testing.T) {
+	authenticated := principal.Principal{
+		Kind: principal.KindHuman, ID: "human-1", TenantID: "tenant-1",
+	}
+
+	tests := map[string]struct {
+		method        string
+		protectLegacy bool
+		authorization string
+		wantCode      codes.Code
+		wantPrincipal principal.Principal
+		wantHandler   bool
+	}{
+		"unprotected legacy injects fixed compatibility principal": {
+			method: legacyv1.PlainQService_ListQueues_FullMethodName, wantCode: codes.OK, wantHandler: true,
+			wantPrincipal: principal.Principal{
+				Kind: principal.KindSystem, ID: principal.LegacyPrincipalID, TenantID: principal.LegacyTenantID,
+			},
+		},
+		"protected legacy requires bearer": {
+			method: legacyv1.PlainQService_ListQueues_FullMethodName, protectLegacy: true,
+			wantCode: codes.Unauthenticated,
+		},
+		"unprotected legacy honors a supplied bearer": {
+			method: legacyv1.PlainQService_ListQueues_FullMethodName, authorization: "Bearer token",
+			wantCode: codes.OK, wantHandler: true, wantPrincipal: authenticated,
+		},
+		"malformed legacy bearer cannot downgrade to anonymous": {
+			method: legacyv1.PlainQService_ListQueues_FullMethodName, authorization: "token",
+			wantCode: codes.Unauthenticated,
+		},
+		"agent v1 is protected even while legacy is open": {
+			method: agentv1.AgentService_GetAgent_FullMethodName, wantCode: codes.Unauthenticated,
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			if test.authorization != "" {
+				ctx = metadata.NewIncomingContext(ctx, metadata.Pairs("authorization", test.authorization))
+			}
+
+			handlerCalled := false
+			var gotPrincipal principal.Principal
+			_, err := UnaryAuth(
+				staticAuthenticator{principal: authenticated}, PublicMethods(),
+				WithUnaryLegacyProtection(test.protectLegacy),
+			)(ctx, nil, &grpc.UnaryServerInfo{FullMethod: test.method}, func(ctx context.Context, _ any) (any, error) {
+				handlerCalled = true
+				gotPrincipal, _ = principal.From(ctx)
+
+				return nil, nil
+			})
+
+			if got := status.Code(err); got != test.wantCode {
+				t.Fatalf("code = %s, want %s (error %v)", got, test.wantCode, err)
+			}
+			if handlerCalled != test.wantHandler {
+				t.Fatalf("handler called = %v, want %v", handlerCalled, test.wantHandler)
+			}
+			if test.wantHandler && (gotPrincipal.Kind != test.wantPrincipal.Kind ||
+				gotPrincipal.ID != test.wantPrincipal.ID || gotPrincipal.TenantID != test.wantPrincipal.TenantID) {
+				t.Fatalf("principal = %#v, want %#v", gotPrincipal, test.wantPrincipal)
+			}
+		})
+	}
+}
+
+type authTestServerStream struct {
+	grpc.ServerStream
+	ctx context.Context //nolint:containedctx // Test double exposes the gRPC stream context.
+}
+
+func (s authTestServerStream) Context() context.Context { return s.ctx }
+
+func TestAnonymousLegacyCompatibilityNeverAdmitsProtectedAgentV1Method(t *testing.T) {
+	public := PublicMethods()
+	unary := UnaryAuth(staticAuthenticator{principal: agentPrincipal("tenant-a", "agent-a")}, public)
+	stream := StreamAuth(staticAuthenticator{principal: agentPrincipal("tenant-a", "agent-a")}, public)
+	protectedMethods := 0
+
+	for _, description := range []grpc.ServiceDesc{
+		agentv1.AgentService_ServiceDesc,
+		agentv1.PubSubService_ServiceDesc,
+		agentv1.SystemService_ServiceDesc,
+	} {
+		for _, method := range description.Methods {
+			fullMethod := "/" + description.ServiceName + "/" + method.MethodName
+			if _, ok := public[fullMethod]; ok {
+				continue
+			}
+			protectedMethods++
+
+			handlerCalled := false
+			_, err := unary(context.Background(), nil, &grpc.UnaryServerInfo{FullMethod: fullMethod},
+				func(context.Context, any) (any, error) {
+					handlerCalled = true
+
+					return nil, nil
+				})
+			if got := status.Code(err); got != codes.Unauthenticated || handlerCalled {
+				t.Errorf("anonymous %s = code %s handler-called %t, want unauthenticated", fullMethod, got, handlerCalled)
+			}
+		}
+
+		for _, method := range description.Streams {
+			fullMethod := "/" + description.ServiceName + "/" + method.StreamName
+			if _, ok := public[fullMethod]; ok {
+				continue
+			}
+			protectedMethods++
+
+			handlerCalled := false
+			err := stream(nil, authTestServerStream{ctx: context.Background()},
+				&grpc.StreamServerInfo{FullMethod: fullMethod}, func(any, grpc.ServerStream) error {
+					handlerCalled = true
+
+					return nil
+				})
+			if got := status.Code(err); got != codes.Unauthenticated || handlerCalled {
+				t.Errorf("anonymous %s = code %s handler-called %t, want unauthenticated", fullMethod, got, handlerCalled)
+			}
+		}
+	}
+
+	if protectedMethods == 0 {
+		t.Fatal("generated agent.v1 inventory contained no protected methods")
+	}
+}
+
+type authTestLegacyServer struct {
+	legacyv1.UnimplementedPlainQServiceServer
+	seenPrincipal chan principal.Principal
+}
+
+func (s authTestLegacyServer) ListQueues(
+	ctx context.Context,
+	_ *legacyv1.ListQueuesRequest,
+) (*legacyv1.ListQueuesResponse, error) {
+	p, _ := principal.From(ctx)
+	s.seenPrincipal <- p
+
+	return &legacyv1.ListQueuesResponse{}, nil
+}
+
+func TestLegacyCompatibilityBufconnAdmitsOldAnonymousClientWithFixedPrincipal(t *testing.T) {
+	seen := make(chan principal.Principal, 1)
+	listener := bufconn.Listen(1024 * 1024)
+	grpcServer := grpc.NewServer(grpc.UnaryInterceptor(UnaryAuth(
+		staticAuthenticator{principal: agentPrincipal("tenant-a", "agent-a")},
+		PublicMethods(),
+		WithUnaryLegacyProtection(false),
+	)))
+	legacyv1.RegisterPlainQServiceServer(grpcServer, authTestLegacyServer{seenPrincipal: seen})
+
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- grpcServer.Serve(listener) }()
+	t.Cleanup(func() {
+		grpcServer.Stop()
+		_ = listener.Close()
+		<-serveDone
+	})
+
+	conn, err := grpc.NewClient("passthrough:///legacy-bufconn",
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithContextDialer(func(context.Context, string) (net.Conn, error) {
+			return listener.Dial()
+		}),
+	)
+	if err != nil {
+		t.Fatalf("grpc.NewClient() error = %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	client := legacyv1.NewPlainQServiceClient(conn)
+	if _, err := client.ListQueues(context.Background(), &legacyv1.ListQueuesRequest{}); err != nil {
+		t.Fatalf("anonymous legacy ListQueues() error = %v", err)
+	}
+
+	select {
+	case got := <-seen:
+		if got.Kind != principal.KindSystem || got.ID != principal.LegacyPrincipalID ||
+			got.TenantID != principal.LegacyTenantID {
+			t.Fatalf("legacy principal = %#v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("legacy handler did not receive a principal")
+	}
+}
 
 type authTestAgentServer struct {
 	agentv1.UnimplementedAgentServiceServer

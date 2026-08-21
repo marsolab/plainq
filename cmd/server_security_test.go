@@ -173,6 +173,46 @@ func TestValidateAgentSecurity(t *testing.T) {
 	}
 }
 
+func TestValidateHumanSecurity(t *testing.T) {
+	valid := func() config.Config {
+		return config.Config{
+			AuthEnable: true, AuthJWTSecret: strings.Repeat("h", 32),
+			AuthJWTIssuer: "plainq-server", AuthJWTAudience: "plainq-human",
+			AuthBootstrapSecret: strings.Repeat("b", 32), AuthRequestMaxBytes: 32 << 10,
+			AuthRateRequestsPerSecond: 5, AuthRateBurst: 10,
+			AuthAccessTokenTTL: time.Hour, AuthRefreshTokenTTL: 30 * 24 * time.Hour,
+		}
+	}
+
+	for name, mutate := range map[string]func(*config.Config){
+		"missing jwt secret":               func(cfg *config.Config) { cfg.AuthJWTSecret = "" },
+		"missing issuer":                   func(cfg *config.Config) { cfg.AuthJWTIssuer = "" },
+		"missing audience":                 func(cfg *config.Config) { cfg.AuthJWTAudience = "" },
+		"short bootstrap secret":           func(cfg *config.Config) { cfg.AuthBootstrapSecret = "short" },
+		"missing body limit":               func(cfg *config.Config) { cfg.AuthRequestMaxBytes = 0 },
+		"invalid rate":                     func(cfg *config.Config) { cfg.AuthRateRequestsPerSecond = 0 },
+		"invalid burst":                    func(cfg *config.Config) { cfg.AuthRateBurst = 0 },
+		"verification dependencies absent": func(cfg *config.Config) { cfg.AuthEmailVerificationEnable = true },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := valid()
+			mutate(&cfg)
+			if err := validateHumanSecurity(&cfg); err == nil {
+				t.Fatal("validateHumanSecurity() unexpectedly succeeded")
+			}
+		})
+	}
+
+	cfg := valid()
+	if err := validateHumanSecurity(&cfg); err != nil {
+		t.Fatalf("validateHumanSecurity() error = %v", err)
+	}
+
+	if err := validateHumanSecurity(&config.Config{GRPCProtectLegacy: true}); err == nil {
+		t.Fatal("legacy protection without a human or agent authenticator unexpectedly succeeded")
+	}
+}
+
 func TestIsWildcardOrLoopbackAddress(t *testing.T) {
 	t.Parallel()
 

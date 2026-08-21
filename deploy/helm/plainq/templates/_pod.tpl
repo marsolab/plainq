@@ -29,6 +29,7 @@ appears in the rendered manifest, only the variable reference does.
 {{- else }}
 - -auth.enable=false
 {{- end }}
+- -grpc.protect-legacy={{ if eq .Values.agent.protectLegacy nil }}{{ .Release.IsInstall }}{{ else }}{{ .Values.agent.protectLegacy }}{{ end }}
 {{- if .Values.agent.enabled }}
 - -agent.enable=true
 - -agent.development-insecure-transport={{ .Values.agent.developmentInsecureTransport }}
@@ -38,7 +39,6 @@ appears in the rendered manifest, only the variable reference does.
 - -agent.auth.access-token-ttl={{ .Values.agent.auth.accessTokenTTL }}
 - -agent.rate.requests-per-second={{ .Values.agent.rate.requestsPerSecond }}
 - -agent.rate.burst={{ .Values.agent.rate.burst }}
-- -grpc.protect-legacy={{ .Values.agent.protectLegacy }}
 {{- if .Values.agent.proxyServerName }}
 - -grpc.proxy.server-name={{ .Values.agent.proxyServerName }}
 {{- end }}

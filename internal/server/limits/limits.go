@@ -55,6 +55,7 @@ func Default() Config {
 	}
 }
 
+//nolint:cyclop,gocyclo // Validation mirrors the explicit hard-limit contract field by field.
 func (c Config) Validate() error {
 	if c.MaxMessageBytes < 1 || c.MaxBatchBytes < c.MaxMessageBytes ||
 		c.MaxSendBatch < 1 || c.MaxReceiveBatch < 1 || c.MaxAttributeKeyBytes < 1 ||

@@ -152,6 +152,9 @@ func (s *Storage) ListProviders(ctx context.Context, orgID string) ([]oauth.Prov
 	return out, nil
 }
 
+// SyncOAuthUser persists an OAuth identity and its security projection atomically.
+//
+//nolint:cyclop // Keep identity, projection, rollback, and commit in one auditable transaction boundary.
 func (s *Storage) SyncOAuthUser(ctx context.Context, user oauth.OAuthUser, providerName, orgID string) (sErr error) {
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
@@ -171,14 +174,17 @@ func (s *Storage) SyncOAuthUser(ctx context.Context, user oauth.OAuthUser, provi
 		OauthSub:      toPgText(user.Subject),
 	})
 
-	now := toTimestamptz(time.Now())
+	nowTime := time.Now()
+	now := toTimestamptz(nowTime)
 
 	switch {
 	case errors.Is(lookupErr, pgx.ErrNoRows):
+		userID = idkit.ULID()
+
 		if err := q.InsertOAuthUser(ctx, sqlcgen.InsertOAuthUserParams{
-			UserID:        idkit.ULID(),
+			UserID:        userID,
 			Email:         user.Email,
-			OrgID:         toPgText(orgID),
+			OrgID:         orgID,
 			OauthProvider: toPgText(providerName),
 			OauthSub:      toPgText(user.Subject),
 			LastSyncAt:    now,
@@ -194,13 +200,20 @@ func (s *Storage) SyncOAuthUser(ctx context.Context, user oauth.OAuthUser, provi
 	default:
 		if err := q.UpdateOAuthUser(ctx, sqlcgen.UpdateOAuthUserParams{
 			Email:      user.Email,
-			OrgID:      toPgText(orgID),
+			OrgID:      orgID,
 			LastSyncAt: now,
 			UpdatedAt:  now,
 			UserID:     userID,
 		}); err != nil {
 			return fmt.Errorf("update oauth user: %w", err)
 		}
+	}
+
+	if err := q.UpsertHumanSecurityPrincipal(ctx, sqlcgen.UpsertHumanSecurityPrincipalParams{
+		UpdatedAtNs: nowTime.UnixNano(),
+		UserID:      userID,
+	}); err != nil {
+		return fmt.Errorf("upsert oauth human security principal: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -226,7 +239,7 @@ func (s *Storage) GetUserByOAuthSub(ctx context.Context, providerName, subject s
 	return &oauth.SyncedUser{
 		UserID:      row.UserID,
 		Email:       row.Email,
-		OrgID:       row.OrgID.String,
+		OrgID:       row.OrgID,
 		Provider:    row.OauthProvider.String,
 		Subject:     row.OauthSub.String,
 		IsOAuthUser: row.IsOauthUser,

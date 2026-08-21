@@ -10,9 +10,9 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/marsolab/plainq/internal/server/config"
+	serversecurity "github.com/marsolab/plainq/internal/server/security"
 	"github.com/marsolab/servekit/authkit/hashkit"
 	"github.com/marsolab/servekit/authkit/jwtkit"
-	"github.com/marsolab/servekit/mailkit"
 )
 
 // ErrRefreshTokenNotFound is returned by DeleteRefreshToken when the token has
@@ -20,6 +20,10 @@ import (
 // refresh flow treats it as an authentication failure so a stale refresh token
 // cannot mint a new session.
 var ErrRefreshTokenNotFound = errors.New("refresh token not found")
+
+// ErrEmailNotVerified is returned when a valid password belongs to an account
+// that has not completed the configured verification flow.
+var ErrEmailNotVerified = errors.New("email is not verified")
 
 // Storage encapsulates interaction with account storage.
 //
@@ -49,7 +53,7 @@ type Storage interface {
 	// DeleteRefreshToken deletes given token from database. It returns
 	// ErrRefreshTokenNotFound when no row matched, so the caller can tell a
 	// consumed or revoked token from a successful single-use rotation.
-	DeleteRefreshToken(ctx context.Context, token string) error
+	DeleteRefreshToken(ctx context.Context, tokenHash []byte) error
 
 	// DeleteRefreshTokenByTokenID deletes given token from database by its id.
 	DeleteRefreshTokenByTokenID(ctx context.Context, tid string) error
@@ -58,11 +62,16 @@ type Storage interface {
 	PurgeRefreshTokens(ctx context.Context, aid string) error
 
 	// DenyAccessToken denies access token by given token string.
-	DenyAccessToken(ctx context.Context, token string, ttl time.Duration) error
+	DenyAccessToken(ctx context.Context, token DeniedToken) error
 
 	// IsAccessTokenDenied reports whether the given access token has been
 	// denied (e.g. via sign-out) and is still within its denial window.
-	IsAccessTokenDenied(ctx context.Context, token string) (bool, error)
+	IsAccessTokenDenied(ctx context.Context, tokenID string) (bool, error)
+
+	// GetAccountSecurity returns the live tenant/status/version used to reject
+	// stale human access tokens after a role change or account disable.
+	GetAccountSecurity(ctx context.Context, userID string) (AccountSecurity, error)
+	ResolveHumanSecurity(ctx context.Context, userID string) (tenantID, status string, authVersion uint64, err error)
 
 	// GetUserRoles gets all roles for a user by user ID.
 	GetUserRoles(ctx context.Context, userID string) ([]string, error)
@@ -80,13 +89,25 @@ type Storage interface {
 
 // Account represents user account with all its properties.
 type Account struct {
-	ID        string
-	Name      string
-	Email     string
-	Password  string
-	Verified  bool
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID          string
+	Name        string
+	Email       string
+	Password    string
+	Verified    bool
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	TenantID    string
+	AuthVersion uint64
+	Status      string
+}
+
+const AccountStatusActive = "active"
+
+// AccountSecurity is the mutable session-security projection for one human.
+type AccountSecurity struct {
+	TenantID    string
+	Status      string
+	AuthVersion uint64
 }
 
 // Session represents an auth session.
@@ -106,21 +127,31 @@ type Session struct {
 
 // RefreshToken represents refresh token.
 type RefreshToken struct {
-	ID        string
+	ID         string
+	AID        string
+	TokenHash  []byte
+	CreatedAt  time.Time
+	ExpiresAt  time.Time
+	LastUsedAt time.Time
+}
+
+// DeniedToken is the non-secret revocation record persisted at logout.
+type DeniedToken struct {
+	TokenID   string
 	AID       string
-	Token     string
-	CreatedAt time.Time
 	ExpiresAt time.Time
+	CreatedAt time.Time
+	Reason    string
 }
 
 type Service struct {
-	cfg     *config.Config
-	logger  *slog.Logger
-	router  *chi.Mux
-	hasher  hashkit.Hasher
-	tokman  jwtkit.TokenManager
-	mailer  mailkit.Sender
-	storage Storage
+	cfg         *config.Config
+	logger      *slog.Logger
+	router      *chi.Mux
+	hasher      hashkit.Hasher
+	tokman      jwtkit.TokenManager
+	storage     Storage
+	rateLimiter *serversecurity.KeyedLimiter
 }
 
 func NewService(
@@ -137,8 +168,9 @@ func NewService(
 		hasher: hasher,
 		// Sessions are signed here (createSession), so without a token manager
 		// signin/signup/refresh dereference a nil interface and panic.
-		tokman:  tokenManager,
-		storage: storage,
+		tokman:      tokenManager,
+		storage:     storage,
+		rateLimiter: newAuthRateLimiter(cfg),
 	}
 
 	s.router.Route("/", func(r chi.Router) {
@@ -146,16 +178,6 @@ func NewService(
 		r.Post("/signin", s.signInHandler)
 		r.Post("/signout", s.signOutHandler)
 		r.Post("/refresh", s.refreshHandler)
-
-		r.Route("/email", func(r chi.Router) {
-			r.Post("/verification", s.emailVerificationHandler)
-			r.Post("/verify", s.verifyEmailHandler)
-		})
-
-		r.Route("/password", func(r chi.Router) {
-			r.Post("/reset", s.resetPasswordHandler)
-			r.Post("/verify", s.verifyPasswordResetCodeHandler)
-		})
 	})
 
 	return &s
@@ -167,11 +189,38 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.router.S
 // "Bearer " prefix) has been revoked via sign-out and is still within its
 // denial window. The auth middleware consults this so a signed-out token stops
 // working immediately rather than lingering until its natural expiry.
-func (s *Service) IsAccessTokenDenied(ctx context.Context, token string) (bool, error) {
-	denied, err := s.storage.IsAccessTokenDenied(ctx, token)
+func (s *Service) IsAccessTokenDenied(ctx context.Context, tokenID string) (bool, error) {
+	denied, err := s.storage.IsAccessTokenDenied(ctx, tokenID)
 	if err != nil {
 		return false, fmt.Errorf("account service: check access token denylist: %w", err)
 	}
 
 	return denied, nil
+}
+
+// GetAccountSecurity exposes the live human session-security projection to
+// HTTP and gRPC authentication middleware.
+func (s *Service) GetAccountSecurity(ctx context.Context, userID string) (AccountSecurity, error) {
+	security, err := s.storage.GetAccountSecurity(ctx, userID)
+	if err != nil {
+		return AccountSecurity{}, fmt.Errorf("account service: get account security: %w", err)
+	}
+
+	return security, nil
+}
+
+// ResolveHumanSecurity implements the transport-neutral live-session resolver
+// used by both HTTP and gRPC authentication.
+//
+//nolint:gocritic // Interface compatibility requires the tenant, status, version tuple.
+func (s *Service) ResolveHumanSecurity(
+	ctx context.Context,
+	userID string,
+) (string, string, uint64, error) {
+	security, err := s.GetAccountSecurity(ctx, userID)
+	if err != nil {
+		return "", "", 0, err
+	}
+
+	return security.TenantID, security.Status, security.AuthVersion, nil
 }

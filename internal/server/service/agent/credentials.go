@@ -406,6 +406,8 @@ func (s *Service) activeCredentialAgent(ctx context.Context, record CredentialRe
 }
 
 // Authenticate verifies stateless token claims and current credential and agent state.
+//
+//nolint:cyclop // Token, credential, agent, and live-version checks intentionally fail closed independently.
 func (s *Service) Authenticate(ctx context.Context, raw string) (principal.Principal, error) {
 	p, err := s.tokens.Verify(raw)
 	if err != nil {

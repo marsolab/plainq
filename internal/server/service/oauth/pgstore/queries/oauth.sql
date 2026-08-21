@@ -47,6 +47,31 @@ SET email        = $1,
     updated_at   = $4
 WHERE user_id = $5;
 
+-- name: UpsertHumanSecurityPrincipal :exec
+INSERT INTO security_principals (
+    tenant_id, principal_kind, principal_id, status, roles_json,
+    auth_version, updated_at_ns
+)
+SELECT u.org_id,
+       'human',
+       u.user_id,
+       u.status,
+       coalesce((
+           SELECT jsonb_agg(r.role_name ORDER BY r.role_name)
+           FROM user_roles ur
+           JOIN roles r ON r.role_id = ur.role_id
+           WHERE ur.user_id = u.user_id
+       ), '[]'::jsonb),
+       u.auth_version,
+       $1
+FROM users u
+WHERE u.user_id = $2
+ON CONFLICT (tenant_id, principal_kind, principal_id) DO UPDATE SET
+    status = excluded.status,
+    roles_json = excluded.roles_json,
+    auth_version = excluded.auth_version,
+    updated_at_ns = excluded.updated_at_ns;
+
 -- name: UpdateUserLastSync :exec
 UPDATE users
 SET last_sync_at = $1,

@@ -49,6 +49,12 @@ type Config struct {
 	AuthRefreshTokenTTL         time.Duration
 	AuthEmailVerificationEnable bool
 	AuthJWTSecret               string // HMAC secret used to sign access/refresh tokens; required when AuthEnable.
+	AuthJWTIssuer               string
+	AuthJWTAudience             string
+	AuthBootstrapSecret         string
+	AuthRequestMaxBytes         int64
+	AuthRateRequestsPerSecond   float64
+	AuthRateBurst               int
 
 	// Agent authentication, transport, and node-local overload protection.
 	AgentEnable                       bool

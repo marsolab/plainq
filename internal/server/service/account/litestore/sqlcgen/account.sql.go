@@ -35,17 +35,20 @@ func (q *Queries) CountDirectoryAccounts(ctx context.Context, arg CountDirectory
 }
 
 const createAccount = `-- name: CreateAccount :exec
-INSERT INTO users (user_id, email, password, verified, created_at, updated_at)
-VALUES (?, ?, ?, ?, ?, ?)
+INSERT INTO users (user_id, email, password, verified, created_at, updated_at, org_id, auth_version, status)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 type CreateAccountParams struct {
-	UserID    string
-	Email     string
-	Password  string
-	Verified  bool
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	UserID      string
+	Email       string
+	Password    string
+	Verified    bool
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	OrgID       string
+	AuthVersion int64
+	Status      string
 }
 
 func (q *Queries) CreateAccount(ctx context.Context, arg CreateAccountParams) error {
@@ -56,30 +59,35 @@ func (q *Queries) CreateAccount(ctx context.Context, arg CreateAccountParams) er
 		arg.Verified,
 		arg.CreatedAt,
 		arg.UpdatedAt,
+		arg.OrgID,
+		arg.AuthVersion,
+		arg.Status,
 	)
 	return err
 }
 
 const createRefreshToken = `-- name: CreateRefreshToken :exec
-INSERT INTO refresh_tokens (id, aid, token, created_at, expires_at)
-VALUES (?, ?, ?, ?, ?)
+INSERT INTO refresh_tokens (id, aid, token_hash, created_at_ns, expires_at_ns, last_used_at_ns)
+VALUES (?, ?, ?, ?, ?, ?)
 `
 
 type CreateRefreshTokenParams struct {
-	ID        string
-	Aid       string
-	Token     string
-	CreatedAt time.Time
-	ExpiresAt time.Time
+	ID           string
+	Aid          string
+	TokenHash    []byte
+	CreatedAtNs  int64
+	ExpiresAtNs  int64
+	LastUsedAtNs int64
 }
 
 func (q *Queries) CreateRefreshToken(ctx context.Context, arg CreateRefreshTokenParams) error {
 	_, err := q.db.ExecContext(ctx, createRefreshToken,
 		arg.ID,
 		arg.Aid,
-		arg.Token,
-		arg.CreatedAt,
-		arg.ExpiresAt,
+		arg.TokenHash,
+		arg.CreatedAtNs,
+		arg.ExpiresAtNs,
+		arg.LastUsedAtNs,
 	)
 	return err
 }
@@ -99,11 +107,11 @@ func (q *Queries) DeleteAccount(ctx context.Context, userID string) (int64, erro
 
 const deleteRefreshToken = `-- name: DeleteRefreshToken :execrows
 DELETE FROM refresh_tokens
-WHERE token = ?
+WHERE token_hash = ?
 `
 
-func (q *Queries) DeleteRefreshToken(ctx context.Context, token string) (int64, error) {
-	result, err := q.db.ExecContext(ctx, deleteRefreshToken, token)
+func (q *Queries) DeleteRefreshToken(ctx context.Context, tokenHash []byte) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteRefreshToken, tokenHash)
 	if err != nil {
 		return 0, err
 	}
@@ -121,33 +129,45 @@ func (q *Queries) DeleteRefreshTokenByTokenID(ctx context.Context, id string) er
 }
 
 const denyAccessToken = `-- name: DenyAccessToken :exec
-INSERT INTO denylist (token, denied_until)
-VALUES (?, ?)
+INSERT INTO denylist (token_id, aid, expires_at_ns, created_at_ns, reason)
+VALUES (?, ?, ?, ?, ?)
 `
 
 type DenyAccessTokenParams struct {
-	Token       string
-	DeniedUntil int64
+	TokenID     string
+	Aid         string
+	ExpiresAtNs int64
+	CreatedAtNs int64
+	Reason      string
 }
 
 func (q *Queries) DenyAccessToken(ctx context.Context, arg DenyAccessTokenParams) error {
-	_, err := q.db.ExecContext(ctx, denyAccessToken, arg.Token, arg.DeniedUntil)
+	_, err := q.db.ExecContext(ctx, denyAccessToken,
+		arg.TokenID,
+		arg.Aid,
+		arg.ExpiresAtNs,
+		arg.CreatedAtNs,
+		arg.Reason,
+	)
 	return err
 }
 
 const getAccountByEmail = `-- name: GetAccountByEmail :one
-SELECT user_id, email, password, verified, created_at, updated_at
+SELECT user_id, email, password, verified, created_at, updated_at, org_id, auth_version, status
 FROM users
 WHERE email = ?
 `
 
 type GetAccountByEmailRow struct {
-	UserID    string
-	Email     string
-	Password  string
-	Verified  bool
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	UserID      string
+	Email       string
+	Password    string
+	Verified    bool
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	OrgID       string
+	AuthVersion int64
+	Status      string
 }
 
 func (q *Queries) GetAccountByEmail(ctx context.Context, email string) (GetAccountByEmailRow, error) {
@@ -160,23 +180,29 @@ func (q *Queries) GetAccountByEmail(ctx context.Context, email string) (GetAccou
 		&i.Verified,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.OrgID,
+		&i.AuthVersion,
+		&i.Status,
 	)
 	return i, err
 }
 
 const getAccountByID = `-- name: GetAccountByID :one
-SELECT user_id, email, password, verified, created_at, updated_at
+SELECT user_id, email, password, verified, created_at, updated_at, org_id, auth_version, status
 FROM users
 WHERE user_id = ?
 `
 
 type GetAccountByIDRow struct {
-	UserID    string
-	Email     string
-	Password  string
-	Verified  bool
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	UserID      string
+	Email       string
+	Password    string
+	Verified    bool
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	OrgID       string
+	AuthVersion int64
+	Status      string
 }
 
 func (q *Queries) GetAccountByID(ctx context.Context, userID string) (GetAccountByIDRow, error) {
@@ -189,6 +215,9 @@ func (q *Queries) GetAccountByID(ctx context.Context, userID string) (GetAccount
 		&i.Verified,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.OrgID,
+		&i.AuthVersion,
+		&i.Status,
 	)
 	return i, err
 }
@@ -204,6 +233,25 @@ func (q *Queries) GetAccountOrgID(ctx context.Context, userID string) (string, e
 	var org_id string
 	err := row.Scan(&org_id)
 	return org_id, err
+}
+
+const getAccountSecurity = `-- name: GetAccountSecurity :one
+SELECT org_id, status, auth_version
+FROM users
+WHERE user_id = ?
+`
+
+type GetAccountSecurityRow struct {
+	OrgID       string
+	Status      string
+	AuthVersion int64
+}
+
+func (q *Queries) GetAccountSecurity(ctx context.Context, userID string) (GetAccountSecurityRow, error) {
+	row := q.db.QueryRowContext(ctx, getAccountSecurity, userID)
+	var i GetAccountSecurityRow
+	err := row.Scan(&i.OrgID, &i.Status, &i.AuthVersion)
+	return i, err
 }
 
 const getUserRoles = `-- name: GetUserRoles :many
@@ -240,17 +288,17 @@ func (q *Queries) GetUserRoles(ctx context.Context, userID string) ([]string, er
 const isAccessTokenDenied = `-- name: IsAccessTokenDenied :one
 SELECT count(*)
 FROM denylist
-WHERE token = ?
-  AND denied_until > ?
+WHERE token_id = ?
+  AND expires_at_ns > ?
 `
 
 type IsAccessTokenDeniedParams struct {
-	Token       string
-	DeniedUntil int64
+	TokenID     string
+	ExpiresAtNs int64
 }
 
 func (q *Queries) IsAccessTokenDenied(ctx context.Context, arg IsAccessTokenDeniedParams) (int64, error) {
-	row := q.db.QueryRowContext(ctx, isAccessTokenDenied, arg.Token, arg.DeniedUntil)
+	row := q.db.QueryRowContext(ctx, isAccessTokenDenied, arg.TokenID, arg.ExpiresAtNs)
 	var count int64
 	err := row.Scan(&count)
 	return count, err
@@ -262,7 +310,7 @@ SELECT u.user_id,
        u.verified,
        u.created_at,
        u.updated_at,
-       u.org_id,
+       coalesce(u.org_id, '') AS org_id,
        u.oauth_provider,
        u.is_oauth_user,
        u.last_sync_at,
@@ -293,7 +341,7 @@ type ListDirectoryAccountsRow struct {
 	Verified      bool
 	CreatedAt     time.Time
 	UpdatedAt     time.Time
-	OrgID         sql.NullString
+	OrgID         string
 	OauthProvider sql.NullString
 	IsOauthUser   bool
 	LastSyncAt    sql.NullTime
@@ -492,4 +540,39 @@ func (q *Queries) SetAccountVerified(ctx context.Context, arg SetAccountVerified
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const upsertHumanSecurityPrincipal = `-- name: UpsertHumanSecurityPrincipal :exec
+INSERT INTO security_principals (
+    tenant_id, principal_kind, principal_id, status, roles_json, auth_version, updated_at_ns
+)
+SELECT u.org_id, 'human', u.user_id, u.status,
+       coalesce((
+           SELECT json_group_array(role_name)
+           FROM (
+               SELECT r.role_name AS role_name
+               FROM user_roles ur
+               JOIN roles r ON r.role_id = ur.role_id
+               WHERE ur.user_id = u.user_id
+               ORDER BY r.role_name
+           )
+       ), '[]'),
+       u.auth_version, ?
+FROM users u
+WHERE u.user_id = ?
+ON CONFLICT (tenant_id, principal_kind, principal_id) DO UPDATE SET
+    status = excluded.status,
+    roles_json = excluded.roles_json,
+    auth_version = excluded.auth_version,
+    updated_at_ns = excluded.updated_at_ns
+`
+
+type UpsertHumanSecurityPrincipalParams struct {
+	UpdatedAtNs int64
+	UserID      string
+}
+
+func (q *Queries) UpsertHumanSecurityPrincipal(ctx context.Context, arg UpsertHumanSecurityPrincipalParams) error {
+	_, err := q.db.ExecContext(ctx, upsertHumanSecurityPrincipal, arg.UpdatedAtNs, arg.UserID)
+	return err
 }

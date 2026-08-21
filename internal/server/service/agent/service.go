@@ -52,6 +52,8 @@ type Service struct {
 }
 
 // NewService constructs an agent registry service without enabling its server wiring.
+//
+//nolint:cyclop // Constructor validates each required security dependency independently.
 func NewService(config ServiceConfig) (*Service, error) {
 	if config.Registry == nil {
 		return nil, errors.New("agent registry store is required")

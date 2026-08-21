@@ -11,29 +11,38 @@ CREATE TABLE users
     verified       boolean     DEFAULT FALSE NOT NULL,
     created_at     timestamptz DEFAULT now() NOT NULL,
     updated_at     timestamptz DEFAULT now() NOT NULL,
-    org_id         varchar(26),
+    org_id         varchar(26)               NOT NULL,
     oauth_provider text,
     oauth_sub      text,
     last_sync_at   timestamptz,
     is_oauth_user  boolean     DEFAULT FALSE NOT NULL,
-    CONSTRAINT users_pk PRIMARY KEY (user_id)
+    auth_version   bigint      DEFAULT 1     NOT NULL,
+    status         text        DEFAULT 'active' NOT NULL,
+    CONSTRAINT users_pk PRIMARY KEY (user_id),
+    FOREIGN KEY (org_id) REFERENCES organizations (org_id)
 );
 
 CREATE TABLE refresh_tokens
 (
-    id         varchar(26)               NOT NULL,
-    aid        varchar(26)               NOT NULL,
-    token      text                      NOT NULL,
-    created_at timestamptz DEFAULT now() NOT NULL,
-    expires_at timestamptz DEFAULT now() NOT NULL,
-    CONSTRAINT refresh_tokens_pk PRIMARY KEY (id)
+    id              varchar(26) NOT NULL,
+    aid             varchar(26) NOT NULL,
+    token_hash      bytea       NOT NULL,
+    created_at_ns   bigint      NOT NULL,
+    expires_at_ns   bigint      NOT NULL,
+    last_used_at_ns bigint      NOT NULL,
+    CONSTRAINT refresh_tokens_pk PRIMARY KEY (id),
+    FOREIGN KEY (aid) REFERENCES users (user_id) ON DELETE CASCADE
 );
 
 CREATE TABLE denylist
 (
-    token        text   NOT NULL,
-    denied_until bigint NOT NULL,
-    CONSTRAINT denylist_pk PRIMARY KEY (token)
+    token_id      text   NOT NULL,
+    aid           text   NOT NULL,
+    expires_at_ns bigint NOT NULL,
+    created_at_ns bigint NOT NULL,
+    reason        text   NOT NULL,
+    CONSTRAINT denylist_pk PRIMARY KEY (token_id),
+    FOREIGN KEY (aid) REFERENCES users (user_id) ON DELETE CASCADE
 );
 
 CREATE TABLE roles
@@ -63,6 +72,9 @@ CREATE TABLE queue_properties
     max_receive_attempts       integer                   NOT NULL,
     drop_policy                integer     DEFAULT 0     NOT NULL,
     dead_letter_queue_id       varchar(26),
+    tenant_id                  text        NOT NULL,
+    created_by_kind            text        NOT NULL,
+    created_by_id              text        NOT NULL,
     CONSTRAINT queue_properties_pk PRIMARY KEY (queue_id)
 );
 
@@ -130,6 +142,24 @@ CREATE TABLE oauth_providers
     created_at    timestamptz DEFAULT now() NOT NULL,
     updated_at    timestamptz DEFAULT now() NOT NULL,
     CONSTRAINT oauth_providers_pk PRIMARY KEY (provider_id)
+);
+
+CREATE TABLE topic_properties (
+  topic_id text PRIMARY KEY,
+  topic_name text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  tenant_id text NOT NULL,
+  created_by_kind text NOT NULL,
+  created_by_id text NOT NULL,
+  UNIQUE (tenant_id, topic_name)
+);
+
+CREATE TABLE topic_subscriptions (
+  subscription_id text PRIMARY KEY,
+  topic_id text NOT NULL REFERENCES topic_properties (topic_id) ON DELETE CASCADE,
+  queue_id text NOT NULL REFERENCES queue_properties (queue_id) ON DELETE CASCADE,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (topic_id, queue_id)
 );
 
 -- Agent messaging tables. Runtime DDL remains in the numbered migrations.
@@ -319,3 +349,45 @@ CREATE TABLE cluster_activation_import_records (
 );
 CREATE INDEX cluster_activation_import_key_idx ON cluster_activation_import_records
   (activation_id, record_kind, record_key);
+
+CREATE TABLE tenant_quotas (
+  tenant_id text PRIMARY KEY,
+  max_agents bigint NOT NULL,
+  max_credentials_per_agent bigint NOT NULL,
+  max_queues bigint NOT NULL,
+  max_topics bigint NOT NULL,
+  max_subscriptions bigint NOT NULL,
+  max_message_bytes bigint NOT NULL,
+  max_stored_bytes bigint NOT NULL,
+  send_per_second bigint NOT NULL,
+  publish_per_second bigint NOT NULL,
+  updated_at_ns bigint NOT NULL
+);
+
+CREATE TABLE quota_windows (
+  tenant_id text NOT NULL,
+  action text NOT NULL,
+  window_started_at_ns bigint NOT NULL,
+  used bigint NOT NULL,
+  PRIMARY KEY (tenant_id, action, window_started_at_ns)
+);
+
+CREATE TABLE tenant_resource_usage (
+  tenant_id text PRIMARY KEY,
+  agent_count bigint NOT NULL,
+  topic_count bigint NOT NULL,
+  subscription_count bigint NOT NULL,
+  stored_messaging_bytes bigint NOT NULL,
+  updated_at_ns bigint NOT NULL
+);
+
+CREATE TABLE agent_resource_usage (
+  tenant_id text NOT NULL,
+  agent_id text NOT NULL,
+  pending_direct_count bigint NOT NULL,
+  pending_direct_bytes bigint NOT NULL,
+  subscription_count bigint NOT NULL,
+  active_credential_count bigint NOT NULL,
+  updated_at_ns bigint NOT NULL,
+  PRIMARY KEY (tenant_id, agent_id)
+);

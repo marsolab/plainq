@@ -214,6 +214,13 @@ already shared, so run several stateless nodes against one Postgres instead.
 
 ## Upgrade notes
 
+- Schema migration 006 deliberately revokes sessions created by older
+  releases because those tables stored clear bearer material. Users must sign
+  in once after the upgrade; no clear-token fallback is retained.
+- New installs protect legacy `schema.v1` gRPC by default. Upgrades preserve
+  anonymous old-client compatibility until you explicitly set
+  `agent.protectLegacy=true`; compatibility is scheduled for removal after two
+  releases.
 - Changing the JWT or Postgres secret content rolls the pods automatically (a
   `checksum/secret` pod annotation tracks the rendered Secret).
 - When `auth.enabled=true`, rendering fails if neither `auth.jwtSecret` nor

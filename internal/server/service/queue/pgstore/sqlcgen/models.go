@@ -18,4 +18,7 @@ type QueueProperty struct {
 	MaxReceiveAttempts       int32
 	DropPolicy               int32
 	DeadLetterQueueID        pgtype.Text
+	TenantID                 string
+	CreatedByKind            string
+	CreatedByID              string
 }

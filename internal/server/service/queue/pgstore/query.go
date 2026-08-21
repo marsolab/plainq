@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
+	"github.com/marsolab/plainq/internal/server/service/queue"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
 )
 
@@ -194,18 +195,33 @@ func decodeQueueCursor(raw string) (queueCursor, error) {
 
 // queryListQueues allows only the selected order column and direction into
 // SQL. Prefixes and decoded cursor values are always PostgreSQL parameters.
+//
+//nolint:gocritic // SQL and arguments are the natural database query result pair.
 func queryListQueues(
 	pageSize int32,
 	prefix, rawCursor string,
 	orderBy v1.ListQueuesRequest_OrderBy,
 	sortBy v1.ListQueuesRequest_SortBy,
+	scopes ...queue.AccessScope,
 ) (string, []any, error) {
 	column, direction := queueOrder(orderBy, sortBy)
 	clauses := make([]string, 0, 2)
 	args := make([]any, 0, 4)
 
+	if len(scopes) > 0 {
+		args = append(args, scopes[0].TenantID)
+		clauses = append(clauses, fmt.Sprintf("tenant_id = $%d", len(args)))
+
+		if scopes[0].Compatibility {
+			clauses = append(clauses,
+				"created_by_kind = 'system' AND created_by_id IN ('migration', 'legacy-v1')")
+		}
+	}
+
 	if prefix != "" {
-		clauses = append(clauses, "left(queue_name, char_length($1)) = $2 COLLATE \"C\"")
+		position := len(args) + 1
+		clauses = append(clauses, fmt.Sprintf(
+			"left(queue_name, char_length($%d)) = $%d COLLATE \"C\"", position, position+1))
 		args = append(args, prefix, prefix)
 	}
 
@@ -226,7 +242,10 @@ func queryListQueues(
 		}
 
 		position := len(args) + 1
-		clauses = append(clauses, fmt.Sprintf("(%[1]s %[2]s $%[3]d OR (%[1]s = $%[4]d AND queue_id %[2]s $%[5]d))", column, comparison, position, position+1, position+2))
+		clauses = append(clauses, fmt.Sprintf(
+			"(%[1]s %[2]s $%[3]d OR (%[1]s = $%[4]d AND queue_id %[2]s $%[5]d))",
+			column, comparison, position, position+1, position+2,
+		))
 		args = append(args, value, value, cursor.ID)
 	}
 
@@ -245,17 +264,43 @@ func queryListQueues(
 	), args, nil
 }
 
-func queryCountQueues(prefix string) (string, []any) {
-	if prefix == "" {
-		return "SELECT count(*) FROM queue_properties;", nil
+//nolint:gocritic // SQL and arguments are the natural database query result pair.
+func queryCountQueues(prefix string, scopes ...queue.AccessScope) (string, []any) {
+	clauses := make([]string, 0, 3)
+	args := make([]any, 0, 3)
+
+	if len(scopes) > 0 {
+		args = append(args, scopes[0].TenantID)
+		clauses = append(clauses, fmt.Sprintf("tenant_id = $%d", len(args)))
+
+		if scopes[0].Compatibility {
+			clauses = append(clauses,
+				"created_by_kind = 'system' AND created_by_id IN ('migration', 'legacy-v1')")
+		}
 	}
 
-	return "SELECT count(*) FROM queue_properties WHERE left(queue_name, char_length($1)) = $2 COLLATE \"C\";", []any{prefix, prefix}
+	if prefix == "" {
+		if len(clauses) == 0 {
+			return "SELECT count(*) FROM queue_properties;", nil
+		}
+
+		return "SELECT count(*) FROM queue_properties WHERE " + strings.Join(clauses, " AND ") + ";", args
+	}
+
+	position := len(args) + 1
+	clauses = append(clauses, fmt.Sprintf(
+		"left(queue_name, char_length($%d)) = $%d COLLATE \"C\"", position, position+1))
+	args = append(args, prefix, prefix)
+
+	return "SELECT count(*) FROM queue_properties WHERE " + strings.Join(clauses, " AND ") + ";", args
 }
 
+//nolint:gocritic // Column and direction are a compact internal SQL fragment pair.
 func queueOrder(orderBy v1.ListQueuesRequest_OrderBy, sortBy v1.ListQueuesRequest_SortBy) (string, string) {
 	column := "queue_id"
+
 	switch orderBy {
+	case v1.ListQueuesRequest_ORDER_BY_ID:
 	case v1.ListQueuesRequest_ORDER_BY_NAME:
 		column = "queue_name"
 	case v1.ListQueuesRequest_ORDER_BY_CREATED_AT:

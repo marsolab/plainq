@@ -19,4 +19,7 @@ type QueueProperty struct {
 	MaxReceiveAttempts       int64
 	DropPolicy               int64
 	DeadLetterQueueID        sql.NullString
+	TenantID                 string
+	CreatedByKind            string
+	CreatedByID              string
 }

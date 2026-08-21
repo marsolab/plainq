@@ -113,29 +113,43 @@ func (e *tursoEvolver) MutateSchema() error {
 			continue
 		}
 
-		// The versions are indexes into the mutation files, never user input,
-		// so interpolating them keeps the script a single parameterless batch.
-		script := fmt.Sprintf("%s\n%s\n", m.changes,
-			fmt.Sprintf(tursoSchemaVersionBump, m.version, m.version-1),
-		)
-
-		if _, err := e.db.ExecContext(ctx, script); err != nil {
-			// Losing the race is not a failure: whoever won applied exactly the
-			// mutation this one was about to. Anything else is a real error.
-			applied, readErr := e.schemaVersion(ctx)
-			if readErr == nil && applied >= m.version {
-				currentVersion = applied
-
-				continue
-			}
-
-			return fmt.Errorf("apply schema mutation %q: %w", m.name, err)
+		applied, err := e.applyMutation(ctx, m)
+		if err != nil {
+			return err
 		}
 
-		currentVersion = m.version
+		currentVersion = applied
 	}
 
 	return nil
+}
+
+func (e *tursoEvolver) applyMutation(ctx context.Context, mutation sqlMutation) (int, error) {
+	var err error
+	if mutation.version == 6 {
+		// Tenant security rebuilds users while preserving every FK child.
+		err = mutations.ApplySQLiteStorage(ctx, e.db)
+	} else {
+		// Versions are derived from trusted embedded filenames. Interpolation
+		// keeps the migration and guarded version bump one remote batch.
+		script := fmt.Sprintf("%s\n%s\n", mutation.changes,
+			fmt.Sprintf(tursoSchemaVersionBump, mutation.version, mutation.version-1),
+		)
+		_, err = e.db.ExecContext(ctx, script)
+	}
+
+	if err == nil {
+		return mutation.version, nil
+	}
+
+	// Losing the race is not a failure: another runner applied exactly this
+	// version. Any unchanged/unreadable version preserves the original error.
+	applied, readErr := e.schemaVersion(ctx)
+	if readErr == nil && applied >= mutation.version {
+		return applied, nil
+	}
+
+	return 0, fmt.Errorf("apply schema mutation %q: %w", mutation.name, err)
 }
 
 // schemaVersion reads the currently recorded schema version.

@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 
+	"github.com/marsolab/plainq/internal/server/middleware"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/marsolab/servekit/grpckit"
@@ -42,9 +43,14 @@ func (s *Service) CreateQueue(ctx context.Context, r *v1.CreateQueueRequest) (*v
 	return output, nil
 }
 
+//nolint:wrapcheck // gRPC status values are constructed at the transport boundary.
 func (s *Service) DeleteQueue(ctx context.Context, r *v1.DeleteQueueRequest) (*v1.DeleteQueueResponse, error) {
 	if err := validateQueueIDFromRequest(r); err != nil {
 		return grpckit.ErrorGRPC[*v1.DeleteQueueResponse](ctx, err)
+	}
+
+	if err := s.requireProtectedLegacyQueuePermission(ctx, r.GetQueueId(), middleware.PermissionDelete); err != nil {
+		return grpckit.ErrorGRPC[*v1.DeleteQueueResponse](ctx, pqerr.AsTransport(err))
 	}
 
 	if _, err := s.storage.DeleteQueue(ctx, r); err != nil {
@@ -65,6 +71,10 @@ func (s *Service) PurgeQueue(ctx context.Context, r *v1.PurgeQueueRequest) (*v1.
 		return grpckit.ErrorGRPC[*v1.PurgeQueueResponse](ctx, err)
 	}
 
+	if err := s.requireProtectedLegacyQueuePermission(ctx, r.GetQueueId(), middleware.PermissionPurge); err != nil {
+		return grpckit.ErrorGRPC[*v1.PurgeQueueResponse](ctx, pqerr.AsTransport(err))
+	}
+
 	output, purgeErr := s.storage.PurgeQueue(ctx, r)
 	if purgeErr != nil {
 		return grpckit.ErrorGRPC[*v1.PurgeQueueResponse](ctx, purgeErr)
@@ -76,6 +86,10 @@ func (s *Service) PurgeQueue(ctx context.Context, r *v1.PurgeQueueRequest) (*v1.
 func (s *Service) Send(ctx context.Context, r *v1.SendRequest) (*v1.SendResponse, error) {
 	if err := validateQueueIDFromRequest(r); err != nil {
 		return grpckit.ErrorGRPC[*v1.SendResponse](ctx, err)
+	}
+
+	if err := s.requireProtectedLegacyQueuePermission(ctx, r.GetQueueId(), middleware.PermissionSend); err != nil {
+		return grpckit.ErrorGRPC[*v1.SendResponse](ctx, pqerr.AsTransport(err))
 	}
 
 	output, sendErr := s.storage.Send(ctx, r)
@@ -91,6 +105,10 @@ func (s *Service) Receive(ctx context.Context, r *v1.ReceiveRequest) (*v1.Receiv
 		return grpckit.ErrorGRPC[*v1.ReceiveResponse](ctx, err)
 	}
 
+	if err := s.requireProtectedLegacyQueuePermission(ctx, r.GetQueueId(), middleware.PermissionReceive); err != nil {
+		return grpckit.ErrorGRPC[*v1.ReceiveResponse](ctx, pqerr.AsTransport(err))
+	}
+
 	output, receiveErr := s.storage.Receive(ctx, r)
 	if receiveErr != nil {
 		return grpckit.ErrorGRPC[*v1.ReceiveResponse](ctx, receiveErr)
@@ -102,6 +120,10 @@ func (s *Service) Receive(ctx context.Context, r *v1.ReceiveRequest) (*v1.Receiv
 func (s *Service) Delete(ctx context.Context, r *v1.DeleteRequest) (*v1.DeleteResponse, error) {
 	if err := validateQueueIDFromRequest(r); err != nil {
 		return grpckit.ErrorGRPC[*v1.DeleteResponse](ctx, err)
+	}
+
+	if err := s.requireProtectedLegacyQueuePermission(ctx, r.GetQueueId(), middleware.PermissionDelete); err != nil {
+		return grpckit.ErrorGRPC[*v1.DeleteResponse](ctx, pqerr.AsTransport(err))
 	}
 
 	output, deleteErr := s.storage.Delete(ctx, r)

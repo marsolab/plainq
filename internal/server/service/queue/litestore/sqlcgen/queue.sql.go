@@ -25,11 +25,20 @@ func (q *Queries) CountQueueProperties(ctx context.Context) (int64, error) {
 
 const deleteQueueProperties = `-- name: DeleteQueueProperties :execrows
 DELETE FROM queue_properties
-WHERE queue_id = ?
+WHERE queue_id = ?1
+  AND tenant_id = ?2
+  AND (NOT CAST(?3 AS boolean)
+    OR (created_by_kind = 'system' AND created_by_id IN ('migration', 'legacy-v1')))
 `
 
-func (q *Queries) DeleteQueueProperties(ctx context.Context, queueID string) (int64, error) {
-	result, err := q.db.ExecContext(ctx, deleteQueueProperties, queueID)
+type DeleteQueuePropertiesParams struct {
+	QueueID      string
+	TenantID     string
+	LegacyCompat bool
+}
+
+func (q *Queries) DeleteQueueProperties(ctx context.Context, arg DeleteQueuePropertiesParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteQueueProperties, arg.QueueID, arg.TenantID, arg.LegacyCompat)
 	if err != nil {
 		return 0, err
 	}
@@ -45,13 +54,25 @@ SELECT queue_id,
        visibility_timeout_seconds,
        max_receive_attempts,
        drop_policy,
-       dead_letter_queue_id
+       dead_letter_queue_id,
+       tenant_id,
+       created_by_kind,
+       created_by_id
 FROM queue_properties
-WHERE queue_id = ?
+WHERE queue_id = ?1
+  AND tenant_id = ?2
+  AND (NOT CAST(?3 AS boolean)
+    OR (created_by_kind = 'system' AND created_by_id IN ('migration', 'legacy-v1')))
 `
 
-func (q *Queries) GetQueuePropertiesByID(ctx context.Context, queueID string) (QueueProperty, error) {
-	row := q.db.QueryRowContext(ctx, getQueuePropertiesByID, queueID)
+type GetQueuePropertiesByIDParams struct {
+	QueueID      string
+	TenantID     string
+	LegacyCompat bool
+}
+
+func (q *Queries) GetQueuePropertiesByID(ctx context.Context, arg GetQueuePropertiesByIDParams) (QueueProperty, error) {
+	row := q.db.QueryRowContext(ctx, getQueuePropertiesByID, arg.QueueID, arg.TenantID, arg.LegacyCompat)
 	var i QueueProperty
 	err := row.Scan(
 		&i.QueueID,
@@ -63,6 +84,9 @@ func (q *Queries) GetQueuePropertiesByID(ctx context.Context, queueID string) (Q
 		&i.MaxReceiveAttempts,
 		&i.DropPolicy,
 		&i.DeadLetterQueueID,
+		&i.TenantID,
+		&i.CreatedByKind,
+		&i.CreatedByID,
 	)
 	return i, err
 }
@@ -76,13 +100,25 @@ SELECT queue_id,
        visibility_timeout_seconds,
        max_receive_attempts,
        drop_policy,
-       dead_letter_queue_id
+       dead_letter_queue_id,
+       tenant_id,
+       created_by_kind,
+       created_by_id
 FROM queue_properties
-WHERE queue_name = ?
+WHERE queue_name = ?1
+  AND tenant_id = ?2
+  AND (NOT CAST(?3 AS boolean)
+    OR (created_by_kind = 'system' AND created_by_id IN ('migration', 'legacy-v1')))
 `
 
-func (q *Queries) GetQueuePropertiesByName(ctx context.Context, queueName string) (QueueProperty, error) {
-	row := q.db.QueryRowContext(ctx, getQueuePropertiesByName, queueName)
+type GetQueuePropertiesByNameParams struct {
+	QueueName    string
+	TenantID     string
+	LegacyCompat bool
+}
+
+func (q *Queries) GetQueuePropertiesByName(ctx context.Context, arg GetQueuePropertiesByNameParams) (QueueProperty, error) {
+	row := q.db.QueryRowContext(ctx, getQueuePropertiesByName, arg.QueueName, arg.TenantID, arg.LegacyCompat)
 	var i QueueProperty
 	err := row.Scan(
 		&i.QueueID,
@@ -94,6 +130,9 @@ func (q *Queries) GetQueuePropertiesByName(ctx context.Context, queueName string
 		&i.MaxReceiveAttempts,
 		&i.DropPolicy,
 		&i.DeadLetterQueueID,
+		&i.TenantID,
+		&i.CreatedByKind,
+		&i.CreatedByID,
 	)
 	return i, err
 }
@@ -105,8 +144,11 @@ INSERT INTO queue_properties (queue_id,
                               visibility_timeout_seconds,
                               max_receive_attempts,
                               drop_policy,
-                              dead_letter_queue_id)
-VALUES (?, ?, ?, ?, ?, ?, ?)
+                              dead_letter_queue_id,
+                              tenant_id,
+                              created_by_kind,
+                              created_by_id)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 type InsertQueuePropertiesParams struct {
@@ -117,6 +159,9 @@ type InsertQueuePropertiesParams struct {
 	MaxReceiveAttempts       int64
 	DropPolicy               int64
 	DeadLetterQueueID        sql.NullString
+	TenantID                 string
+	CreatedByKind            string
+	CreatedByID              string
 }
 
 func (q *Queries) InsertQueueProperties(ctx context.Context, arg InsertQueuePropertiesParams) error {
@@ -128,6 +173,9 @@ func (q *Queries) InsertQueueProperties(ctx context.Context, arg InsertQueueProp
 		arg.MaxReceiveAttempts,
 		arg.DropPolicy,
 		arg.DeadLetterQueueID,
+		arg.TenantID,
+		arg.CreatedByKind,
+		arg.CreatedByID,
 	)
 	return err
 }
