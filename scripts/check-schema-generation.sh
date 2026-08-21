@@ -11,7 +11,9 @@ for pkg in v1 agent/v1; do
   vt_file="$(find "$package_root" -maxdepth 1 -name '*_vtproto.pb.go' -print -quit)"
   test -n "$grpc_file"
   test -n "$vt_file"
-  test "$(rg -l 'type .*ServiceClient interface' "$package_root" --glob '*.go' --max-depth 1 | wc -l | tr -d ' ')" -eq 1
-  rg -q 'type .*ServiceClient interface' "$grpc_file"
-  if rg -q 'type .*ServiceClient interface' "$vt_file"; then exit 1; fi
+  client_file_count="$(find "$package_root" -maxdepth 1 -name '*.go' -type f \
+    -exec grep -l -E 'type .*ServiceClient interface' {} + | wc -l | tr -d '[:space:]')"
+  test "$client_file_count" -eq 1
+  grep -q -E 'type .*ServiceClient interface' "$grpc_file"
+  if grep -q -E 'type .*ServiceClient interface' "$vt_file"; then exit 1; fi
 done

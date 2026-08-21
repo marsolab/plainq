@@ -40,6 +40,8 @@ jobs:
         run: git diff --exit-code -- schema/docs internal/server/schema
       - name: Check public SDK generation
         run: ./scripts/check-schema-generation.sh
+      - name: Test public SDK generation guard without ripgrep
+        run: ./scripts/check-schema-generation_test.sh
       - name: Test schema compatibility
         run: go test ./internal/server/schema/... -count=1
 
