@@ -146,6 +146,7 @@ first failure rather than after it.
 | `plainq_oauth_request_duration_seconds` | histogram | `provider`, `stage` | Latency of calls out to an OAuth provider. A slow provider becomes a slow login. |
 | `plainq_oauth_requests_total` | counter | `provider`, `stage`, `result` | Calls out to an OAuth provider, by stage of the flow and outcome. |
 | `plainq_onboarding_checks_total` | counter | `outcome` | Onboarding gate evaluations, by outcome. `required` means the server is still refusing traffic pending initial setup. |
+| `plainq_security_audit_failures_total` | counter | — | Authentication failures that could not be persisted to the security audit log. Any increase means the best-effort audit trail is incomplete. |
 
 ### Storage
 

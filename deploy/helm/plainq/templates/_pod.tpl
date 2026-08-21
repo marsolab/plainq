@@ -1,17 +1,18 @@
 {{/*
 plainq.args builds the argument list for the "serve" subcommand from values.
 
-Note on the JWT secret: PlainQ only reads configuration from CLI flags, not env
-vars. We still source the secret value from a Kubernetes Secret (never inlined in
-the manifest) by exposing it as the env var PLAINQ_JWT_SECRET and referencing it
-in the flag with $(PLAINQ_JWT_SECRET). Kubernetes expands $(VAR) references in
-container args itself — this is a native kubelet feature, not a shell feature, so
-it works on a distroless image with no shell. The expanded plaintext secret never
-appears in the rendered manifest, only the variable reference does.
+PlainQ reads configuration from CLI flags, so authentication credentials are
+sourced from Kubernetes Secrets into environment variables and referenced from
+the flags with $(VAR). Kubelet expands these references without a shell. The
+rendered workload therefore contains only references, never plaintext values.
 */}}
 {{- define "plainq.args" -}}
 - serve
+{{- if and .Values.agent.enabled .Values.agent.developmentInsecureTransport }}
+- -grpc.addr=127.0.0.1:{{ .Values.service.grpcPort }}
+{{- else }}
 - -grpc.addr=:{{ .Values.service.grpcPort }}
+{{- end }}
 - -http.addr=:{{ .Values.service.httpPort }}
 - -storage.driver={{ .Values.storage.driver }}
 {{- if eq .Values.storage.driver "sqlite" }}
@@ -22,8 +23,36 @@ appears in the rendered manifest, only the variable reference does.
 {{- if .Values.auth.enabled }}
 - -auth.enable=true
 - -auth.jwt.secret=$(PLAINQ_JWT_SECRET)
+- -auth.bootstrap.secret=$(PLAINQ_BOOTSTRAP_SECRET)
 {{- else }}
 - -auth.enable=false
+{{- end }}
+- -grpc.protect-legacy={{ if eq .Values.agent.protectLegacy nil }}{{ .Release.IsInstall }}{{ else }}{{ .Values.agent.protectLegacy }}{{ end }}
+{{- if .Values.agent.enabled }}
+- -agent.enable=true
+- -agent.development-insecure-transport={{ .Values.agent.developmentInsecureTransport }}
+- -agent.auth.issuer={{ .Values.agent.auth.issuer }}
+- -agent.auth.audience={{ .Values.agent.auth.audience }}
+- -agent.auth.jwt-secret=$(PLAINQ_AGENT_JWT_SECRET)
+- -agent.auth.access-token-ttl={{ .Values.agent.auth.accessTokenTTL }}
+- -agent.rate.requests-per-second={{ .Values.agent.rate.requestsPerSecond }}
+- -agent.rate.burst={{ .Values.agent.rate.burst }}
+{{- if .Values.agent.proxyServerName }}
+- -grpc.proxy.server-name={{ .Values.agent.proxyServerName }}
+{{- end }}
+{{- if not .Values.agent.developmentInsecureTransport }}
+- -grpc.tls.mode={{ .Values.agent.tls.mode }}
+- -grpc.tls.cert-file=/etc/plainq/grpc-tls/{{ .Values.agent.tls.certKey }}
+- -grpc.tls.key-file=/etc/plainq/grpc-tls/{{ .Values.agent.tls.keyKey }}
+{{- if eq .Values.agent.tls.mode "mutual" }}
+- -grpc.tls.client-ca-file=/etc/plainq/grpc-tls/{{ .Values.agent.tls.clientCAKey }}
+{{- end }}
+{{- end }}
+{{- if .Values.cluster.enabled }}
+- -grpc.advertise.addr=$(PLAINQ_POD_IP):{{ .Values.service.grpcPort }}
+{{- end }}
+{{- else }}
+- -agent.enable=false
 {{- end }}
 - -log.level={{ .Values.config.logLevel }}
 - -health.route={{ .Values.config.healthRoute }}
@@ -47,6 +76,18 @@ $(VAR) expansion above, plus any user-supplied env.
     secretKeyRef:
       name: {{ include "plainq.jwtSecretName" . }}
       key: {{ .Values.auth.secretKey }}
+- name: PLAINQ_BOOTSTRAP_SECRET
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "plainq.bootstrapSecretName" . }}
+      key: {{ .Values.auth.bootstrap.secretKey }}
+{{- end }}
+{{- if .Values.agent.enabled }}
+- name: PLAINQ_AGENT_JWT_SECRET
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.agent.auth.existingSecret | default (printf "%s-agent-auth" (include "plainq.fullname" .)) }}
+      key: {{ .Values.agent.auth.secretKey }}
 {{- end }}
 {{- if eq .Values.storage.driver "postgres" }}
 - name: PLAINQ_POSTGRES_DSN
@@ -189,6 +230,11 @@ StatefulSet (sqlite) and the Deployment (postgres).
     # /tmp is writable scratch space, required because readOnlyRootFilesystem is true.
     - name: tmp
       mountPath: /tmp
+    {{- if and .Values.agent.enabled (not .Values.agent.developmentInsecureTransport) }}
+    - name: grpc-tls
+      mountPath: /etc/plainq/grpc-tls
+      readOnly: true
+    {{- end }}
     {{- if eq .Values.storage.driver "sqlite" }}
     - name: data
       mountPath: {{ dir .Values.storage.sqlite.path }}
@@ -201,6 +247,11 @@ plainq.volumes renders the shared pod-level volumes.
 {{- define "plainq.volumes" -}}
 - name: tmp
   emptyDir: {}
+{{- if and .Values.agent.enabled (not .Values.agent.developmentInsecureTransport) }}
+- name: grpc-tls
+  secret:
+    secretName: {{ .Values.agent.tls.existingSecret }}
+{{- end }}
 {{- if and (eq .Values.storage.driver "sqlite") (not .Values.storage.sqlite.persistence.enabled) }}
 - name: data
   emptyDir: {}

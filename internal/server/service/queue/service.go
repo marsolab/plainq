@@ -2,15 +2,19 @@ package queue
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/marsolab/plainq/internal/server/authz"
 	"github.com/marsolab/plainq/internal/server/config"
+	_ "github.com/marsolab/plainq/internal/server/grpccodec" // Register PlainQ's process-wide protobuf codec at init time.
+	"github.com/marsolab/plainq/internal/server/middleware"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
-	vtgrpc "github.com/planetscale/vtprotobuf/codec/grpc"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/encoding"
 )
 
 // Storage encapsulates interaction with queue storage.
@@ -72,18 +76,76 @@ type Service struct {
 	logger       *slog.Logger
 	router       chi.Router
 	storage      Storage
+	operations   *Operations
+	operationsMu sync.Mutex
 	topicMetrics TopicMetricsRecorder
+	permissions  middleware.PermissionChecker
+}
+
+func (s *Service) policyOperations() *Operations {
+	s.operationsMu.Lock()
+	defer s.operationsMu.Unlock()
+
+	if s.operations == nil {
+		var authorizer authz.Authorizer
+		if _, shared := s.storage.(authz.PolicyStore); !shared && s.policyProtectionEnabled() {
+			authorizer = legacyServicePolicyAuthorizer{service: s}
+		}
+
+		operations, err := NewOperations(s.storage, authorizer)
+		if err != nil {
+			panic(fmt.Sprintf("create queue operations: %v", err))
+		}
+
+		s.operations = operations
+	}
+
+	return s.operations
+}
+
+func (s *Service) policyProtectionEnabled() bool {
+	if s.cfg == nil {
+		return s.permissions != nil
+	}
+
+	return s.cfg.AuthEnable || s.cfg.GRPCProtectLegacy
+}
+
+// SetPermissionChecker wires the tenant-aware RBAC resolver used by queue
+// mutation routes. It is set after both services are constructed to avoid a
+// package cycle between queue and RBAC.
+func (s *Service) SetPermissionChecker(checker middleware.PermissionChecker) {
+	s.operationsMu.Lock()
+	defer s.operationsMu.Unlock()
+
+	s.permissions = checker
+	if _, shared := s.storage.(authz.PolicyStore); !shared {
+		s.operations = nil
+	}
+}
+
+// HasQueuePermission delegates through the currently configured checker. The
+// service itself is installed in route middleware so construction order does
+// not create a window where handlers capture a nil checker.
+func (s *Service) HasQueuePermission(
+	ctx context.Context, userID, queueID string, permission middleware.PermissionType,
+) (bool, error) {
+	if s.permissions == nil {
+		return false, errors.New("queue permission checker is not configured")
+	}
+
+	allowed, err := s.permissions.HasQueuePermission(ctx, userID, queueID, permission)
+	if err != nil {
+		return false, fmt.Errorf("resolve queue permission: %w", err)
+	}
+
+	return allowed, nil
 }
 
 // NewService creates a new queue service.
 func NewService(cfg *config.Config, logger *slog.Logger, storage Storage) *Service {
-	encoding.RegisterCodec(vtgrpc.Codec{})
-
 	s := Service{
-		cfg:     cfg,
-		logger:  logger,
-		router:  chi.NewRouter(),
-		storage: storage,
+		cfg: cfg, logger: logger, router: chi.NewRouter(), storage: storage,
 	}
 
 	s.router.Route("/", func(r chi.Router) {

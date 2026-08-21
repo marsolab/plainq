@@ -19,14 +19,6 @@ type sweepResult struct {
 }
 
 func (s *Storage) gc(ctx context.Context) {
-	defer func() {
-		if r := recover(); r != nil {
-			s.logger.Error("GC routine recovered from panic",
-				slog.Any("panic", r),
-			)
-		}
-	}()
-
 	s.logger.Debug("Starting garbage collection routine...")
 
 	timer := time.NewTicker(s.gcTimeout)
@@ -38,20 +30,29 @@ func (s *Storage) gc(ctx context.Context) {
 			return
 
 		case <-timer.C:
-			if s.observer.Queues() == 0 {
-				continue
-			}
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						s.logger.Error("GC iteration recovered from panic", slog.Any("panic", r))
+					}
+				}()
 
-			s.collect(ctx)
+				if s.observer.Queues() == 0 {
+					return
+				}
+
+				if err := s.collect(ctx); err != nil {
+					s.logger.Error("GC collection failed", slog.Any("error", err))
+				}
+			}()
 		}
 	}
 }
 
-// collect runs one full sweep and records how it went. It mirrors the SQLite
-// backend: the failure paths still panic, but the outcome is recorded on the
-// way out, so the error result is reachable for exactly the failures an
-// operator needs to see.
-func (s *Storage) collect(ctx context.Context) {
+// collect runs one full sweep and records how it went. Enumeration errors are
+// returned to the timer iteration; a failed queue is logged without stopping
+// the rest of the batch.
+func (s *Storage) collect(ctx context.Context) error {
 	var (
 		start = time.Now()
 		cErr  error
@@ -63,19 +64,17 @@ func (s *Storage) collect(ctx context.Context) {
 	if queuesErr != nil {
 		cErr = queuesErr
 
-		panic(fmt.Sprintf("get queue IDs for GC: %v", queuesErr))
+		return fmt.Errorf("get queue IDs for GC: %w", queuesErr)
 	}
 
-	for _, queueID := range queues {
+	cErr = runSweepBatch(ctx, queues, func(ctx context.Context, queueID string) error {
 		s.logger.Debug("Running garbage collection for queue",
 			slog.String("queue_id", queueID),
 		)
 
 		result, sweepErr := s.sweep(ctx, queueID)
 		if sweepErr != nil {
-			cErr = sweepErr
-
-			panic(fmt.Errorf("sweep queue (id: %q): %s", queueID, sweepErr.Error()))
+			return fmt.Errorf("sweep queue (id: %q): %w", queueID, sweepErr)
 		}
 
 		// A sweep is the one moment the store already knows a queue changed
@@ -88,7 +87,24 @@ func (s *Storage) collect(ctx context.Context) {
 			slog.String("duration", result.Duration.String()),
 			slog.Uint64("messages_dropped", result.MessagesDropped),
 		)
+
+		return nil
+	}, s.logger)
+
+	return cErr
+}
+
+func runSweepBatch(ctx context.Context, queueIDs []string, sweep func(context.Context, string) error, logger *slog.Logger) error {
+	errs := make([]error, 0)
+
+	for _, queueID := range queueIDs {
+		if err := sweep(ctx, queueID); err != nil {
+			logger.Error("queue sweep failed", slog.String("queue_id", queueID), slog.Any("error", err))
+			errs = append(errs, err)
+		}
 	}
+
+	return errors.Join(errs...)
 }
 
 func (s *Storage) queuesForGC(ctx context.Context) (_ []string, sErr error) {
@@ -157,7 +173,7 @@ func (s *Storage) sweep(ctx context.Context, queueID string) (_ *sweepResult, sE
 
 	tx, txErr := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if txErr != nil {
-		panic(fmt.Errorf("begin transaction: %w", txErr))
+		return nil, fmt.Errorf("begin transaction: %w", txErr)
 	}
 
 	defer func() { sErr = errors.Join(sErr, rollback(ctx, tx)) }()
@@ -258,6 +274,15 @@ func moveMessagesToDLQ(ctx context.Context, tx pgx.Tx, props QueueProps) (uint64
 		if _, err := tx.Exec(ctx, insertSQL, m.ID, m.Body); err != nil {
 			return 0, fmt.Errorf("insert into DLQ: %w", err)
 		}
+	}
+
+	ids := make([]string, 0, len(msgs))
+	for _, m := range msgs {
+		ids = append(ids, m.ID)
+	}
+
+	if _, err := tx.Exec(ctx, queryDeleteMessagesNoReturning(props.ID), ids); err != nil {
+		return 0, fmt.Errorf("remove dead-lettered messages: %w", err)
 	}
 
 	return uint64(len(msgs)), nil

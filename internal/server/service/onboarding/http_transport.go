@@ -2,29 +2,32 @@ package onboarding
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/cristalhq/jwt/v5"
+	"github.com/marsolab/plainq/internal/server/principal"
 	"github.com/marsolab/servekit/authkit/jwtkit"
 	"github.com/marsolab/servekit/errkit"
 	"github.com/marsolab/servekit/httpkit"
 )
 
-const (
-	tokenIssuer = "plainq-server"
-)
+const defaultBootstrapMaxBytes int64 = 32 << 10
 
 // onboardingRequest is the payload accepted by completeOnboardingHandler.
 // It is package-level so validateOnboardingRequest can reference the type.
 type onboardingRequest struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
-	Name     string `json:"name,omitempty"`
+	BootstrapSecret string `json:"bootstrap_secret"`
+	Email           string `json:"email"`
+	Password        string `json:"password"`
+	Name            string `json:"name,omitempty"`
 }
 
 // getOnboardingStatusHandler returns the current onboarding status.
@@ -46,19 +49,12 @@ func (s *Service) getOnboardingStatusHandler(w http.ResponseWriter, r *http.Requ
 
 // completeOnboardingHandler handles the creation of the initial admin user.
 func (s *Service) completeOnboardingHandler(w http.ResponseWriter, r *http.Request) {
-	// First, verify that onboarding is actually needed.
-	needsOnboarding, err := s.NeedsOnboarding(r.Context())
-	if err != nil {
-		httpkit.ErrorHTTP(w, r, fmt.Errorf("check onboarding status: %w", err))
-
-		return
+	maxBytes := s.cfg.AuthRequestMaxBytes
+	if maxBytes <= 0 {
+		maxBytes = defaultBootstrapMaxBytes
 	}
 
-	if !needsOnboarding {
-		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: onboarding has already been completed", errkit.ErrInvalidArgument))
-
-		return
-	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 
 	var req onboardingRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -73,6 +69,12 @@ func (s *Service) completeOnboardingHandler(w http.ResponseWriter, r *http.Reque
 		}
 	}()
 
+	if !s.allowBootstrapRequest(r, req.Email) {
+		rejectBootstrapRate(w, r)
+
+		return
+	}
+
 	// Validate input.
 	if err := s.validateOnboardingRequest(req); err != nil {
 		httpkit.ErrorHTTP(w, r, err)
@@ -80,18 +82,11 @@ func (s *Service) completeOnboardingHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Create the initial admin user.
-	admin, err := s.CreateInitialAdmin(r.Context(), req.Email, req.Password, req.Name)
+	admin, session, err := s.bootstrap(r.Context(), req, bootstrapRequestMetadata{
+		RequestID: requestID(r), SourceIP: requestSourceIP(r), UserAgent: r.UserAgent(),
+	})
 	if err != nil {
-		httpkit.ErrorHTTP(w, r, fmt.Errorf("create initial admin: %w", err))
-
-		return
-	}
-
-	// Generate session tokens for the new admin.
-	session, err := s.createAdminSession(r.Context(), admin.UserID, admin.Email, time.Now())
-	if err != nil {
-		httpkit.ErrorHTTP(w, r, fmt.Errorf("create admin session: %w", err))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("complete onboarding: %w", err))
 
 		return
 	}
@@ -115,8 +110,67 @@ func (s *Service) completeOnboardingHandler(w http.ResponseWriter, r *http.Reque
 	httpkit.JSON(w, r, resp)
 }
 
+type bootstrapRequestMetadata struct {
+	RequestID string
+	SourceIP  string
+	UserAgent string
+}
+
+// bootstrap creates tokens first, then commits the user, role, principal,
+// hashed refresh token, and audit event in one storage transaction. Raw
+// tokens are returned only after that transaction succeeds.
+func (s *Service) bootstrap(
+	ctx context.Context,
+	req onboardingRequest,
+	metadata bootstrapRequestMetadata,
+) (*InitialAdmin, *Session, error) {
+	if !bootstrapSecretMatches(req.BootstrapSecret, s.cfg.AuthBootstrapSecret) {
+		return nil, nil, errkit.ErrUnauthenticated
+	}
+
+	hashedPassword, err := s.hasher.HashPassword(req.Password)
+	if err != nil {
+		return nil, nil, fmt.Errorf("hash password: %w", err)
+	}
+
+	now := time.Now().UTC()
+	admin := InitialAdmin{
+		UserID: generateUserID(), Email: req.Email, Password: hashedPassword, Name: req.Name,
+		Verified: true, CreatedAt: now, TenantID: principal.LegacyTenantID,
+		AuthVersion: 1, Status: "active",
+	}
+
+	session, refresh, err := s.createAdminSession(admin, now)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	record := BootstrapRecord{
+		Admin:        admin,
+		RefreshToken: refresh,
+		Audit: AuditEvent{
+			ID: generateUserID(), TenantID: admin.TenantID,
+			PrincipalKind: string(principal.KindHuman), PrincipalID: admin.UserID,
+			Action: "onboarding.bootstrap", ResourceKind: "tenant", ResourceID: admin.TenantID,
+			Outcome: "success", RequestID: metadata.RequestID, SourceIP: metadata.SourceIP,
+			UserAgent: metadata.UserAgent, MetadataJSON: []byte(`{}`), CreatedAt: now,
+		},
+	}
+	if err := s.storage.Bootstrap(ctx, record); err != nil {
+		return nil, nil, fmt.Errorf("persist bootstrap transaction: %w", err)
+	}
+
+	admin.Password = ""
+
+	return &admin, session, nil
+}
+
 // validateOnboardingRequest validates the onboarding request data.
 func (s *Service) validateOnboardingRequest(req onboardingRequest) error {
+	if req.BootstrapSecret == "" {
+		return fmt.Errorf("%w: bootstrap secret is required", errkit.ErrUnauthenticated)
+	}
+
 	if req.Email == "" {
 		return fmt.Errorf("%w: email is required", errkit.ErrInvalidArgument)
 	}
@@ -152,7 +206,7 @@ type Session struct {
 }
 
 // createAdminSession creates a session for the newly created admin user.
-func (s *Service) createAdminSession(_ context.Context, userID, email string, t time.Time) (*Session, error) {
+func (s *Service) createAdminSession(admin InitialAdmin, t time.Time) (*Session, RefreshTokenRecord, error) {
 	// Admin users get the admin role.
 	roles := []string{"admin"}
 
@@ -161,39 +215,45 @@ func (s *Service) createAdminSession(_ context.Context, userID, email string, t 
 	accessToken, aErr := s.tokman.Sign(&jwtkit.Token{
 		Claims: jwtkit.Claims{
 			ID:        tokenID,
-			Audience:  []string{},
-			Issuer:    tokenIssuer,
-			Subject:   "",
+			Audience:  []string{s.cfg.AuthJWTAudience},
+			Issuer:    s.cfg.AuthJWTIssuer,
+			Subject:   admin.UserID,
 			ExpiresAt: jwt.NewNumericDate(t.Add(s.cfg.AuthAccessTokenTTL)),
 			IssuedAt:  jwt.NewNumericDate(t),
 			NotBefore: jwt.NewNumericDate(t),
 		},
 		Meta: map[string]any{
-			"uid":   userID,
-			"email": email,
-			"roles": roles,
+			"uid":          admin.UserID,
+			"email":        admin.Email,
+			"roles":        roles,
+			"tenant_id":    admin.TenantID,
+			"auth_version": admin.AuthVersion,
+			"token_use":    "access",
 		},
 	})
 	if aErr != nil {
-		return nil, fmt.Errorf("onboarding service: failed to create access token: %w", aErr)
+		return nil, RefreshTokenRecord{}, fmt.Errorf("onboarding service: failed to create access token: %w", aErr)
 	}
 
 	refreshToken, rErr := s.tokman.Sign(&jwtkit.Token{
 		Claims: jwtkit.Claims{
 			ID:        tokenID,
-			Audience:  []string{},
-			Issuer:    tokenIssuer,
-			Subject:   "",
+			Audience:  []string{s.cfg.AuthJWTAudience},
+			Issuer:    s.cfg.AuthJWTIssuer,
+			Subject:   admin.UserID,
 			ExpiresAt: jwt.NewNumericDate(t.Add(s.cfg.AuthRefreshTokenTTL)),
 			IssuedAt:  jwt.NewNumericDate(t),
 			NotBefore: jwt.NewNumericDate(t),
 		},
 		Meta: map[string]any{
-			"aid": userID, // For compatibility with refresh token parsing.
+			"aid":          admin.UserID,
+			"tenant_id":    admin.TenantID,
+			"auth_version": admin.AuthVersion,
+			"token_use":    "refresh",
 		},
 	})
 	if rErr != nil {
-		return nil, fmt.Errorf("onboarding service: failed to create refresh token: %w", rErr)
+		return nil, RefreshTokenRecord{}, fmt.Errorf("onboarding service: failed to create refresh token: %w", rErr)
 	}
 
 	session := Session{
@@ -203,5 +263,35 @@ func (s *Service) createAdminSession(_ context.Context, userID, email string, t 
 		ExpiresAt:    t.Add(s.cfg.AuthAccessTokenTTL),
 	}
 
-	return &session, nil
+	tokenHash := sha256.Sum256([]byte(refreshToken))
+	record := RefreshTokenRecord{
+		ID: tokenID, AccountID: admin.UserID, TokenHash: tokenHash[:],
+		CreatedAt: t, ExpiresAt: t.Add(s.cfg.AuthRefreshTokenTTL), LastUsedAt: t,
+	}
+
+	return &session, record, nil
+}
+
+func bootstrapSecretMatches(provided, configured string) bool {
+	providedDigest := sha256.Sum256([]byte(provided))
+	configuredDigest := sha256.Sum256([]byte(configured))
+
+	return subtle.ConstantTimeCompare(providedDigest[:], configuredDigest[:]) == 1
+}
+
+func requestID(r *http.Request) string {
+	if id := strings.TrimSpace(r.Header.Get("X-Request-ID")); id != "" {
+		return id
+	}
+
+	return generateUserID()
+}
+
+func requestSourceIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil {
+		return host
+	}
+
+	return r.RemoteAddr
 }

@@ -66,6 +66,10 @@ message ReceiveMessage {
 
   // body represents the message content as sequence of bytes.
   bytes body = 2;
+
+  string receipt_handle = 3;
+  uint32 delivery_attempt = 4;
+  google.protobuf.Timestamp lease_expires_at = 5;
 }
 
 // ListQueuesRequest represents a request to list queues.
@@ -426,3 +430,15 @@ message PublishResponse {
   // which is the number of published messages times the number of subscribers.
   uint64 delivered_count = 4;
 }
+
+message QueueDeliveryReceipt { string message_id = 1; string receipt_handle = 2; }
+message QueueDeliveryFailure { string message_id = 1; string code = 2; string message = 3; }
+message QueueNackDelivery { QueueDeliveryReceipt receipt = 1; uint32 available_after_seconds = 2; string reason = 3; }
+message QueueExtendDelivery { QueueDeliveryReceipt receipt = 1; uint32 extension_seconds = 2; }
+message QueueExtendedDelivery { string message_id = 1; string receipt_handle = 2; google.protobuf.Timestamp lease_expires_at = 3; }
+message AcknowledgeQueueRequest { string queue_id = 1; repeated QueueDeliveryReceipt receipts = 2; }
+message AcknowledgeQueueResponse { repeated string successful_message_ids = 1; repeated QueueDeliveryFailure failed = 2; }
+message NackQueueRequest { string queue_id = 1; repeated QueueNackDelivery deliveries = 2; }
+message NackQueueResponse { repeated string successful_message_ids = 1; repeated QueueDeliveryFailure failed = 2; }
+message ExtendQueueLeaseRequest { string queue_id = 1; repeated QueueExtendDelivery deliveries = 2; }
+message ExtendQueueLeaseResponse { repeated QueueExtendedDelivery extended = 1; repeated QueueDeliveryFailure failed = 2; }

@@ -17,6 +17,10 @@ const (
 	// it already exists.
 	ErrAlreadyExists Error = "already exist"
 
+	// ErrFailedPrecondition shows that the resource is in a state that does
+	// not permit the requested operation.
+	ErrFailedPrecondition Error = "failed precondition"
+
 	// ErrUnauthenticated indicates the request does not have valid
 	// authentication credentials to perform the operation.
 	ErrUnauthenticated Error = "authentication failed"

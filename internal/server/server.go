@@ -2,6 +2,8 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -15,19 +17,22 @@ import (
 	"github.com/marsolab/plainq/internal/server/config"
 	"github.com/marsolab/plainq/internal/server/interceptor"
 	"github.com/marsolab/plainq/internal/server/middleware"
+	agentv1 "github.com/marsolab/plainq/internal/server/schema/agent/v1"
 	"github.com/marsolab/plainq/internal/server/service/account"
 	"github.com/marsolab/plainq/internal/server/service/oauth"
 	"github.com/marsolab/plainq/internal/server/service/onboarding"
 	"github.com/marsolab/plainq/internal/server/service/queue"
 	"github.com/marsolab/plainq/internal/server/service/rbac"
+	"github.com/marsolab/plainq/internal/server/service/securityaudit"
 	"github.com/marsolab/plainq/internal/server/service/telemetry"
 	"github.com/marsolab/plainq/internal/server/service/telemetry/collector"
 	"github.com/marsolab/plainq/internal/shared/pqlite"
 	"github.com/marsolab/servekit"
 	"github.com/marsolab/servekit/authkit/jwtkit"
-	"github.com/marsolab/servekit/grpckit"
 	"github.com/marsolab/servekit/httpkit"
-	_ "google.golang.org/grpc/encoding/proto"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	healthv1 "google.golang.org/grpc/health/grpc_health_v1"
 )
 
 // PlainQ represents plainq logic.
@@ -42,6 +47,13 @@ type PlainQ struct {
 	observer     *telemetry.Observer
 	tokenManager jwtkit.TokenManager
 
+	agentTransport GRPCEndpointRegistrator
+	authenticator  interceptor.Authenticator
+	resources      interceptor.ResourceAuthorizer
+	admission      *interceptor.PrincipalAdmissionLimiter
+	auditor        securityaudit.Auditor
+	serverVersion  string
+
 	// Telemetry components.
 	metricsCollector *collector.Collector
 	metricsStore     *collector.SQLiteStore
@@ -54,7 +66,7 @@ type PlainQ struct {
 
 // NewServer returns a pointer to a new instance of the PlainQ.
 //
-//nolint:funlen,cyclop // server wiring assembles the full HTTP/gRPC stack in one place.
+//nolint:funlen,cyclop,gocognit,gocyclo // Server wiring assembles the full HTTP/gRPC stack in one place.
 func NewServer(
 	cfg *config.Config,
 	logger *slog.Logger,
@@ -88,6 +100,17 @@ func NewServer(
 
 	if pq.clusterNode != nil {
 		pq.clusterHandler = NewClusterHandler(pq.clusterNode, logger)
+	}
+
+	if cfg.AgentEnable && (pq.agentTransport == nil || pq.authenticator == nil ||
+		pq.resources == nil || pq.admission == nil || pq.auditor == nil) {
+		return nil, errors.New(
+			"agent APIs require transport, authentication, authorization, admission, and audit dependencies",
+		)
+	}
+
+	if cfg.AuthEnable && (pq.authenticator == nil || pq.admission == nil || pq.auditor == nil) {
+		return nil, errors.New("human-authenticated gRPC requires authentication, admission, and audit dependencies")
 	}
 
 	// Initialize metrics collector if telemetry database is provided.
@@ -149,7 +172,12 @@ func NewServer(
 			// open by deliberate configuration rather than by omission.
 			protect := func(r chi.Router) {
 				if cfg.AuthEnable {
-					r.Use(middleware.AuthenticateJWT(pq.tokenManager, pq.account))
+					r.Use(middleware.AuthenticateJWT(
+						pq.tokenManager,
+						pq.account,
+						middleware.WithHumanSecurityResolver(pq.account),
+						middleware.WithHumanTokenPolicy(cfg.AuthJWTIssuer, cfg.AuthJWTAudience),
+					))
 				}
 			}
 
@@ -275,15 +303,61 @@ func NewServer(
 	// Register the HTTP listener with a server.
 	server.RegisterListener("HTTP", httpListener)
 
-	grpcListener, grpcListenerErr := grpckit.NewListenerGRPC(cfg.GRPCAddr,
-		grpckit.WithUnaryInterceptors(interceptor.Metrics()),
+	var grpcTLSConfig *tls.Config
+
+	if cfg.AgentEnable && !cfg.AgentDevelopmentInsecureTransport {
+		loaded, err := LoadGRPCTLSConfig(
+			cfg.GRPCTLSMode, cfg.GRPCTLSCertFile, cfg.GRPCTLSKeyFile, cfg.GRPCTLSClientCAFile,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		grpcTLSConfig = loaded
+	}
+
+	grpcListener, grpcListenerErr := NewGRPCListener(
+		cfg.GRPCAddr,
+		grpcTLSConfig,
+		[]grpc.UnaryServerInterceptor{
+			interceptor.Metrics(),
+			interceptor.Logging(logger),
+			interceptor.UnaryAuth(
+				pq.authenticator, interceptor.PublicMethods(),
+				interceptor.WithUnaryLegacyProtection(cfg.GRPCProtectLegacy),
+				interceptor.WithUnaryAuthenticationAuditor(pq.auditor),
+			),
+			interceptor.UnaryAdmission(pq.admission),
+			interceptor.UnaryAuthorize(pq.resources),
+		},
+		[]grpc.StreamServerInterceptor{
+			interceptor.StreamLogging(logger),
+			interceptor.StreamAuth(
+				pq.authenticator, interceptor.PublicMethods(),
+				interceptor.WithStreamLegacyProtection(cfg.GRPCProtectLegacy),
+				interceptor.WithStreamAuthenticationAuditor(pq.auditor),
+			),
+			interceptor.StreamAdmission(pq.admission),
+			interceptor.StreamAuthorize(pq.resources),
+		},
 	)
 	if grpcListenerErr != nil {
 		return nil, fmt.Errorf("create gRPC listener: %w", grpcListenerErr)
 	}
 
+	grpcListener.SetLogger(logger)
+
 	// Mount the queue gRPC routes to the gRPC listener.
 	grpcListener.Mount(pq.queue)
+
+	healthServer := health.NewServer()
+	healthServer.SetServingStatus("", healthv1.HealthCheckResponse_SERVING)
+	grpcListener.Mount(&grpcHealthMount{server: healthServer})
+	grpcListener.Mount(newCapabilitiesService(&pq))
+
+	if cfg.AgentEnable {
+		grpcListener.Mount(pq.agentTransport)
+	}
 
 	// Register the gRPC listener with a server.
 	server.RegisterListener("GRPC", grpcListener)
@@ -420,6 +494,47 @@ func listenerHTTP(cfg *config.Config, logger *slog.Logger, checker hc.HealthChec
 // Option configures the PlainQ server.
 type Option func(*PlainQ)
 
+// WithAgentMessaging installs the generated AgentService transport and every
+// security dependency needed by its protected routes.
+func WithAgentMessaging(
+	transport GRPCEndpointRegistrator,
+	authenticator interceptor.Authenticator,
+	resources interceptor.ResourceAuthorizer,
+	admission *interceptor.PrincipalAdmissionLimiter,
+) Option {
+	return func(pq *PlainQ) {
+		pq.agentTransport = transport
+		pq.authenticator = authenticator
+		pq.resources = resources
+		pq.admission = admission
+	}
+}
+
+// WithHumanGRPCSecurity installs human-session authentication and admission
+// together when the agent API (and therefore its complete security option) is
+// disabled. Keeping these dependencies in one option prevents authenticated
+// legacy calls from reaching a nil limiter.
+func WithHumanGRPCSecurity(
+	authenticator interceptor.Authenticator,
+	admission *interceptor.PrincipalAdmissionLimiter,
+) Option {
+	return func(pq *PlainQ) {
+		pq.authenticator = authenticator
+		pq.admission = admission
+	}
+}
+
+// WithSecurityAuditor installs the append-only auditor used for best-effort
+// authentication-failure records at the gRPC boundary.
+func WithSecurityAuditor(auditor securityaudit.Auditor) Option {
+	return func(pq *PlainQ) { pq.auditor = auditor }
+}
+
+// WithServerVersion reports the current build in agent capabilities.
+func WithServerVersion(version string) Option {
+	return func(pq *PlainQ) { pq.serverVersion = version }
+}
+
 // WithMetricsStore sets the metrics store for telemetry collection.
 func WithMetricsStore(db pqlite.DB) Option {
 	return func(pq *PlainQ) {
@@ -443,4 +558,57 @@ func WithObserver(observer *telemetry.Observer) Option {
 // GetMetricsCollector returns the metrics collector for external use.
 func (s *PlainQ) GetMetricsCollector() *collector.Collector {
 	return s.metricsCollector
+}
+
+type grpcHealthMount struct {
+	server *health.Server
+}
+
+func (m *grpcHealthMount) Mount(server *grpc.Server) {
+	healthv1.RegisterHealthServer(server, m.server)
+}
+
+type capabilitiesService struct {
+	agentv1.UnimplementedSystemServiceServer
+	serverVersion   string
+	apiServices     []string
+	agentEnabled    bool
+	transportSecure bool
+	clusterEnabled  bool
+	protectLegacy   bool
+}
+
+func newCapabilitiesService(pq *PlainQ) *capabilitiesService {
+	services := []string{"schema.v1.PlainQService", "agent.v1.SystemService", "grpc.health.v1.Health"}
+	if pq.cfg.AgentEnable {
+		services = append(services, "agent.v1.AgentService")
+	}
+
+	return &capabilitiesService{
+		serverVersion:   pq.serverVersion,
+		apiServices:     services,
+		agentEnabled:    pq.cfg.AgentEnable,
+		transportSecure: pq.cfg.AgentEnable && !pq.cfg.AgentDevelopmentInsecureTransport,
+		clusterEnabled:  pq.clusterNode != nil,
+		protectLegacy:   pq.cfg.GRPCProtectLegacy,
+	}
+}
+
+func (s *capabilitiesService) Mount(server *grpc.Server) {
+	agentv1.RegisterSystemServiceServer(server, s)
+}
+
+func (s *capabilitiesService) GetCapabilities(
+	context.Context,
+	*agentv1.GetCapabilitiesRequest,
+) (*agentv1.GetCapabilitiesResponse, error) {
+	return &agentv1.GetCapabilitiesResponse{
+		ServerVersion:               s.serverVersion,
+		ApiServices:                 append([]string(nil), s.apiServices...),
+		AgentAuthRequired:           s.agentEnabled,
+		TransportSecure:             s.transportSecure,
+		ClusterEnabled:              s.clusterEnabled,
+		AgentMessagingFeatureActive: false,
+		LegacyV1AuthRequired:        s.protectLegacy,
+	}, nil
 }

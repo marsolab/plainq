@@ -6,6 +6,15 @@ deps:
 schema:
 	cd internal/server/schema && buf generate buf.build/plainq/schema
 
+.PHONY: schema-local
+schema-local:
+	cd schema && buf lint && buf generate --template buf.docs.gen.yaml && perl -pi -e 's/[ \t]+$$//' docs/index.html
+	cd internal/server/schema && buf generate ../../../schema --template buf.gen.yaml
+
+.PHONY: schema-breaking
+schema-breaking:
+	cd schema && buf breaking --against 'https://github.com/marsolab/plainq.git#branch=main,subdir=schema'
+
 .PHONY: sqlc-generate
 sqlc-generate:
 	sqlc generate
@@ -47,4 +56,10 @@ docker:
 
 .PHONY: helm-lint
 helm-lint:
-	helm lint deploy/helm/plainq --set auth.jwtSecret=ci-test-secret
+	helm lint deploy/helm/plainq \
+		--set auth.jwtSecret=ci-test-jwt-secret-at-least-32-bytes \
+		--set auth.bootstrap.secret=ci-test-bootstrap-secret-32-bytes
+
+.PHONY: helm-test
+helm-test:
+	deploy/helm/plainq/tests/bootstrap-secret.sh

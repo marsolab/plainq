@@ -70,3 +70,10 @@ func TestAsTransportPassesNilThrough(t *testing.T) {
 		t.Fatalf("AsTransport(nil) = %v, want nil", got)
 	}
 }
+
+func TestIsFailedPreconditionPreservesPolicyState(t *testing.T) {
+	err := fmt.Errorf("delete queue: %w", ErrFailedPrecondition)
+	if !IsFailedPrecondition(err) {
+		t.Fatalf("IsFailedPrecondition(%v) = false, want true", err)
+	}
+}

@@ -117,33 +117,49 @@ func classifyWrite(err error) error {
 // RemoveRoleFromUserUnlessLastHolder makes the "another holder must remain"
 // condition part of the delete, so two concurrent removals cannot both observe
 // the other account and both succeed.
-func (s *Storage) RemoveRoleFromUserUnlessLastHolder(ctx context.Context, userID, roleID string) error {
-	rows, err := s.queries.RemoveRoleFromUserUnlessLastHolder(ctx, sqlcgen.RemoveRoleFromUserUnlessLastHolderParams{
-		UserID: userID,
-		RoleID: roleID,
+func (s *Storage) RemoveRoleFromUserUnlessLastHolder(
+	ctx context.Context,
+	userID, roleID string,
+) (sErr error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return fmt.Errorf("remove role from user: begin transaction: %w", err)
+	}
+	defer func() {
+		if err := tx.Rollback(ctx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+			sErr = errors.Join(sErr, fmt.Errorf("remove role from user: rollback transaction: %w", err))
+		}
+	}()
+
+	q := s.queries.WithTx(tx)
+
+	rows, err := q.RemoveRoleFromUserUnlessLastHolder(ctx, sqlcgen.RemoveRoleFromUserUnlessLastHolderParams{
+		UserID: userID, RoleID: roleID,
 	})
 	if err != nil {
+		return fmt.Errorf("remove role from user: conditional delete: %w", err)
+	}
+
+	if rows == 0 {
+		held, err := q.UserHasRole(ctx, sqlcgen.UserHasRoleParams{UserID: userID, RoleID: roleID})
+		if err != nil {
+			return fmt.Errorf("remove role from user: check refused deletion: %w", err)
+		}
+
+		if held {
+			return rbac.ErrLastRoleHolder
+		}
+
+		return fmt.Errorf("user role not found: %w", pqerr.ErrNotFound)
+	}
+
+	if err := bumpAndProjectHuman(ctx, q, userID, time.Now()); err != nil {
 		return fmt.Errorf("remove role from user: %w", err)
 	}
 
-	if rows > 0 {
-		return nil
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("remove role from user: commit transaction: %w", err)
 	}
 
-	// No row went, for one of two reasons: the account did not hold the role,
-	// or it held it and was the last to do so. Only a read tells those apart,
-	// and it runs after the delete was already refused — so it shapes the
-	// message the caller sees, never the invariant.
-	roles, err := s.GetUserRoles(ctx, userID)
-	if err != nil {
-		return err
-	}
-
-	for _, held := range roles {
-		if held.RoleID == roleID {
-			return rbac.ErrLastRoleHolder
-		}
-	}
-
-	return fmt.Errorf("user role not found: %w", pqerr.ErrNotFound)
+	return nil
 }

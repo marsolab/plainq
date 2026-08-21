@@ -35,22 +35,29 @@ jobs:
           # Full history so the baseline ref + git worktree are available.
           fetch-depth: 0
 
+      - name: Test performance verdict and status instrumentation
+        run: make -C perf test
+
       - name: Resolve workload parameters
         id: cfg
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             # Light, fast run for quick PR signal.
             git fetch --quiet origin "${{ github.base_ref }}"
-            echo "baseline_ref=origin/${{ github.base_ref }}" >> "$GITHUB_OUTPUT"
-            echo "duration=45s" >> "$GITHUB_OUTPUT"
-            echo "vus=10" >> "$GITHUB_OUTPUT"
-            echo "run_id=pr-${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+            {
+              echo "baseline_ref=origin/${{ github.base_ref }}"
+              echo "duration=45s"
+              echo "vus=10"
+              echo "run_id=pr-${{ github.event.pull_request.number }}"
+            } >> "$GITHUB_OUTPUT"
           else
             # Thorough run on main vs the previous commit for the baseline trend.
-            echo "baseline_ref=HEAD~1" >> "$GITHUB_OUTPUT"
-            echo "duration=2m" >> "$GITHUB_OUTPUT"
-            echo "vus=30" >> "$GITHUB_OUTPUT"
-            echo "run_id=main-${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+            {
+              echo "baseline_ref=HEAD~1"
+              echo "duration=2m"
+              echo "vus=30"
+              echo "run_id=main-${{ github.run_id }}"
+            } >> "$GITHUB_OUTPUT"
           fi
 
       - name: Run AB test
@@ -70,8 +77,10 @@ jobs:
         run: |
           path="perf/results/report-${{ steps.cfg.outputs.run_id }}.md"
           if [ -f "$path" ]; then
-            echo "path=$path" >> "$GITHUB_OUTPUT"
-            echo "found=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "path=$path"
+              echo "found=true"
+            } >> "$GITHUB_OUTPUT"
           else
             echo "found=false" >> "$GITHUB_OUTPUT"
           fi

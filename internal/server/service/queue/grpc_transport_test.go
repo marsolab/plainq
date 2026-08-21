@@ -4,10 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"testing"
 	"time"
 
+	"github.com/marsolab/plainq/internal/server/authz"
+	"github.com/marsolab/plainq/internal/server/config"
+	"github.com/marsolab/plainq/internal/server/middleware"
+	"github.com/marsolab/plainq/internal/server/principal"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/maxatome/go-testdeep/td"
@@ -175,6 +180,363 @@ func TestServer_DescribeQueue(t *testing.T) {
 				t.Errorf("DescribeQueue() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestServer_DeleteQueueFailedPrecondition(t *testing.T) {
+	server := &Service{storage: &mockStorage{
+		deleteQueueFunc: func(context.Context, *v1.DeleteQueueRequest) (*v1.DeleteQueueResponse, error) {
+			return nil, pqerr.ErrFailedPrecondition
+		},
+	}}
+
+	_, err := server.DeleteQueue(context.Background(), &v1.DeleteQueueRequest{QueueId: validXID})
+	if got := status.Code(err); got != codes.FailedPrecondition {
+		t.Fatalf("DeleteQueue status = %s, want %s", got, codes.FailedPrecondition)
+	}
+}
+
+func TestProtectedLegacyGRPCQueueOperationsUseTenantRBAC(t *testing.T) {
+	const queueID = "c5s8b4p9e8rg5u5fgq10"
+	ctx := principal.With(context.Background(), principal.Principal{
+		Kind: principal.KindHuman, ID: "human-a", TenantID: "tenant-a",
+	})
+
+	tests := []struct {
+		name       string
+		permission middleware.PermissionType
+		invoke     func(*Service) error
+	}{
+		{
+			name: "delete queue", permission: middleware.PermissionDelete,
+			invoke: func(service *Service) error {
+				_, err := service.DeleteQueue(ctx, &v1.DeleteQueueRequest{QueueId: queueID})
+
+				return err
+			},
+		},
+		{
+			name: "purge queue", permission: middleware.PermissionPurge,
+			invoke: func(service *Service) error {
+				_, err := service.PurgeQueue(ctx, &v1.PurgeQueueRequest{QueueId: queueID})
+
+				return err
+			},
+		},
+		{
+			name: "send", permission: middleware.PermissionSend,
+			invoke: func(service *Service) error {
+				_, err := service.Send(ctx, &v1.SendRequest{QueueId: queueID})
+
+				return err
+			},
+		},
+		{
+			name: "receive", permission: middleware.PermissionReceive,
+			invoke: func(service *Service) error {
+				_, err := service.Receive(ctx, &v1.ReceiveRequest{QueueId: queueID})
+
+				return err
+			},
+		},
+		{
+			name: "acknowledge", permission: middleware.PermissionDelete,
+			invoke: func(service *Service) error {
+				_, err := service.Delete(ctx, &v1.DeleteRequest{QueueId: queueID})
+
+				return err
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := &Service{
+				cfg: &config.Config{GRPCProtectLegacy: true}, storage: authorizedLegacyStorage(queueID, "topic-a"),
+			}
+			service.SetPermissionChecker(testPermissionCheckerFunc(func(
+				_ context.Context,
+				userID, gotQueueID string,
+				permission middleware.PermissionType,
+			) (bool, error) {
+				if userID != "human-a" || gotQueueID != queueID || permission != test.permission {
+					t.Fatalf("permission check = user %q queue %q permission %q", userID, gotQueueID, permission)
+				}
+
+				return false, nil
+			}))
+
+			err := test.invoke(service)
+			if got := status.Code(err); got != codes.PermissionDenied {
+				t.Fatalf("operation code = %s, want %s (error %v)", got, codes.PermissionDenied, err)
+			}
+		})
+	}
+}
+
+func TestEveryGeneratedProtectedLegacyRPCIsAuthorized(t *testing.T) {
+	const (
+		queueID = "c5s8b4p9e8rg5u5fgq10"
+		topicID = "topic-a"
+	)
+	ctx := principal.With(context.Background(), principal.Principal{
+		Kind: principal.KindHuman, ID: "human-a", TenantID: "tenant-a", Roles: []string{"member"},
+	})
+
+	invocations := map[string]func(*Service) error{
+		v1.PlainQService_ListQueues_FullMethodName: func(service *Service) error {
+			_, err := service.ListQueues(ctx, &v1.ListQueuesRequest{})
+
+			return err
+		},
+		v1.PlainQService_DescribeQueue_FullMethodName: func(service *Service) error {
+			_, err := service.DescribeQueue(ctx, &v1.DescribeQueueRequest{QueueId: queueID})
+
+			return err
+		},
+		v1.PlainQService_CreateQueue_FullMethodName: func(service *Service) error {
+			_, err := service.CreateQueue(ctx, &v1.CreateQueueRequest{QueueName: "orders"})
+
+			return err
+		},
+		v1.PlainQService_PurgeQueue_FullMethodName: func(service *Service) error {
+			_, err := service.PurgeQueue(ctx, &v1.PurgeQueueRequest{QueueId: queueID})
+
+			return err
+		},
+		v1.PlainQService_DeleteQueue_FullMethodName: func(service *Service) error {
+			_, err := service.DeleteQueue(ctx, &v1.DeleteQueueRequest{QueueId: queueID})
+
+			return err
+		},
+		v1.PlainQService_Send_FullMethodName: func(service *Service) error {
+			_, err := service.Send(ctx, &v1.SendRequest{QueueId: queueID})
+
+			return err
+		},
+		v1.PlainQService_Receive_FullMethodName: func(service *Service) error {
+			_, err := service.Receive(ctx, &v1.ReceiveRequest{QueueId: queueID})
+
+			return err
+		},
+		v1.PlainQService_Delete_FullMethodName: func(service *Service) error {
+			_, err := service.Delete(ctx, &v1.DeleteRequest{QueueId: queueID})
+
+			return err
+		},
+		v1.PlainQService_ListTopics_FullMethodName: func(service *Service) error {
+			_, err := service.ListTopics(ctx, &v1.ListTopicsRequest{})
+
+			return err
+		},
+		v1.PlainQService_CreateTopic_FullMethodName: func(service *Service) error {
+			_, err := service.CreateTopic(ctx, &v1.CreateTopicRequest{TopicName: "events"})
+
+			return err
+		},
+		v1.PlainQService_DeleteTopic_FullMethodName: func(service *Service) error {
+			_, err := service.DeleteTopic(ctx, &v1.DeleteTopicRequest{TopicId: topicID})
+
+			return err
+		},
+		v1.PlainQService_Subscribe_FullMethodName: func(service *Service) error {
+			_, err := service.Subscribe(ctx, &v1.SubscribeRequest{TopicId: topicID, QueueId: queueID})
+
+			return err
+		},
+		v1.PlainQService_Unsubscribe_FullMethodName: func(service *Service) error {
+			_, err := service.Unsubscribe(ctx, &v1.UnsubscribeRequest{TopicId: topicID, SubscriptionId: "sub-a"})
+
+			return err
+		},
+		v1.PlainQService_Publish_FullMethodName: func(service *Service) error {
+			_, err := service.Publish(ctx, &v1.PublishRequest{TopicId: topicID})
+
+			return err
+		},
+	}
+
+	generated := make(map[string]struct{}, len(v1.PlainQService_ServiceDesc.Methods))
+	for _, method := range v1.PlainQService_ServiceDesc.Methods {
+		fullMethod := fmt.Sprintf("/%s/%s", v1.PlainQService_ServiceDesc.ServiceName, method.MethodName)
+		generated[fullMethod] = struct{}{}
+		if _, ok := invocations[fullMethod]; !ok {
+			t.Errorf("generated legacy method %q lacks a denial regression", fullMethod)
+		}
+		if action, ok := legacyGRPCActionInventory[fullMethod]; !ok || !authz.ValidAction(action) {
+			t.Errorf("generated legacy method %q lacks an explicit authorization policy", fullMethod)
+		}
+	}
+	if len(invocations) != len(generated) || len(legacyGRPCActionInventory) != len(generated) {
+		t.Fatalf(
+			"legacy inventories = %d denial regressions / %d policies, generated service has %d methods",
+			len(invocations), len(legacyGRPCActionInventory), len(generated),
+		)
+	}
+
+	for method, invoke := range invocations {
+		t.Run(method, func(t *testing.T) {
+			storage := authorizedLegacyStorage(queueID, topicID)
+			service := &Service{cfg: &config.Config{GRPCProtectLegacy: true}, storage: storage}
+			service.SetPermissionChecker(testPermissionCheckerFunc(func(
+				context.Context, string, string, middleware.PermissionType,
+			) (bool, error) {
+				return false, nil
+			}))
+
+			if err := invoke(service); status.Code(err) != codes.PermissionDenied {
+				t.Fatalf("protected legacy method code = %s, want %s (error %v)",
+					status.Code(err), codes.PermissionDenied, err)
+			}
+		})
+	}
+}
+
+func TestProtectedLegacyCrossTenantResourcesAreHidden(t *testing.T) {
+	const queueID = "c5s8b4p9e8rg5u5fgq10"
+	ctx := principal.With(context.Background(), principal.Principal{
+		Kind: principal.KindHuman, ID: "admin-a", TenantID: "tenant-a", Roles: []string{"admin"},
+	})
+	service := &Service{
+		cfg: &config.Config{GRPCProtectLegacy: true},
+		storage: &mockStorage{
+			describeQueueFunc: func(context.Context, *v1.DescribeQueueRequest) (*v1.DescribeQueueResponse, error) {
+				return nil, pqerr.ErrNotFound
+			},
+			sendFunc: func(context.Context, *v1.SendRequest) (*v1.SendResponse, error) {
+				return &v1.SendResponse{}, nil
+			},
+			listTopicsFunc: func(context.Context) (*ListTopicsResponse, error) {
+				return &ListTopicsResponse{}, nil
+			},
+		},
+	}
+	service.SetPermissionChecker(testPermissionCheckerFunc(func(
+		context.Context, string, string, middleware.PermissionType,
+	) (bool, error) {
+		return false, nil
+	}))
+
+	invocations := map[string]func() error{
+		"describe queue": func() error {
+			_, err := service.DescribeQueue(ctx, &v1.DescribeQueueRequest{QueueId: queueID})
+
+			return err
+		},
+		"purge queue": func() error {
+			_, err := service.PurgeQueue(ctx, &v1.PurgeQueueRequest{QueueId: queueID})
+
+			return err
+		},
+		"delete queue": func() error {
+			_, err := service.DeleteQueue(ctx, &v1.DeleteQueueRequest{QueueId: queueID})
+
+			return err
+		},
+		"send": func() error {
+			_, err := service.Send(ctx, &v1.SendRequest{QueueId: queueID})
+
+			return err
+		},
+		"receive": func() error {
+			_, err := service.Receive(ctx, &v1.ReceiveRequest{QueueId: queueID})
+
+			return err
+		},
+		"acknowledge": func() error {
+			_, err := service.Delete(ctx, &v1.DeleteRequest{QueueId: queueID})
+
+			return err
+		},
+		"delete topic": func() error {
+			_, err := service.DeleteTopic(ctx, &v1.DeleteTopicRequest{TopicId: "topic-b"})
+
+			return err
+		},
+		"subscribe": func() error {
+			_, err := service.Subscribe(ctx, &v1.SubscribeRequest{TopicId: "topic-b", QueueId: queueID})
+
+			return err
+		},
+		"unsubscribe": func() error {
+			_, err := service.Unsubscribe(ctx, &v1.UnsubscribeRequest{TopicId: "topic-b", SubscriptionId: "sub-b"})
+
+			return err
+		},
+		"publish": func() error {
+			_, err := service.Publish(ctx, &v1.PublishRequest{TopicId: "topic-b"})
+
+			return err
+		},
+	}
+
+	for name, invoke := range invocations {
+		t.Run(name, func(t *testing.T) {
+			if err := invoke(); status.Code(err) != codes.NotFound {
+				t.Fatalf("cross-tenant resource code = %s, want %s (error %v)",
+					status.Code(err), codes.NotFound, err)
+			}
+		})
+	}
+}
+
+func TestProtectedLegacySameTenantPoliciesAllowGrantedOperations(t *testing.T) {
+	const (
+		queueID = "c5s8b4p9e8rg5u5fgq10"
+		topicID = "topic-a"
+	)
+	storage := authorizedLegacyStorage(queueID, topicID)
+	memberContext := principal.With(context.Background(), principal.Principal{
+		Kind: principal.KindHuman, ID: "human-a", TenantID: "tenant-a", Roles: []string{"member"},
+	})
+	service := &Service{cfg: &config.Config{GRPCProtectLegacy: true}, storage: storage}
+	service.SetPermissionChecker(testPermissionCheckerFunc(func(
+		_ context.Context, userID, gotQueueID string, permission middleware.PermissionType,
+	) (bool, error) {
+		return userID == "human-a" && gotQueueID == queueID && permission == middleware.PermissionSend, nil
+	}))
+
+	if _, err := service.Send(memberContext, &v1.SendRequest{QueueId: queueID}); err != nil {
+		t.Fatalf("same-tenant granted queue send: %v", err)
+	}
+
+	adminContext := principal.With(context.Background(), principal.Principal{
+		Kind: principal.KindHuman, ID: "admin-a", TenantID: "tenant-a", Roles: []string{"admin"},
+	})
+	if _, err := service.Publish(adminContext, &v1.PublishRequest{TopicId: topicID}); err != nil {
+		t.Fatalf("same-tenant admin topic publish: %v", err)
+	}
+}
+
+func authorizedLegacyStorage(queueID, topicID string) *mockStorage {
+	return &mockStorage{
+		listQueuesFunc: func(context.Context, *v1.ListQueuesRequest) (*v1.ListQueuesResponse, error) {
+			return &v1.ListQueuesResponse{}, nil
+		},
+		describeQueueFunc: func(context.Context, *v1.DescribeQueueRequest) (*v1.DescribeQueueResponse, error) {
+			return &v1.DescribeQueueResponse{QueueId: queueID}, nil
+		},
+		createQueueFunc: func(context.Context, *v1.CreateQueueRequest) (*v1.CreateQueueResponse, error) {
+			return &v1.CreateQueueResponse{QueueId: queueID}, nil
+		},
+		purgeQueueFunc: func(context.Context, *v1.PurgeQueueRequest) (*v1.PurgeQueueResponse, error) {
+			return &v1.PurgeQueueResponse{}, nil
+		},
+		deleteQueueFunc: func(context.Context, *v1.DeleteQueueRequest) (*v1.DeleteQueueResponse, error) {
+			return &v1.DeleteQueueResponse{}, nil
+		},
+		sendFunc: func(context.Context, *v1.SendRequest) (*v1.SendResponse, error) {
+			return &v1.SendResponse{}, nil
+		},
+		receiveFunc: func(context.Context, *v1.ReceiveRequest) (*v1.ReceiveResponse, error) {
+			return &v1.ReceiveResponse{}, nil
+		},
+		deleteFunc: func(context.Context, *v1.DeleteRequest) (*v1.DeleteResponse, error) {
+			return &v1.DeleteResponse{}, nil
+		},
+		listTopicsFunc: func(context.Context) (*ListTopicsResponse, error) {
+			return &ListTopicsResponse{Topics: []Topic{{TopicID: topicID}}}, nil
+		},
 	}
 }
 

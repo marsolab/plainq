@@ -6,6 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
+	"net"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -19,10 +22,16 @@ import (
 	"github.com/marsolab/plainq/internal/cluster"
 	"github.com/marsolab/plainq/internal/server"
 	"github.com/marsolab/plainq/internal/server/config"
+	"github.com/marsolab/plainq/internal/server/interceptor"
 	"github.com/marsolab/plainq/internal/server/mutations"
+	"github.com/marsolab/plainq/internal/server/principal"
+	"github.com/marsolab/plainq/internal/server/security"
 	"github.com/marsolab/plainq/internal/server/service/account"
 	accountstore "github.com/marsolab/plainq/internal/server/service/account/litestore"
 	accountpg "github.com/marsolab/plainq/internal/server/service/account/pgstore"
+	"github.com/marsolab/plainq/internal/server/service/agent"
+	agentstore "github.com/marsolab/plainq/internal/server/service/agent/litestore"
+	agentpg "github.com/marsolab/plainq/internal/server/service/agent/pgstore"
 	"github.com/marsolab/plainq/internal/server/service/oauth"
 	oauthstore "github.com/marsolab/plainq/internal/server/service/oauth/litestore"
 	oauthpg "github.com/marsolab/plainq/internal/server/service/oauth/pgstore"
@@ -35,6 +44,9 @@ import (
 	"github.com/marsolab/plainq/internal/server/service/rbac"
 	rbacstore "github.com/marsolab/plainq/internal/server/service/rbac/litestore"
 	rbacpg "github.com/marsolab/plainq/internal/server/service/rbac/pgstore"
+	"github.com/marsolab/plainq/internal/server/service/securityaudit"
+	auditstore "github.com/marsolab/plainq/internal/server/service/securityaudit/litestore"
+	auditpg "github.com/marsolab/plainq/internal/server/service/securityaudit/pgstore"
 	"github.com/marsolab/plainq/internal/server/service/telemetry"
 	"github.com/marsolab/plainq/internal/shared/pqlite"
 	"github.com/marsolab/servekit/authkit/hashkit"
@@ -203,12 +215,36 @@ func serverCommand() *commandSpec {
 				"set refresh token TTL",
 			)
 
-			f.BoolVar(&cfg.AuthEmailVerificationEnable, "auth.email.verification.enable", true,
+			f.BoolVar(&cfg.AuthEmailVerificationEnable, "auth.email.verification.enable", false,
 				"enable email verification",
 			)
 
 			f.StringVar(&cfg.AuthJWTSecret, "auth.jwt.secret", "",
 				"HMAC secret used to sign access/refresh tokens (required when auth.enable)",
+			)
+
+			f.StringVar(&cfg.AuthJWTIssuer, "auth.jwt.issuer", "plainq-server",
+				"issuer required in signed human access tokens",
+			)
+
+			f.StringVar(&cfg.AuthJWTAudience, "auth.jwt.audience", "plainq-human",
+				"audience required in signed human access tokens",
+			)
+
+			f.StringVar(&cfg.AuthBootstrapSecret, "auth.bootstrap.secret", "",
+				"constant-time shared secret required to create the first remote administrator",
+			)
+
+			f.Int64Var(&cfg.AuthRequestMaxBytes, "auth.request.max-bytes", 32<<10,
+				"maximum signup, signin, refresh, and bootstrap request size",
+			)
+
+			f.Float64Var(&cfg.AuthRateRequestsPerSecond, "auth.rate.requests-per-second", 5,
+				"per-IP and per-account authentication request rate",
+			)
+
+			f.IntVar(&cfg.AuthRateBurst, "auth.rate.burst", 10,
+				"per-IP and per-account authentication request burst",
 			)
 
 			// Telemetry.
@@ -245,6 +281,69 @@ func serverCommand() *commandSpec {
 
 			f.StringVar(&cfg.GRPCAddr, "grpc.addr", ":8080",
 				"set gRPC listener address",
+			)
+
+			f.StringVar(&cfg.GRPCAdvertiseAddr, "grpc.advertise.addr", "",
+				"routable gRPC address advertised to clustered followers",
+			)
+
+			f.StringVar(&cfg.GRPCProxyServerName, "grpc.proxy.server-name", "",
+				"TLS server name used by clustered gRPC followers",
+			)
+
+			f.BoolVar(&cfg.GRPCProtectLegacy, "grpc.protect-legacy", false,
+				"protect legacy v1 gRPC methods after their tenant migration is installed",
+			)
+
+			f.StringVar(&cfg.GRPCTLSMode, "grpc.tls.mode", "server",
+				"gRPC TLS mode for agent APIs: server or mutual",
+			)
+
+			f.StringVar(&cfg.GRPCTLSCertFile, "grpc.tls.cert-file", "",
+				"PEM certificate for the gRPC listener",
+			)
+
+			f.StringVar(&cfg.GRPCTLSKeyFile, "grpc.tls.key-file", "",
+				"PEM private key for the gRPC listener certificate",
+			)
+
+			f.StringVar(&cfg.GRPCTLSClientCAFile, "grpc.tls.client-ca-file", "",
+				"PEM client CA required by mutual gRPC TLS",
+			)
+
+			// Agent API. Enabling it is secure by default: unless the
+			// development-only loopback exception is selected, TLS material is
+			// required before any listener or storage is opened.
+			f.BoolVar(&cfg.AgentEnable, "agent.enable", false,
+				"enable agent-first gRPC messaging APIs",
+			)
+
+			f.BoolVar(&cfg.AgentDevelopmentInsecureTransport, "agent.development-insecure-transport", false,
+				"allow plaintext agent gRPC transport only on an explicit loopback address",
+			)
+
+			f.StringVar(&cfg.AgentAuthIssuer, "agent.auth.issuer", "plainq",
+				"issuer required in signed agent access tokens",
+			)
+
+			f.StringVar(&cfg.AgentAuthAudience, "agent.auth.audience", "plainq-agents",
+				"audience required in signed agent access tokens",
+			)
+
+			f.StringVar(&cfg.AgentAuthJWTSecret, "agent.auth.jwt-secret", "",
+				"HMAC secret for agent access tokens (at least 32 bytes)",
+			)
+
+			f.DurationVar(&cfg.AgentAccessTokenTTL, "agent.auth.access-token-ttl", 5*time.Minute,
+				"short lifetime for agent access tokens (maximum 15 minutes)",
+			)
+
+			f.Float64Var(&cfg.AgentRateRequestsPerSecond, "agent.rate.requests-per-second", 100,
+				"node-local authenticated request rate per tenant/principal",
+			)
+
+			f.IntVar(&cfg.AgentRateBurst, "agent.rate.burst", 200,
+				"node-local authenticated request burst per tenant/principal",
 			)
 
 			f.StringVar(&cfg.HTTPAddr, "http.addr", ":8081",
@@ -335,6 +434,14 @@ func serverCommand() *commandSpec {
 
 			logger.Info("Starting plainq server")
 
+			if err := validateAgentSecurity(&cfg, &clusterCfg); err != nil {
+				return err
+			}
+
+			if err := validateHumanSecurity(&cfg); err != nil {
+				return err
+			}
+
 			var checker hc.HealthChecker = hc.NewNopChecker()
 
 			if cfg.HealthEnable {
@@ -368,6 +475,15 @@ func serverCommand() *commandSpec {
 			backend, backendErr := initStorageBackend(&cfg, logger)
 			if backendErr != nil {
 				return backendErr
+			}
+
+			if !cfg.GRPCProtectLegacy {
+				logger.Warn(
+					"Legacy schema.v1 gRPC compatibility is enabled; anonymous access is limited to fixed-tenant legacy-owned rows",
+					slog.String("principal", principal.LegacyPrincipalID),
+					slog.String("tenant_id", principal.LegacyTenantID),
+					slog.String("removal_target", "after two releases"),
+				)
 			}
 
 			// One observer, shared by the storage layer and — once the
@@ -457,6 +573,7 @@ func serverCommand() *commandSpec {
 			}
 
 			rbacService := rbac.NewService(&cfg, logger, rbacStorage)
+			queueService.SetPermissionChecker(rbacService)
 
 			oauthStorage, oauthStorageErr := initOAuthStorage(&cfg, logger, backend)
 			if oauthStorageErr != nil {
@@ -469,6 +586,41 @@ func serverCommand() *commandSpec {
 			var serverOpts []server.Option
 
 			serverOpts = append(serverOpts, server.WithObserver(observer))
+			serverOpts = append(serverOpts, server.WithServerVersion(Commit))
+
+			auditStorage, auditStorageErr := initSecurityAuditStorage(backend)
+			if auditStorageErr != nil {
+				return auditStorageErr
+			}
+
+			auditor, auditorErr := securityaudit.New(auditStorage)
+			if auditorErr != nil {
+				return fmt.Errorf("create security auditor: %w", auditorErr)
+			}
+
+			serverOpts = append(serverOpts, server.WithSecurityAuditor(auditor))
+
+			if cfg.AuthEnable && !cfg.AgentEnable {
+				grpcAuthenticator, grpcAdmission, grpcSecurityErr := initHumanGRPCSecurity(
+					&cfg, tokenManager, accountStorage,
+				)
+				if grpcSecurityErr != nil {
+					return grpcSecurityErr
+				}
+
+				serverOpts = append(serverOpts, server.WithHumanGRPCSecurity(grpcAuthenticator, grpcAdmission))
+			}
+
+			if cfg.AgentEnable {
+				agentOption, agentOptionErr := initAgentServerOption(
+					&cfg, backend, tokenManager, accountStorage, auditor,
+				)
+				if agentOptionErr != nil {
+					return agentOptionErr
+				}
+
+				serverOpts = append(serverOpts, agentOption)
+			}
 
 			if clusterNode != nil {
 				serverOpts = append(serverOpts, server.WithClusterNode(clusterNode))
@@ -501,6 +653,209 @@ func serverCommand() *commandSpec {
 			return plainqServer.Serve(ctx)
 		},
 	}
+}
+
+// validateHumanSecurity rejects configurations that would make human or
+// bootstrap authentication look enabled while silently weakening the
+// security boundary. Email verification is deliberately fail-closed until a
+// verifier and delivery backend are configured; mounting placeholder routes
+// would create a false security promise.
+//
+//nolint:cyclop,gocyclo // Each branch validates one explicit security invariant.
+func validateHumanSecurity(cfg *config.Config) error {
+	if cfg.GRPCProtectLegacy && !cfg.AuthEnable && !cfg.AgentEnable {
+		return errors.New("protected legacy gRPC requires human or agent authentication")
+	}
+
+	if !cfg.AuthEnable {
+		return nil
+	}
+
+	if len(cfg.AuthJWTSecret) < 32 {
+		return errors.New("human JWT secret must be at least 32 bytes")
+	}
+
+	if strings.TrimSpace(cfg.AuthJWTIssuer) == "" || strings.TrimSpace(cfg.AuthJWTAudience) == "" {
+		return errors.New("human token issuer and audience are required")
+	}
+
+	if len(cfg.AuthBootstrapSecret) < 32 {
+		return errors.New("bootstrap secret must be at least 32 bytes")
+	}
+
+	if cfg.AuthAccessTokenTTL <= 0 || cfg.AuthRefreshTokenTTL <= 0 {
+		return errors.New("human access and refresh token TTLs must be positive")
+	}
+
+	if cfg.AuthRequestMaxBytes <= 0 || cfg.AuthRequestMaxBytes > 1<<20 {
+		return errors.New("auth request max bytes must be between 1 and 1048576")
+	}
+
+	if math.IsNaN(cfg.AuthRateRequestsPerSecond) || math.IsInf(cfg.AuthRateRequestsPerSecond, 0) ||
+		cfg.AuthRateRequestsPerSecond <= 0 || cfg.AuthRateBurst <= 0 {
+		return errors.New("auth rate and burst must be finite and positive")
+	}
+
+	if err := cfg.ValidateAgentAdmission(); err != nil {
+		return fmt.Errorf("validate authenticated gRPC admission: %w", err)
+	}
+
+	if cfg.AuthEmailVerificationEnable {
+		return errors.New("email verification requires a verifier and delivery backend; none is configured")
+	}
+
+	return nil
+}
+
+func initHumanGRPCSecurity(
+	cfg *config.Config,
+	humanTokens jwtkit.TokenManager,
+	accountStorage account.Storage,
+) (interceptor.Authenticator, *interceptor.PrincipalAdmissionLimiter, error) {
+	authenticator, err := interceptor.NewCompositeAuthenticator(
+		nil, humanTokens, accountStorage, accountStorage,
+		interceptor.WithCompositeHumanTokenPolicy(cfg.AuthJWTIssuer, cfg.AuthJWTAudience),
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create human gRPC authenticator: %w", err)
+	}
+
+	admission, err := interceptor.NewPrincipalAdmissionLimiter(
+		cfg.AgentRateRequestsPerSecond, cfg.AgentRateBurst,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create human gRPC admission limiter: %w", err)
+	}
+
+	return authenticator, admission, nil
+}
+
+//nolint:gocyclo,cyclop // validation mirrors the explicit security contract one rule at a time.
+func validateAgentSecurity(cfg *config.Config, clusterCfg *cluster.Config) error {
+	if !cfg.AgentEnable {
+		return nil
+	}
+
+	if len(cfg.AgentAuthJWTSecret) < 32 {
+		return errors.New("agent JWT secret must be at least 32 bytes")
+	}
+
+	if cfg.AgentAuthIssuer == "" || cfg.AgentAuthAudience == "" {
+		return errors.New("agent token issuer and audience are required")
+	}
+
+	if cfg.AgentAccessTokenTTL <= 0 || cfg.AgentAccessTokenTTL > 15*time.Minute {
+		return errors.New("agent access token TTL must be between zero and 15 minutes")
+	}
+
+	if err := cfg.ValidateAgentAdmission(); err != nil {
+		return fmt.Errorf("validate agent admission: %w", err)
+	}
+
+	if cfg.AgentDevelopmentInsecureTransport {
+		host, _, err := net.SplitHostPort(cfg.GRPCAddr)
+		if err != nil || (host != "127.0.0.1" && host != "localhost" && host != "::1") {
+			return errors.New("insecure agent transport requires a loopback gRPC address")
+		}
+
+		return nil
+	}
+
+	if cfg.GRPCTLSMode != "server" && cfg.GRPCTLSMode != "mutual" {
+		return errors.New("agent APIs require server or mutual gRPC TLS mode")
+	}
+
+	if cfg.GRPCTLSCertFile == "" || cfg.GRPCTLSKeyFile == "" {
+		return errors.New("agent APIs require a gRPC TLS certificate and key")
+	}
+
+	if cfg.GRPCTLSMode == "mutual" && cfg.GRPCTLSClientCAFile == "" {
+		return errors.New("mutual gRPC TLS requires a client CA")
+	}
+
+	if clusterCfg != nil && clusterCfg.Enabled &&
+		(cfg.GRPCAdvertiseAddr == "" || isWildcardOrLoopbackAddress(cfg.GRPCAdvertiseAddr)) {
+		return errors.New("clustered agent APIs require a routable gRPC advertise address")
+	}
+
+	return nil
+}
+
+func initAgentServerOption(
+	cfg *config.Config,
+	backend *storageBackend,
+	humanTokens jwtkit.TokenManager,
+	accountStorage account.Storage,
+	auditor securityaudit.Auditor,
+) (server.Option, error) {
+	agentStorage, err := initAgentStorage(backend)
+	if err != nil {
+		return nil, err
+	}
+
+	agentTokens, err := security.NewAgentTokenManager(security.AgentTokenConfig{
+		Issuer: cfg.AgentAuthIssuer, Audience: cfg.AgentAuthAudience,
+		Secret: []byte(cfg.AgentAuthJWTSecret), TTL: cfg.AgentAccessTokenTTL,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create agent token manager: %w", err)
+	}
+
+	agentService, err := agent.NewService(agent.ServiceConfig{
+		Registry: agentStorage, Principals: agentStorage, Credentials: agentStorage,
+		Grants: agentStorage, Auditor: auditor, Tokens: agentTokens,
+		PreAuth: agent.PreAuthConfig{RequestsPerSecond: 5, Burst: 10, MaxEntries: 4096},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create agent service: %w", err)
+	}
+
+	agentTransport, err := agent.NewGRPCTransport(agentService)
+	if err != nil {
+		return nil, fmt.Errorf("create agent gRPC transport: %w", err)
+	}
+
+	authenticator, err := interceptor.NewCompositeAuthenticator(
+		agentService, humanTokens, accountStorage, accountStorage,
+		interceptor.WithCompositeHumanTokenPolicy(cfg.AuthJWTIssuer, cfg.AuthJWTAudience),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create gRPC authenticator: %w", err)
+	}
+
+	resourceAuthorizer, err := interceptor.NewStoreResourceAuthorizer(agentStorage)
+	if err != nil {
+		return nil, fmt.Errorf("create resource authorizer: %w", err)
+	}
+
+	admission, err := interceptor.NewPrincipalAdmissionLimiter(
+		cfg.AgentRateRequestsPerSecond, cfg.AgentRateBurst,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create principal admission limiter: %w", err)
+	}
+
+	return server.WithAgentMessaging(agentTransport, authenticator, resourceAuthorizer, admission), nil
+}
+
+func isWildcardOrLoopbackAddress(address string) bool {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil || host == "" {
+		return true
+	}
+
+	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
+		return true
+	}
+
+	ip, parseErr := netip.ParseAddr(host)
+	if parseErr != nil {
+		return false
+	}
+
+	ip = ip.WithZone("")
+
+	return ip.IsUnspecified() || ip.IsLoopback()
 }
 
 func initLogger(cfg *config.Config) (*slog.Logger, error) {
@@ -612,13 +967,22 @@ func initSQLiteBackend(cfg *config.Config, logger *slog.Logger) (*litekit.Conn, 
 		slog.String("path", cfg.StorageDBPath),
 	)
 
-	evolver, evolverErr := litekit.NewEvolver(conn, mutations.SqliteStorageMutations())
-	if evolverErr != nil {
-		return nil, fmt.Errorf("create schema evolver: %w", evolverErr)
+	migrationCtx, migrationCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer migrationCancel()
+
+	if err := mutations.ApplySQLiteStorage(migrationCtx, conn); err != nil {
+		_ = conn.Close()
+
+		return nil, fmt.Errorf("schema mutation: %w", err)
 	}
 
-	if err := evolver.MutateSchema(); err != nil {
-		return nil, fmt.Errorf("schema mutation: %w", err)
+	verifyCtx, verifyCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer verifyCancel()
+
+	if err := verifySQLiteForeignKeys(verifyCtx, conn); err != nil {
+		_ = conn.Close()
+
+		return nil, fmt.Errorf("verify sqlite foreign keys: %w", err)
 	}
 
 	logger.Info("SQLite schema has been initialized",
@@ -680,9 +1044,80 @@ func initTursoBackend(cfg *config.Config, logger *slog.Logger) (*sql.DB, error) 
 		return nil, fmt.Errorf("turso schema mutation: %w", err)
 	}
 
+	if err := verifySQLiteForeignKeys(ctx, db); err != nil {
+		if closeErr := db.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close turso connection: %w", closeErr))
+		}
+
+		return nil, fmt.Errorf("verify turso foreign keys: %w", err)
+	}
+
 	logger.Info("Turso schema has been initialized")
 
 	return db, nil
+}
+
+// verifySQLiteForeignKeys proves that connection-local FK enforcement is
+// active on two concurrently acquired pool connections. The orphan probes run
+// in rolled-back transactions and therefore never leave startup data behind.
+//
+//nolint:cyclop // Both pooled connections are independently proven and cleaned up.
+func verifySQLiteForeignKeys(ctx context.Context, db pqlite.DB) (vErr error) {
+	connections := make([]*sql.Conn, 0, 2)
+	defer func() {
+		for _, conn := range connections {
+			if err := conn.Close(); err != nil {
+				vErr = errors.Join(vErr, fmt.Errorf("close foreign-key probe connection: %w", err))
+			}
+		}
+	}()
+
+	for range 2 {
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			return fmt.Errorf("acquire foreign-key probe connection: %w", err)
+		}
+
+		connections = append(connections, conn)
+	}
+
+	for index, conn := range connections {
+		if err := pqlite.EnforceForeignKeys(ctx, conn); err != nil {
+			return fmt.Errorf("connection %d: %w", index+1, err)
+		}
+
+		tx, err := conn.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("connection %d begin orphan probe: %w", index+1, err)
+		}
+
+		_, insertErr := tx.ExecContext(ctx, `
+			INSERT INTO agents (
+				agent_id, tenant_id, agent_name, status, auth_version,
+				created_by_kind, created_by_id, created_at_ns, updated_at_ns
+			) VALUES (?, ?, ?, 1, 1, 'system', 'startup-probe', 0, 0)`,
+			fmt.Sprintf("plainq-fk-probe-%d", index+1),
+			fmt.Sprintf("plainq-missing-tenant-%d", index+1),
+			fmt.Sprintf("plainq-fk-probe-%d", index+1),
+		)
+
+		rollbackErr := tx.Rollback()
+		if rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			return fmt.Errorf("connection %d rollback orphan probe: %w", index+1, rollbackErr)
+		}
+
+		if insertErr == nil {
+			return fmt.Errorf("connection %d accepted an orphan agent insert", index+1)
+		}
+
+		message := strings.ToUpper(insertErr.Error())
+		if !strings.Contains(message, "FOREIGN KEY") &&
+			!strings.Contains(message, "SQLITE_CONSTRAINT_FOREIGNKEY") {
+			return fmt.Errorf("connection %d orphan probe failed unexpectedly: %w", index+1, insertErr)
+		}
+	}
+
+	return nil
 }
 
 func initPostgresBackend(cfg *config.Config, logger *slog.Logger) (*pgxpool.Pool, error) {
@@ -874,6 +1309,46 @@ func initAccountStorage(cfg *config.Config, logger *slog.Logger, backend *storag
 		store, err := accountstore.NewStorage(backend.lite(), logger, opts...)
 		if err != nil {
 			return nil, fmt.Errorf("create %s account storage: %w", backend.driver, err)
+		}
+
+		return store, nil
+	}
+}
+
+func initAgentStorage(backend *storageBackend) (agent.Store, error) {
+	switch backend.driver {
+	case storageDriverPostgres:
+		store, err := agentpg.NewStorage(backend.pgpool)
+		if err != nil {
+			return nil, fmt.Errorf("create postgres agent storage: %w", err)
+		}
+
+		return store, nil
+
+	default:
+		store, err := agentstore.NewStorage(backend.lite())
+		if err != nil {
+			return nil, fmt.Errorf("create %s agent storage: %w", backend.driver, err)
+		}
+
+		return store, nil
+	}
+}
+
+func initSecurityAuditStorage(backend *storageBackend) (securityaudit.Storage, error) {
+	switch backend.driver {
+	case storageDriverPostgres:
+		store, err := auditpg.NewStorage(backend.pgpool)
+		if err != nil {
+			return nil, fmt.Errorf("create postgres security audit storage: %w", err)
+		}
+
+		return store, nil
+
+	default:
+		store, err := auditstore.NewStorage(backend.lite())
+		if err != nil {
+			return nil, fmt.Errorf("create %s security audit storage: %w", backend.driver, err)
 		}
 
 		return store, nil

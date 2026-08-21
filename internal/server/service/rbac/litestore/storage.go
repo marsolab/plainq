@@ -124,65 +124,168 @@ func (s *Storage) GetAllRoles(ctx context.Context) ([]rbac.Role, error) {
 }
 
 func (s *Storage) UpdateRole(ctx context.Context, role rbac.Role) error {
-	rows, err := s.queries.UpdateRole(ctx, sqlcgen.UpdateRoleParams{
-		RoleName: role.RoleName,
-		RoleID:   role.RoleID,
+	err := pqlite.WithWriteTx(ctx, s.db, pqlite.DefaultWriteRetry(), func(tx pqlite.Tx) error {
+		sqlTx, ok := tx.(*sql.Tx)
+		if !ok {
+			return errors.New("RBAC write transaction is not database/sql")
+		}
+
+		q := s.queries.WithTx(sqlTx)
+
+		rows, err := q.UpdateRole(ctx, sqlcgen.UpdateRoleParams{RoleName: role.RoleName, RoleID: role.RoleID})
+		if err != nil {
+			return fmt.Errorf("update role row: %w", err)
+		}
+
+		if rows == 0 {
+			return fmt.Errorf("role not found: %w", pqerr.ErrNotFound)
+		}
+
+		users, err := q.ListUsersWithRole(ctx, role.RoleID)
+		if err != nil {
+			return fmt.Errorf("list role holders: %w", err)
+		}
+
+		now := time.Now()
+		for _, userID := range users {
+			if err := bumpAndProjectHuman(ctx, q, userID, now); err != nil {
+				return fmt.Errorf("refresh renamed role holder %s: %w", userID, err)
+			}
+		}
+
+		return nil
 	})
 	if err != nil {
 		return fmt.Errorf("update role: %w", err)
-	}
-
-	if rows == 0 {
-		return fmt.Errorf("role not found: %w", pqerr.ErrNotFound)
 	}
 
 	return nil
 }
 
 func (s *Storage) DeleteRole(ctx context.Context, roleID string) error {
-	rows, err := s.queries.DeleteRole(ctx, roleID)
-	if err != nil {
-		return fmt.Errorf("delete role: %w", err)
-	}
+	err := pqlite.WithWriteTx(ctx, s.db, pqlite.DefaultWriteRetry(), func(tx pqlite.Tx) error {
+		sqlTx, ok := tx.(*sql.Tx)
+		if !ok {
+			return errors.New("role deletion transaction is not database/sql")
+		}
 
-	if rows == 0 {
-		return fmt.Errorf("role not found: %w", pqerr.ErrNotFound)
+		q := s.queries.WithTx(sqlTx)
+
+		rows, err := q.DeleteRole(ctx, roleID)
+		if err != nil {
+			return fmt.Errorf("delete role row: %w", err)
+		}
+
+		if rows == 1 {
+			return nil
+		}
+
+		if _, err := q.GetRoleByID(ctx, roleID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("role not found: %w", pqerr.ErrNotFound)
+			}
+
+			return fmt.Errorf("check role after conditional delete: %w", err)
+		}
+
+		holders, err := q.CountUsersWithRole(ctx, roleID)
+		if err != nil {
+			return fmt.Errorf("count role holders after conditional delete: %w", err)
+		}
+
+		if holders > 0 {
+			return rbac.ErrRoleInUse
+		}
+
+		return errors.New("conditional role delete affected no rows")
+	})
+	if err != nil {
+		if errors.Is(err, rbac.ErrRoleInUse) {
+			return rbac.ErrRoleInUse
+		}
+
+		return fmt.Errorf("delete role: %w", err)
 	}
 
 	return nil
 }
 
 func (s *Storage) AssignRoleToUser(ctx context.Context, userID, roleID string) error {
-	rows, err := s.queries.AssignRoleToUser(ctx, sqlcgen.AssignRoleToUserParams{
-		UserID:    userID,
-		RoleID:    roleID,
-		CreatedAt: time.Now(),
+	err := pqlite.WithWriteTx(ctx, s.db, pqlite.DefaultWriteRetry(), func(tx pqlite.Tx) error {
+		sqlTx, ok := tx.(*sql.Tx)
+		if !ok {
+			return errors.New("RBAC write transaction is not database/sql")
+		}
+
+		q := s.queries.WithTx(sqlTx)
+
+		rows, err := q.AssignRoleToUser(ctx, sqlcgen.AssignRoleToUserParams{
+			UserID: userID, RoleID: roleID, CreatedAt: time.Now(),
+		})
+		if err != nil {
+			return fmt.Errorf("insert user role: %w", err)
+		}
+
+		if rows == 0 {
+			return rbac.ErrRoleAlreadyAssigned
+		}
+
+		return bumpAndProjectHuman(ctx, q, userID, time.Now())
 	})
 	if err != nil {
-		return fmt.Errorf("assign role to user: %w", err)
-	}
+		if errors.Is(err, rbac.ErrRoleAlreadyAssigned) {
+			return rbac.ErrRoleAlreadyAssigned
+		}
 
-	// The insert ignores conflicts, so no affected row means the assignment
-	// already existed. Reporting it as success would claim a change that never
-	// happened.
-	if rows == 0 {
-		return rbac.ErrRoleAlreadyAssigned
+		return fmt.Errorf("assign role to user: %w", err)
 	}
 
 	return nil
 }
 
 func (s *Storage) RemoveRoleFromUser(ctx context.Context, userID, roleID string) error {
-	rows, err := s.queries.RemoveRoleFromUser(ctx, sqlcgen.RemoveRoleFromUserParams{
-		UserID: userID,
-		RoleID: roleID,
+	err := pqlite.WithWriteTx(ctx, s.db, pqlite.DefaultWriteRetry(), func(tx pqlite.Tx) error {
+		sqlTx, ok := tx.(*sql.Tx)
+		if !ok {
+			return errors.New("RBAC write transaction is not database/sql")
+		}
+
+		q := s.queries.WithTx(sqlTx)
+
+		rows, err := q.RemoveRoleFromUser(ctx, sqlcgen.RemoveRoleFromUserParams{
+			UserID: userID, RoleID: roleID,
+		})
+		if err != nil {
+			return fmt.Errorf("delete user role: %w", err)
+		}
+
+		if rows == 0 {
+			return fmt.Errorf("user role not found: %w", pqerr.ErrNotFound)
+		}
+
+		return bumpAndProjectHuman(ctx, q, userID, time.Now())
 	})
 	if err != nil {
 		return fmt.Errorf("remove role from user: %w", err)
 	}
 
-	if rows == 0 {
-		return fmt.Errorf("user role not found: %w", pqerr.ErrNotFound)
+	return nil
+}
+
+func bumpAndProjectHuman(ctx context.Context, q *sqlcgen.Queries, userID string, now time.Time) error {
+	rows, err := q.BumpUserAuthVersion(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("bump human auth version: %w", err)
+	}
+
+	if rows != 1 {
+		return fmt.Errorf("account not found: %w", pqerr.ErrNotFound)
+	}
+
+	if err := q.UpsertHumanSecurityPrincipal(ctx, sqlcgen.UpsertHumanSecurityPrincipalParams{
+		UpdatedAtNs: now.UnixNano(), UserID: userID,
+	}); err != nil {
+		return fmt.Errorf("project human security principal: %w", err)
 	}
 
 	return nil

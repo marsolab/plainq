@@ -1,3 +1,4 @@
+//nolint:contextcheck // policyHTTPContext always derives from the request's context and only adds bounded metadata.
 package queue
 
 import (
@@ -12,9 +13,9 @@ import (
 )
 
 func (s *Service) listTopicsHandler(w http.ResponseWriter, r *http.Request) {
-	output, err := s.storage.ListTopics(r.Context())
+	output, err := s.policyOperations().ListTopics(s.policyHTTPContext(r))
 	if err != nil {
-		httpkit.ErrorHTTP(w, r, err)
+		queueHTTPError(w, r, err)
 
 		return
 	}
@@ -25,7 +26,7 @@ func (s *Service) listTopicsHandler(w http.ResponseWriter, r *http.Request) {
 func (s *Service) createTopicHandler(w http.ResponseWriter, r *http.Request) {
 	var input CreateTopicRequest
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		httpkit.ErrorHTTP(w, r, err)
+		queueHTTPError(w, r, err)
 
 		return
 	}
@@ -36,9 +37,9 @@ func (s *Service) createTopicHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	output, err := s.storage.CreateTopic(r.Context(), &input)
+	output, err := s.policyOperations().CreateTopic(s.policyHTTPContext(r), &input)
 	if err != nil {
-		httpkit.ErrorHTTP(w, r, err)
+		queueHTTPError(w, r, err)
 
 		return
 	}
@@ -47,8 +48,8 @@ func (s *Service) createTopicHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) deleteTopicHandler(w http.ResponseWriter, r *http.Request) {
-	if err := s.storage.DeleteTopic(r.Context(), chi.URLParam(r, "topicID")); err != nil {
-		httpkit.ErrorHTTP(w, r, err)
+	if err := s.policyOperations().DeleteTopic(s.policyHTTPContext(r), chi.URLParam(r, "topicID")); err != nil {
+		queueHTTPError(w, r, err)
 
 		return
 	}
@@ -61,7 +62,7 @@ func (s *Service) deleteTopicHandler(w http.ResponseWriter, r *http.Request) {
 func (s *Service) subscribeTopicHandler(w http.ResponseWriter, r *http.Request) {
 	var input SubscribeRequest
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		httpkit.ErrorHTTP(w, r, err)
+		queueHTTPError(w, r, err)
 
 		return
 	}
@@ -73,14 +74,14 @@ func (s *Service) subscribeTopicHandler(w http.ResponseWriter, r *http.Request) 
 	}()
 
 	if err := validateQueueID(input.QueueID); err != nil {
-		httpkit.ErrorHTTP(w, r, fmt.Errorf("validation error: %w", err))
+		queueHTTPError(w, r, fmt.Errorf("validation error: %w", err))
 
 		return
 	}
 
-	output, err := s.storage.Subscribe(r.Context(), chi.URLParam(r, "topicID"), &input)
+	output, err := s.policyOperations().Subscribe(s.policyHTTPContext(r), chi.URLParam(r, "topicID"), &input)
 	if err != nil {
-		httpkit.ErrorHTTP(w, r, err)
+		queueHTTPError(w, r, err)
 
 		return
 	}
@@ -91,8 +92,9 @@ func (s *Service) subscribeTopicHandler(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Service) unsubscribeTopicHandler(w http.ResponseWriter, r *http.Request) {
-	if err := s.storage.Unsubscribe(r.Context(), chi.URLParam(r, "topicID"), chi.URLParam(r, "subscriptionID")); err != nil {
-		httpkit.ErrorHTTP(w, r, err)
+	if err := s.policyOperations().
+		Unsubscribe(s.policyHTTPContext(r), chi.URLParam(r, "topicID"), chi.URLParam(r, "subscriptionID")); err != nil {
+		queueHTTPError(w, r, err)
 
 		return
 	}
@@ -105,7 +107,7 @@ func (s *Service) unsubscribeTopicHandler(w http.ResponseWriter, r *http.Request
 func (s *Service) publishTopicHandler(w http.ResponseWriter, r *http.Request) {
 	var input PublishRequest
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		httpkit.ErrorHTTP(w, r, err)
+		queueHTTPError(w, r, err)
 
 		return
 	}
@@ -116,9 +118,9 @@ func (s *Service) publishTopicHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	output, err := s.storage.Publish(r.Context(), chi.URLParam(r, "topicID"), &input)
+	output, err := s.policyOperations().Publish(s.policyHTTPContext(r), chi.URLParam(r, "topicID"), &input)
 	if err != nil {
-		httpkit.ErrorHTTP(w, r, err)
+		queueHTTPError(w, r, err)
 
 		return
 	}

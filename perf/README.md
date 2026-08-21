@@ -104,7 +104,11 @@ shows the run under the `load` variant.
    (so disk noise doesn't skew results), and the Prometheus `/metrics`
    endpoint enabled.
 3. **Load test.** k6 runs two `constant-vus` scenarios in parallel — one per
-   variant — performing a full message lifecycle each iteration:
+   variant — with an isolated queue slot for every global k6 VU id. (k6 assigns
+   ids arbitrarily across concurrent scenarios, so each variant provisions the
+   full two-scenario id range.) Variant-local time slots serialize SQLite
+   writers, so the comparison measures successful service work instead of
+   shared-queue lease races. Each iteration performs a full lifecycle:
    `Send → Receive → Delete`. Every sample is tagged `variant=baseline|candidate`
    (scenario tag) and `op=send|receive|delete|total` (per call).
 4. **Store.** k6 streams metrics to VictoriaMetrics via Prometheus
@@ -123,6 +127,7 @@ All knobs are environment variables (forwarded by `make`/`run.sh`):
 | `DURATION`     | `2m`         | Load duration.                           |
 | `BATCH_SIZE`   | `1`          | `Receive` batch size (1–10).             |
 | `MSG_BYTES`    | `256`        | Message body size.                       |
+| `WORK_SLOT_MS` | `25`         | Per-VU SQLite writer slot in milliseconds. |
 | `RUN_ID`       | git short sha| Label applied to metrics & result files. |
 | `KEEP_UP`      | `1`          | Keep the stack up after the run.         |
 
@@ -134,6 +139,7 @@ Custom k6 metrics (in VictoriaMetrics, prefixed `k6_`):
 | ----------------------------------- | ------- | --------------- |
 | `k6_plainq_reqs_total`              | counter | `variant`, `op` |
 | `k6_plainq_errs_total`              | counter | `variant`, `op` |
+| `k6_plainq_rpc_status_total`        | counter | `variant`, `op`, bounded `code`, `grpc_status`, `reason` |
 | `k6_plainq_latency_{p50,p95,p99,…}` | gauge   | `variant`, `op` |
 
 Server-side series scraped from each PlainQ `/metrics` (label `variant`,
@@ -145,19 +151,19 @@ Server-side series scraped from each PlainQ `/metrics` (label `variant`,
 > they read `n/a`, the AB comparison still works — k6's client-side metrics are
 > the source of truth for latency and throughput.
 
-> **High error rates under load are expected** with the SQLite backend: it is
-> single-writer, so many concurrent VUs doing `Send`/`Delete` raise
-> `SQLITE_BUSY`. That contention hits **both** variants equally, so the
-> *relative* candidate-vs-baseline verdict stays meaningful even when absolute
-> error rates are high. Lower `VUS`, raise `BATCH_SIZE`, or point at PostgreSQL
-> for a cleaner absolute picture. k6's absolute thresholds are intentionally
-> loose for this reason — `report.py`'s relative comparison is the real gate.
+The report requires at least a 95% successful end-to-end workload for **both**
+variants. Below that threshold it reports `INCONCLUSIVE`, prints the bounded
+gRPC status/reason breakdown, and suppresses the latency delta verdict. Failed
+RPC latency is not comparable to a successful queue lifecycle, even when both
+variants fail for the same reason. Lower `VUS`, fix the workload, or use a
+backend suited to the intended concurrency before interpreting latency.
 
 ## Regression gating in CI
 
-`report.py` exits non-zero when the candidate's end-to-end p95 is more than
-10% above baseline (or its error rate is materially worse), so it can gate a
-pipeline:
+`report.py` exits 1 when the candidate's valid end-to-end p95 is more than 10%
+above baseline (or its valid error rate is materially worse). It exits 2 when
+the workload is inconclusive, so automation cannot treat invalid latency as a
+pass or regression:
 
 ```shell
 make -C perf ab DURATION=3m   # exits non-zero on regression

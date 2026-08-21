@@ -28,6 +28,13 @@ func AsTransport(err error) error {
 	return fmt.Errorf("%w: %w", sentinel, err)
 }
 
+// IsFailedPrecondition identifies policy-state failures that servekit cannot
+// represent with one of its transport sentinels. Queue transports map this to
+// gRPC FailedPrecondition and HTTP 409 directly.
+func IsFailedPrecondition(err error) bool {
+	return errors.Is(err, ErrFailedPrecondition)
+}
+
 func transportSentinel(err error) error {
 	switch {
 	case errors.Is(err, ErrNotFound):

@@ -1,6 +1,8 @@
+//nolint:contextcheck // policyHTTPContext always derives from the request's context and only adds bounded metadata.
 package queue
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -11,6 +13,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
+	"github.com/marsolab/plainq/internal/server/service/quota"
+	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/marsolab/servekit/errkit"
 	"github.com/marsolab/servekit/httpkit"
 )
@@ -19,7 +23,7 @@ func (s *Service) createQueueHandler(w http.ResponseWriter, r *http.Request) {
 	var input v1.CreateQueueRequest
 
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		httpkit.ErrorHTTP(w, r, err)
+		queueHTTPError(w, r, err)
 
 		return
 	}
@@ -32,9 +36,9 @@ func (s *Service) createQueueHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	output, createErr := s.storage.CreateQueue(r.Context(), &input)
+	output, createErr := s.policyOperations().CreateQueue(s.policyHTTPContext(r), &input)
 	if createErr != nil {
-		httpkit.ErrorHTTP(w, r, createErr)
+		queueHTTPError(w, r, createErr)
 
 		return
 	}
@@ -51,19 +55,19 @@ func (s *Service) listQueuesHandler(w http.ResponseWriter, r *http.Request) {
 	if l := r.URL.Query().Get("limit"); l != "" {
 		limit, parseErr := strconv.Atoi(l)
 		if parseErr != nil {
-			httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: invalid limit", errkit.ErrInvalidArgument))
+			queueHTTPError(w, r, fmt.Errorf("%w: invalid limit", errkit.ErrInvalidArgument))
 
 			return
 		}
 
 		if limit < 1 {
-			httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: invalid limit", errkit.ErrInvalidArgument))
+			queueHTTPError(w, r, fmt.Errorf("%w: invalid limit", errkit.ErrInvalidArgument))
 
 			return
 		}
 
 		if limit > math.MaxInt32 {
-			httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: limit too large", errkit.ErrInvalidArgument))
+			queueHTTPError(w, r, fmt.Errorf("%w: limit too large", errkit.ErrInvalidArgument))
 
 			return
 		}
@@ -71,9 +75,9 @@ func (s *Service) listQueuesHandler(w http.ResponseWriter, r *http.Request) {
 		input.Limit = int32(limit) //nolint:gosec // limit was validated against math.MaxInt32 above.
 	}
 
-	output, listErr := s.storage.ListQueues(r.Context(), &input)
+	output, listErr := s.policyOperations().ListQueues(s.policyHTTPContext(r), &input)
 	if listErr != nil {
-		httpkit.ErrorHTTP(w, r, listErr)
+		queueHTTPError(w, r, listErr)
 
 		return
 	}
@@ -85,16 +89,16 @@ func (s *Service) describeQueueHandler(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
 	if err := validateQueueID(id); err != nil {
-		httpkit.ErrorHTTP(w, r, err)
+		queueHTTPError(w, r, err)
 
 		return
 	}
 
 	input := v1.DescribeQueueRequest{QueueId: id}
 
-	output, describeErr := s.storage.DescribeQueue(r.Context(), &input)
+	output, describeErr := s.policyOperations().DescribeQueue(s.policyHTTPContext(r), &input)
 	if describeErr != nil {
-		httpkit.ErrorHTTP(w, r, describeErr)
+		queueHTTPError(w, r, describeErr)
 
 		return
 	}
@@ -106,7 +110,7 @@ func (s *Service) deleteQueueHandler(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
 	if err := validateQueueID(id); err != nil {
-		httpkit.ErrorHTTP(w, r, fmt.Errorf("validation error: %w", err))
+		queueHTTPError(w, r, fmt.Errorf("validation error: %w", err))
 
 		return
 	}
@@ -121,9 +125,15 @@ func (s *Service) deleteQueueHandler(w http.ResponseWriter, r *http.Request) {
 		Force:   force,
 	}
 
-	output, deleteErr := s.storage.DeleteQueue(r.Context(), &input)
+	output, deleteErr := s.policyOperations().DeleteQueue(s.policyHTTPContext(r), &input)
 	if deleteErr != nil {
-		httpkit.ErrorHTTP(w, r, deleteErr)
+		if pqerr.IsFailedPrecondition(deleteErr) {
+			queueHTTPError(w, r, deleteErr, httpkit.WithStatus(http.StatusConflict))
+
+			return
+		}
+
+		queueHTTPError(w, r, deleteErr)
 
 		return
 	}
@@ -137,16 +147,16 @@ func (s *Service) purgeQueueHandler(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
 	if err := validateQueueID(id); err != nil {
-		httpkit.ErrorHTTP(w, r, fmt.Errorf("validation error: %w", err))
+		queueHTTPError(w, r, fmt.Errorf("validation error: %w", err))
 
 		return
 	}
 
-	output, purgeErr := s.storage.PurgeQueue(r.Context(), &v1.PurgeQueueRequest{
+	output, purgeErr := s.policyOperations().PurgeQueue(s.policyHTTPContext(r), &v1.PurgeQueueRequest{
 		QueueId: id,
 	})
 	if purgeErr != nil {
-		httpkit.ErrorHTTP(w, r, purgeErr)
+		queueHTTPError(w, r, purgeErr)
 
 		return
 	}
@@ -161,7 +171,7 @@ func (s *Service) sendMessagesHandler(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
 	if err := validateQueueID(id); err != nil {
-		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: invalid queue id", errkit.ErrInvalidArgument))
+		queueHTTPError(w, r, fmt.Errorf("%w: invalid queue id", errkit.ErrInvalidArgument))
 
 		return
 	}
@@ -169,7 +179,7 @@ func (s *Service) sendMessagesHandler(w http.ResponseWriter, r *http.Request) {
 	var input v1.SendRequest
 
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		httpkit.ErrorHTTP(w, r, err)
+		queueHTTPError(w, r, err)
 
 		return
 	}
@@ -179,14 +189,14 @@ func (s *Service) sendMessagesHandler(w http.ResponseWriter, r *http.Request) {
 	input.QueueId = id
 
 	if len(input.Messages) == 0 {
-		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: at least one message is required", errkit.ErrInvalidArgument))
+		queueHTTPError(w, r, fmt.Errorf("%w: at least one message is required", errkit.ErrInvalidArgument))
 
 		return
 	}
 
-	output, sendErr := s.storage.Send(r.Context(), &input)
+	output, sendErr := s.policyOperations().Send(s.policyHTTPContext(r), &input)
 	if sendErr != nil {
-		httpkit.ErrorHTTP(w, r, sendErr)
+		queueHTTPError(w, r, sendErr)
 
 		return
 	}
@@ -201,24 +211,24 @@ func (s *Service) receiveMessagesHandler(w http.ResponseWriter, r *http.Request)
 	id := chi.URLParam(r, "id")
 
 	if err := validateQueueID(id); err != nil {
-		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: invalid queue id", errkit.ErrInvalidArgument))
+		queueHTTPError(w, r, fmt.Errorf("%w: invalid queue id", errkit.ErrInvalidArgument))
 
 		return
 	}
 
 	batch, batchErr := parseBatchSize(r.URL.Query().Get("batch"))
 	if batchErr != nil {
-		httpkit.ErrorHTTP(w, r, batchErr)
+		queueHTTPError(w, r, batchErr)
 
 		return
 	}
 
-	output, recvErr := s.storage.Receive(r.Context(), &v1.ReceiveRequest{
+	output, recvErr := s.policyOperations().Receive(s.policyHTTPContext(r), &v1.ReceiveRequest{
 		QueueId:   id,
 		BatchSize: batch,
 	})
 	if recvErr != nil {
-		httpkit.ErrorHTTP(w, r, recvErr)
+		queueHTTPError(w, r, recvErr)
 
 		return
 	}
@@ -232,7 +242,7 @@ func (s *Service) ackMessagesHandler(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
 	if err := validateQueueID(id); err != nil {
-		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: invalid queue id", errkit.ErrInvalidArgument))
+		queueHTTPError(w, r, fmt.Errorf("%w: invalid queue id", errkit.ErrInvalidArgument))
 
 		return
 	}
@@ -240,7 +250,7 @@ func (s *Service) ackMessagesHandler(w http.ResponseWriter, r *http.Request) {
 	var input v1.DeleteRequest
 
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		httpkit.ErrorHTTP(w, r, err)
+		queueHTTPError(w, r, err)
 
 		return
 	}
@@ -250,14 +260,14 @@ func (s *Service) ackMessagesHandler(w http.ResponseWriter, r *http.Request) {
 	input.QueueId = id
 
 	if len(input.MessageIds) == 0 {
-		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: at least one message id is required", errkit.ErrInvalidArgument))
+		queueHTTPError(w, r, fmt.Errorf("%w: at least one message id is required", errkit.ErrInvalidArgument))
 
 		return
 	}
 
-	output, deleteErr := s.storage.Delete(r.Context(), &input)
+	output, deleteErr := s.policyOperations().Delete(s.policyHTTPContext(r), &input)
 	if deleteErr != nil {
-		httpkit.ErrorHTTP(w, r, deleteErr)
+		queueHTTPError(w, r, deleteErr)
 
 		return
 	}
@@ -272,25 +282,25 @@ func (s *Service) peekMessagesHandler(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
 	if err := validateQueueID(id); err != nil {
-		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: invalid queue id", errkit.ErrInvalidArgument))
+		queueHTTPError(w, r, fmt.Errorf("%w: invalid queue id", errkit.ErrInvalidArgument))
 
 		return
 	}
 
 	params, paramErr := parsePeekParams(r.URL.Query())
 	if paramErr != nil {
-		httpkit.ErrorHTTP(w, r, paramErr)
+		queueHTTPError(w, r, paramErr)
 
 		return
 	}
 
-	output, peekErr := s.storage.Peek(r.Context(), &PeekRequest{
+	output, peekErr := s.policyOperations().Peek(s.policyHTTPContext(r), &PeekRequest{
 		QueueID: id,
 		Limit:   params.limit,
 		Offset:  params.offset,
 	})
 	if peekErr != nil {
-		httpkit.ErrorHTTP(w, r, peekErr)
+		queueHTTPError(w, r, peekErr)
 
 		return
 	}
@@ -303,6 +313,31 @@ func (s *Service) closeBody(r *http.Request, op string) {
 	if err := r.Body.Close(); err != nil {
 		s.logger.Error(op+": close request body", slog.String("error", err.Error()))
 	}
+}
+
+func (s *Service) policyHTTPContext(r *http.Request) context.Context {
+	keys := append([]string(nil), r.Header.Values("Idempotency-Key")...)
+	keys = append(keys, r.Header.Values("X-Idempotency-Key")...)
+
+	return WithHTTPRequestPolicyMetadata(
+		r.Context(), keys, r.Header.Get("X-Request-ID"), r.RemoteAddr, r.UserAgent(),
+	)
+}
+
+func queueHTTPError(
+	w http.ResponseWriter,
+	r *http.Request,
+	err error,
+	options ...httpkit.ResponseOption,
+) {
+	if retryDelay, exhausted := quota.RetryDelay(err); exhausted {
+		retrySeconds := int(math.Ceil(retryDelay.Seconds()))
+		w.Header().Set("Retry-After", strconv.Itoa(retrySeconds))
+
+		options = append(options, httpkit.WithStatus(http.StatusTooManyRequests))
+	}
+
+	httpkit.ErrorHTTP(w, r, pqerr.AsTransport(err), options...)
 }
 
 // parseBatchSize parses the receive batch-size query parameter. An empty value

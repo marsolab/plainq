@@ -233,9 +233,12 @@ type ReceiveMessage struct {
 	// id represents unique message identifier.
 	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	// body represents the message content as sequence of bytes.
-	Body          []byte `protobuf:"bytes,2,opt,name=body,proto3" json:"body,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Body            []byte                 `protobuf:"bytes,2,opt,name=body,proto3" json:"body,omitempty"`
+	ReceiptHandle   string                 `protobuf:"bytes,3,opt,name=receipt_handle,json=receiptHandle,proto3" json:"receipt_handle,omitempty"`
+	DeliveryAttempt uint32                 `protobuf:"varint,4,opt,name=delivery_attempt,json=deliveryAttempt,proto3" json:"delivery_attempt,omitempty"`
+	LeaseExpiresAt  *timestamppb.Timestamp `protobuf:"bytes,5,opt,name=lease_expires_at,json=leaseExpiresAt,proto3" json:"lease_expires_at,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *ReceiveMessage) Reset() {
@@ -278,6 +281,27 @@ func (x *ReceiveMessage) GetId() string {
 func (x *ReceiveMessage) GetBody() []byte {
 	if x != nil {
 		return x.Body
+	}
+	return nil
+}
+
+func (x *ReceiveMessage) GetReceiptHandle() string {
+	if x != nil {
+		return x.ReceiptHandle
+	}
+	return ""
+}
+
+func (x *ReceiveMessage) GetDeliveryAttempt() uint32 {
+	if x != nil {
+		return x.DeliveryAttempt
+	}
+	return 0
+}
+
+func (x *ReceiveMessage) GetLeaseExpiresAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.LeaseExpiresAt
 	}
 	return nil
 }
@@ -2105,16 +2129,615 @@ func (x *PublishResponse) GetDeliveredCount() uint64 {
 	return 0
 }
 
+type QueueDeliveryReceipt struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	MessageId     string                 `protobuf:"bytes,1,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
+	ReceiptHandle string                 `protobuf:"bytes,2,opt,name=receipt_handle,json=receiptHandle,proto3" json:"receipt_handle,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *QueueDeliveryReceipt) Reset() {
+	*x = QueueDeliveryReceipt{}
+	mi := &file_v1_schema_proto_msgTypes[34]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *QueueDeliveryReceipt) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*QueueDeliveryReceipt) ProtoMessage() {}
+
+func (x *QueueDeliveryReceipt) ProtoReflect() protoreflect.Message {
+	mi := &file_v1_schema_proto_msgTypes[34]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use QueueDeliveryReceipt.ProtoReflect.Descriptor instead.
+func (*QueueDeliveryReceipt) Descriptor() ([]byte, []int) {
+	return file_v1_schema_proto_rawDescGZIP(), []int{34}
+}
+
+func (x *QueueDeliveryReceipt) GetMessageId() string {
+	if x != nil {
+		return x.MessageId
+	}
+	return ""
+}
+
+func (x *QueueDeliveryReceipt) GetReceiptHandle() string {
+	if x != nil {
+		return x.ReceiptHandle
+	}
+	return ""
+}
+
+type QueueDeliveryFailure struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	MessageId     string                 `protobuf:"bytes,1,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
+	Code          string                 `protobuf:"bytes,2,opt,name=code,proto3" json:"code,omitempty"`
+	Message       string                 `protobuf:"bytes,3,opt,name=message,proto3" json:"message,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *QueueDeliveryFailure) Reset() {
+	*x = QueueDeliveryFailure{}
+	mi := &file_v1_schema_proto_msgTypes[35]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *QueueDeliveryFailure) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*QueueDeliveryFailure) ProtoMessage() {}
+
+func (x *QueueDeliveryFailure) ProtoReflect() protoreflect.Message {
+	mi := &file_v1_schema_proto_msgTypes[35]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use QueueDeliveryFailure.ProtoReflect.Descriptor instead.
+func (*QueueDeliveryFailure) Descriptor() ([]byte, []int) {
+	return file_v1_schema_proto_rawDescGZIP(), []int{35}
+}
+
+func (x *QueueDeliveryFailure) GetMessageId() string {
+	if x != nil {
+		return x.MessageId
+	}
+	return ""
+}
+
+func (x *QueueDeliveryFailure) GetCode() string {
+	if x != nil {
+		return x.Code
+	}
+	return ""
+}
+
+func (x *QueueDeliveryFailure) GetMessage() string {
+	if x != nil {
+		return x.Message
+	}
+	return ""
+}
+
+type QueueNackDelivery struct {
+	state                 protoimpl.MessageState `protogen:"open.v1"`
+	Receipt               *QueueDeliveryReceipt  `protobuf:"bytes,1,opt,name=receipt,proto3" json:"receipt,omitempty"`
+	AvailableAfterSeconds uint32                 `protobuf:"varint,2,opt,name=available_after_seconds,json=availableAfterSeconds,proto3" json:"available_after_seconds,omitempty"`
+	Reason                string                 `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
+}
+
+func (x *QueueNackDelivery) Reset() {
+	*x = QueueNackDelivery{}
+	mi := &file_v1_schema_proto_msgTypes[36]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *QueueNackDelivery) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*QueueNackDelivery) ProtoMessage() {}
+
+func (x *QueueNackDelivery) ProtoReflect() protoreflect.Message {
+	mi := &file_v1_schema_proto_msgTypes[36]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use QueueNackDelivery.ProtoReflect.Descriptor instead.
+func (*QueueNackDelivery) Descriptor() ([]byte, []int) {
+	return file_v1_schema_proto_rawDescGZIP(), []int{36}
+}
+
+func (x *QueueNackDelivery) GetReceipt() *QueueDeliveryReceipt {
+	if x != nil {
+		return x.Receipt
+	}
+	return nil
+}
+
+func (x *QueueNackDelivery) GetAvailableAfterSeconds() uint32 {
+	if x != nil {
+		return x.AvailableAfterSeconds
+	}
+	return 0
+}
+
+func (x *QueueNackDelivery) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+type QueueExtendDelivery struct {
+	state            protoimpl.MessageState `protogen:"open.v1"`
+	Receipt          *QueueDeliveryReceipt  `protobuf:"bytes,1,opt,name=receipt,proto3" json:"receipt,omitempty"`
+	ExtensionSeconds uint32                 `protobuf:"varint,2,opt,name=extension_seconds,json=extensionSeconds,proto3" json:"extension_seconds,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *QueueExtendDelivery) Reset() {
+	*x = QueueExtendDelivery{}
+	mi := &file_v1_schema_proto_msgTypes[37]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *QueueExtendDelivery) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*QueueExtendDelivery) ProtoMessage() {}
+
+func (x *QueueExtendDelivery) ProtoReflect() protoreflect.Message {
+	mi := &file_v1_schema_proto_msgTypes[37]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use QueueExtendDelivery.ProtoReflect.Descriptor instead.
+func (*QueueExtendDelivery) Descriptor() ([]byte, []int) {
+	return file_v1_schema_proto_rawDescGZIP(), []int{37}
+}
+
+func (x *QueueExtendDelivery) GetReceipt() *QueueDeliveryReceipt {
+	if x != nil {
+		return x.Receipt
+	}
+	return nil
+}
+
+func (x *QueueExtendDelivery) GetExtensionSeconds() uint32 {
+	if x != nil {
+		return x.ExtensionSeconds
+	}
+	return 0
+}
+
+type QueueExtendedDelivery struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	MessageId      string                 `protobuf:"bytes,1,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`
+	ReceiptHandle  string                 `protobuf:"bytes,2,opt,name=receipt_handle,json=receiptHandle,proto3" json:"receipt_handle,omitempty"`
+	LeaseExpiresAt *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=lease_expires_at,json=leaseExpiresAt,proto3" json:"lease_expires_at,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *QueueExtendedDelivery) Reset() {
+	*x = QueueExtendedDelivery{}
+	mi := &file_v1_schema_proto_msgTypes[38]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *QueueExtendedDelivery) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*QueueExtendedDelivery) ProtoMessage() {}
+
+func (x *QueueExtendedDelivery) ProtoReflect() protoreflect.Message {
+	mi := &file_v1_schema_proto_msgTypes[38]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use QueueExtendedDelivery.ProtoReflect.Descriptor instead.
+func (*QueueExtendedDelivery) Descriptor() ([]byte, []int) {
+	return file_v1_schema_proto_rawDescGZIP(), []int{38}
+}
+
+func (x *QueueExtendedDelivery) GetMessageId() string {
+	if x != nil {
+		return x.MessageId
+	}
+	return ""
+}
+
+func (x *QueueExtendedDelivery) GetReceiptHandle() string {
+	if x != nil {
+		return x.ReceiptHandle
+	}
+	return ""
+}
+
+func (x *QueueExtendedDelivery) GetLeaseExpiresAt() *timestamppb.Timestamp {
+	if x != nil {
+		return x.LeaseExpiresAt
+	}
+	return nil
+}
+
+type AcknowledgeQueueRequest struct {
+	state         protoimpl.MessageState  `protogen:"open.v1"`
+	QueueId       string                  `protobuf:"bytes,1,opt,name=queue_id,json=queueId,proto3" json:"queue_id,omitempty"`
+	Receipts      []*QueueDeliveryReceipt `protobuf:"bytes,2,rep,name=receipts,proto3" json:"receipts,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AcknowledgeQueueRequest) Reset() {
+	*x = AcknowledgeQueueRequest{}
+	mi := &file_v1_schema_proto_msgTypes[39]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AcknowledgeQueueRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AcknowledgeQueueRequest) ProtoMessage() {}
+
+func (x *AcknowledgeQueueRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_v1_schema_proto_msgTypes[39]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AcknowledgeQueueRequest.ProtoReflect.Descriptor instead.
+func (*AcknowledgeQueueRequest) Descriptor() ([]byte, []int) {
+	return file_v1_schema_proto_rawDescGZIP(), []int{39}
+}
+
+func (x *AcknowledgeQueueRequest) GetQueueId() string {
+	if x != nil {
+		return x.QueueId
+	}
+	return ""
+}
+
+func (x *AcknowledgeQueueRequest) GetReceipts() []*QueueDeliveryReceipt {
+	if x != nil {
+		return x.Receipts
+	}
+	return nil
+}
+
+type AcknowledgeQueueResponse struct {
+	state                protoimpl.MessageState  `protogen:"open.v1"`
+	SuccessfulMessageIds []string                `protobuf:"bytes,1,rep,name=successful_message_ids,json=successfulMessageIds,proto3" json:"successful_message_ids,omitempty"`
+	Failed               []*QueueDeliveryFailure `protobuf:"bytes,2,rep,name=failed,proto3" json:"failed,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
+}
+
+func (x *AcknowledgeQueueResponse) Reset() {
+	*x = AcknowledgeQueueResponse{}
+	mi := &file_v1_schema_proto_msgTypes[40]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AcknowledgeQueueResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AcknowledgeQueueResponse) ProtoMessage() {}
+
+func (x *AcknowledgeQueueResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_v1_schema_proto_msgTypes[40]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AcknowledgeQueueResponse.ProtoReflect.Descriptor instead.
+func (*AcknowledgeQueueResponse) Descriptor() ([]byte, []int) {
+	return file_v1_schema_proto_rawDescGZIP(), []int{40}
+}
+
+func (x *AcknowledgeQueueResponse) GetSuccessfulMessageIds() []string {
+	if x != nil {
+		return x.SuccessfulMessageIds
+	}
+	return nil
+}
+
+func (x *AcknowledgeQueueResponse) GetFailed() []*QueueDeliveryFailure {
+	if x != nil {
+		return x.Failed
+	}
+	return nil
+}
+
+type NackQueueRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	QueueId       string                 `protobuf:"bytes,1,opt,name=queue_id,json=queueId,proto3" json:"queue_id,omitempty"`
+	Deliveries    []*QueueNackDelivery   `protobuf:"bytes,2,rep,name=deliveries,proto3" json:"deliveries,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *NackQueueRequest) Reset() {
+	*x = NackQueueRequest{}
+	mi := &file_v1_schema_proto_msgTypes[41]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NackQueueRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NackQueueRequest) ProtoMessage() {}
+
+func (x *NackQueueRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_v1_schema_proto_msgTypes[41]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NackQueueRequest.ProtoReflect.Descriptor instead.
+func (*NackQueueRequest) Descriptor() ([]byte, []int) {
+	return file_v1_schema_proto_rawDescGZIP(), []int{41}
+}
+
+func (x *NackQueueRequest) GetQueueId() string {
+	if x != nil {
+		return x.QueueId
+	}
+	return ""
+}
+
+func (x *NackQueueRequest) GetDeliveries() []*QueueNackDelivery {
+	if x != nil {
+		return x.Deliveries
+	}
+	return nil
+}
+
+type NackQueueResponse struct {
+	state                protoimpl.MessageState  `protogen:"open.v1"`
+	SuccessfulMessageIds []string                `protobuf:"bytes,1,rep,name=successful_message_ids,json=successfulMessageIds,proto3" json:"successful_message_ids,omitempty"`
+	Failed               []*QueueDeliveryFailure `protobuf:"bytes,2,rep,name=failed,proto3" json:"failed,omitempty"`
+	unknownFields        protoimpl.UnknownFields
+	sizeCache            protoimpl.SizeCache
+}
+
+func (x *NackQueueResponse) Reset() {
+	*x = NackQueueResponse{}
+	mi := &file_v1_schema_proto_msgTypes[42]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NackQueueResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NackQueueResponse) ProtoMessage() {}
+
+func (x *NackQueueResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_v1_schema_proto_msgTypes[42]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NackQueueResponse.ProtoReflect.Descriptor instead.
+func (*NackQueueResponse) Descriptor() ([]byte, []int) {
+	return file_v1_schema_proto_rawDescGZIP(), []int{42}
+}
+
+func (x *NackQueueResponse) GetSuccessfulMessageIds() []string {
+	if x != nil {
+		return x.SuccessfulMessageIds
+	}
+	return nil
+}
+
+func (x *NackQueueResponse) GetFailed() []*QueueDeliveryFailure {
+	if x != nil {
+		return x.Failed
+	}
+	return nil
+}
+
+type ExtendQueueLeaseRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	QueueId       string                 `protobuf:"bytes,1,opt,name=queue_id,json=queueId,proto3" json:"queue_id,omitempty"`
+	Deliveries    []*QueueExtendDelivery `protobuf:"bytes,2,rep,name=deliveries,proto3" json:"deliveries,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ExtendQueueLeaseRequest) Reset() {
+	*x = ExtendQueueLeaseRequest{}
+	mi := &file_v1_schema_proto_msgTypes[43]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ExtendQueueLeaseRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ExtendQueueLeaseRequest) ProtoMessage() {}
+
+func (x *ExtendQueueLeaseRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_v1_schema_proto_msgTypes[43]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ExtendQueueLeaseRequest.ProtoReflect.Descriptor instead.
+func (*ExtendQueueLeaseRequest) Descriptor() ([]byte, []int) {
+	return file_v1_schema_proto_rawDescGZIP(), []int{43}
+}
+
+func (x *ExtendQueueLeaseRequest) GetQueueId() string {
+	if x != nil {
+		return x.QueueId
+	}
+	return ""
+}
+
+func (x *ExtendQueueLeaseRequest) GetDeliveries() []*QueueExtendDelivery {
+	if x != nil {
+		return x.Deliveries
+	}
+	return nil
+}
+
+type ExtendQueueLeaseResponse struct {
+	state         protoimpl.MessageState   `protogen:"open.v1"`
+	Extended      []*QueueExtendedDelivery `protobuf:"bytes,1,rep,name=extended,proto3" json:"extended,omitempty"`
+	Failed        []*QueueDeliveryFailure  `protobuf:"bytes,2,rep,name=failed,proto3" json:"failed,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ExtendQueueLeaseResponse) Reset() {
+	*x = ExtendQueueLeaseResponse{}
+	mi := &file_v1_schema_proto_msgTypes[44]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ExtendQueueLeaseResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ExtendQueueLeaseResponse) ProtoMessage() {}
+
+func (x *ExtendQueueLeaseResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_v1_schema_proto_msgTypes[44]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ExtendQueueLeaseResponse.ProtoReflect.Descriptor instead.
+func (*ExtendQueueLeaseResponse) Descriptor() ([]byte, []int) {
+	return file_v1_schema_proto_rawDescGZIP(), []int{44}
+}
+
+func (x *ExtendQueueLeaseResponse) GetExtended() []*QueueExtendedDelivery {
+	if x != nil {
+		return x.Extended
+	}
+	return nil
+}
+
+func (x *ExtendQueueLeaseResponse) GetFailed() []*QueueDeliveryFailure {
+	if x != nil {
+		return x.Failed
+	}
+	return nil
+}
+
 var File_v1_schema_proto protoreflect.FileDescriptor
 
 const file_v1_schema_proto_rawDesc = "" +
 	"\n" +
 	"\x0fv1/schema.proto\x12\x02v1\x1a\x1fgoogle/protobuf/timestamp.proto\"!\n" +
 	"\vSendMessage\x12\x12\n" +
-	"\x04body\x18\x01 \x01(\fR\x04body\"4\n" +
+	"\x04body\x18\x01 \x01(\fR\x04body\"\xcc\x01\n" +
 	"\x0eReceiveMessage\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
-	"\x04body\x18\x02 \x01(\fR\x04body\"\xca\x02\n" +
+	"\x04body\x18\x02 \x01(\fR\x04body\x12%\n" +
+	"\x0ereceipt_handle\x18\x03 \x01(\tR\rreceiptHandle\x12)\n" +
+	"\x10delivery_attempt\x18\x04 \x01(\rR\x0fdeliveryAttempt\x12D\n" +
+	"\x10lease_expires_at\x18\x05 \x01(\v2\x1a.google.protobuf.TimestampR\x0eleaseExpiresAt\"\xca\x02\n" +
 	"\x11ListQueuesRequest\x12!\n" +
 	"\fqueue_prefix\x18\x01 \x01(\tR\vqueuePrefix\x12\x14\n" +
 	"\x05limit\x18\x02 \x01(\x05R\x05limit\x12\x16\n" +
@@ -2239,7 +2862,50 @@ const file_v1_schema_proto_rawDesc = "" +
 	"\tqueue_ids\x18\x02 \x03(\tR\bqueueIds\x12\x1f\n" +
 	"\vmessage_ids\x18\x03 \x03(\tR\n" +
 	"messageIds\x12'\n" +
-	"\x0fdelivered_count\x18\x04 \x01(\x04R\x0edeliveredCount*\x89\x01\n" +
+	"\x0fdelivered_count\x18\x04 \x01(\x04R\x0edeliveredCount\"\\\n" +
+	"\x14QueueDeliveryReceipt\x12\x1d\n" +
+	"\n" +
+	"message_id\x18\x01 \x01(\tR\tmessageId\x12%\n" +
+	"\x0ereceipt_handle\x18\x02 \x01(\tR\rreceiptHandle\"c\n" +
+	"\x14QueueDeliveryFailure\x12\x1d\n" +
+	"\n" +
+	"message_id\x18\x01 \x01(\tR\tmessageId\x12\x12\n" +
+	"\x04code\x18\x02 \x01(\tR\x04code\x12\x18\n" +
+	"\amessage\x18\x03 \x01(\tR\amessage\"\x97\x01\n" +
+	"\x11QueueNackDelivery\x122\n" +
+	"\areceipt\x18\x01 \x01(\v2\x18.v1.QueueDeliveryReceiptR\areceipt\x126\n" +
+	"\x17available_after_seconds\x18\x02 \x01(\rR\x15availableAfterSeconds\x12\x16\n" +
+	"\x06reason\x18\x03 \x01(\tR\x06reason\"v\n" +
+	"\x13QueueExtendDelivery\x122\n" +
+	"\areceipt\x18\x01 \x01(\v2\x18.v1.QueueDeliveryReceiptR\areceipt\x12+\n" +
+	"\x11extension_seconds\x18\x02 \x01(\rR\x10extensionSeconds\"\xa3\x01\n" +
+	"\x15QueueExtendedDelivery\x12\x1d\n" +
+	"\n" +
+	"message_id\x18\x01 \x01(\tR\tmessageId\x12%\n" +
+	"\x0ereceipt_handle\x18\x02 \x01(\tR\rreceiptHandle\x12D\n" +
+	"\x10lease_expires_at\x18\x03 \x01(\v2\x1a.google.protobuf.TimestampR\x0eleaseExpiresAt\"j\n" +
+	"\x17AcknowledgeQueueRequest\x12\x19\n" +
+	"\bqueue_id\x18\x01 \x01(\tR\aqueueId\x124\n" +
+	"\breceipts\x18\x02 \x03(\v2\x18.v1.QueueDeliveryReceiptR\breceipts\"\x82\x01\n" +
+	"\x18AcknowledgeQueueResponse\x124\n" +
+	"\x16successful_message_ids\x18\x01 \x03(\tR\x14successfulMessageIds\x120\n" +
+	"\x06failed\x18\x02 \x03(\v2\x18.v1.QueueDeliveryFailureR\x06failed\"d\n" +
+	"\x10NackQueueRequest\x12\x19\n" +
+	"\bqueue_id\x18\x01 \x01(\tR\aqueueId\x125\n" +
+	"\n" +
+	"deliveries\x18\x02 \x03(\v2\x15.v1.QueueNackDeliveryR\n" +
+	"deliveries\"{\n" +
+	"\x11NackQueueResponse\x124\n" +
+	"\x16successful_message_ids\x18\x01 \x03(\tR\x14successfulMessageIds\x120\n" +
+	"\x06failed\x18\x02 \x03(\v2\x18.v1.QueueDeliveryFailureR\x06failed\"m\n" +
+	"\x17ExtendQueueLeaseRequest\x12\x19\n" +
+	"\bqueue_id\x18\x01 \x01(\tR\aqueueId\x127\n" +
+	"\n" +
+	"deliveries\x18\x02 \x03(\v2\x17.v1.QueueExtendDeliveryR\n" +
+	"deliveries\"\x83\x01\n" +
+	"\x18ExtendQueueLeaseResponse\x125\n" +
+	"\bextended\x18\x01 \x03(\v2\x19.v1.QueueExtendedDeliveryR\bextended\x120\n" +
+	"\x06failed\x18\x02 \x03(\v2\x18.v1.QueueDeliveryFailureR\x06failed*\x89\x01\n" +
 	"\x0eEvictionPolicy\x12\x1f\n" +
 	"\x1bEVICTION_POLICY_UNSPECIFIED\x10\x00\x12\x18\n" +
 	"\x14EVICTION_POLICY_DROP\x10\x01\x12\x1f\n" +
@@ -2278,95 +2944,117 @@ func file_v1_schema_proto_rawDescGZIP() []byte {
 }
 
 var file_v1_schema_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_v1_schema_proto_msgTypes = make([]protoimpl.MessageInfo, 34)
+var file_v1_schema_proto_msgTypes = make([]protoimpl.MessageInfo, 45)
 var file_v1_schema_proto_goTypes = []any{
-	(EvictionPolicy)(0),            // 0: v1.EvictionPolicy
-	(ListQueuesRequest_OrderBy)(0), // 1: v1.ListQueuesRequest.OrderBy
-	(ListQueuesRequest_SortBy)(0),  // 2: v1.ListQueuesRequest.SortBy
-	(*SendMessage)(nil),            // 3: v1.SendMessage
-	(*ReceiveMessage)(nil),         // 4: v1.ReceiveMessage
-	(*ListQueuesRequest)(nil),      // 5: v1.ListQueuesRequest
-	(*ListQueuesResponse)(nil),     // 6: v1.ListQueuesResponse
-	(*DescribeQueueRequest)(nil),   // 7: v1.DescribeQueueRequest
-	(*DescribeQueueResponse)(nil),  // 8: v1.DescribeQueueResponse
-	(*CreateQueueRequest)(nil),     // 9: v1.CreateQueueRequest
-	(*CreateQueueResponse)(nil),    // 10: v1.CreateQueueResponse
-	(*PurgeQueueRequest)(nil),      // 11: v1.PurgeQueueRequest
-	(*PurgeQueueResponse)(nil),     // 12: v1.PurgeQueueResponse
-	(*DeleteQueueRequest)(nil),     // 13: v1.DeleteQueueRequest
-	(*DeleteQueueResponse)(nil),    // 14: v1.DeleteQueueResponse
-	(*SendRequest)(nil),            // 15: v1.SendRequest
-	(*SendResponse)(nil),           // 16: v1.SendResponse
-	(*ReceiveRequest)(nil),         // 17: v1.ReceiveRequest
-	(*ReceiveResponse)(nil),        // 18: v1.ReceiveResponse
-	(*DeleteRequest)(nil),          // 19: v1.DeleteRequest
-	(*DeleteResponse)(nil),         // 20: v1.DeleteResponse
-	(*DeleteFailure)(nil),          // 21: v1.DeleteFailure
-	(*Topic)(nil),                  // 22: v1.Topic
-	(*Subscription)(nil),           // 23: v1.Subscription
-	(*PublishMessage)(nil),         // 24: v1.PublishMessage
-	(*ListTopicsRequest)(nil),      // 25: v1.ListTopicsRequest
-	(*ListTopicsResponse)(nil),     // 26: v1.ListTopicsResponse
-	(*CreateTopicRequest)(nil),     // 27: v1.CreateTopicRequest
-	(*CreateTopicResponse)(nil),    // 28: v1.CreateTopicResponse
-	(*DeleteTopicRequest)(nil),     // 29: v1.DeleteTopicRequest
-	(*DeleteTopicResponse)(nil),    // 30: v1.DeleteTopicResponse
-	(*SubscribeRequest)(nil),       // 31: v1.SubscribeRequest
-	(*SubscribeResponse)(nil),      // 32: v1.SubscribeResponse
-	(*UnsubscribeRequest)(nil),     // 33: v1.UnsubscribeRequest
-	(*UnsubscribeResponse)(nil),    // 34: v1.UnsubscribeResponse
-	(*PublishRequest)(nil),         // 35: v1.PublishRequest
-	(*PublishResponse)(nil),        // 36: v1.PublishResponse
-	(*timestamppb.Timestamp)(nil),  // 37: google.protobuf.Timestamp
+	(EvictionPolicy)(0),              // 0: v1.EvictionPolicy
+	(ListQueuesRequest_OrderBy)(0),   // 1: v1.ListQueuesRequest.OrderBy
+	(ListQueuesRequest_SortBy)(0),    // 2: v1.ListQueuesRequest.SortBy
+	(*SendMessage)(nil),              // 3: v1.SendMessage
+	(*ReceiveMessage)(nil),           // 4: v1.ReceiveMessage
+	(*ListQueuesRequest)(nil),        // 5: v1.ListQueuesRequest
+	(*ListQueuesResponse)(nil),       // 6: v1.ListQueuesResponse
+	(*DescribeQueueRequest)(nil),     // 7: v1.DescribeQueueRequest
+	(*DescribeQueueResponse)(nil),    // 8: v1.DescribeQueueResponse
+	(*CreateQueueRequest)(nil),       // 9: v1.CreateQueueRequest
+	(*CreateQueueResponse)(nil),      // 10: v1.CreateQueueResponse
+	(*PurgeQueueRequest)(nil),        // 11: v1.PurgeQueueRequest
+	(*PurgeQueueResponse)(nil),       // 12: v1.PurgeQueueResponse
+	(*DeleteQueueRequest)(nil),       // 13: v1.DeleteQueueRequest
+	(*DeleteQueueResponse)(nil),      // 14: v1.DeleteQueueResponse
+	(*SendRequest)(nil),              // 15: v1.SendRequest
+	(*SendResponse)(nil),             // 16: v1.SendResponse
+	(*ReceiveRequest)(nil),           // 17: v1.ReceiveRequest
+	(*ReceiveResponse)(nil),          // 18: v1.ReceiveResponse
+	(*DeleteRequest)(nil),            // 19: v1.DeleteRequest
+	(*DeleteResponse)(nil),           // 20: v1.DeleteResponse
+	(*DeleteFailure)(nil),            // 21: v1.DeleteFailure
+	(*Topic)(nil),                    // 22: v1.Topic
+	(*Subscription)(nil),             // 23: v1.Subscription
+	(*PublishMessage)(nil),           // 24: v1.PublishMessage
+	(*ListTopicsRequest)(nil),        // 25: v1.ListTopicsRequest
+	(*ListTopicsResponse)(nil),       // 26: v1.ListTopicsResponse
+	(*CreateTopicRequest)(nil),       // 27: v1.CreateTopicRequest
+	(*CreateTopicResponse)(nil),      // 28: v1.CreateTopicResponse
+	(*DeleteTopicRequest)(nil),       // 29: v1.DeleteTopicRequest
+	(*DeleteTopicResponse)(nil),      // 30: v1.DeleteTopicResponse
+	(*SubscribeRequest)(nil),         // 31: v1.SubscribeRequest
+	(*SubscribeResponse)(nil),        // 32: v1.SubscribeResponse
+	(*UnsubscribeRequest)(nil),       // 33: v1.UnsubscribeRequest
+	(*UnsubscribeResponse)(nil),      // 34: v1.UnsubscribeResponse
+	(*PublishRequest)(nil),           // 35: v1.PublishRequest
+	(*PublishResponse)(nil),          // 36: v1.PublishResponse
+	(*QueueDeliveryReceipt)(nil),     // 37: v1.QueueDeliveryReceipt
+	(*QueueDeliveryFailure)(nil),     // 38: v1.QueueDeliveryFailure
+	(*QueueNackDelivery)(nil),        // 39: v1.QueueNackDelivery
+	(*QueueExtendDelivery)(nil),      // 40: v1.QueueExtendDelivery
+	(*QueueExtendedDelivery)(nil),    // 41: v1.QueueExtendedDelivery
+	(*AcknowledgeQueueRequest)(nil),  // 42: v1.AcknowledgeQueueRequest
+	(*AcknowledgeQueueResponse)(nil), // 43: v1.AcknowledgeQueueResponse
+	(*NackQueueRequest)(nil),         // 44: v1.NackQueueRequest
+	(*NackQueueResponse)(nil),        // 45: v1.NackQueueResponse
+	(*ExtendQueueLeaseRequest)(nil),  // 46: v1.ExtendQueueLeaseRequest
+	(*ExtendQueueLeaseResponse)(nil), // 47: v1.ExtendQueueLeaseResponse
+	(*timestamppb.Timestamp)(nil),    // 48: google.protobuf.Timestamp
 }
 var file_v1_schema_proto_depIdxs = []int32{
-	1,  // 0: v1.ListQueuesRequest.order_by:type_name -> v1.ListQueuesRequest.OrderBy
-	2,  // 1: v1.ListQueuesRequest.sort_by:type_name -> v1.ListQueuesRequest.SortBy
-	8,  // 2: v1.ListQueuesResponse.queues:type_name -> v1.DescribeQueueResponse
-	37, // 3: v1.DescribeQueueResponse.created_at:type_name -> google.protobuf.Timestamp
-	0,  // 4: v1.DescribeQueueResponse.eviction_policy:type_name -> v1.EvictionPolicy
-	0,  // 5: v1.CreateQueueRequest.eviction_policy:type_name -> v1.EvictionPolicy
-	3,  // 6: v1.SendRequest.messages:type_name -> v1.SendMessage
-	4,  // 7: v1.ReceiveResponse.messages:type_name -> v1.ReceiveMessage
-	21, // 8: v1.DeleteResponse.failed:type_name -> v1.DeleteFailure
-	37, // 9: v1.Topic.created_at:type_name -> google.protobuf.Timestamp
-	23, // 10: v1.Topic.subscriptions:type_name -> v1.Subscription
-	37, // 11: v1.Subscription.created_at:type_name -> google.protobuf.Timestamp
-	22, // 12: v1.ListTopicsResponse.topics:type_name -> v1.Topic
-	24, // 13: v1.PublishRequest.messages:type_name -> v1.PublishMessage
-	5,  // 14: v1.PlainQService.ListQueues:input_type -> v1.ListQueuesRequest
-	7,  // 15: v1.PlainQService.DescribeQueue:input_type -> v1.DescribeQueueRequest
-	9,  // 16: v1.PlainQService.CreateQueue:input_type -> v1.CreateQueueRequest
-	11, // 17: v1.PlainQService.PurgeQueue:input_type -> v1.PurgeQueueRequest
-	13, // 18: v1.PlainQService.DeleteQueue:input_type -> v1.DeleteQueueRequest
-	15, // 19: v1.PlainQService.Send:input_type -> v1.SendRequest
-	17, // 20: v1.PlainQService.Receive:input_type -> v1.ReceiveRequest
-	19, // 21: v1.PlainQService.Delete:input_type -> v1.DeleteRequest
-	25, // 22: v1.PlainQService.ListTopics:input_type -> v1.ListTopicsRequest
-	27, // 23: v1.PlainQService.CreateTopic:input_type -> v1.CreateTopicRequest
-	29, // 24: v1.PlainQService.DeleteTopic:input_type -> v1.DeleteTopicRequest
-	31, // 25: v1.PlainQService.Subscribe:input_type -> v1.SubscribeRequest
-	33, // 26: v1.PlainQService.Unsubscribe:input_type -> v1.UnsubscribeRequest
-	35, // 27: v1.PlainQService.Publish:input_type -> v1.PublishRequest
-	6,  // 28: v1.PlainQService.ListQueues:output_type -> v1.ListQueuesResponse
-	8,  // 29: v1.PlainQService.DescribeQueue:output_type -> v1.DescribeQueueResponse
-	10, // 30: v1.PlainQService.CreateQueue:output_type -> v1.CreateQueueResponse
-	12, // 31: v1.PlainQService.PurgeQueue:output_type -> v1.PurgeQueueResponse
-	14, // 32: v1.PlainQService.DeleteQueue:output_type -> v1.DeleteQueueResponse
-	16, // 33: v1.PlainQService.Send:output_type -> v1.SendResponse
-	18, // 34: v1.PlainQService.Receive:output_type -> v1.ReceiveResponse
-	20, // 35: v1.PlainQService.Delete:output_type -> v1.DeleteResponse
-	26, // 36: v1.PlainQService.ListTopics:output_type -> v1.ListTopicsResponse
-	28, // 37: v1.PlainQService.CreateTopic:output_type -> v1.CreateTopicResponse
-	30, // 38: v1.PlainQService.DeleteTopic:output_type -> v1.DeleteTopicResponse
-	32, // 39: v1.PlainQService.Subscribe:output_type -> v1.SubscribeResponse
-	34, // 40: v1.PlainQService.Unsubscribe:output_type -> v1.UnsubscribeResponse
-	36, // 41: v1.PlainQService.Publish:output_type -> v1.PublishResponse
-	28, // [28:42] is the sub-list for method output_type
-	14, // [14:28] is the sub-list for method input_type
-	14, // [14:14] is the sub-list for extension type_name
-	14, // [14:14] is the sub-list for extension extendee
-	0,  // [0:14] is the sub-list for field type_name
+	48, // 0: v1.ReceiveMessage.lease_expires_at:type_name -> google.protobuf.Timestamp
+	1,  // 1: v1.ListQueuesRequest.order_by:type_name -> v1.ListQueuesRequest.OrderBy
+	2,  // 2: v1.ListQueuesRequest.sort_by:type_name -> v1.ListQueuesRequest.SortBy
+	8,  // 3: v1.ListQueuesResponse.queues:type_name -> v1.DescribeQueueResponse
+	48, // 4: v1.DescribeQueueResponse.created_at:type_name -> google.protobuf.Timestamp
+	0,  // 5: v1.DescribeQueueResponse.eviction_policy:type_name -> v1.EvictionPolicy
+	0,  // 6: v1.CreateQueueRequest.eviction_policy:type_name -> v1.EvictionPolicy
+	3,  // 7: v1.SendRequest.messages:type_name -> v1.SendMessage
+	4,  // 8: v1.ReceiveResponse.messages:type_name -> v1.ReceiveMessage
+	21, // 9: v1.DeleteResponse.failed:type_name -> v1.DeleteFailure
+	48, // 10: v1.Topic.created_at:type_name -> google.protobuf.Timestamp
+	23, // 11: v1.Topic.subscriptions:type_name -> v1.Subscription
+	48, // 12: v1.Subscription.created_at:type_name -> google.protobuf.Timestamp
+	22, // 13: v1.ListTopicsResponse.topics:type_name -> v1.Topic
+	24, // 14: v1.PublishRequest.messages:type_name -> v1.PublishMessage
+	37, // 15: v1.QueueNackDelivery.receipt:type_name -> v1.QueueDeliveryReceipt
+	37, // 16: v1.QueueExtendDelivery.receipt:type_name -> v1.QueueDeliveryReceipt
+	48, // 17: v1.QueueExtendedDelivery.lease_expires_at:type_name -> google.protobuf.Timestamp
+	37, // 18: v1.AcknowledgeQueueRequest.receipts:type_name -> v1.QueueDeliveryReceipt
+	38, // 19: v1.AcknowledgeQueueResponse.failed:type_name -> v1.QueueDeliveryFailure
+	39, // 20: v1.NackQueueRequest.deliveries:type_name -> v1.QueueNackDelivery
+	38, // 21: v1.NackQueueResponse.failed:type_name -> v1.QueueDeliveryFailure
+	40, // 22: v1.ExtendQueueLeaseRequest.deliveries:type_name -> v1.QueueExtendDelivery
+	41, // 23: v1.ExtendQueueLeaseResponse.extended:type_name -> v1.QueueExtendedDelivery
+	38, // 24: v1.ExtendQueueLeaseResponse.failed:type_name -> v1.QueueDeliveryFailure
+	5,  // 25: v1.PlainQService.ListQueues:input_type -> v1.ListQueuesRequest
+	7,  // 26: v1.PlainQService.DescribeQueue:input_type -> v1.DescribeQueueRequest
+	9,  // 27: v1.PlainQService.CreateQueue:input_type -> v1.CreateQueueRequest
+	11, // 28: v1.PlainQService.PurgeQueue:input_type -> v1.PurgeQueueRequest
+	13, // 29: v1.PlainQService.DeleteQueue:input_type -> v1.DeleteQueueRequest
+	15, // 30: v1.PlainQService.Send:input_type -> v1.SendRequest
+	17, // 31: v1.PlainQService.Receive:input_type -> v1.ReceiveRequest
+	19, // 32: v1.PlainQService.Delete:input_type -> v1.DeleteRequest
+	25, // 33: v1.PlainQService.ListTopics:input_type -> v1.ListTopicsRequest
+	27, // 34: v1.PlainQService.CreateTopic:input_type -> v1.CreateTopicRequest
+	29, // 35: v1.PlainQService.DeleteTopic:input_type -> v1.DeleteTopicRequest
+	31, // 36: v1.PlainQService.Subscribe:input_type -> v1.SubscribeRequest
+	33, // 37: v1.PlainQService.Unsubscribe:input_type -> v1.UnsubscribeRequest
+	35, // 38: v1.PlainQService.Publish:input_type -> v1.PublishRequest
+	6,  // 39: v1.PlainQService.ListQueues:output_type -> v1.ListQueuesResponse
+	8,  // 40: v1.PlainQService.DescribeQueue:output_type -> v1.DescribeQueueResponse
+	10, // 41: v1.PlainQService.CreateQueue:output_type -> v1.CreateQueueResponse
+	12, // 42: v1.PlainQService.PurgeQueue:output_type -> v1.PurgeQueueResponse
+	14, // 43: v1.PlainQService.DeleteQueue:output_type -> v1.DeleteQueueResponse
+	16, // 44: v1.PlainQService.Send:output_type -> v1.SendResponse
+	18, // 45: v1.PlainQService.Receive:output_type -> v1.ReceiveResponse
+	20, // 46: v1.PlainQService.Delete:output_type -> v1.DeleteResponse
+	26, // 47: v1.PlainQService.ListTopics:output_type -> v1.ListTopicsResponse
+	28, // 48: v1.PlainQService.CreateTopic:output_type -> v1.CreateTopicResponse
+	30, // 49: v1.PlainQService.DeleteTopic:output_type -> v1.DeleteTopicResponse
+	32, // 50: v1.PlainQService.Subscribe:output_type -> v1.SubscribeResponse
+	34, // 51: v1.PlainQService.Unsubscribe:output_type -> v1.UnsubscribeResponse
+	36, // 52: v1.PlainQService.Publish:output_type -> v1.PublishResponse
+	39, // [39:53] is the sub-list for method output_type
+	25, // [25:39] is the sub-list for method input_type
+	25, // [25:25] is the sub-list for extension type_name
+	25, // [25:25] is the sub-list for extension extendee
+	0,  // [0:25] is the sub-list for field type_name
 }
 
 func init() { file_v1_schema_proto_init() }
@@ -2380,7 +3068,7 @@ func file_v1_schema_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_v1_schema_proto_rawDesc), len(file_v1_schema_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   34,
+			NumMessages:   45,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

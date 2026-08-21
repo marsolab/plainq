@@ -155,6 +155,8 @@ func (s *Storage) ListProviders(ctx context.Context, orgID string) ([]oauth.Prov
 // SyncOAuthUser upserts an OAuth-authenticated user by (oauth_provider,
 // oauth_sub) in a serializable transaction so the check-then-act is
 // race-free.
+//
+//nolint:cyclop // Keep identity, projection, rollback, and commit in one auditable transaction boundary.
 func (s *Storage) SyncOAuthUser(ctx context.Context, user oauth.OAuthUser, providerName, orgID string) (sErr error) {
 	tx, err := pqlite.BeginTx(ctx, s.db)
 	if err != nil {
@@ -169,19 +171,23 @@ func (s *Storage) SyncOAuthUser(ctx context.Context, user oauth.OAuthUser, provi
 
 	q := s.queries.WithTx(tx)
 
-	userID, lookupErr := q.GetUserIDByOAuthSub(ctx, sqlcgen.GetUserIDByOAuthSubParams{
+	identity, lookupErr := q.GetOAuthUserIdentity(ctx, sqlcgen.GetOAuthUserIdentityParams{
 		OauthProvider: toNullString(providerName),
 		OauthSub:      toNullString(user.Subject),
 	})
 
 	now := time.Now()
 
+	var userID string
+
 	switch {
 	case errors.Is(lookupErr, sql.ErrNoRows):
+		userID = idkit.ULID()
+
 		if err := q.InsertOAuthUser(ctx, sqlcgen.InsertOAuthUserParams{
-			UserID:        idkit.ULID(),
+			UserID:        userID,
 			Email:         user.Email,
-			OrgID:         toNullString(orgID),
+			OrgID:         orgID,
 			OauthProvider: toNullString(providerName),
 			OauthSub:      toNullString(user.Subject),
 			LastSyncAt:    sql.NullTime{Time: now, Valid: true},
@@ -195,15 +201,31 @@ func (s *Storage) SyncOAuthUser(ctx context.Context, user oauth.OAuthUser, provi
 		return fmt.Errorf("check existing oauth user: %w", lookupErr)
 
 	default:
+		userID = identity.UserID
 		if err := q.UpdateOAuthUser(ctx, sqlcgen.UpdateOAuthUserParams{
 			Email:      user.Email,
-			OrgID:      toNullString(orgID),
+			OrgID:      orgID,
 			LastSyncAt: sql.NullTime{Time: now, Valid: true},
 			UpdatedAt:  now,
 			UserID:     userID,
 		}); err != nil {
 			return fmt.Errorf("update oauth user: %w", err)
 		}
+
+		if identity.OrgID != orgID {
+			if err := q.DeleteHumanSecurityPrincipal(ctx, sqlcgen.DeleteHumanSecurityPrincipalParams{
+				TenantID: identity.OrgID, PrincipalID: userID,
+			}); err != nil {
+				return fmt.Errorf("delete previous oauth human security principal: %w", err)
+			}
+		}
+	}
+
+	if err := q.UpsertHumanSecurityPrincipal(ctx, sqlcgen.UpsertHumanSecurityPrincipalParams{
+		UpdatedAtNs: now.UnixNano(),
+		UserID:      userID,
+	}); err != nil {
+		return fmt.Errorf("upsert oauth human security principal: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -229,7 +251,7 @@ func (s *Storage) GetUserByOAuthSub(ctx context.Context, providerName, subject s
 	return &oauth.SyncedUser{
 		UserID:      row.UserID,
 		Email:       row.Email,
-		OrgID:       row.OrgID.String,
+		OrgID:       row.OrgID,
 		Provider:    row.OauthProvider.String,
 		Subject:     row.OauthSub.String,
 		IsOAuthUser: row.IsOauthUser,

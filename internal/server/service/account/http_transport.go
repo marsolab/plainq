@@ -2,6 +2,7 @@ package account
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,18 +12,24 @@ import (
 	"time"
 
 	"github.com/cristalhq/jwt/v5"
+	"github.com/marsolab/plainq/internal/server/config"
+	"github.com/marsolab/plainq/internal/server/principal"
+	"github.com/marsolab/plainq/internal/server/security"
 	"github.com/marsolab/servekit/authkit/jwtkit"
 	"github.com/marsolab/servekit/errkit"
 	"github.com/marsolab/servekit/httpkit"
 	"github.com/marsolab/servekit/idkit"
-	"github.com/marsolab/servekit/mailkit"
 )
 
 const (
-	tokenIssuer = "plainq-server"
+	defaultTokenIssuer   = "plainq-server"
+	defaultTokenAudience = "plainq-human"
+	maxAuthRequestBytes  = 32 << 10
 )
 
+//nolint:cyclop // Each request validation and persistence failure maps to a distinct HTTP response.
 func (s *Service) signUpHandler(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, authRequestMaxBytes(s.cfg))
 	// Check if registration is enabled.
 	if !s.cfg.AuthRegistrationEnable {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: user registration is disabled", errkit.ErrUnauthorized))
@@ -52,6 +59,18 @@ func (s *Service) signUpHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	if !s.allowIPAndAccount(r, req.Email) {
+		rejectAuthRate(w, r)
+
+		return
+	}
+
+	if err := validateEmail(req.Email); err != nil {
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("validate email: %w", err))
+
+		return
+	}
+
 	if req.Name != "" {
 		if err := validateUserName(req.Name); err != nil {
 			httpkit.ErrorHTTP(w, r, fmt.Errorf("validate user name: %w", err))
@@ -73,16 +92,19 @@ func (s *Service) signUpHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	verified := !s.cfg.AuthRegistrationEnable
+	verified := initialVerified(s.cfg)
 
 	userAccount := Account{
-		ID:        idkit.ULID(),
-		Name:      req.Name,
-		Email:     req.Email,
-		Password:  hashedPassword,
-		Verified:  verified,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		ID:          idkit.ULID(),
+		Name:        req.Name,
+		Email:       req.Email,
+		Password:    hashedPassword,
+		Verified:    verified,
+		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now(),
+		TenantID:    principal.LegacyTenantID,
+		AuthVersion: 1,
+		Status:      AccountStatusActive,
 	}
 
 	if err := s.storage.CreateAccount(r.Context(), userAccount); err != nil {
@@ -95,6 +117,8 @@ func (s *Service) signUpHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) signInHandler(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, authRequestMaxBytes(s.cfg))
+
 	type request struct {
 		Email    string `json:"email"`
 		Password string `json:"password"`
@@ -116,6 +140,12 @@ func (s *Service) signInHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	if !s.allowIPAndAccount(r, req.Email) {
+		rejectAuthRate(w, r)
+
+		return
+	}
+
 	if err := validateEmail(req.Email); err != nil {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("validate email: %w", err))
 
@@ -131,6 +161,12 @@ func (s *Service) signInHandler(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.hasher.CheckPassword(account.Password, req.Password); err != nil {
 		httpkit.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
+
+		return
+	}
+
+	if err := requireVerified(*account); err != nil {
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: %w", errkit.ErrUnauthorized, err))
 
 		return
 	}
@@ -156,29 +192,31 @@ func (s *Service) signOutHandler(w http.ResponseWriter, r *http.Request) {
 	token = strings.TrimPrefix(token, "Bearer")
 	token = strings.TrimSpace(token)
 
-	if err := s.storage.DenyAccessToken(r.Context(), token, s.cfg.AuthAccessTokenTTL); err != nil {
-		httpkit.ErrorHTTP(w, r, fmt.Errorf("deny access token: %w", err))
+	parsed, parseErr := s.tokman.ParseVerify(token)
+
+	claims, claimsErr := validateHumanSessionClaims(parsed, s.cfg, "access", "uid")
+	if parseErr != nil || claimsErr != nil {
+		httpkit.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
 
 		return
 	}
 
-	// Denying the access token is not enough: the session's refresh token would
-	// still mint a new one via the public /refresh endpoint. Access and refresh
-	// tokens of a session share a token id (jti), so drop the refresh row by
-	// that id to revoke the whole session. Best effort — an unparseable token
-	// has no id to match, and the access token is already denied regardless.
-	if parsed, parseErr := s.tokman.ParseVerify(token); parseErr == nil {
-		if err := s.storage.DeleteRefreshTokenByTokenID(r.Context(), parsed.ID); err != nil {
-			httpkit.ErrorHTTP(w, r, fmt.Errorf("delete refresh token: %w", err))
+	if err := s.storage.RevokeSession(r.Context(), DeniedToken{
+		TokenID: parsed.ID, AID: claims.accountID, ExpiresAt: parsed.ExpiresAt.UTC(),
+		CreatedAt: time.Now(), Reason: "logout",
+	}); err != nil {
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("revoke session: %w", err))
 
-			return
-		}
+		return
 	}
 
 	httpkit.Status(w, r, http.StatusOK)
 }
 
+//nolint:cyclop // Refresh deliberately keeps parse, live-state, rotation, and replay failures distinct.
 func (s *Service) refreshHandler(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, authRequestMaxBytes(s.cfg))
+
 	type request struct {
 		RefreshToken string `json:"refresh_token"`
 	}
@@ -199,6 +237,12 @@ func (s *Service) refreshHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	if !s.allowIP(r) {
+		rejectAuthRate(w, r)
+
+		return
+	}
+
 	token, parseErr := s.tokman.ParseVerify(req.RefreshToken)
 	if parseErr != nil {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: parse refresh token: %s", errkit.ErrUnauthenticated, parseErr.Error()))
@@ -206,16 +250,29 @@ func (s *Service) refreshHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	aid, ok := token.Meta["aid"]
-	if !ok {
+	claims, claimsErr := validateHumanSessionClaims(token, s.cfg, "refresh", "aid")
+	if claimsErr != nil {
 		httpkit.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
 
 		return
 	}
 
-	accountID, ok := aid.(string)
-	if !ok {
-		httpkit.ErrorHTTP(w, r, errkit.ErrUnauthenticated)
+	if !s.allowAccount(claims.accountID) {
+		rejectAuthRate(w, r)
+
+		return
+	}
+
+	live, securityErr := s.storage.GetAccountSecurity(r.Context(), claims.accountID)
+	if securityErr != nil {
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("get account security: %w", securityErr))
+
+		return
+	}
+
+	if live.Status != AccountStatusActive || live.TenantID != claims.tenantID ||
+		live.AuthVersion != claims.authVersion {
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: refresh token is stale", errkit.ErrUnauthenticated))
 
 		return
 	}
@@ -223,7 +280,8 @@ func (s *Service) refreshHandler(w http.ResponseWriter, r *http.Request) {
 	// Consume the presented refresh token as a single-use credential. A missing
 	// row means it was already rotated away or revoked on sign-out, so refuse to
 	// mint a new session rather than resurrect a dead one.
-	if err := s.storage.DeleteRefreshToken(r.Context(), req.RefreshToken); err != nil {
+	tokenHash := hashSessionToken(req.RefreshToken)
+	if err := s.storage.DeleteRefreshToken(r.Context(), tokenHash[:]); err != nil {
 		if errors.Is(err, ErrRefreshTokenNotFound) {
 			httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: refresh token is no longer valid", errkit.ErrUnauthenticated))
 
@@ -236,7 +294,7 @@ func (s *Service) refreshHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create new session.
-	session, err := s.createSession(r.Context(), accountID, idkit.ULID(), time.Now())
+	session, err := s.createSession(r.Context(), claims.accountID, idkit.ULID(), time.Now())
 	if err != nil {
 		httpkit.ErrorHTTP(w, r, fmt.Errorf("create session: %w", err))
 
@@ -246,135 +304,30 @@ func (s *Service) refreshHandler(w http.ResponseWriter, r *http.Request) {
 	httpkit.JSON(w, r, session)
 }
 
-func (s *Service) emailVerificationHandler(w http.ResponseWriter, r *http.Request) {
-	type request struct {
-		Email string `json:"email"`
-	}
-
-	var req request
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: decode request json: %s", errkit.ErrInvalidArgument, err.Error()))
-
-		return
-	}
-
-	defer r.Body.Close()
-
-	if err := validateEmail(req.Email); err != nil {
-		httpkit.ErrorHTTP(w, r, fmt.Errorf("validate email: %w", err))
-
-		return
-	}
-
-	code := idkit.DigiCode()
-
-	if err := s.mailer.Send(r.Context(), mailkit.Message{
-		From:    "noreply@plainq.com",
-		To:      []string{req.Email},
-		Subject: "Verify your email",
-		HTML:    fmt.Sprintf("<p>Click <a href='https://plainq.com/verify?code=%s'>here</a> to verify your email.</p>", code),
-		Text:    "Click here to verify your email: https://plainq.com/verify?code=" + code,
-	}); err != nil {
-		httpkit.ErrorHTTP(w, r, fmt.Errorf("send email: %w", err))
-
-		return
-	}
-
-	httpkit.Status(w, r, http.StatusOK)
-}
-
-func (s *Service) verifyEmailHandler(w http.ResponseWriter, r *http.Request) {
-	type request struct {
-		Code string `json:"code"`
-	}
-
-	var req request
-
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: decode request json: %s", errkit.ErrInvalidArgument, err.Error()))
-
-		return
-	}
-
-	defer func() {
-		if err := r.Body.Close(); err != nil {
-			s.logger.Error("verify email: close request body",
-				slog.String("error", err.Error()),
-			)
-		}
-	}()
-
-	//nolint:godox // tracking item: implement verification code validation logic.
-	// TODO: Implement verification code validation logic.
-
-	httpkit.Status(w, r, http.StatusOK)
-}
-
-func (s *Service) resetPasswordHandler(w http.ResponseWriter, r *http.Request) {
-	type request struct {
-		Email string `json:"email"`
-	}
-
-	var req request
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: decode request json: %s", errkit.ErrInvalidArgument, err.Error()))
-
-		return
-	}
-
-	defer func() {
-		if err := r.Body.Close(); err != nil {
-			s.logger.Error("reset password: close request body",
-				slog.String("error", err.Error()),
-			)
-		}
-	}()
-
-	if err := validateEmail(req.Email); err != nil {
-		httpkit.ErrorHTTP(w, r, fmt.Errorf("validate email: %w", err))
-
-		return
-	}
-
-	//nolint:godox // tracking item: implement password reset code sending logic.
-	// TODO: Implement password reset code sending logic.
-
-	httpkit.Status(w, r, http.StatusOK)
-}
-
-func (s *Service) verifyPasswordResetCodeHandler(w http.ResponseWriter, r *http.Request) {
-	type request struct {
-		Code string `json:"code"`
-	}
-
-	var req request
-
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		httpkit.ErrorHTTP(w, r, fmt.Errorf("%w: decode request json: %s", errkit.ErrInvalidArgument, err.Error()))
-
-		return
-	}
-
-	defer func() {
-		if err := r.Body.Close(); err != nil {
-			s.logger.Error("verify password reset code: close request body",
-				slog.String("error", err.Error()),
-			)
-		}
-	}()
-
-	//nolint:godox // tracking item: implement password reset code validation logic.
-	// TODO: Implement password reset code validation logic.
-
-	httpkit.Status(w, r, http.StatusOK)
-}
-
 // createSession is a helper function to create a new session.
+//
+//nolint:cyclop // Session creation validates every security precondition before signing or persistence.
 func (s *Service) createSession(ctx context.Context, aid, tid string, t time.Time) (*Session, error) {
 	// Get user account to get email.
 	account, err := s.storage.GetAccountByID(ctx, aid)
 	if err != nil {
 		return nil, fmt.Errorf("account service: failed to get account: %w", err)
+	}
+
+	if err := requireVerified(*account); err != nil {
+		return nil, err
+	}
+
+	if account.Status != "" && account.Status != AccountStatusActive {
+		return nil, errors.New("account is disabled")
+	}
+
+	if account.TenantID == "" {
+		return nil, errors.New("account tenant is required")
+	}
+
+	if account.AuthVersion == 0 {
+		return nil, errors.New("account auth version is required")
 	}
 
 	// Get user roles.
@@ -387,17 +340,20 @@ func (s *Service) createSession(ctx context.Context, aid, tid string, t time.Tim
 	accessToken, aErr := s.tokman.Sign(&jwtkit.Token{
 		Claims: jwtkit.Claims{
 			ID:        tid,
-			Audience:  []string{},
-			Issuer:    tokenIssuer,
-			Subject:   "",
+			Audience:  []string{humanTokenAudience(s.cfg)},
+			Issuer:    humanTokenIssuer(s.cfg),
+			Subject:   aid,
 			ExpiresAt: jwt.NewNumericDate(t.Add(s.cfg.AuthAccessTokenTTL)),
 			IssuedAt:  jwt.NewNumericDate(t),
 			NotBefore: jwt.NewNumericDate(t),
 		},
 		Meta: map[string]any{
-			"uid":   aid,
-			"email": account.Email,
-			"roles": roles,
+			"uid":          aid,
+			"email":        account.Email,
+			"roles":        roles,
+			"tenant_id":    account.TenantID,
+			"auth_version": account.AuthVersion,
+			"token_use":    "access",
 		},
 	})
 	if aErr != nil {
@@ -407,27 +363,32 @@ func (s *Service) createSession(ctx context.Context, aid, tid string, t time.Tim
 	refreshToken, rErr := s.tokman.Sign(&jwtkit.Token{
 		Claims: jwtkit.Claims{
 			ID:        tid,
-			Audience:  []string{},
-			Issuer:    tokenIssuer,
-			Subject:   "",
+			Audience:  []string{humanTokenAudience(s.cfg)},
+			Issuer:    humanTokenIssuer(s.cfg),
+			Subject:   aid,
 			ExpiresAt: jwt.NewNumericDate(t.Add(s.cfg.AuthRefreshTokenTTL)),
 			IssuedAt:  jwt.NewNumericDate(t),
 			NotBefore: jwt.NewNumericDate(t),
 		},
 		Meta: map[string]any{
-			"aid": aid,
+			"aid":          aid,
+			"tenant_id":    account.TenantID,
+			"auth_version": account.AuthVersion,
+			"token_use":    "refresh",
 		},
 	})
 	if rErr != nil {
 		return nil, fmt.Errorf("account service: failed to create session: %w", rErr)
 	}
 
+	refreshHash := hashSessionToken(refreshToken)
 	refreshTokenRecord := RefreshToken{
-		ID:        tid,
-		AID:       aid,
-		Token:     refreshToken,
-		CreatedAt: t,
-		ExpiresAt: t.Add(s.cfg.AuthRefreshTokenTTL),
+		ID:         tid,
+		AID:        aid,
+		TokenHash:  append([]byte(nil), refreshHash[:]...),
+		CreatedAt:  t,
+		ExpiresAt:  t.Add(s.cfg.AuthRefreshTokenTTL),
+		LastUsedAt: t,
 	}
 
 	if err := s.storage.CreateRefreshToken(ctx, refreshTokenRecord); err != nil {
@@ -442,4 +403,97 @@ func (s *Service) createSession(ctx context.Context, aid, tid string, t time.Tim
 	}
 
 	return &session, nil
+}
+
+func initialVerified(cfg *config.Config) bool {
+	return cfg == nil || !cfg.AuthEmailVerificationEnable
+}
+
+func requireVerified(account Account) error {
+	if !account.Verified {
+		return ErrEmailNotVerified
+	}
+
+	return nil
+}
+
+func hashSessionToken(raw string) [32]byte {
+	return sha256.Sum256([]byte(raw))
+}
+
+func humanTokenIssuer(cfg *config.Config) string {
+	if cfg != nil && cfg.AuthJWTIssuer != "" {
+		return cfg.AuthJWTIssuer
+	}
+
+	return defaultTokenIssuer
+}
+
+func humanTokenAudience(cfg *config.Config) string {
+	if cfg != nil && cfg.AuthJWTAudience != "" {
+		return cfg.AuthJWTAudience
+	}
+
+	return defaultTokenAudience
+}
+
+type humanSessionClaims struct {
+	accountID   string
+	tenantID    string
+	authVersion uint64
+}
+
+//nolint:cyclop // Every required refresh/access-token claim is validated independently.
+func validateHumanSessionClaims(
+	token *jwtkit.Token,
+	cfg *config.Config,
+	wantUse string,
+	accountMetaKey string,
+) (humanSessionClaims, error) {
+	if err := validateRegisteredHumanToken(token, cfg); err != nil {
+		return humanSessionClaims{}, err
+	}
+
+	accountID, ok := token.Meta[accountMetaKey].(string)
+	if !ok || accountID == "" || accountID != token.Subject {
+		return humanSessionClaims{}, errors.New("invalid account token claim")
+	}
+
+	tokenUse, ok := token.Meta["token_use"].(string)
+	if !ok || tokenUse != wantUse {
+		return humanSessionClaims{}, errors.New("invalid token use")
+	}
+
+	tenantID, ok := token.Meta["tenant_id"].(string)
+	if !ok || tenantID == "" {
+		return humanSessionClaims{}, errors.New("invalid tenant token claim")
+	}
+
+	authVersion, ok := security.Uint64Claim(token.Meta["auth_version"])
+	if !ok || authVersion == 0 {
+		return humanSessionClaims{}, errors.New("invalid auth version token claim")
+	}
+
+	return humanSessionClaims{
+		accountID: accountID, tenantID: tenantID, authVersion: authVersion,
+	}, nil
+}
+
+func validateRegisteredHumanToken(token *jwtkit.Token, cfg *config.Config) error {
+	if token == nil || token.ID == "" || token.ExpiresAt == nil || token.Subject == "" ||
+		token.Issuer != humanTokenIssuer(cfg) || !tokenHasAudience(token.Audience, humanTokenAudience(cfg)) {
+		return errors.New("invalid registered token claims")
+	}
+
+	return nil
+}
+
+func tokenHasAudience(audiences []string, want string) bool {
+	for _, audience := range audiences {
+		if audience == want {
+			return true
+		}
+	}
+
+	return false
 }

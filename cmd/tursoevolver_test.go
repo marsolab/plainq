@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"io/fs"
 	"path/filepath"
 	"testing"
 	"testing/fstest"
@@ -105,6 +106,54 @@ func TestTursoEvolverIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestTursoEvolverUpgradePreservesPopulatedUserChildren(t *testing.T) {
+	all := mutations.SqliteStorageMutations()
+	versionFour := make(fstest.MapFS, 4)
+	for _, name := range []string{"001_schema.sql", "002_user.sql", "003_organizations.sql", "004_pubsub.sql"} {
+		data, err := fs.ReadFile(all, name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		versionFour[name] = &fstest.MapFile{Data: data}
+	}
+
+	db := openLocalSQLite(t)
+	if err := newTursoEvolver(db, versionFour).MutateSchema(); err != nil {
+		t.Fatalf("apply v4: %v", err)
+	}
+
+	for _, statement := range []string{
+		`INSERT INTO users (user_id, email, password) VALUES ('upgrade-user', 'upgrade@example.test', 'hash')`,
+		`INSERT INTO user_roles (user_id, role_id) VALUES ('upgrade-user', '01HQ5RJNXS6TPXK89PQWY4N8JD')`,
+		`INSERT INTO user_teams (user_id, team_id) VALUES ('upgrade-user', '01HQ5RJNXS6TPXK89PQWY4N8JI')`,
+		`INSERT INTO queue_properties (queue_id, queue_name, retention_period_seconds, visibility_timeout_seconds, max_receive_attempts) VALUES ('upgrade-queue', 'upgrade-queue', 60, 30, 5)`,
+		`INSERT INTO topic_properties (topic_id, topic_name) VALUES ('upgrade-topic', 'upgrade-topic')`,
+		`INSERT INTO topic_subscriptions (subscription_id, topic_id, queue_id) VALUES ('upgrade-sub', 'upgrade-topic', 'upgrade-queue')`,
+	} {
+		if _, err := db.ExecContext(context.Background(), statement); err != nil {
+			t.Fatalf("seed v4: %v", err)
+		}
+	}
+
+	if err := newTursoEvolver(db, all).MutateSchema(); err != nil {
+		t.Fatalf("upgrade through tenant security: %v", err)
+	}
+
+	var roles, teams, subscriptions int
+	if err := db.QueryRow(`SELECT count(*) FROM user_roles WHERE user_id = 'upgrade-user'`).Scan(&roles); err != nil {
+		t.Fatalf("count roles: %v", err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM user_teams WHERE user_id = 'upgrade-user'`).Scan(&teams); err != nil {
+		t.Fatalf("count teams: %v", err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM topic_subscriptions WHERE subscription_id = 'upgrade-sub'`).Scan(&subscriptions); err != nil {
+		t.Fatalf("count subscriptions: %v", err)
+	}
+	if roles != 1 || teams != 1 || subscriptions != 1 {
+		t.Fatalf("preserved children = roles %d teams %d subscriptions %d", roles, teams, subscriptions)
+	}
+}
+
 // TestTursoEvolverMatchesLitekitVersions guards the property that lets a
 // database move between the sqlite and turso drivers: both evolvers must end
 // up on the same schema_version for the same set of migration files.
@@ -152,9 +201,9 @@ func TestTursoEvolverStopsOnFailedMutation(t *testing.T) {
 	t.Parallel()
 
 	broken := fstest.MapFS{
-		"1_ok.sql":     &fstest.MapFile{Data: []byte(`CREATE TABLE IF NOT EXISTS first (id TEXT NOT NULL);`)},
-		"2_broken.sql": &fstest.MapFile{Data: []byte(`CREATE TABLE second (;`)},
-		"3_never.sql":  &fstest.MapFile{Data: []byte(`CREATE TABLE IF NOT EXISTS third (id TEXT NOT NULL);`)},
+		"001_ok.sql":     &fstest.MapFile{Data: []byte(`CREATE TABLE IF NOT EXISTS first (id TEXT NOT NULL);`)},
+		"002_broken.sql": &fstest.MapFile{Data: []byte(`CREATE TABLE second (;`)},
+		"003_never.sql":  &fstest.MapFile{Data: []byte(`CREATE TABLE IF NOT EXISTS third (id TEXT NOT NULL);`)},
 	}
 
 	db := openLocalSQLite(t)

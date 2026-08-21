@@ -7,8 +7,10 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/marsolab/plainq/internal/server/security"
 	"github.com/marsolab/plainq/internal/server/service/account"
 	"github.com/marsolab/plainq/internal/server/service/account/pgstore/sqlcgen"
 	"github.com/marsolab/servekit/logkit"
@@ -56,16 +58,40 @@ func WithLogger(logger *slog.Logger) Option {
 	return func(s *Storage) { s.logger = logger }
 }
 
-func (s *Storage) CreateAccount(ctx context.Context, a account.Account) error {
-	if err := s.queries.CreateAccount(ctx, sqlcgen.CreateAccountParams{
-		UserID:    a.ID,
-		Email:     a.Email,
-		Password:  a.Password,
-		Verified:  a.Verified,
-		CreatedAt: toTimestamptz(a.CreatedAt),
-		UpdatedAt: toTimestamptz(a.UpdatedAt),
+func (s *Storage) CreateAccount(ctx context.Context, a account.Account) (sErr error) {
+	authVersion, err := security.AuthVersionInt64(a.AuthVersion)
+	if err != nil {
+		return fmt.Errorf("validate account authentication version: %w", err)
+	}
+
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return fmt.Errorf("create account: begin transaction: %w", err)
+	}
+	defer func() {
+		if err := tx.Rollback(ctx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+			sErr = errors.Join(sErr, fmt.Errorf("create account: rollback transaction: %w", err))
+		}
+	}()
+
+	q := s.queries.WithTx(tx)
+
+	if err := q.CreateAccount(ctx, sqlcgen.CreateAccountParams{
+		UserID: a.ID, Email: a.Email, Password: a.Password, Verified: a.Verified,
+		CreatedAt: toTimestamptz(a.CreatedAt), UpdatedAt: toTimestamptz(a.UpdatedAt),
+		OrgID: a.TenantID, AuthVersion: authVersion, Status: a.Status,
 	}); err != nil {
 		return fmt.Errorf("create account: %w", err)
+	}
+
+	if err := q.UpsertHumanSecurityPrincipal(ctx, sqlcgen.UpsertHumanSecurityPrincipalParams{
+		UpdatedAtNs: a.UpdatedAt.UnixNano(), UserID: a.ID,
+	}); err != nil {
+		return fmt.Errorf("create account principal projection: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("create account: commit transaction: %w", err)
 	}
 
 	return nil
@@ -77,13 +103,21 @@ func (s *Storage) GetAccountByID(ctx context.Context, id string) (*account.Accou
 		return nil, fmt.Errorf("get account by id: %w", err)
 	}
 
+	authVersion, err := security.AuthVersionUint64(row.AuthVersion)
+	if err != nil {
+		return nil, fmt.Errorf("decode account authentication version: %w", err)
+	}
+
 	return &account.Account{
-		ID:        row.UserID,
-		Email:     row.Email,
-		Password:  row.Password,
-		Verified:  row.Verified,
-		CreatedAt: row.CreatedAt.Time,
-		UpdatedAt: row.UpdatedAt.Time,
+		ID:          row.UserID,
+		Email:       row.Email,
+		Password:    row.Password,
+		Verified:    row.Verified,
+		CreatedAt:   row.CreatedAt.Time,
+		UpdatedAt:   row.UpdatedAt.Time,
+		TenantID:    row.OrgID,
+		AuthVersion: authVersion,
+		Status:      row.Status,
 	}, nil
 }
 
@@ -93,13 +127,21 @@ func (s *Storage) GetAccountByEmail(ctx context.Context, email string) (*account
 		return nil, fmt.Errorf("get account by email: %w", err)
 	}
 
+	authVersion, err := security.AuthVersionUint64(row.AuthVersion)
+	if err != nil {
+		return nil, fmt.Errorf("decode account authentication version: %w", err)
+	}
+
 	return &account.Account{
-		ID:        row.UserID,
-		Email:     row.Email,
-		Password:  row.Password,
-		Verified:  row.Verified,
-		CreatedAt: row.CreatedAt.Time,
-		UpdatedAt: row.UpdatedAt.Time,
+		ID:          row.UserID,
+		Email:       row.Email,
+		Password:    row.Password,
+		Verified:    row.Verified,
+		CreatedAt:   row.CreatedAt.Time,
+		UpdatedAt:   row.UpdatedAt.Time,
+		TenantID:    row.OrgID,
+		AuthVersion: authVersion,
+		Status:      row.Status,
 	}, nil
 }
 
@@ -135,11 +177,9 @@ func (s *Storage) DeleteAccount(ctx context.Context, id string) error {
 
 func (s *Storage) CreateRefreshToken(ctx context.Context, t account.RefreshToken) error {
 	if err := s.queries.CreateRefreshToken(ctx, sqlcgen.CreateRefreshTokenParams{
-		ID:        t.ID,
-		Aid:       t.AID,
-		Token:     t.Token,
-		CreatedAt: toTimestamptz(t.CreatedAt),
-		ExpiresAt: toTimestamptz(t.ExpiresAt),
+		ID: t.ID, Aid: t.AID, TokenHash: append([]byte(nil), t.TokenHash...),
+		CreatedAtNs: t.CreatedAt.UnixNano(), ExpiresAtNs: t.ExpiresAt.UnixNano(),
+		LastUsedAtNs: t.LastUsedAt.UnixNano(),
 	}); err != nil {
 		return fmt.Errorf("create refresh token: %w", err)
 	}
@@ -147,8 +187,8 @@ func (s *Storage) CreateRefreshToken(ctx context.Context, t account.RefreshToken
 	return nil
 }
 
-func (s *Storage) DeleteRefreshToken(ctx context.Context, token string) error {
-	rows, err := s.queries.DeleteRefreshToken(ctx, token)
+func (s *Storage) DeleteRefreshToken(ctx context.Context, tokenHash []byte) error {
+	rows, err := s.queries.DeleteRefreshToken(ctx, tokenHash)
 	if err != nil {
 		return fmt.Errorf("delete refresh token: %w", err)
 	}
@@ -176,10 +216,10 @@ func (s *Storage) PurgeRefreshTokens(ctx context.Context, aid string) error {
 	return nil
 }
 
-func (s *Storage) DenyAccessToken(ctx context.Context, token string, ttl time.Duration) error {
+func (s *Storage) DenyAccessToken(ctx context.Context, token account.DeniedToken) error {
 	if err := s.queries.DenyAccessToken(ctx, sqlcgen.DenyAccessTokenParams{
-		Token:       token,
-		DeniedUntil: time.Now().Add(ttl).Unix(),
+		TokenID: token.TokenID, Aid: token.AID, ExpiresAtNs: token.ExpiresAt.UnixNano(),
+		CreatedAtNs: token.CreatedAt.UnixNano(), Reason: token.Reason,
 	}); err != nil {
 		return fmt.Errorf("deny access token: %w", err)
 	}
@@ -187,16 +227,75 @@ func (s *Storage) DenyAccessToken(ctx context.Context, token string, ttl time.Du
 	return nil
 }
 
-func (s *Storage) IsAccessTokenDenied(ctx context.Context, token string) (bool, error) {
+func (s *Storage) RevokeSession(ctx context.Context, token account.DeniedToken) (sErr error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return fmt.Errorf("revoke session: begin transaction: %w", err)
+	}
+	defer func() {
+		if err := tx.Rollback(ctx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+			sErr = errors.Join(sErr, fmt.Errorf("revoke session: rollback transaction: %w", err))
+		}
+	}()
+
+	q := s.queries.WithTx(tx)
+	if err := q.DenyAccessToken(ctx, sqlcgen.DenyAccessTokenParams{
+		TokenID: token.TokenID, Aid: token.AID, ExpiresAtNs: token.ExpiresAt.UnixNano(),
+		CreatedAtNs: token.CreatedAt.UnixNano(), Reason: token.Reason,
+	}); err != nil {
+		return fmt.Errorf("revoke session: deny access token: %w", err)
+	}
+
+	if err := q.DeleteRefreshTokenByTokenID(ctx, token.TokenID); err != nil {
+		return fmt.Errorf("revoke session: delete refresh token by id: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("revoke session: commit transaction: %w", err)
+	}
+
+	return nil
+}
+
+func (s *Storage) IsAccessTokenDenied(ctx context.Context, tokenID string) (bool, error) {
 	count, err := s.queries.IsAccessTokenDenied(ctx, sqlcgen.IsAccessTokenDeniedParams{
-		Token:       token,
-		DeniedUntil: time.Now().Unix(),
+		TokenID:     tokenID,
+		ExpiresAtNs: time.Now().UnixNano(),
 	})
 	if err != nil {
 		return false, fmt.Errorf("is access token denied: %w", err)
 	}
 
 	return count > 0, nil
+}
+
+func (s *Storage) GetAccountSecurity(ctx context.Context, userID string) (account.AccountSecurity, error) {
+	row, err := s.queries.GetAccountSecurity(ctx, userID)
+	if err != nil {
+		return account.AccountSecurity{}, fmt.Errorf("get account security: %w", err)
+	}
+
+	authVersion, err := security.AuthVersionUint64(row.AuthVersion)
+	if err != nil {
+		return account.AccountSecurity{}, fmt.Errorf("decode account authentication version: %w", err)
+	}
+
+	return account.AccountSecurity{
+		TenantID: row.OrgID, Status: row.Status, AuthVersion: authVersion,
+	}, nil
+}
+
+//nolint:gocritic // Interface compatibility requires the tenant, status, version tuple.
+func (s *Storage) ResolveHumanSecurity(
+	ctx context.Context,
+	userID string,
+) (string, string, uint64, error) {
+	accountSecurity, err := s.GetAccountSecurity(ctx, userID)
+	if err != nil {
+		return "", "", 0, err
+	}
+
+	return accountSecurity.TenantID, accountSecurity.Status, accountSecurity.AuthVersion, nil
 }
 
 func (s *Storage) GetUserRoles(ctx context.Context, userID string) ([]string, error) {

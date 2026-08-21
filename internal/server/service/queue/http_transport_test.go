@@ -8,7 +8,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/marsolab/plainq/internal/server/config"
+	"github.com/marsolab/plainq/internal/server/middleware"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
+	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/marsolab/servekit/logkit"
 	"github.com/maxatome/go-testdeep/td"
 )
@@ -17,17 +20,99 @@ import (
 const validXID = "9m4e2mr0ui3e8a215n4g"
 
 func newTestService(storage Storage) *Service {
-	return NewService(nil, logkit.NewNop(), storage)
+	svc := NewService(nil, logkit.NewNop(), storage)
+	svc.SetPermissionChecker(testPermissionCheckerFunc(func(
+		context.Context, string, string, middleware.PermissionType,
+	) (bool, error) {
+		return true, nil
+	}))
+
+	return svc
+}
+
+type testPermissionCheckerFunc func(context.Context, string, string, middleware.PermissionType) (bool, error)
+
+func (f testPermissionCheckerFunc) HasQueuePermission(
+	ctx context.Context, userID, queueID string, permission middleware.PermissionType,
+) (bool, error) {
+	return f(ctx, userID, queueID, permission)
 }
 
 func doRequest(t *testing.T, svc *Service, method, target, body string) *httptest.ResponseRecorder {
 	t.Helper()
 
 	req := httptest.NewRequest(method, target, strings.NewReader(body))
+	req = req.WithContext(context.WithValue(req.Context(), middleware.UserContextKey, middleware.UserInfo{
+		UserID: "user-1", Roles: []string{"member"}, TenantID: "tenant-1",
+	}))
 	rec := httptest.NewRecorder()
 	svc.ServeHTTP(rec, req)
 
 	return rec
+}
+
+func TestServiceQueueMutationRoutesEnforcePermissionAndResolveAdminTenant(t *testing.T) {
+	storageCalled := false
+	svc := NewService(nil, logkit.NewNop(), &mockStorage{
+		sendFunc: func(context.Context, *v1.SendRequest) (*v1.SendResponse, error) {
+			storageCalled = true
+
+			return &v1.SendResponse{}, nil
+		},
+	})
+
+	var gotUserID, gotQueueID string
+	var gotPermission middleware.PermissionType
+	svc.SetPermissionChecker(testPermissionCheckerFunc(func(
+		_ context.Context, userID, queueID string, permission middleware.PermissionType,
+	) (bool, error) {
+		gotUserID, gotQueueID, gotPermission = userID, queueID, permission
+
+		return false, nil
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/"+validXID+"/messages", strings.NewReader(
+		`{"messages":[{"body":"aGVsbG8="}]}`,
+	))
+	req = req.WithContext(context.WithValue(req.Context(), middleware.UserContextKey, middleware.UserInfo{
+		UserID: "admin-1", Roles: []string{"admin"}, TenantID: "tenant-1",
+	}))
+	rec := httptest.NewRecorder()
+	svc.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("permission denied status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+	if storageCalled {
+		t.Fatal("send storage called despite denied permission")
+	}
+	if gotUserID != "admin-1" || gotQueueID != validXID || gotPermission != middleware.PermissionSend {
+		t.Fatalf("permission check = (%q, %q, %q)", gotUserID, gotQueueID, gotPermission)
+	}
+}
+
+func TestServiceQueueMutationRoutesRemainOpenWhenAuthenticationIsDisabled(t *testing.T) {
+	storageCalled := false
+	svc := NewService(&config.Config{AuthEnable: false}, logkit.NewNop(), &mockStorage{
+		sendFunc: func(context.Context, *v1.SendRequest) (*v1.SendResponse, error) {
+			storageCalled = true
+
+			return &v1.SendResponse{}, nil
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/"+validXID+"/messages", strings.NewReader(
+		`{"messages":[{"body":"aGVsbG8="}]}`,
+	))
+	rec := httptest.NewRecorder()
+	svc.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("auth-disabled send status = %d, want %d", rec.Code, http.StatusCreated)
+	}
+	if !storageCalled {
+		t.Fatal("auth-disabled send did not reach storage")
+	}
 }
 
 func TestService_SendMessagesHandler(t *testing.T) {
@@ -131,6 +216,19 @@ func TestService_ReceiveMessagesHandler(t *testing.T) {
 			rec := doRequest(t, newTestService(tc.storage), http.MethodPost, tc.target, "")
 			td.Cmp(t, rec.Code, tc.wantStatus)
 		})
+	}
+}
+
+func TestService_DeleteQueueHandlerFailedPrecondition(t *testing.T) {
+	svc := newTestService(&mockStorage{
+		deleteQueueFunc: func(context.Context, *v1.DeleteQueueRequest) (*v1.DeleteQueueResponse, error) {
+			return nil, pqerr.ErrFailedPrecondition
+		},
+	})
+
+	rec := doRequest(t, svc, http.MethodDelete, "/"+validXID, "")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("DeleteQueue status = %d, want %d", rec.Code, http.StatusConflict)
 	}
 }
 
