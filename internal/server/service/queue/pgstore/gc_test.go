@@ -3,13 +3,17 @@ package pgstore
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"reflect"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/marsolab/plainq/internal/server/mutations"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
 )
@@ -22,11 +26,51 @@ func newPostgresTestStorage(t *testing.T) *Storage {
 		t.Skip("PLAINQ_TEST_POSTGRES_DSN is not set")
 	}
 
-	pool, err := pgxpool.New(context.Background(), dsn)
+	ctx := context.Background()
+	admin, err := pgxpool.New(ctx, dsn)
 	if err != nil {
-		t.Fatalf("open postgres pool: %v", err)
+		t.Fatalf("open postgres admin pool: %v", err)
+	}
+	t.Cleanup(admin.Close)
+
+	schema := fmt.Sprintf("queue_store_%d", time.Now().UnixNano())
+	if _, err := admin.Exec(ctx, "CREATE SCHEMA "+pgx.Identifier{schema}.Sanitize()); err != nil {
+		t.Fatalf("create postgres schema: %v", err)
+	}
+	t.Cleanup(func() {
+		if _, err := admin.Exec(context.Background(), "DROP SCHEMA "+pgx.Identifier{schema}.Sanitize()+" CASCADE"); err != nil {
+			t.Errorf("drop postgres schema: %v", err)
+		}
+	})
+
+	config, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatalf("parse postgres DSN: %v", err)
+	}
+	config.ConnConfig.RuntimeParams["search_path"] = schema
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatalf("open postgres fixture pool: %v", err)
 	}
 	t.Cleanup(pool.Close)
+
+	storageFS, err := mutations.ValidatedStorageFS(mutations.PostgresStorageMutations())
+	if err != nil {
+		t.Fatalf("validate postgres migrations: %v", err)
+	}
+	entries, err := fs.ReadDir(storageFS, ".")
+	if err != nil {
+		t.Fatalf("read postgres migrations: %v", err)
+	}
+	for _, entry := range entries {
+		changes, err := fs.ReadFile(storageFS, entry.Name())
+		if err != nil {
+			t.Fatalf("read postgres migration %s: %v", entry.Name(), err)
+		}
+		if _, err := pool.Exec(ctx, string(changes)); err != nil {
+			t.Fatalf("apply postgres migration %s: %v", entry.Name(), err)
+		}
+	}
 
 	store, err := New(pool, WithGCTimeout(time.Hour))
 	if err != nil {

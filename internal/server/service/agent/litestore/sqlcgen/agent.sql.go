@@ -10,6 +10,47 @@ import (
 	"database/sql"
 )
 
+const accountExpiredCredentials = `-- name: AccountExpiredCredentials :many
+UPDATE agent_credentials
+SET expired_accounted_at_ns = cast(?1 AS integer)
+WHERE tenant_id = cast(?2 AS text)
+  AND agent_id = cast(?3 AS text)
+  AND revoked_at_ns IS NULL
+  AND expired_accounted_at_ns IS NULL
+  AND expires_at_ns IS NOT NULL
+  AND expires_at_ns <= cast(?1 AS integer)
+RETURNING credential_id
+`
+
+type AccountExpiredCredentialsParams struct {
+	AccountedAtNs int64
+	TenantID      string
+	AgentID       string
+}
+
+func (q *Queries) AccountExpiredCredentials(ctx context.Context, arg AccountExpiredCredentialsParams) ([]string, error) {
+	rows, err := q.db.QueryContext(ctx, accountExpiredCredentials, arg.AccountedAtNs, arg.TenantID, arg.AgentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var credential_id string
+		if err := rows.Scan(&credential_id); err != nil {
+			return nil, err
+		}
+		items = append(items, credential_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const countActiveCredentials = `-- name: CountActiveCredentials :one
 SELECT count(*)
 FROM agent_credentials
@@ -113,6 +154,25 @@ func (q *Queries) CreateAgentPrincipal(ctx context.Context, arg CreateAgentPrinc
 	return err
 }
 
+const createAgentResourceUsage = `-- name: CreateAgentResourceUsage :exec
+INSERT INTO agent_resource_usage (
+    tenant_id, agent_id, pending_direct_count, pending_direct_bytes,
+    subscription_count, active_credential_count, updated_at_ns
+)
+VALUES (?, ?, 0, 0, 0, 0, ?)
+`
+
+type CreateAgentResourceUsageParams struct {
+	TenantID    string
+	AgentID     string
+	UpdatedAtNs int64
+}
+
+func (q *Queries) CreateAgentResourceUsage(ctx context.Context, arg CreateAgentResourceUsageParams) error {
+	_, err := q.db.ExecContext(ctx, createAgentResourceUsage, arg.TenantID, arg.AgentID, arg.UpdatedAtNs)
+	return err
+}
+
 const createCredential = `-- name: CreateCredential :exec
 INSERT INTO agent_credentials (
     credential_id, tenant_id, agent_id, credential_name, credential_prefix,
@@ -144,6 +204,48 @@ func (q *Queries) CreateCredential(ctx context.Context, arg CreateCredentialPara
 		arg.ExpiresAtNs,
 	)
 	return err
+}
+
+const decrementActiveCredentialUsage = `-- name: DecrementActiveCredentialUsage :execrows
+UPDATE agent_resource_usage
+SET active_credential_count = active_credential_count - 1,
+    updated_at_ns = cast(?1 AS integer)
+WHERE tenant_id = cast(?2 AS text)
+  AND agent_id = cast(?3 AS text)
+  AND active_credential_count > 0
+`
+
+type DecrementActiveCredentialUsageParams struct {
+	UpdatedAtNs int64
+	TenantID    string
+	AgentID     string
+}
+
+func (q *Queries) DecrementActiveCredentialUsage(ctx context.Context, arg DecrementActiveCredentialUsageParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, decrementActiveCredentialUsage, arg.UpdatedAtNs, arg.TenantID, arg.AgentID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const deleteResourceGrant = `-- name: DeleteResourceGrant :execrows
+DELETE FROM agent_resource_grants
+WHERE tenant_id = cast(?1 AS text)
+  AND grant_id = cast(?2 AS text)
+`
+
+type DeleteResourceGrantParams struct {
+	TenantID string
+	GrantID  string
+}
+
+func (q *Queries) DeleteResourceGrant(ctx context.Context, arg DeleteResourceGrantParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deleteResourceGrant, arg.TenantID, arg.GrantID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const getAgent = `-- name: GetAgent :one
@@ -221,6 +323,31 @@ func (q *Queries) GetAgentByName(ctx context.Context, arg GetAgentByNameParams) 
 		&i.UpdatedAtNs,
 		&i.DisabledAtNs,
 	)
+	return i, err
+}
+
+const getAgentCredentialCapacity = `-- name: GetAgentCredentialCapacity :one
+SELECT u.active_credential_count, q.max_credentials_per_agent
+FROM agent_resource_usage u
+JOIN tenant_quotas q ON q.tenant_id = u.tenant_id
+WHERE u.tenant_id = cast(?1 AS text)
+  AND u.agent_id = cast(?2 AS text)
+`
+
+type GetAgentCredentialCapacityParams struct {
+	TenantID string
+	AgentID  string
+}
+
+type GetAgentCredentialCapacityRow struct {
+	ActiveCredentialCount  int64
+	MaxCredentialsPerAgent int64
+}
+
+func (q *Queries) GetAgentCredentialCapacity(ctx context.Context, arg GetAgentCredentialCapacityParams) (GetAgentCredentialCapacityRow, error) {
+	row := q.db.QueryRowContext(ctx, getAgentCredentialCapacity, arg.TenantID, arg.AgentID)
+	var i GetAgentCredentialCapacityRow
+	err := row.Scan(&i.ActiveCredentialCount, &i.MaxCredentialsPerAgent)
 	return i, err
 }
 
@@ -308,6 +435,222 @@ func (q *Queries) GetCredentialByPrefix(ctx context.Context, credentialPrefix st
 	return i, err
 }
 
+const getMutationRateLimit = `-- name: GetMutationRateLimit :one
+SELECT cast(CASE
+    WHEN cast(?1 AS text) = 'topic.publish' THEN publish_per_second
+    ELSE send_per_second
+END AS integer)
+FROM tenant_quotas
+WHERE tenant_id = cast(?2 AS text)
+`
+
+type GetMutationRateLimitParams struct {
+	Action   string
+	TenantID string
+}
+
+func (q *Queries) GetMutationRateLimit(ctx context.Context, arg GetMutationRateLimitParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, getMutationRateLimit, arg.Action, arg.TenantID)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
+const getPolicyIdempotency = `-- name: GetPolicyIdempotency :one
+SELECT request_hash, response_json
+FROM agent_idempotency
+WHERE tenant_id = cast(?1 AS text)
+  AND principal_kind = cast(?2 AS text)
+  AND principal_id = cast(?3 AS text)
+  AND operation = cast(?4 AS text)
+  AND idempotency_key = cast(?5 AS text)
+  AND expires_at_ns > cast(?6 AS integer)
+`
+
+type GetPolicyIdempotencyParams struct {
+	TenantID       string
+	PrincipalKind  string
+	PrincipalID    string
+	Operation      string
+	IdempotencyKey string
+	NowNs          int64
+}
+
+type GetPolicyIdempotencyRow struct {
+	RequestHash  []byte
+	ResponseJson string
+}
+
+func (q *Queries) GetPolicyIdempotency(ctx context.Context, arg GetPolicyIdempotencyParams) (GetPolicyIdempotencyRow, error) {
+	row := q.db.QueryRowContext(ctx, getPolicyIdempotency,
+		arg.TenantID,
+		arg.PrincipalKind,
+		arg.PrincipalID,
+		arg.Operation,
+		arg.IdempotencyKey,
+		arg.NowNs,
+	)
+	var i GetPolicyIdempotencyRow
+	err := row.Scan(&i.RequestHash, &i.ResponseJson)
+	return i, err
+}
+
+const getResourceGrant = `-- name: GetResourceGrant :one
+SELECT grant_id, tenant_id, subject_kind, subject_id,
+       resource_kind, resource_id, action, created_at_ns
+FROM agent_resource_grants
+WHERE tenant_id = cast(?1 AS text)
+  AND grant_id = cast(?2 AS text)
+`
+
+type GetResourceGrantParams struct {
+	TenantID string
+	GrantID  string
+}
+
+func (q *Queries) GetResourceGrant(ctx context.Context, arg GetResourceGrantParams) (AgentResourceGrant, error) {
+	row := q.db.QueryRowContext(ctx, getResourceGrant, arg.TenantID, arg.GrantID)
+	var i AgentResourceGrant
+	err := row.Scan(
+		&i.GrantID,
+		&i.TenantID,
+		&i.SubjectKind,
+		&i.SubjectID,
+		&i.ResourceKind,
+		&i.ResourceID,
+		&i.Action,
+		&i.CreatedAtNs,
+	)
+	return i, err
+}
+
+const getTenantAgentCapacity = `-- name: GetTenantAgentCapacity :one
+SELECT u.agent_count, q.max_agents
+FROM tenant_resource_usage u
+JOIN tenant_quotas q ON q.tenant_id = u.tenant_id
+WHERE u.tenant_id = ?
+`
+
+type GetTenantAgentCapacityRow struct {
+	AgentCount int64
+	MaxAgents  int64
+}
+
+func (q *Queries) GetTenantAgentCapacity(ctx context.Context, tenantID string) (GetTenantAgentCapacityRow, error) {
+	row := q.db.QueryRowContext(ctx, getTenantAgentCapacity, tenantID)
+	var i GetTenantAgentCapacityRow
+	err := row.Scan(&i.AgentCount, &i.MaxAgents)
+	return i, err
+}
+
+const hasLegacyPolicyPermission = `-- name: HasLegacyPolicyPermission :one
+WITH effective_roles AS (
+    SELECT ur.role_id
+    FROM user_roles ur
+    WHERE ur.user_id = cast(?2 AS text)
+    UNION
+    SELECT tr.role_id
+    FROM user_teams ut
+    JOIN teams t ON t.team_id = ut.team_id
+    JOIN team_roles tr ON tr.team_id = t.team_id
+    WHERE ut.user_id = cast(?2 AS text)
+      AND t.org_id = cast(?3 AS text)
+      AND t.is_active = TRUE
+)
+SELECT EXISTS (
+    SELECT 1
+    FROM users u
+    JOIN organizations o ON o.org_id = u.org_id AND o.is_active = TRUE
+    JOIN effective_roles er
+    JOIN roles r ON r.role_id = er.role_id
+    LEFT JOIN queue_properties q
+      ON q.queue_id = cast(?1 AS text)
+     AND q.tenant_id = u.org_id
+    LEFT JOIN queue_permissions qp ON qp.queue_id = q.queue_id AND qp.role_id = r.role_id
+    WHERE u.user_id = cast(?2 AS text)
+      AND u.org_id = cast(?3 AS text)
+      AND u.status = 'active'
+      AND (
+        r.role_name = 'admin'
+        OR (
+          cast(?4 AS text) = 'queue'
+          AND q.queue_id IS NOT NULL
+          AND CASE cast(?5 AS text)
+            WHEN 'queue.send' THEN coalesce(qp.can_send, FALSE)
+            WHEN 'queue.receive' THEN coalesce(qp.can_receive, FALSE)
+            WHEN 'queue.read' THEN coalesce(qp.can_receive, FALSE)
+            WHEN 'queue.ack' THEN coalesce(qp.can_delete, FALSE)
+            WHEN 'queue.purge' THEN coalesce(qp.can_purge, FALSE)
+            WHEN 'queue.delete' THEN coalesce(qp.can_delete, FALSE)
+            ELSE FALSE
+          END
+        )
+      )
+)
+`
+
+type HasLegacyPolicyPermissionParams struct {
+	ResourceID   string
+	SubjectID    string
+	TenantID     string
+	ResourceKind string
+	Action       string
+}
+
+func (q *Queries) HasLegacyPolicyPermission(ctx context.Context, arg HasLegacyPolicyPermissionParams) (bool, error) {
+	row := q.db.QueryRowContext(ctx, hasLegacyPolicyPermission,
+		arg.ResourceID,
+		arg.SubjectID,
+		arg.TenantID,
+		arg.ResourceKind,
+		arg.Action,
+	)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const hasPolicyGrant = `-- name: HasPolicyGrant :one
+SELECT EXISTS (
+    SELECT 1
+    FROM agent_resource_grants g
+    JOIN security_principals p
+      ON p.tenant_id = g.tenant_id
+     AND p.principal_kind = g.subject_kind
+     AND p.principal_id = g.subject_id
+     AND p.status = 'active'
+    WHERE g.tenant_id = cast(?1 AS text)
+      AND g.subject_kind = cast(?2 AS text)
+      AND g.subject_id = cast(?3 AS text)
+      AND g.resource_kind = cast(?4 AS text)
+      AND g.resource_id = cast(?5 AS text)
+      AND g.action = cast(?6 AS text)
+)
+`
+
+type HasPolicyGrantParams struct {
+	TenantID     string
+	SubjectKind  string
+	SubjectID    string
+	ResourceKind string
+	ResourceID   string
+	Action       string
+}
+
+func (q *Queries) HasPolicyGrant(ctx context.Context, arg HasPolicyGrantParams) (bool, error) {
+	row := q.db.QueryRowContext(ctx, hasPolicyGrant,
+		arg.TenantID,
+		arg.SubjectKind,
+		arg.SubjectID,
+		arg.ResourceKind,
+		arg.ResourceID,
+		arg.Action,
+	)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const hasResourceGrant = `-- name: HasResourceGrant :one
 SELECT EXISTS (
     SELECT 1
@@ -342,6 +685,243 @@ func (q *Queries) HasResourceGrant(ctx context.Context, arg HasResourceGrantPara
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err
+}
+
+const incrementActiveCredentialUsage = `-- name: IncrementActiveCredentialUsage :execrows
+UPDATE agent_resource_usage
+SET active_credential_count = active_credential_count + 1,
+    updated_at_ns = cast(?1 AS integer)
+WHERE tenant_id = cast(?2 AS text)
+  AND agent_id = cast(?3 AS text)
+  AND active_credential_count < cast(?4 AS integer)
+`
+
+type IncrementActiveCredentialUsageParams struct {
+	UpdatedAtNs     int64
+	TenantID        string
+	AgentID         string
+	CredentialLimit int64
+}
+
+func (q *Queries) IncrementActiveCredentialUsage(ctx context.Context, arg IncrementActiveCredentialUsageParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, incrementActiveCredentialUsage,
+		arg.UpdatedAtNs,
+		arg.TenantID,
+		arg.AgentID,
+		arg.CredentialLimit,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const incrementMutationQuotaWindow = `-- name: IncrementMutationQuotaWindow :one
+UPDATE quota_windows
+SET used = used + cast(?1 AS integer)
+WHERE tenant_id = cast(?2 AS text)
+  AND action = cast(?3 AS text)
+  AND window_started_at_ns = cast(?4 AS integer)
+  AND used <= cast(?5 AS integer) - cast(?1 AS integer)
+RETURNING used
+`
+
+type IncrementMutationQuotaWindowParams struct {
+	Units             int64
+	TenantID          string
+	Action            string
+	WindowStartedAtNs int64
+	QuotaLimit        int64
+}
+
+func (q *Queries) IncrementMutationQuotaWindow(ctx context.Context, arg IncrementMutationQuotaWindowParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, incrementMutationQuotaWindow,
+		arg.Units,
+		arg.TenantID,
+		arg.Action,
+		arg.WindowStartedAtNs,
+		arg.QuotaLimit,
+	)
+	var used int64
+	err := row.Scan(&used)
+	return used, err
+}
+
+const incrementTenantAgentUsage = `-- name: IncrementTenantAgentUsage :execrows
+UPDATE tenant_resource_usage
+SET agent_count = agent_count + 1,
+    updated_at_ns = cast(?1 AS integer)
+WHERE tenant_id = cast(?2 AS text)
+`
+
+type IncrementTenantAgentUsageParams struct {
+	UpdatedAtNs int64
+	TenantID    string
+}
+
+func (q *Queries) IncrementTenantAgentUsage(ctx context.Context, arg IncrementTenantAgentUsageParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, incrementTenantAgentUsage, arg.UpdatedAtNs, arg.TenantID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const insertAgentAuditEvent = `-- name: InsertAgentAuditEvent :exec
+INSERT INTO security_audit_events (
+    audit_id, tenant_id, principal_kind, principal_id, action,
+    resource_kind, resource_id, outcome, request_id, reason,
+    source_ip, user_agent, metadata_json, created_at_ns
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`
+
+type InsertAgentAuditEventParams struct {
+	AuditID       string
+	TenantID      string
+	PrincipalKind string
+	PrincipalID   string
+	Action        string
+	ResourceKind  string
+	ResourceID    string
+	Outcome       string
+	RequestID     string
+	Reason        string
+	SourceIp      string
+	UserAgent     string
+	MetadataJson  string
+	CreatedAtNs   int64
+}
+
+func (q *Queries) InsertAgentAuditEvent(ctx context.Context, arg InsertAgentAuditEventParams) error {
+	_, err := q.db.ExecContext(ctx, insertAgentAuditEvent,
+		arg.AuditID,
+		arg.TenantID,
+		arg.PrincipalKind,
+		arg.PrincipalID,
+		arg.Action,
+		arg.ResourceKind,
+		arg.ResourceID,
+		arg.Outcome,
+		arg.RequestID,
+		arg.Reason,
+		arg.SourceIp,
+		arg.UserAgent,
+		arg.MetadataJson,
+		arg.CreatedAtNs,
+	)
+	return err
+}
+
+const insertMutationQuotaWindow = `-- name: InsertMutationQuotaWindow :one
+INSERT INTO quota_windows (tenant_id, action, window_started_at_ns, used)
+SELECT
+    cast(?1 AS text),
+    cast(?2 AS text),
+    cast(?3 AS integer),
+    cast(?4 AS integer)
+WHERE cast(?4 AS integer) <= cast(?5 AS integer)
+ON CONFLICT (tenant_id, action, window_started_at_ns) DO NOTHING
+RETURNING used
+`
+
+type InsertMutationQuotaWindowParams struct {
+	TenantID          string
+	Action            string
+	WindowStartedAtNs int64
+	Units             int64
+	QuotaLimit        int64
+}
+
+func (q *Queries) InsertMutationQuotaWindow(ctx context.Context, arg InsertMutationQuotaWindowParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, insertMutationQuotaWindow,
+		arg.TenantID,
+		arg.Action,
+		arg.WindowStartedAtNs,
+		arg.Units,
+		arg.QuotaLimit,
+	)
+	var used int64
+	err := row.Scan(&used)
+	return used, err
+}
+
+const insertPolicyIdempotency = `-- name: InsertPolicyIdempotency :exec
+INSERT INTO agent_idempotency (
+    tenant_id, principal_kind, principal_id, operation, idempotency_key,
+    request_hash, response_json, created_at_ns, expires_at_ns
+)
+VALUES (
+    cast(?1 AS text),
+    cast(?2 AS text),
+    cast(?3 AS text),
+    cast(?4 AS text),
+    cast(?5 AS text),
+    ?6,
+    cast(?7 AS text),
+    cast(?8 AS integer),
+    cast(?9 AS integer)
+)
+`
+
+type InsertPolicyIdempotencyParams struct {
+	TenantID       string
+	PrincipalKind  string
+	PrincipalID    string
+	Operation      string
+	IdempotencyKey string
+	RequestHash    []byte
+	ResponseJson   string
+	CreatedAtNs    int64
+	ExpiresAtNs    int64
+}
+
+func (q *Queries) InsertPolicyIdempotency(ctx context.Context, arg InsertPolicyIdempotencyParams) error {
+	_, err := q.db.ExecContext(ctx, insertPolicyIdempotency,
+		arg.TenantID,
+		arg.PrincipalKind,
+		arg.PrincipalID,
+		arg.Operation,
+		arg.IdempotencyKey,
+		arg.RequestHash,
+		arg.ResponseJson,
+		arg.CreatedAtNs,
+		arg.ExpiresAtNs,
+	)
+	return err
+}
+
+const insertResourceGrant = `-- name: InsertResourceGrant :exec
+INSERT INTO agent_resource_grants (
+    grant_id, tenant_id, subject_kind, subject_id,
+    resource_kind, resource_id, action, created_at_ns
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+`
+
+type InsertResourceGrantParams struct {
+	GrantID      string
+	TenantID     string
+	SubjectKind  string
+	SubjectID    string
+	ResourceKind string
+	ResourceID   string
+	Action       string
+	CreatedAtNs  int64
+}
+
+func (q *Queries) InsertResourceGrant(ctx context.Context, arg InsertResourceGrantParams) error {
+	_, err := q.db.ExecContext(ctx, insertResourceGrant,
+		arg.GrantID,
+		arg.TenantID,
+		arg.SubjectKind,
+		arg.SubjectID,
+		arg.ResourceKind,
+		arg.ResourceID,
+		arg.Action,
+		arg.CreatedAtNs,
+	)
+	return err
 }
 
 const listAgents = `-- name: ListAgents :many
@@ -476,6 +1056,169 @@ func (q *Queries) ListCredentials(ctx context.Context, arg ListCredentialsParams
 	return items, nil
 }
 
+const listResourceGrants = `-- name: ListResourceGrants :many
+SELECT grant_id, tenant_id, subject_kind, subject_id,
+       resource_kind, resource_id, action, created_at_ns
+FROM agent_resource_grants
+WHERE tenant_id = cast(?1 AS text)
+  AND (cast(?2 AS text) = '' OR subject_kind = cast(?2 AS text))
+  AND (cast(?3 AS text) = '' OR subject_id = cast(?3 AS text))
+  AND (cast(?4 AS text) = '' OR resource_kind = cast(?4 AS text))
+  AND (cast(?5 AS text) = '' OR resource_id = cast(?5 AS text))
+  AND (cast(?6 AS text) = '' OR grant_id > cast(?6 AS text))
+ORDER BY grant_id
+LIMIT cast(?7 AS integer)
+`
+
+type ListResourceGrantsParams struct {
+	TenantID     string
+	SubjectKind  string
+	SubjectID    string
+	ResourceKind string
+	ResourceID   string
+	AfterID      string
+	PageLimit    int64
+}
+
+func (q *Queries) ListResourceGrants(ctx context.Context, arg ListResourceGrantsParams) ([]AgentResourceGrant, error) {
+	rows, err := q.db.QueryContext(ctx, listResourceGrants,
+		arg.TenantID,
+		arg.SubjectKind,
+		arg.SubjectID,
+		arg.ResourceKind,
+		arg.ResourceID,
+		arg.AfterID,
+		arg.PageLimit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AgentResourceGrant{}
+	for rows.Next() {
+		var i AgentResourceGrant
+		if err := rows.Scan(
+			&i.GrantID,
+			&i.TenantID,
+			&i.SubjectKind,
+			&i.SubjectID,
+			&i.ResourceKind,
+			&i.ResourceID,
+			&i.Action,
+			&i.CreatedAtNs,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const policyResourceExists = `-- name: PolicyResourceExists :one
+SELECT CASE cast(?1 AS text)
+    WHEN 'tenant' THEN EXISTS (
+        SELECT 1 FROM organizations
+        WHERE org_id = cast(?2 AS text)
+          AND org_id = cast(?3 AS text)
+          AND is_active = TRUE
+    )
+    WHEN 'agent' THEN EXISTS (
+        SELECT 1 FROM agents
+        WHERE tenant_id = cast(?2 AS text)
+          AND agent_id = cast(?3 AS text)
+    )
+    WHEN 'queue' THEN EXISTS (
+        SELECT 1 FROM queue_properties
+        WHERE tenant_id = cast(?2 AS text)
+          AND queue_id = cast(?3 AS text)
+    )
+    WHEN 'topic' THEN EXISTS (
+        SELECT 1 FROM topic_properties
+        WHERE tenant_id = cast(?2 AS text)
+          AND topic_id = cast(?3 AS text)
+    )
+    WHEN 'subscription' THEN EXISTS (
+        SELECT 1
+        FROM topic_subscriptions s
+        JOIN topic_properties t ON t.topic_id = s.topic_id
+        WHERE t.tenant_id = cast(?2 AS text)
+          AND s.subscription_id = cast(?3 AS text)
+    )
+    ELSE FALSE
+END
+`
+
+type PolicyResourceExistsParams struct {
+	ResourceKind string
+	TenantID     string
+	ResourceID   string
+}
+
+func (q *Queries) PolicyResourceExists(ctx context.Context, arg PolicyResourceExistsParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, policyResourceExists, arg.ResourceKind, arg.TenantID, arg.ResourceID)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
+const policySubjectExists = `-- name: PolicySubjectExists :one
+SELECT EXISTS (
+    SELECT 1 FROM security_principals
+    WHERE tenant_id = cast(?1 AS text)
+      AND principal_kind = cast(?2 AS text)
+      AND principal_id = cast(?3 AS text)
+      AND status = 'active'
+)
+`
+
+type PolicySubjectExistsParams struct {
+	TenantID    string
+	SubjectKind string
+	SubjectID   string
+}
+
+func (q *Queries) PolicySubjectExists(ctx context.Context, arg PolicySubjectExistsParams) (bool, error) {
+	row := q.db.QueryRowContext(ctx, policySubjectExists, arg.TenantID, arg.SubjectKind, arg.SubjectID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const removeExpiredCredentialUsage = `-- name: RemoveExpiredCredentialUsage :execrows
+UPDATE agent_resource_usage
+SET active_credential_count = active_credential_count - cast(?1 AS integer),
+    updated_at_ns = cast(?2 AS integer)
+WHERE tenant_id = cast(?3 AS text)
+  AND agent_id = cast(?4 AS text)
+  AND active_credential_count >= cast(?1 AS integer)
+`
+
+type RemoveExpiredCredentialUsageParams struct {
+	Removed     int64
+	UpdatedAtNs int64
+	TenantID    string
+	AgentID     string
+}
+
+func (q *Queries) RemoveExpiredCredentialUsage(ctx context.Context, arg RemoveExpiredCredentialUsageParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, removeExpiredCredentialUsage,
+		arg.Removed,
+		arg.UpdatedAtNs,
+		arg.TenantID,
+		arg.AgentID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const revokeCredential = `-- name: RevokeCredential :execrows
 UPDATE agent_credentials
 SET revoked_at_ns = cast(?1 AS integer)
@@ -483,6 +1226,7 @@ WHERE tenant_id = cast(?2 AS text)
   AND agent_id = cast(?3 AS text)
   AND credential_id = cast(?4 AS text)
   AND revoked_at_ns IS NULL
+  AND expired_accounted_at_ns IS NULL
 `
 
 type RevokeCredentialParams struct {

@@ -23,6 +23,7 @@ import (
 	"github.com/marsolab/plainq/internal/server/service/onboarding"
 	"github.com/marsolab/plainq/internal/server/service/queue"
 	"github.com/marsolab/plainq/internal/server/service/rbac"
+	"github.com/marsolab/plainq/internal/server/service/securityaudit"
 	"github.com/marsolab/plainq/internal/server/service/telemetry"
 	"github.com/marsolab/plainq/internal/server/service/telemetry/collector"
 	"github.com/marsolab/plainq/internal/shared/pqlite"
@@ -50,6 +51,7 @@ type PlainQ struct {
 	authenticator  interceptor.Authenticator
 	resources      interceptor.ResourceAuthorizer
 	admission      *interceptor.PrincipalAdmissionLimiter
+	auditor        securityaudit.Auditor
 	serverVersion  string
 
 	// Telemetry components.
@@ -101,12 +103,14 @@ func NewServer(
 	}
 
 	if cfg.AgentEnable && (pq.agentTransport == nil || pq.authenticator == nil ||
-		pq.resources == nil || pq.admission == nil) {
-		return nil, errors.New("agent APIs require transport, authentication, authorization, and admission dependencies")
+		pq.resources == nil || pq.admission == nil || pq.auditor == nil) {
+		return nil, errors.New(
+			"agent APIs require transport, authentication, authorization, admission, and audit dependencies",
+		)
 	}
 
-	if cfg.AuthEnable && (pq.authenticator == nil || pq.admission == nil) {
-		return nil, errors.New("human-authenticated gRPC requires authentication and admission dependencies")
+	if cfg.AuthEnable && (pq.authenticator == nil || pq.admission == nil || pq.auditor == nil) {
+		return nil, errors.New("human-authenticated gRPC requires authentication, admission, and audit dependencies")
 	}
 
 	// Initialize metrics collector if telemetry database is provided.
@@ -321,6 +325,7 @@ func NewServer(
 			interceptor.UnaryAuth(
 				pq.authenticator, interceptor.PublicMethods(),
 				interceptor.WithUnaryLegacyProtection(cfg.GRPCProtectLegacy),
+				interceptor.WithUnaryAuthenticationAuditor(pq.auditor),
 			),
 			interceptor.UnaryAdmission(pq.admission),
 			interceptor.UnaryAuthorize(pq.resources),
@@ -330,6 +335,7 @@ func NewServer(
 			interceptor.StreamAuth(
 				pq.authenticator, interceptor.PublicMethods(),
 				interceptor.WithStreamLegacyProtection(cfg.GRPCProtectLegacy),
+				interceptor.WithStreamAuthenticationAuditor(pq.auditor),
 			),
 			interceptor.StreamAdmission(pq.admission),
 			interceptor.StreamAuthorize(pq.resources),
@@ -516,6 +522,12 @@ func WithHumanGRPCSecurity(
 		pq.authenticator = authenticator
 		pq.admission = admission
 	}
+}
+
+// WithSecurityAuditor installs the append-only auditor used for best-effort
+// authentication-failure records at the gRPC boundary.
+func WithSecurityAuditor(auditor securityaudit.Auditor) Option {
+	return func(pq *PlainQ) { pq.auditor = auditor }
 }
 
 // WithServerVersion reports the current build in agent capabilities.

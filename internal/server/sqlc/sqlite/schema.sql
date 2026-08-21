@@ -377,6 +377,7 @@ CREATE TABLE quota_windows (
 CREATE TABLE tenant_resource_usage (
   tenant_id TEXT PRIMARY KEY,
   agent_count INTEGER NOT NULL,
+  queue_count INTEGER NOT NULL,
   topic_count INTEGER NOT NULL,
   subscription_count INTEGER NOT NULL,
   stored_messaging_bytes INTEGER NOT NULL,

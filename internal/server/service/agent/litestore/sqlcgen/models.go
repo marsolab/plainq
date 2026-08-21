@@ -21,3 +21,14 @@ type AgentCredential struct {
 	RevokedAtNs          sql.NullInt64
 	LastUsedAtNs         sql.NullInt64
 }
+
+type AgentResourceGrant struct {
+	GrantID      string
+	TenantID     string
+	SubjectKind  string
+	SubjectID    string
+	ResourceKind string
+	ResourceID   string
+	Action       string
+	CreatedAtNs  int64
+}

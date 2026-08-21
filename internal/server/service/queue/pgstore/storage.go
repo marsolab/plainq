@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 
 	"github.com/heartwilltell/hc"
@@ -12,9 +13,11 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/marsolab/plainq/internal/metrics"
+	"github.com/marsolab/plainq/internal/server/authz"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/service/queue"
 	"github.com/marsolab/plainq/internal/server/service/queue/pgstore/sqlcgen"
+	"github.com/marsolab/plainq/internal/server/service/quota"
 	"github.com/marsolab/plainq/internal/server/service/telemetry"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/marsolab/servekit/errkit"
@@ -137,7 +140,7 @@ func New(pool *pgxpool.Pool, options ...Option) (*Storage, error) {
 	return &s, nil
 }
 
-//nolint:cyclop // Queue creation keeps validation, SQL, cache, and cleanup failures distinct.
+//nolint:cyclop,gocyclo // Queue creation keeps validation, SQL, cache, and cleanup failures distinct.
 func (s *Storage) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest) (_ *v1.CreateQueueResponse, sErr error) {
 	scope := queue.ScopeFromContext(ctx)
 	queueID := idkit.XID()
@@ -171,6 +174,26 @@ func (s *Storage) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest)
 
 	defer func() { sErr = errors.Join(sErr, rollback(ctx, tx)) }()
 
+	var policyTransaction postgresQueuePolicyTx
+
+	if mutation, ok := postgresQueueMutation(ctx); ok {
+		replayed, found, err := replayPostgresQueuePolicy[v1.CreateQueueResponse](
+			ctx, tx, mutation, authz.ActionQueueCreate, mutation.TenantID,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		if found {
+			return &replayed, nil
+		}
+
+		policyTransaction, err = reservePostgresQueuePolicy(ctx, tx, mutation)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	if err := s.queries.WithTx(tx).InsertQueueProperties(ctx, sqlcgen.InsertQueuePropertiesParams{
 		QueueID:                  queueID,
 		QueueName:                input.QueueName,
@@ -190,6 +213,20 @@ func (s *Storage) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest)
 		return nil, fmt.Errorf("create queue table: %w", err)
 	}
 
+	output := v1.CreateQueueResponse{QueueId: queueID}
+
+	if mutation, ok := postgresQueueMutation(ctx); ok {
+		if err := quota.ApplyActualUsageTx(ctx, policyTransaction, quota.UsageDelta{
+			TenantID: mutation.TenantID, QueueCountAdded: 1,
+		}); err != nil {
+			return nil, fmt.Errorf("apply created postgres queue usage: %w", err)
+		}
+
+		if err := finishPostgresQueuePolicy(ctx, policyTransaction, mutation, &output); err != nil {
+			return nil, err
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
@@ -206,7 +243,7 @@ func (s *Storage) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest)
 
 	s.observer.QueueCreated()
 
-	return &v1.CreateQueueResponse{QueueId: queueID}, nil
+	return &output, nil
 }
 
 func (s *Storage) ListQueues(ctx context.Context, input *v1.ListQueuesRequest) (*v1.ListQueuesResponse, error) {
@@ -299,6 +336,7 @@ func (s *Storage) DescribeQueue(ctx context.Context, input *v1.DescribeQueueRequ
 	return output, nil
 }
 
+//nolint:cyclop // Purge keeps dynamic-table, exact count, audit, replay, and rollback paths together.
 func (s *Storage) PurgeQueue(ctx context.Context, input *v1.PurgeQueueRequest) (_ *v1.PurgeQueueResponse, sErr error) {
 	queueID := input.GetQueueId()
 	if err := s.ensureQueueAccessible(ctx, queueID); err != nil {
@@ -311,6 +349,26 @@ func (s *Storage) PurgeQueue(ctx context.Context, input *v1.PurgeQueueRequest) (
 	}
 
 	defer func() { sErr = errors.Join(sErr, rollback(ctx, tx)) }()
+
+	var policyTransaction postgresQueuePolicyTx
+
+	if mutation, ok := postgresQueueMutation(ctx); ok {
+		replayed, found, err := replayPostgresQueuePolicy[v1.PurgeQueueResponse](
+			ctx, tx, mutation, authz.ActionQueuePurge, queueID,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		if found {
+			return &replayed, nil
+		}
+
+		policyTransaction, err = reservePostgresQueuePolicy(ctx, tx, mutation)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	var count uint64
 	if err := tx.QueryRow(ctx, queryCountMessages(queueID)).Scan(&count); err != nil {
@@ -326,13 +384,22 @@ func (s *Storage) PurgeQueue(ctx context.Context, input *v1.PurgeQueueRequest) (
 		return nil, fmt.Errorf("purge queue %q count (%d) != rows affected (%d)", queueID, count, rows)
 	}
 
+	output := v1.PurgeQueueResponse{MessagesCount: count}
+	if mutation, ok := postgresQueueMutation(ctx); ok {
+		mutation.Audit.Metadata = map[string]string{auditMetadataMessageCount: strconv.FormatUint(count, 10)}
+		if err := finishPostgresQueuePolicy(ctx, policyTransaction, mutation, &output); err != nil {
+			return nil, err
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
 
-	return &v1.PurgeQueueResponse{MessagesCount: count}, nil
+	return &output, nil
 }
 
+//nolint:cyclop,gocyclo // Delete keeps force, exact rows, dynamic table, ledger, audit, replay, and cache outcomes together.
 func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest) (_ *v1.DeleteQueueResponse, sErr error) {
 	queueID := input.GetQueueId()
 
@@ -351,6 +418,26 @@ func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest)
 
 	defer func() { sErr = errors.Join(sErr, rollback(ctx, tx)) }()
 
+	var policyTransaction postgresQueuePolicyTx
+
+	if mutation, ok := postgresQueueMutation(ctx); ok {
+		replayed, found, err := replayPostgresQueuePolicy[v1.DeleteQueueResponse](
+			ctx, tx, mutation, authz.ActionQueueDelete, queueID,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		if found {
+			return &replayed, nil
+		}
+
+		policyTransaction, err = reservePostgresQueuePolicy(ctx, tx, mutation)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	var messageCount uint64
 	if err := tx.QueryRow(ctx, queryCountMessages(queueID)).Scan(&messageCount); err != nil {
 		return nil, fmt.Errorf("count queue %q messages: %w", queueID, err)
@@ -358,6 +445,14 @@ func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest)
 
 	if err := canDeleteQueue(input.GetForce(), messageCount); err != nil {
 		return nil, err
+	}
+
+	var removedSubscriptions uint64
+	if _, ok := postgresQueueMutation(ctx); ok {
+		removedSubscriptions, err = deletePostgresSubscriptionsForQueue(ctx, tx, scope.TenantID, queueID)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	rows, delErr := s.queries.WithTx(tx).DeleteQueueProperties(ctx, sqlcgen.DeleteQueuePropertiesParams{
@@ -375,6 +470,22 @@ func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest)
 		return nil, fmt.Errorf("drop queue %q table: %w", queueID, err)
 	}
 
+	output := v1.DeleteQueueResponse{}
+
+	if mutation, ok := postgresQueueMutation(ctx); ok {
+		if err := quota.ApplyActualUsageTx(ctx, policyTransaction, quota.UsageDelta{
+			TenantID: mutation.TenantID, QueueCountRemoved: 1,
+			SubscriptionCountRemoved: removedSubscriptions,
+		}); err != nil {
+			return nil, fmt.Errorf("apply deleted postgres queue usage: %w", err)
+		}
+
+		mutation.Audit.Metadata = map[string]string{auditMetadataMessageCount: strconv.FormatUint(messageCount, 10)}
+		if err := finishPostgresQueuePolicy(ctx, policyTransaction, mutation, &output); err != nil {
+			return nil, err
+		}
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
@@ -383,7 +494,7 @@ func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest)
 
 	s.observer.QueueDeleted(queueID)
 
-	return &v1.DeleteQueueResponse{}, nil
+	return &output, nil
 }
 
 func canDeleteQueue(force bool, messageCount uint64) error {
@@ -404,6 +515,10 @@ func (s *Storage) Send(ctx context.Context, input *v1.SendRequest) (*v1.SendResp
 
 	output := v1.SendResponse{
 		MessageIds: make([]string, 0, len(messages)),
+	}
+
+	if mutation, ok := postgresQueueMutation(ctx); ok {
+		return s.sendWithPolicy(ctx, input, mutation)
 	}
 
 	if len(messages) == 0 {
@@ -479,6 +594,10 @@ func (s *Storage) Receive(ctx context.Context, input *v1.ReceiveRequest) (*v1.Re
 		return nil, fmt.Errorf("describe queue (id: %q): %w", queueID, describeErr)
 	}
 
+	if mutation, ok := postgresQueueMutation(ctx); ok {
+		return s.receiveWithPolicy(ctx, input, info, mutation)
+	}
+
 	limit := input.BatchSize
 	if limit == 0 {
 		limit = 1
@@ -544,6 +663,10 @@ func (s *Storage) Delete(ctx context.Context, input *v1.DeleteRequest) (*v1.Dele
 	output := v1.DeleteResponse{
 		Successful: make([]string, 0, len(ids)),
 		Failed:     make([]*v1.DeleteFailure, 0),
+	}
+
+	if mutation, ok := postgresQueueMutation(ctx); ok {
+		return s.deleteWithPolicy(ctx, input, mutation)
 	}
 
 	if len(ids) == 0 {

@@ -9,9 +9,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/marsolab/plainq/internal/server/authz"
 	agentv1 "github.com/marsolab/plainq/internal/server/schema/agent/v1"
 	"github.com/marsolab/plainq/internal/server/service/agent"
 	"github.com/marsolab/plainq/internal/server/service/agent/litestore/sqlcgen"
+	"github.com/marsolab/plainq/internal/server/service/quota"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/marsolab/plainq/internal/shared/pqlite"
 )
@@ -44,6 +46,7 @@ func (s *Storage) withinTx(ctx context.Context, fn func(pqlite.Tx) error) error 
 	return nil
 }
 
+//nolint:cyclop,funlen,gocognit,gocyclo // Registry creation keeps all policy, projection, and ledger writes in one visible transaction.
 func (s *Storage) CreateAgent(ctx context.Context, input agent.CreateAgentInput) (agent.AgentRecord, error) {
 	status, err := storedAgentStatus(input.Status)
 	if err != nil {
@@ -59,6 +62,48 @@ func (s *Storage) CreateAgent(ctx context.Context, input agent.CreateAgentInput)
 
 	err = s.withinTx(ctx, func(tx pqlite.Tx) error {
 		queries := sqlcgen.New(tx)
+		policyTx := sqlitePolicyTransaction{queries: queries, now: input.UpdatedAt.UTC()}
+
+		replayed, found, err := sqlitePolicyReplay[agent.AgentRecord](
+			ctx, queries, input.Policy, authz.ActionAgentCreate, input.TenantID, input.AgentID,
+		)
+		if err != nil {
+			return err
+		}
+
+		if input.Policy.Actor != input.CreatedBy {
+			return errors.New("policy actor does not match agent creator")
+		}
+
+		if found {
+			created = replayed
+
+			return nil
+		}
+
+		if _, err := quota.ReserveRateTx(
+			ctx, policyTx, input.TenantID, input.Policy.Action, input.Policy.RateUnits, input.Policy.Audit.CreatedAt,
+		); err != nil {
+			return fmt.Errorf("reserve create agent rate: %w", err)
+		}
+
+		capacity, err := queries.GetTenantAgentCapacity(ctx, input.TenantID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return agent.ErrNotFound
+			}
+
+			return fmt.Errorf("read tenant agent capacity: %w", err)
+		}
+
+		if capacity.AgentCount < 0 || capacity.MaxAgents <= 0 {
+			return errors.New("invalid tenant agent capacity ledger")
+		}
+
+		if capacity.AgentCount >= capacity.MaxAgents {
+			return errors.Join(agent.ErrFailedPrecondition, quota.ErrExhausted)
+		}
+
 		if err := queries.CreateAgent(ctx, sqlcgen.CreateAgentParams{
 			AgentID:       input.AgentID,
 			TenantID:      input.TenantID,
@@ -82,6 +127,18 @@ func (s *Storage) CreateAgent(ctx context.Context, input agent.CreateAgentInput)
 			return classifyWrite("create agent principal", err)
 		}
 
+		if err := queries.CreateAgentResourceUsage(ctx, sqlcgen.CreateAgentResourceUsageParams{
+			TenantID: input.TenantID, AgentID: input.AgentID, UpdatedAtNs: input.UpdatedAt.UnixNano(),
+		}); err != nil {
+			return classifyWrite("create agent resource usage", err)
+		}
+
+		if err := quota.ApplyActualUsageTx(ctx, policyTx, quota.UsageDelta{
+			TenantID: input.TenantID, AgentCountAdded: 1,
+		}); err != nil {
+			return fmt.Errorf("apply created agent usage: %w", err)
+		}
+
 		row, err := queries.GetAgent(ctx, sqlcgen.GetAgentParams{
 			TenantID: input.TenantID,
 			AgentID:  input.AgentID,
@@ -94,8 +151,11 @@ func (s *Storage) CreateAgent(ctx context.Context, input agent.CreateAgentInput)
 			row.AgentID, row.TenantID, row.AgentName, row.Status, row.AuthVersion,
 			row.CreatedAtNs, row.UpdatedAtNs, row.DisabledAtNs,
 		)
+		if err != nil {
+			return err
+		}
 
-		return err
+		return finishSQLitePolicy(ctx, policyTx, input.Policy, created)
 	})
 	if err != nil {
 		return agent.AgentRecord{}, err
@@ -290,6 +350,7 @@ func (s *Storage) ListAgents(ctx context.Context, input agent.ListAgentsInput) (
 	return result, nil
 }
 
+//nolint:cyclop // Status projection, authentication version, audit, and idempotency update atomically.
 func (s *Storage) SetAgentStatus(ctx context.Context, input agent.SetAgentStatusInput) (agent.AgentRecord, error) {
 	status, err := storedAgentStatus(input.Status)
 	if err != nil {
@@ -300,6 +361,27 @@ func (s *Storage) SetAgentStatus(ctx context.Context, input agent.SetAgentStatus
 
 	err = s.withinTx(ctx, func(tx pqlite.Tx) error {
 		queries := sqlcgen.New(tx)
+		policyTx := sqlitePolicyTransaction{queries: queries, now: input.UpdatedAt.UTC()}
+
+		replayed, found, err := sqlitePolicyReplay[agent.AgentRecord](
+			ctx, queries, input.Policy, authz.ActionAgentStatusSet, input.TenantID, input.AgentID,
+		)
+		if err != nil {
+			return err
+		}
+
+		if found {
+			updated = replayed
+
+			return nil
+		}
+
+		if _, err := quota.ReserveRateTx(
+			ctx, policyTx, input.TenantID, input.Policy.Action, input.Policy.RateUnits, input.Policy.Audit.CreatedAt,
+		); err != nil {
+			return fmt.Errorf("reserve status mutation rate: %w", err)
+		}
+
 		params := sqlcgen.UpdateAgentStatusParams{
 			Status:      status,
 			UpdatedAtNs: input.UpdatedAt.UnixNano(),
@@ -336,8 +418,11 @@ func (s *Storage) SetAgentStatus(ctx context.Context, input agent.SetAgentStatus
 			row.AgentID, row.TenantID, row.AgentName, row.Status, row.AuthVersion,
 			row.CreatedAtNs, row.UpdatedAtNs, row.DisabledAtNs,
 		)
+		if err != nil {
+			return err
+		}
 
-		return err
+		return finishSQLitePolicy(ctx, policyTx, input.Policy, updated)
 	})
 	if err != nil {
 		return agent.AgentRecord{}, err
@@ -464,8 +549,28 @@ func (s *Storage) CreateCredential(
 
 	err := s.withinTx(ctx, func(tx pqlite.Tx) error {
 		queries := sqlcgen.New(tx)
+		policyTx := sqlitePolicyTransaction{queries: queries, now: input.CreatedAt.UTC()}
 
-		if err := sqliteCredentialCapacity(ctx, queries, input.TenantID, input.AgentID, input.CreatedAt); err != nil {
+		replayed, found, err := sqlitePolicyReplay[agent.CredentialRecord](
+			ctx, queries, input.Policy, authz.ActionCredentialCreate, input.TenantID, input.AgentID,
+		)
+		if err != nil {
+			return err
+		}
+
+		if found {
+			created = replayed
+
+			return nil
+		}
+
+		if _, err := quota.ReserveRateTx(
+			ctx, policyTx, input.TenantID, input.Policy.Action, input.Policy.RateUnits, input.Policy.Audit.CreatedAt,
+		); err != nil {
+			return fmt.Errorf("reserve create credential rate: %w", err)
+		}
+
+		if err := sqliteCredentialCapacity(ctx, policyTx, input.TenantID, input.AgentID, input.CreatedAt); err != nil {
 			return err
 		}
 
@@ -476,14 +581,23 @@ func (s *Storage) CreateCredential(
 			return classifyWrite("create credential", err)
 		}
 
+		if err := quota.ApplyActualUsageTx(ctx, policyTx, quota.UsageDelta{
+			TenantID: input.TenantID, AgentID: input.AgentID, ActiveCredentialsAdded: 1,
+		}); err != nil {
+			return fmt.Errorf("apply created credential usage: %w", err)
+		}
+
 		row, err := queries.GetCredentialByID(ctx, input.CredentialID)
 		if err != nil {
 			return fmt.Errorf("read created credential: %w", err)
 		}
 
 		created, err = sqliteCredentialRecord(row)
+		if err != nil {
+			return err
+		}
 
-		return err
+		return finishSQLitePolicy(ctx, policyTx, input.Policy, created)
 	})
 	if err != nil {
 		return agent.CredentialRecord{}, err
@@ -492,6 +606,7 @@ func (s *Storage) CreateCredential(
 	return created, nil
 }
 
+//nolint:cyclop // Registration handles replay, canonical rows, expiry accounting, and atomic policy writes.
 func (s *Storage) RegisterCredential(
 	ctx context.Context,
 	input agent.RegisterCredentialInput,
@@ -500,6 +615,21 @@ func (s *Storage) RegisterCredential(
 
 	err := s.withinTx(ctx, func(tx pqlite.Tx) error {
 		queries := sqlcgen.New(tx)
+		policyTx := sqlitePolicyTransaction{queries: queries, now: input.CreatedAt.UTC()}
+
+		replayed, found, err := sqlitePolicyReplay[agent.RegisterCredentialResult](
+			ctx, queries, input.Policy, authz.ActionCredentialRegister, input.TenantID, input.AgentID,
+		)
+		if err != nil {
+			return err
+		}
+
+		if found {
+			result = replayed
+			result.AlreadyExisted = true
+
+			return nil
+		}
 
 		existing, err := queries.GetCredentialByID(ctx, input.CredentialID)
 		if err == nil {
@@ -521,7 +651,13 @@ func (s *Storage) RegisterCredential(
 			return fmt.Errorf("get registered credential: %w", err)
 		}
 
-		if err := sqliteCredentialCapacity(ctx, queries, input.TenantID, input.AgentID, input.CreatedAt); err != nil {
+		if _, err := quota.ReserveRateTx(
+			ctx, policyTx, input.TenantID, input.Policy.Action, input.Policy.RateUnits, input.Policy.Audit.CreatedAt,
+		); err != nil {
+			return fmt.Errorf("reserve register credential rate: %w", err)
+		}
+
+		if err := sqliteCredentialCapacity(ctx, policyTx, input.TenantID, input.AgentID, input.CreatedAt); err != nil {
 			return err
 		}
 
@@ -530,6 +666,12 @@ func (s *Storage) RegisterCredential(
 			input.SecretHash, input.CreatedAt, input.ExpiresAt,
 		)); err != nil {
 			return classifyWrite("register credential", err)
+		}
+
+		if err := quota.ApplyActualUsageTx(ctx, policyTx, quota.UsageDelta{
+			TenantID: input.TenantID, AgentID: input.AgentID, ActiveCredentialsAdded: 1,
+		}); err != nil {
+			return fmt.Errorf("apply registered credential usage: %w", err)
 		}
 
 		row, err := queries.GetCredentialByID(ctx, input.CredentialID)
@@ -544,7 +686,7 @@ func (s *Storage) RegisterCredential(
 
 		result = agent.RegisterCredentialResult{Credential: record}
 
-		return nil
+		return finishSQLitePolicy(ctx, policyTx, input.Policy, result)
 	})
 	if err != nil {
 		return agent.RegisterCredentialResult{}, err
@@ -605,9 +747,32 @@ func (s *Storage) GetCredentialByPrefix(ctx context.Context, prefix string) (age
 	return record, nil
 }
 
+//nolint:cyclop // Revocation accounts expiry, principal version, audit, and replay in one transaction.
 func (s *Storage) RevokeCredential(ctx context.Context, input agent.RevokeCredentialInput) error {
 	return s.withinTx(ctx, func(tx pqlite.Tx) error {
 		queries := sqlcgen.New(tx)
+		policyTx := sqlitePolicyTransaction{queries: queries, now: input.RevokedAt.UTC()}
+
+		_, found, err := sqlitePolicyReplay[struct{}](
+			ctx, queries, input.Policy, authz.ActionCredentialRevoke, input.TenantID, input.AgentID,
+		)
+		if err != nil {
+			return err
+		}
+
+		if found {
+			return nil
+		}
+
+		if _, err := quota.ReserveRateTx(
+			ctx, policyTx, input.TenantID, input.Policy.Action, input.Policy.RateUnits, input.Policy.Audit.CreatedAt,
+		); err != nil {
+			return fmt.Errorf("reserve revoke credential rate: %w", err)
+		}
+
+		if err := sqliteAccountExpiredCredentials(ctx, policyTx, input.TenantID, input.AgentID, input.RevokedAt); err != nil {
+			return err
+		}
 
 		rows, err := queries.RevokeCredential(ctx, sqlcgen.RevokeCredentialParams{
 			RevokedAtNs: input.RevokedAt.UnixNano(), TenantID: input.TenantID,
@@ -618,7 +783,13 @@ func (s *Storage) RevokeCredential(ctx context.Context, input agent.RevokeCreden
 		}
 
 		if rows > 0 {
-			return nil
+			if err := quota.ApplyActualUsageTx(ctx, policyTx, quota.UsageDelta{
+				TenantID: input.TenantID, AgentID: input.AgentID, ActiveCredentialsRemoved: 1,
+			}); err != nil {
+				return fmt.Errorf("apply revoked credential usage: %w", err)
+			}
+
+			return finishSQLitePolicy(ctx, policyTx, input.Policy, struct{}{})
 		}
 
 		existing, err := queries.GetCredentialByID(ctx, input.CredentialID)
@@ -631,41 +802,123 @@ func (s *Storage) RevokeCredential(ctx context.Context, input agent.RevokeCreden
 			return fmt.Errorf("check revoked credential: %w", err)
 		}
 
-		return nil
+		return finishSQLitePolicy(ctx, policyTx, input.Policy, struct{}{})
 	})
 }
 
 func (s *Storage) TouchCredential(ctx context.Context, input agent.TouchCredentialInput) error {
-	rows, err := s.queries.TouchCredential(ctx, sqlcgen.TouchCredentialParams{
-		UsedAtNs: input.UsedAt.UnixNano(), TenantID: input.TenantID,
-		AgentID: input.AgentID, CredentialID: input.CredentialID,
+	return s.withinTx(ctx, func(tx pqlite.Tx) error {
+		queries := sqlcgen.New(tx)
+		policyTx := sqlitePolicyTransaction{queries: queries, now: input.UsedAt.UTC()}
+
+		_, found, err := sqlitePolicyReplay[struct{}](
+			ctx, queries, input.Policy, authz.ActionCredentialExchange, input.TenantID, input.AgentID,
+		)
+		if err != nil {
+			return err
+		}
+
+		if found {
+			return nil
+		}
+
+		if _, err := quota.ReserveRateTx(
+			ctx, policyTx, input.TenantID, input.Policy.Action, input.Policy.RateUnits, input.Policy.Audit.CreatedAt,
+		); err != nil {
+			return fmt.Errorf("reserve credential exchange rate: %w", err)
+		}
+
+		rows, err := queries.TouchCredential(ctx, sqlcgen.TouchCredentialParams{
+			UsedAtNs: input.UsedAt.UnixNano(), TenantID: input.TenantID,
+			AgentID: input.AgentID, CredentialID: input.CredentialID,
+		})
+		if err != nil {
+			return fmt.Errorf("touch credential: %w", err)
+		}
+
+		if rows == 0 {
+			return agent.ErrUnauthenticated
+		}
+
+		return finishSQLitePolicy(ctx, policyTx, input.Policy, struct{}{})
+	})
+}
+
+func sqliteCredentialCapacity(
+	ctx context.Context,
+	policyTx sqlitePolicyTransaction,
+	tenantID, agentID string,
+	now time.Time,
+) error {
+	capacity, err := policyTx.queries.GetAgentCredentialCapacity(ctx, sqlcgen.GetAgentCredentialCapacityParams{
+		TenantID: tenantID, AgentID: agentID,
 	})
 	if err != nil {
-		return fmt.Errorf("touch credential: %w", err)
+		if errors.Is(err, sql.ErrNoRows) {
+			return agent.ErrNotFound
+		}
+
+		return fmt.Errorf("read agent credential capacity: %w", err)
 	}
 
-	if rows == 0 {
-		return agent.ErrUnauthenticated
+	removed, err := policyTx.queries.AccountExpiredCredentials(ctx, sqlcgen.AccountExpiredCredentialsParams{
+		AccountedAtNs: now.UnixNano(), TenantID: tenantID, AgentID: agentID,
+	})
+	if err != nil {
+		return fmt.Errorf("account expired credentials: %w", err)
+	}
+
+	if len(removed) > 0 {
+		if err := quota.ApplyActualUsageTx(ctx, policyTx, quota.UsageDelta{
+			TenantID: tenantID, AgentID: agentID, ActiveCredentialsRemoved: uint64(len(removed)),
+		}); err != nil {
+			return fmt.Errorf("apply expired credential usage: %w", err)
+		}
+	}
+
+	active := capacity.ActiveCredentialCount - int64(len(removed))
+	if active < 0 || capacity.MaxCredentialsPerAgent <= 0 {
+		return errors.New("invalid agent credential capacity ledger")
+	}
+
+	if active >= capacity.MaxCredentialsPerAgent {
+		return errors.Join(agent.ErrFailedPrecondition, quota.ErrExhausted)
 	}
 
 	return nil
 }
 
-func sqliteCredentialCapacity(
+func sqliteAccountExpiredCredentials(
 	ctx context.Context,
-	queries *sqlcgen.Queries,
+	policyTx sqlitePolicyTransaction,
 	tenantID, agentID string,
 	now time.Time,
 ) error {
-	count, err := queries.CountActiveCredentials(ctx, sqlcgen.CountActiveCredentialsParams{
-		TenantID: tenantID, AgentID: agentID, NowNs: now.UnixNano(),
-	})
-	if err != nil {
-		return fmt.Errorf("count active credentials: %w", err)
+	if _, err := policyTx.queries.GetAgentCredentialCapacity(ctx, sqlcgen.GetAgentCredentialCapacityParams{
+		TenantID: tenantID, AgentID: agentID,
+	}); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return agent.ErrNotFound
+		}
+
+		return fmt.Errorf("read agent credential capacity: %w", err)
 	}
 
-	if count >= agent.DefaultMaxActiveCredentials {
-		return agent.ErrFailedPrecondition
+	removed, err := policyTx.queries.AccountExpiredCredentials(ctx, sqlcgen.AccountExpiredCredentialsParams{
+		AccountedAtNs: now.UnixNano(), TenantID: tenantID, AgentID: agentID,
+	})
+	if err != nil {
+		return fmt.Errorf("account expired credentials: %w", err)
+	}
+
+	if len(removed) == 0 {
+		return nil
+	}
+
+	if err := quota.ApplyActualUsageTx(ctx, policyTx, quota.UsageDelta{
+		TenantID: tenantID, AgentID: agentID, ActiveCredentialsRemoved: uint64(len(removed)),
+	}); err != nil {
+		return fmt.Errorf("apply accounted credential usage: %w", err)
 	}
 
 	return nil

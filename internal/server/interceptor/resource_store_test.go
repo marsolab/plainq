@@ -4,13 +4,15 @@ import (
 	"context"
 	"testing"
 
+	"github.com/marsolab/plainq/internal/server/authz"
 	"github.com/marsolab/plainq/internal/server/principal"
 	"github.com/marsolab/plainq/internal/server/service/agent"
 )
 
 type authorizationStoreStub struct {
 	selector agent.AuthorizationResourceSelector
-	grant    agent.ResourceGrantCheck
+	action   authz.Action
+	resource authz.Resource
 }
 
 func (s *authorizationStoreStub) ResolveAuthorizationResource(
@@ -30,9 +32,28 @@ func (s *authorizationStoreStub) HasResourceGrant(
 	_ context.Context,
 	check agent.ResourceGrantCheck,
 ) (bool, error) {
-	s.grant = check
+	return true, nil
+}
+
+func (s *authorizationStoreStub) HasGrant(
+	_ context.Context,
+	_ principal.Principal,
+	action authz.Action,
+	resource authz.Resource,
+) (bool, error) {
+	s.action = action
+	s.resource = resource
 
 	return true, nil
+}
+
+func (s *authorizationStoreStub) HasLegacyPermission(
+	context.Context,
+	principal.Principal,
+	authz.Action,
+	authz.Resource,
+) (bool, error) {
+	return false, nil
 }
 
 func TestStoreResourceAuthorizerMapsPolicyProjection(t *testing.T) {
@@ -61,7 +82,7 @@ func TestStoreResourceAuthorizerMapsPolicyProjection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HasGrant() error = %v", err)
 	}
-	if !granted || store.grant.ResourceKind != agent.AuthorizationResourceAgent {
-		t.Fatalf("granted = %v, grant = %#v", granted, store.grant)
+	if !granted || store.action != authz.ActionAgentSend || store.resource.Type != authz.ResourceAgent {
+		t.Fatalf("granted = %v, action = %q, resource = %#v", granted, store.action, store.resource)
 	}
 }

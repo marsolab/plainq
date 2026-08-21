@@ -86,11 +86,12 @@ CREATE INDEX quota_windows_sweep_idx ON quota_windows (window_started_at_ns, ten
 CREATE TABLE tenant_resource_usage (
   tenant_id text PRIMARY KEY REFERENCES organizations (org_id) ON DELETE CASCADE,
   agent_count bigint NOT NULL DEFAULT 0,
+  queue_count bigint NOT NULL DEFAULT 0,
   topic_count bigint NOT NULL DEFAULT 0,
   subscription_count bigint NOT NULL DEFAULT 0,
   stored_messaging_bytes bigint NOT NULL DEFAULT 0,
   updated_at_ns bigint NOT NULL,
-  CHECK (agent_count >= 0 AND topic_count >= 0 AND subscription_count >= 0 AND stored_messaging_bytes >= 0)
+  CHECK (agent_count >= 0 AND queue_count >= 0 AND topic_count >= 0 AND subscription_count >= 0 AND stored_messaging_bytes >= 0)
 );
 
 CREATE TABLE agent_resource_usage (
@@ -129,11 +130,12 @@ SELECT org_id, 10000, 2, 10000, 1000, 1000, 1048576, 10737418240,
 FROM organizations;
 
 INSERT INTO tenant_resource_usage (
-  tenant_id, agent_count, topic_count, subscription_count,
+  tenant_id, agent_count, queue_count, topic_count, subscription_count,
   stored_messaging_bytes, updated_at_ns
 )
 SELECT o.org_id,
        (SELECT count(*) FROM agents a WHERE a.tenant_id = o.org_id),
+       (SELECT count(*) FROM queue_properties q WHERE q.tenant_id = o.org_id),
        (SELECT count(*) FROM topic_properties t WHERE t.tenant_id = o.org_id),
        (SELECT count(*) FROM topic_subscriptions s JOIN topic_properties t ON t.topic_id = s.topic_id WHERE t.tenant_id = o.org_id),
        coalesce((SELECT sum(stored_bytes) FROM direct_messages d WHERE d.tenant_id = o.org_id), 0),
@@ -163,6 +165,7 @@ BEGIN
        SELECT 1
        FROM tenant_resource_usage u
        WHERE u.agent_count <> (SELECT count(*) FROM agents a WHERE a.tenant_id = u.tenant_id)
+          OR u.queue_count <> (SELECT count(*) FROM queue_properties q WHERE q.tenant_id = u.tenant_id)
           OR u.topic_count <> (SELECT count(*) FROM topic_properties t WHERE t.tenant_id = u.tenant_id)
           OR u.subscription_count <> (
             SELECT count(*)
@@ -176,6 +179,7 @@ BEGIN
             WHERE d.tenant_id = u.tenant_id
           )
           OR u.agent_count < 0
+          OR u.queue_count < 0
           OR u.topic_count < 0
           OR u.subscription_count < 0
           OR u.stored_messaging_bytes < 0
@@ -213,6 +217,7 @@ BEGIN
      )
      OR (SELECT count(*) FROM tenant_resource_usage) <> (SELECT count(*) FROM organizations)
      OR (SELECT coalesce(sum(agent_count), 0) FROM tenant_resource_usage) <> (SELECT count(*) FROM agents)
+     OR (SELECT coalesce(sum(queue_count), 0) FROM tenant_resource_usage) <> (SELECT count(*) FROM queue_properties)
      OR (SELECT coalesce(sum(topic_count), 0) FROM tenant_resource_usage) <> (SELECT count(*) FROM topic_properties)
      OR (SELECT coalesce(sum(subscription_count), 0) FROM tenant_resource_usage) <> (SELECT count(*) FROM topic_subscriptions)
      OR (SELECT coalesce(sum(stored_messaging_bytes), 0) FROM tenant_resource_usage) <> (SELECT coalesce(sum(stored_bytes), 0) FROM direct_messages)

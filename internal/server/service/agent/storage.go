@@ -40,6 +40,13 @@ type CredentialStore interface {
 	TouchCredential(ctx context.Context, input TouchCredentialInput) error
 }
 
+// GrantStore persists atomic fixed-vocabulary direct grants.
+type GrantStore interface {
+	CreateGrant(ctx context.Context, input CreateGrantInput) (GrantRecord, error)
+	ListGrants(ctx context.Context, input ListGrantsInput) (GrantPage, error)
+	DeleteGrant(ctx context.Context, input DeleteGrantInput) error
+}
+
 // AuthorizationResourceKind is the storage representation of an agent policy resource.
 type AuthorizationResourceKind string
 
@@ -88,4 +95,5 @@ type Store interface {
 	PrincipalStore
 	CredentialStore
 	AuthorizationStore
+	GrantStore
 }

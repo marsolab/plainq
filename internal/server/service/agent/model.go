@@ -3,6 +3,8 @@ package agent
 import (
 	"time"
 
+	"github.com/marsolab/plainq/internal/server/authz"
+	"github.com/marsolab/plainq/internal/server/policytx"
 	"github.com/marsolab/plainq/internal/server/principal"
 	agentv1 "github.com/marsolab/plainq/internal/server/schema/agent/v1"
 )
@@ -56,6 +58,7 @@ type CreateAgentInput struct {
 	CreatedBy   principal.Ref
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
+	Policy      policytx.Mutation
 }
 
 // ListAgentsInput describes a tenant-scoped name-order page.
@@ -81,6 +84,7 @@ type SetAgentStatusInput struct {
 	AgentID   string
 	Status    agentv1.AgentStatus
 	UpdatedAt time.Time
+	Policy    policytx.Mutation
 }
 
 // CreateCredentialInput carries a newly generated bootstrap credential hash into storage.
@@ -93,6 +97,7 @@ type CreateCredentialInput struct {
 	SecretHash   [32]byte
 	CreatedAt    time.Time
 	ExpiresAt    *time.Time
+	Policy       policytx.Mutation
 }
 
 // RegisterCredentialInput carries an externally generated credential hash into storage.
@@ -105,6 +110,7 @@ type RegisterCredentialInput struct {
 	SecretHash   [32]byte
 	CreatedAt    time.Time
 	ExpiresAt    *time.Time
+	Policy       policytx.Mutation
 }
 
 // RegisterCredentialResult identifies a canonical idempotent registration replay.
@@ -134,6 +140,7 @@ type RevokeCredentialInput struct {
 	AgentID      string
 	CredentialID string
 	RevokedAt    time.Time
+	Policy       policytx.Mutation
 }
 
 // TouchCredentialInput records successful credential use.
@@ -142,4 +149,55 @@ type TouchCredentialInput struct {
 	AgentID      string
 	CredentialID string
 	UsedAt       time.Time
+	Policy       policytx.Mutation
+}
+
+// CreateGrantInput creates one fixed-vocabulary direct grant.
+type CreateGrantInput struct {
+	GrantID      string
+	TenantID     string
+	SubjectID    string
+	ResourceID   string
+	Action       string
+	SubjectKind  principal.Kind
+	ResourceKind authz.ResourceType
+	CreatedAt    time.Time
+	Policy       policytx.Mutation
+}
+
+// GrantRecord is one tenant-owned direct grant.
+type GrantRecord struct {
+	GrantID      string
+	TenantID     string
+	SubjectID    string
+	ResourceID   string
+	Action       string
+	SubjectKind  principal.Kind
+	ResourceKind authz.ResourceType
+	CreatedAt    time.Time
+}
+
+// ListGrantsInput describes a bounded grant-ID keyset page.
+type ListGrantsInput struct {
+	TenantID     string
+	SubjectID    string
+	ResourceID   string
+	AfterID      string
+	SubjectKind  principal.Kind
+	ResourceKind authz.ResourceType
+	Limit        uint32
+}
+
+// GrantPage is one bounded direct-grant page.
+type GrantPage struct {
+	Grants     []GrantRecord
+	NextCursor string
+	HasMore    bool
+}
+
+// DeleteGrantInput removes one tenant-owned direct grant.
+type DeleteGrantInput struct {
+	TenantID string
+	GrantID  string
+	Policy   policytx.Mutation
 }

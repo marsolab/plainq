@@ -5,13 +5,16 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/marsolab/plainq/internal/server/authz"
+	"github.com/marsolab/plainq/internal/server/principal"
 	"github.com/marsolab/plainq/internal/server/service/agent"
 )
 
 // StoreResourceAuthorizer adapts the agent persistence authorization
 // projection to the transport policy seam.
 type StoreResourceAuthorizer struct {
-	store agent.AuthorizationStore
+	store      agent.AuthorizationStore
+	authorizer authz.Authorizer
 }
 
 // NewStoreResourceAuthorizer constructs a persistence-backed authorizer.
@@ -20,7 +23,17 @@ func NewStoreResourceAuthorizer(store agent.AuthorizationStore) (*StoreResourceA
 		return nil, errors.New("agent authorization store is required")
 	}
 
-	return &StoreResourceAuthorizer{store: store}, nil
+	policyStore, ok := store.(authz.PolicyStore)
+	if !ok {
+		return nil, errors.New("agent authorization store does not implement shared policy reads")
+	}
+
+	authorizer, err := authz.NewAuthorizer(policyStore)
+	if err != nil {
+		return nil, fmt.Errorf("create shared resource authorizer: %w", err)
+	}
+
+	return &StoreResourceAuthorizer{store: store, authorizer: authorizer}, nil
 }
 
 // ResolveResource implements ResourceAuthorizer.
@@ -46,20 +59,43 @@ func (a *StoreResourceAuthorizer) ResolveResource(
 
 // HasGrant implements ResourceAuthorizer.
 func (a *StoreResourceAuthorizer) HasGrant(ctx context.Context, check GrantCheck) (bool, error) {
-	kind, err := authorizationResourceKind(check.ResourceKind)
+	resourceType, action, err := sharedGrantVocabulary(check.ResourceKind, check.Action)
 	if err != nil {
 		return false, err
 	}
 
-	granted, err := a.store.HasResourceGrant(ctx, agent.ResourceGrantCheck{
-		TenantID: check.TenantID, SubjectKind: check.SubjectKind, SubjectID: check.SubjectID,
-		ResourceKind: kind, ResourceID: check.ResourceID, Action: check.Action,
-	})
-	if err != nil {
-		return false, fmt.Errorf("check persisted authorization grant: %w", err)
+	resource := authz.Resource{Type: resourceType, TenantID: check.TenantID, ID: check.ResourceID}
+	if resourceType == authz.ResourceAgent && check.SubjectKind == principal.KindAgent &&
+		check.SubjectID == check.ResourceID {
+		resource.OwnerKind = principal.KindAgent
+		resource.OwnerID = check.ResourceID
 	}
 
-	return granted, nil
+	err = a.authorizer.Authorize(ctx, principal.Principal{
+		Kind: check.SubjectKind, ID: check.SubjectID, TenantID: check.TenantID,
+	}, action, resource)
+	if err == nil {
+		return true, nil
+	}
+
+	if errors.Is(err, authz.ErrPermissionDenied) {
+		return false, nil
+	}
+
+	return false, fmt.Errorf("authorize persisted resource: %w", err)
+}
+
+func sharedGrantVocabulary(kind ResourceKind, action string) (authz.ResourceType, authz.Action, error) {
+	switch {
+	case kind == ResourceAgent && action == "send":
+		return authz.ResourceAgent, authz.ActionAgentSend, nil
+	case kind == ResourceTopic && action == "publish":
+		return authz.ResourceTopic, authz.ActionTopicPublish, nil
+	case kind == ResourceTopic && action == "subscribe":
+		return authz.ResourceTopic, authz.ActionTopicSubscribe, nil
+	default:
+		return "", "", errors.New("unsupported authorization action")
+	}
 }
 
 func authorizationResourceKind(kind ResourceKind) (agent.AuthorizationResourceKind, error) {

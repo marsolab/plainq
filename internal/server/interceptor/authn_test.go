@@ -3,6 +3,7 @@ package interceptor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"sync/atomic"
@@ -14,6 +15,7 @@ import (
 	agentv1 "github.com/marsolab/plainq/internal/server/schema/agent/v1"
 	legacyv1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/security"
+	"github.com/marsolab/plainq/internal/server/service/securityaudit"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/marsolab/servekit/authkit/jwtkit"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
@@ -29,6 +31,56 @@ type rejectingAuthenticator struct{}
 
 func (rejectingAuthenticator) Authenticate(context.Context, string) (principal.Principal, error) {
 	return principal.Principal{}, errors.New("not an agent token")
+}
+
+type authenticationAuditRecorder struct {
+	events    []securityaudit.Event
+	appendErr error
+}
+
+func (r *authenticationAuditRecorder) Append(_ context.Context, event securityaudit.Event) error {
+	r.events = append(r.events, event)
+
+	return r.appendErr
+}
+
+func (*authenticationAuditRecorder) List(context.Context, securityaudit.Query) (securityaudit.Page, error) {
+	return securityaudit.Page{}, nil
+}
+
+func TestAuthenticationFailuresAreAuditedWithoutCredentialMaterial(t *testing.T) {
+	recorder := &authenticationAuditRecorder{appendErr: errors.New("audit unavailable")}
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs(
+		"authorization", "Bearer secret-access-token",
+		"x-request-id", "request-1",
+		"user-agent", "plainq-test/1.0",
+	))
+
+	_, err := UnaryAuth(
+		rejectingAuthenticator{}, PublicMethods(), WithUnaryAuthenticationAuditor(recorder),
+	)(ctx, nil, &grpc.UnaryServerInfo{FullMethod: agentv1.AgentService_GetAgent_FullMethodName},
+		func(context.Context, any) (any, error) {
+			t.Fatal("handler called after failed authentication")
+
+			return nil, nil
+		})
+	if got := status.Code(err); got != codes.Unauthenticated {
+		t.Fatalf("code = %s, want %s (error %v)", got, codes.Unauthenticated, err)
+	}
+	if len(recorder.events) != 1 {
+		t.Fatalf("audit events = %d, want 1", len(recorder.events))
+	}
+
+	event := recorder.events[0]
+	if event.Action != "authentication.failure" || event.Outcome != "failure" ||
+		event.Reason != "invalid_access_token" || event.RequestID != "request-1" ||
+		event.UserAgent != "plainq-test/1.0" {
+		t.Fatalf("audit event = %#v", event)
+	}
+	if strings.Contains(strings.ToLower(fmt.Sprint(event)), "secret-access-token") ||
+		strings.Contains(strings.ToLower(fmt.Sprint(event)), "audit unavailable") {
+		t.Fatalf("audit event contains credential or persistence error: %#v", event)
+	}
 }
 
 type humanVerifierStub struct{ token *jwtkit.Token }

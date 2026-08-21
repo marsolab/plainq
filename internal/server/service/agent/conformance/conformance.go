@@ -9,10 +9,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/marsolab/plainq/internal/server/authz"
+	"github.com/marsolab/plainq/internal/server/policytx"
 	"github.com/marsolab/plainq/internal/server/principal"
 	agentv1 "github.com/marsolab/plainq/internal/server/schema/agent/v1"
 	"github.com/marsolab/plainq/internal/server/security"
 	"github.com/marsolab/plainq/internal/server/service/agent"
+	"github.com/marsolab/plainq/internal/server/service/securityaudit"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
 )
 
@@ -69,6 +72,10 @@ func Credentials(t *testing.T, newStore Factory) {
 			CredentialID: "01J00000000000000000000111", TenantID: tenantA, AgentID: agentA.AgentID,
 			Name: "runtime", Prefix: "pqac_01J00000000000000000000111", SecretHash: hash,
 			CreatedAt: createdAt, ExpiresAt: &expiresAt,
+			Policy: agentMutation(
+				tenantA, conformanceActor(), authz.ActionCredentialCreate,
+				agentA.AgentID, "create-credential-111", createdAt,
+			),
 		})
 		if err != nil {
 			t.Fatalf("create credential: %v", err)
@@ -91,6 +98,10 @@ func Credentials(t *testing.T, newStore Factory) {
 		usedAt := createdAt.Add(time.Minute)
 		if err := store.TouchCredential(ctx, agent.TouchCredentialInput{
 			TenantID: tenantA, AgentID: agentA.AgentID, CredentialID: created.CredentialID, UsedAt: usedAt,
+			Policy: agentMutation(
+				tenantA, conformanceActor(), authz.ActionCredentialExchange,
+				agentA.AgentID, "touch-credential-111", usedAt,
+			),
 		}); err != nil {
 			t.Fatalf("touch credential: %v", err)
 		}
@@ -112,17 +123,29 @@ func Credentials(t *testing.T, newStore Factory) {
 		revokedAt := createdAt.Add(2 * time.Minute)
 		if err := store.RevokeCredential(ctx, agent.RevokeCredentialInput{
 			TenantID: tenantB, AgentID: agentA.AgentID, CredentialID: created.CredentialID, RevokedAt: revokedAt,
+			Policy: agentMutation(
+				tenantB, conformanceActor(), authz.ActionCredentialRevoke,
+				agentA.AgentID, "cross-revoke-credential-111", revokedAt,
+			),
 		}); !errors.Is(err, agent.ErrNotFound) {
 			t.Fatalf("cross-tenant revoke error = %v, want %v", err, agent.ErrNotFound)
 		}
 
 		if err := store.RevokeCredential(ctx, agent.RevokeCredentialInput{
 			TenantID: tenantA, AgentID: agentA.AgentID, CredentialID: created.CredentialID, RevokedAt: revokedAt,
+			Policy: agentMutation(
+				tenantA, conformanceActor(), authz.ActionCredentialRevoke,
+				agentA.AgentID, "revoke-credential-111", revokedAt,
+			),
 		}); err != nil {
 			t.Fatalf("revoke credential: %v", err)
 		}
 		if err := store.RevokeCredential(ctx, agent.RevokeCredentialInput{
 			TenantID: tenantA, AgentID: agentA.AgentID, CredentialID: created.CredentialID, RevokedAt: revokedAt.Add(time.Minute),
+			Policy: agentMutation(
+				tenantA, conformanceActor(), authz.ActionCredentialRevoke,
+				agentA.AgentID, "repeat-revoke-credential-111", revokedAt.Add(time.Minute),
+			),
 		}); err != nil {
 			t.Fatalf("repeat revoke credential: %v", err)
 		}
@@ -134,6 +157,10 @@ func Credentials(t *testing.T, newStore Factory) {
 		if err := store.TouchCredential(ctx, agent.TouchCredentialInput{
 			TenantID: tenantA, AgentID: agentA.AgentID, CredentialID: created.CredentialID,
 			UsedAt: revokedAt.Add(time.Minute),
+			Policy: agentMutation(
+				tenantA, conformanceActor(), authz.ActionCredentialExchange,
+				agentA.AgentID, "touch-revoked-credential-111", revokedAt.Add(time.Minute),
+			),
 		}); !errors.Is(err, agent.ErrUnauthenticated) {
 			t.Fatalf("touch revoked credential error = %v, want %v", err, agent.ErrUnauthenticated)
 		}
@@ -149,6 +176,10 @@ func Credentials(t *testing.T, newStore Factory) {
 			CredentialID: "01J00000000000000000000122", TenantID: tenantA, AgentID: createdAgent.AgentID,
 			Name: "external", Prefix: "pqac_01J00000000000000000000122", SecretHash: [32]byte{4, 5, 6},
 			CreatedAt: createdAt, ExpiresAt: &expiresAt,
+			Policy: agentMutation(
+				tenantA, conformanceActor(), authz.ActionCredentialRegister,
+				createdAgent.AgentID, "register-credential-122", createdAt,
+			),
 		}
 
 		first, err := store.RegisterCredential(ctx, input)
@@ -174,6 +205,10 @@ func Credentials(t *testing.T, newStore Factory) {
 			t.Run(name, func(t *testing.T) {
 				conflict := input
 				mutate(&conflict)
+				conflict.Policy = agentMutation(
+					conflict.TenantID, conformanceActor(), authz.ActionCredentialRegister,
+					conflict.AgentID, "register-conflict-"+name, conflict.CreatedAt,
+				)
 				if _, err := store.RegisterCredential(ctx, conflict); !errors.Is(err, agent.ErrAlreadyExists) {
 					t.Fatalf("register conflict error = %v, want %v", err, agent.ErrAlreadyExists)
 				}
@@ -193,6 +228,10 @@ func Credentials(t *testing.T, newStore Factory) {
 			CredentialID: "01J00000000000000000000124", TenantID: tenantA, AgentID: createdAgent.AgentID,
 			Name: "concurrent-external", Prefix: "pqac_01J00000000000000000000124", SecretHash: [32]byte{7, 8, 9},
 			CreatedAt: createdAt, ExpiresAt: &expiresAt,
+			Policy: agentMutation(
+				tenantA, conformanceActor(), authz.ActionCredentialRegister,
+				createdAgent.AgentID, "register-credential-124", createdAt,
+			),
 		}
 
 		const registrations = 8
@@ -257,6 +296,10 @@ func Credentials(t *testing.T, newStore Factory) {
 		_, err := store.CreateCredential(ctx, agent.CreateCredentialInput{
 			CredentialID: credentialID, TenantID: tenantA, AgentID: createdAgent.AgentID,
 			Name: "projection-runtime", Prefix: "pqac_" + credentialID, SecretHash: [32]byte{1}, CreatedAt: now,
+			Policy: agentMutation(
+				tenantA, conformanceActor(), authz.ActionCredentialCreate,
+				createdAgent.AgentID, "create-projection-credential", now,
+			),
 		})
 		if err != nil {
 			t.Fatalf("create projection credential: %v", err)
@@ -325,6 +368,10 @@ func Credentials(t *testing.T, newStore Factory) {
 			_, err := store.CreateCredential(ctx, agent.CreateCredentialInput{
 				CredentialID: id, TenantID: tenantA, AgentID: createdAgent.AgentID, Name: name,
 				Prefix: "pqac_" + id, SecretHash: sha256.Sum256([]byte(name)), CreatedAt: at, ExpiresAt: expiresAt,
+				Policy: agentMutation(
+					tenantA, conformanceActor(), authz.ActionCredentialCreate,
+					createdAgent.AgentID, "create-capacity-"+id, at,
+				),
 			})
 			if err != nil {
 				return fmt.Errorf("create credential in capacity scenario: %w", err)
@@ -346,6 +393,10 @@ func Credentials(t *testing.T, newStore Factory) {
 		}
 		if err := store.RevokeCredential(ctx, agent.RevokeCredentialInput{
 			TenantID: tenantA, AgentID: createdAgent.AgentID, CredentialID: "01J00000000000000000000132", RevokedAt: now,
+			Policy: agentMutation(
+				tenantA, conformanceActor(), authz.ActionCredentialRevoke,
+				createdAgent.AgentID, "revoke-capacity-132", now,
+			),
 		}); err != nil {
 			t.Fatalf("revoke first: %v", err)
 		}
@@ -370,6 +421,10 @@ func Credentials(t *testing.T, newStore Factory) {
 				CredentialID: id, TenantID: tenantA, AgentID: createdAgent.AgentID,
 				Name: []string{"first", "second"}[index], Prefix: "pqac_" + id,
 				SecretHash: [32]byte{byte(index + 1)}, CreatedAt: now,
+				Policy: agentMutation(
+					tenantA, conformanceActor(), authz.ActionCredentialCreate,
+					createdAgent.AgentID, "create-list-credential-"+id, now,
+				),
 			})
 			if err != nil {
 				t.Fatalf("create credential %d: %v", index, err)
@@ -421,12 +476,47 @@ func seedCredentialAgent(
 		Status: agentv1.AgentStatus_AGENT_STATUS_ACTIVE, AuthVersion: 1,
 		CreatedBy: principal.Ref{Kind: principal.KindSystem, ID: conformancePrincipalID},
 		CreatedAt: createdAt, UpdatedAt: createdAt,
+		Policy: agentMutation(
+			tenantID, conformanceActor(), authz.ActionAgentCreate,
+			agentID, "create-agent-"+agentID, createdAt,
+		),
 	})
 	if err != nil {
 		t.Fatalf("create credential test agent: %v", err)
 	}
 
 	return record
+}
+
+func conformanceActor() principal.Ref {
+	return principal.Ref{Kind: principal.KindSystem, ID: conformancePrincipalID}
+}
+
+func agentMutation(
+	tenantID string,
+	actor principal.Ref,
+	action authz.Action,
+	resourceID, key string,
+	now time.Time,
+) policytx.Mutation {
+	hash := sha256.Sum256([]byte(key))
+
+	return policytx.Mutation{
+		TenantID: tenantID,
+		Actor:    actor,
+		Action:   action,
+		Resource: authz.Resource{
+			Type: authz.ResourceAgent, TenantID: tenantID, ID: resourceID,
+		},
+		IdempotencyKey: key,
+		RequestHash:    hash,
+		RateUnits:      1,
+		Audit: securityaudit.Event{
+			EventID: "audit-" + key, TenantID: tenantID, ActorKind: actor.Kind, ActorID: actor.ID,
+			Action: string(action), ResourceType: string(authz.ResourceAgent), ResourceID: resourceID,
+			Outcome: "success", CreatedAt: now,
+		},
+	}
 }
 
 // Registry exercises the registry contract against a storage backend.
@@ -455,6 +545,10 @@ func Registry(t *testing.T, newStore Factory) {
 			CreatedBy:   principal.Ref{Kind: principal.KindSystem, ID: conformancePrincipalID},
 			CreatedAt:   time.Unix(100, 0).UTC(),
 			UpdatedAt:   time.Unix(100, 0).UTC(),
+			Policy: agentMutation(
+				tenantA, conformanceActor(), authz.ActionAgentCreate,
+				"01J00000000000000000000001", "create-registry-001", time.Unix(100, 0).UTC(),
+			),
 		})
 		if err != nil {
 			t.Fatalf("create first tenant-a agent: %v", err)
@@ -469,6 +563,10 @@ func Registry(t *testing.T, newStore Factory) {
 			CreatedBy:   principal.Ref{Kind: principal.KindSystem, ID: conformancePrincipalID},
 			CreatedAt:   time.Unix(101, 0).UTC(),
 			UpdatedAt:   time.Unix(101, 0).UTC(),
+			Policy: agentMutation(
+				tenantA, conformanceActor(), authz.ActionAgentCreate,
+				"01J00000000000000000000002", "create-registry-002", time.Unix(101, 0).UTC(),
+			),
 		})
 		if !errors.Is(err, agent.ErrAlreadyExists) {
 			t.Fatalf("create duplicate tenant-a agent: got %v, want %v", err, agent.ErrAlreadyExists)
@@ -483,6 +581,10 @@ func Registry(t *testing.T, newStore Factory) {
 			CreatedBy:   principal.Ref{Kind: principal.KindSystem, ID: conformancePrincipalID},
 			CreatedAt:   time.Unix(102, 0).UTC(),
 			UpdatedAt:   time.Unix(102, 0).UTC(),
+			Policy: agentMutation(
+				tenantB, conformanceActor(), authz.ActionAgentCreate,
+				"01J00000000000000000000003", "create-registry-003", time.Unix(102, 0).UTC(),
+			),
 		})
 		if err != nil {
 			t.Fatalf("create tenant-b agent: %v", err)
@@ -506,6 +608,10 @@ func Registry(t *testing.T, newStore Factory) {
 			CreatedBy:   principal.Ref{Kind: principal.KindHuman, ID: "admin-1"},
 			CreatedAt:   createdAt,
 			UpdatedAt:   createdAt,
+			Policy: agentMutation(
+				tenantA, principal.Ref{Kind: principal.KindHuman, ID: "admin-1"},
+				authz.ActionAgentCreate, "01J00000000000000000000011", "create-registry-011", createdAt,
+			),
 		})
 		if err != nil {
 			t.Fatalf("create agent: %v", err)
@@ -536,6 +642,10 @@ func Registry(t *testing.T, newStore Factory) {
 			CreatedBy:   principal.Ref{Kind: principal.KindSystem, ID: conformancePrincipalID},
 			CreatedAt:   createdAt,
 			UpdatedAt:   createdAt,
+			Policy: agentMutation(
+				tenantA, conformanceActor(), authz.ActionAgentCreate,
+				"01J00000000000000000000012", "create-registry-012", createdAt,
+			),
 		})
 		if !errors.Is(err, agent.ErrAlreadyExists) {
 			t.Fatalf("create with conflicting principal error = %v, want %v", err, agent.ErrAlreadyExists)
@@ -607,6 +717,10 @@ func Registry(t *testing.T, newStore Factory) {
 			CreatedBy:   principal.Ref{Kind: principal.KindSystem, ID: conformancePrincipalID},
 			CreatedAt:   createdAt,
 			UpdatedAt:   createdAt,
+			Policy: agentMutation(
+				tenantA, conformanceActor(), authz.ActionAgentCreate,
+				"01J00000000000000000000015", "create-registry-015", createdAt,
+			),
 		})
 		if err != nil {
 			t.Fatalf("create agent: %v", err)
@@ -661,6 +775,10 @@ func Registry(t *testing.T, newStore Factory) {
 			CreatedBy:   principal.Ref{Kind: principal.KindSystem, ID: conformancePrincipalID},
 			CreatedAt:   createdAt,
 			UpdatedAt:   createdAt,
+			Policy: agentMutation(
+				tenantA, conformanceActor(), authz.ActionAgentCreate,
+				"01J00000000000000000000021", "create-registry-021", createdAt,
+			),
 		})
 		if err != nil {
 			t.Fatalf("create agent: %v", err)
@@ -682,6 +800,10 @@ func Registry(t *testing.T, newStore Factory) {
 		disabled, err := store.SetAgentStatus(ctx, agent.SetAgentStatusInput{
 			TenantID: tenantA, AgentID: created.AgentID,
 			Status: agentv1.AgentStatus_AGENT_STATUS_DISABLED, UpdatedAt: disabledAt,
+			Policy: agentMutation(
+				tenantA, conformanceActor(), authz.ActionAgentStatusSet,
+				created.AgentID, "disable-registry-021", disabledAt,
+			),
 		})
 		if err != nil {
 			t.Fatalf("disable agent: %v", err)
@@ -697,6 +819,10 @@ func Registry(t *testing.T, newStore Factory) {
 		reenabled, err := store.SetAgentStatus(ctx, agent.SetAgentStatusInput{
 			TenantID: tenantA, AgentID: created.AgentID,
 			Status: agentv1.AgentStatus_AGENT_STATUS_ACTIVE, UpdatedAt: time.Unix(302, 0).UTC(),
+			Policy: agentMutation(
+				tenantA, conformanceActor(), authz.ActionAgentStatusSet,
+				created.AgentID, "enable-registry-021", time.Unix(302, 0).UTC(),
+			),
 		})
 		if err != nil || reenabled.DisabledAt != nil {
 			t.Fatalf("reenable agent = %#v, %v", reenabled, err)
@@ -704,6 +830,10 @@ func Registry(t *testing.T, newStore Factory) {
 		if _, err := store.SetAgentStatus(ctx, agent.SetAgentStatusInput{
 			TenantID: tenantB, AgentID: created.AgentID,
 			Status: agentv1.AgentStatus_AGENT_STATUS_DISABLED, UpdatedAt: time.Unix(303, 0).UTC(),
+			Policy: agentMutation(
+				tenantB, conformanceActor(), authz.ActionAgentStatusSet,
+				created.AgentID, "cross-disable-registry-021", time.Unix(303, 0).UTC(),
+			),
 		}); !errors.Is(err, agent.ErrNotFound) {
 			t.Fatalf("cross-tenant status error = %v, want %v", err, agent.ErrNotFound)
 		}
@@ -717,15 +847,21 @@ func Registry(t *testing.T, newStore Factory) {
 		}
 
 		for index, name := range []string{alphaName, "alpha-two", "beta"} {
+			agentID := []string{"01J00000000000000000000031", "01J00000000000000000000032", "01J00000000000000000000033"}[index]
+			createdAt := time.Unix(int64(400+index), 0).UTC()
 			_, err := store.CreateAgent(ctx, agent.CreateAgentInput{
-				AgentID:     []string{"01J00000000000000000000031", "01J00000000000000000000032", "01J00000000000000000000033"}[index],
+				AgentID:     agentID,
 				TenantID:    tenantA,
 				Name:        name,
 				Status:      agentv1.AgentStatus_AGENT_STATUS_ACTIVE,
 				AuthVersion: 1,
 				CreatedBy:   principal.Ref{Kind: principal.KindSystem, ID: conformancePrincipalID},
-				CreatedAt:   time.Unix(int64(400+index), 0).UTC(),
-				UpdatedAt:   time.Unix(int64(400+index), 0).UTC(),
+				CreatedAt:   createdAt,
+				UpdatedAt:   createdAt,
+				Policy: agentMutation(
+					tenantA, conformanceActor(), authz.ActionAgentCreate,
+					agentID, "create-list-agent-"+agentID, createdAt,
+				),
 			})
 			if err != nil {
 				t.Fatalf("create %s: %v", name, err)
@@ -768,6 +904,10 @@ func Registry(t *testing.T, newStore Factory) {
 			CreatedBy:   principal.Ref{Kind: principal.KindSystem, ID: conformancePrincipalID},
 			CreatedAt:   time.Unix(500, 0).UTC(),
 			UpdatedAt:   time.Unix(500, 0).UTC(),
+			Policy: agentMutation(
+				"tenant-missing", conformanceActor(), authz.ActionAgentCreate,
+				"01J00000000000000000000041", "create-missing-agent", time.Unix(500, 0).UTC(),
+			),
 		})
 		if !errors.Is(err, agent.ErrNotFound) {
 			t.Fatalf("create without tenant error = %v, want %v", err, agent.ErrNotFound)

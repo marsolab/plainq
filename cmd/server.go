@@ -44,6 +44,9 @@ import (
 	"github.com/marsolab/plainq/internal/server/service/rbac"
 	rbacstore "github.com/marsolab/plainq/internal/server/service/rbac/litestore"
 	rbacpg "github.com/marsolab/plainq/internal/server/service/rbac/pgstore"
+	"github.com/marsolab/plainq/internal/server/service/securityaudit"
+	auditstore "github.com/marsolab/plainq/internal/server/service/securityaudit/litestore"
+	auditpg "github.com/marsolab/plainq/internal/server/service/securityaudit/pgstore"
 	"github.com/marsolab/plainq/internal/server/service/telemetry"
 	"github.com/marsolab/plainq/internal/shared/pqlite"
 	"github.com/marsolab/servekit/authkit/hashkit"
@@ -585,6 +588,18 @@ func serverCommand() *commandSpec {
 			serverOpts = append(serverOpts, server.WithObserver(observer))
 			serverOpts = append(serverOpts, server.WithServerVersion(Commit))
 
+			auditStorage, auditStorageErr := initSecurityAuditStorage(backend)
+			if auditStorageErr != nil {
+				return auditStorageErr
+			}
+
+			auditor, auditorErr := securityaudit.New(auditStorage)
+			if auditorErr != nil {
+				return fmt.Errorf("create security auditor: %w", auditorErr)
+			}
+
+			serverOpts = append(serverOpts, server.WithSecurityAuditor(auditor))
+
 			if cfg.AuthEnable && !cfg.AgentEnable {
 				grpcAuthenticator, grpcAdmission, grpcSecurityErr := initHumanGRPCSecurity(
 					&cfg, tokenManager, accountStorage,
@@ -597,7 +612,9 @@ func serverCommand() *commandSpec {
 			}
 
 			if cfg.AgentEnable {
-				agentOption, agentOptionErr := initAgentServerOption(&cfg, backend, tokenManager, accountStorage)
+				agentOption, agentOptionErr := initAgentServerOption(
+					&cfg, backend, tokenManager, accountStorage, auditor,
+				)
 				if agentOptionErr != nil {
 					return agentOptionErr
 				}
@@ -769,6 +786,7 @@ func initAgentServerOption(
 	backend *storageBackend,
 	humanTokens jwtkit.TokenManager,
 	accountStorage account.Storage,
+	auditor securityaudit.Auditor,
 ) (server.Option, error) {
 	agentStorage, err := initAgentStorage(backend)
 	if err != nil {
@@ -784,7 +802,8 @@ func initAgentServerOption(
 	}
 
 	agentService, err := agent.NewService(agent.ServiceConfig{
-		Registry: agentStorage, Principals: agentStorage, Credentials: agentStorage, Tokens: agentTokens,
+		Registry: agentStorage, Principals: agentStorage, Credentials: agentStorage,
+		Grants: agentStorage, Auditor: auditor, Tokens: agentTokens,
 		PreAuth: agent.PreAuthConfig{RequestsPerSecond: 5, Burst: 10, MaxEntries: 4096},
 	})
 	if err != nil {
@@ -1310,6 +1329,26 @@ func initAgentStorage(backend *storageBackend) (agent.Store, error) {
 		store, err := agentstore.NewStorage(backend.lite())
 		if err != nil {
 			return nil, fmt.Errorf("create %s agent storage: %w", backend.driver, err)
+		}
+
+		return store, nil
+	}
+}
+
+func initSecurityAuditStorage(backend *storageBackend) (securityaudit.Storage, error) {
+	switch backend.driver {
+	case storageDriverPostgres:
+		store, err := auditpg.NewStorage(backend.pgpool)
+		if err != nil {
+			return nil, fmt.Errorf("create postgres security audit storage: %w", err)
+		}
+
+		return store, nil
+
+	default:
+		store, err := auditstore.NewStorage(backend.lite())
+		if err != nil {
+			return nil, fmt.Errorf("create %s security audit storage: %w", backend.driver, err)
 		}
 
 		return store, nil

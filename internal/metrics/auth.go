@@ -75,6 +75,12 @@ var (
 		Help:   "Onboarding gate evaluations, by outcome. `required` means the server is still refusing traffic pending initial setup.",
 		Labels: []string{labelOutcome},
 	})
+
+	securityAuditFailures = NewCounterVec(Definition{
+		Name:   Namespace + "_security_audit_failures_total",
+		Help:   "Authentication failures that could not be persisted to the security audit log.",
+		Labels: []string{},
+	})
 )
 
 // Onboarding gate outcomes.
@@ -109,6 +115,10 @@ func RecordOAuthRequest(provider, stage string, err error) {
 
 // RecordOnboardingCheck records one evaluation of the onboarding gate.
 func RecordOnboardingCheck(outcome string) { onboardingChecks.With(outcome).Inc() }
+
+// RecordSecurityAuditFailure records a best-effort authentication audit event
+// that persistence could not durably append.
+func RecordSecurityAuditFailure() { securityAuditFailures.With().Inc() }
 
 // ObserveOAuthDuration records how long a provider call took.
 func ObserveOAuthDuration(provider, stage string, seconds float64) {

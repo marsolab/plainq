@@ -12,6 +12,7 @@ import (
 	"github.com/marsolab/plainq/internal/server/service/onboarding"
 	"github.com/marsolab/plainq/internal/server/service/queue"
 	"github.com/marsolab/plainq/internal/server/service/rbac"
+	"github.com/marsolab/plainq/internal/server/service/securityaudit"
 	"github.com/marsolab/plainq/internal/server/service/telemetry/collector"
 	"github.com/marsolab/servekit/logkit"
 	"github.com/maxatome/go-testdeep/td"
@@ -57,6 +58,14 @@ func (grpcResourceStub) ResolveResource(
 
 func (grpcResourceStub) HasGrant(context.Context, interceptor.GrantCheck) (bool, error) {
 	return true, nil
+}
+
+type securityAuditorStub struct{}
+
+func (securityAuditorStub) Append(context.Context, securityaudit.Event) error { return nil }
+
+func (securityAuditorStub) List(context.Context, securityaudit.Query) (securityaudit.Page, error) {
+	return securityaudit.Page{}, nil
 }
 
 // Test_NewServer_mountsRoutes builds the whole route tree the way the binary
@@ -148,6 +157,7 @@ func TestNewServerMountsAgentTransportOnlyWithCompleteSecurityDependencies(t *te
 		&cfg, logger, healthCheckerStub{}, nil,
 		queueService, accountService, onboardingService, rbacService, oauthService,
 		WithAgentMessaging(grpcMountStub{}, grpcAuthenticatorStub{}, grpcResourceStub{}, admission),
+		WithSecurityAuditor(securityAuditorStub{}),
 	)
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)
@@ -185,6 +195,7 @@ func TestNewServerRequiresCompleteHumanGRPCSecurity(t *testing.T) {
 		&cfg, logger, healthCheckerStub{}, nil,
 		queueService, accountService, onboardingService, rbacService, oauthService,
 		WithHumanGRPCSecurity(grpcAuthenticatorStub{}, admission),
+		WithSecurityAuditor(securityAuditorStub{}),
 	)
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)

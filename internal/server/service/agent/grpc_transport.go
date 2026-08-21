@@ -5,11 +5,14 @@ import (
 	"errors"
 
 	"github.com/marsolab/servekit/grpckit"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	agentv1 "github.com/marsolab/plainq/internal/server/schema/agent/v1"
+	"github.com/marsolab/plainq/internal/server/service/quota"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
 )
 
@@ -125,9 +128,56 @@ func (t *GRPCTransport) ExchangeAgentCredential(
 	return mapGRPC(ctx, response, err)
 }
 
+// CreateGrant maps tenant-admin direct grant creation onto the generated transport.
+func (t *GRPCTransport) CreateGrant(
+	ctx context.Context,
+	req *agentv1.CreateGrantRequest,
+) (*agentv1.CreateGrantResponse, error) {
+	response, err := t.service.CreateGrant(ctx, req)
+
+	return mapGRPC(ctx, response, err)
+}
+
+// ListGrants maps the bounded opaque grant page onto the generated transport.
+func (t *GRPCTransport) ListGrants(
+	ctx context.Context,
+	req *agentv1.ListGrantsRequest,
+) (*agentv1.ListGrantsResponse, error) {
+	response, err := t.service.ListGrants(ctx, req)
+
+	return mapGRPC(ctx, response, err)
+}
+
+// DeleteGrant maps tenant-admin direct grant deletion onto the generated transport.
+func (t *GRPCTransport) DeleteGrant(
+	ctx context.Context,
+	req *agentv1.DeleteGrantRequest,
+) (*agentv1.DeleteGrantResponse, error) {
+	response, err := t.service.DeleteGrant(ctx, req)
+
+	return mapGRPC(ctx, response, err)
+}
+
 func mapGRPC[T any](ctx context.Context, response T, err error) (T, error) {
 	if err == nil {
 		return response, nil
+	}
+
+	if retryDelay, exhausted := quota.RetryDelay(err); exhausted {
+		var zero T
+
+		value := status.New(codes.ResourceExhausted, codes.ResourceExhausted.String())
+
+		withDetails, detailsErr := value.WithDetails(&errdetails.RetryInfo{
+			RetryDelay: durationpb.New(retryDelay),
+		})
+		if detailsErr != nil {
+			//nolint:wrapcheck // This is the deliberate gRPC transport boundary.
+			return zero, value.Err()
+		}
+
+		//nolint:wrapcheck // This is the deliberate gRPC transport boundary.
+		return zero, withDetails.Err()
 	}
 
 	if errors.Is(err, ErrFailedPrecondition) {

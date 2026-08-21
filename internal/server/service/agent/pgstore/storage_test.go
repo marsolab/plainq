@@ -21,10 +21,36 @@ type registryFixture struct {
 }
 
 func (f *registryFixture) SeedOrganization(ctx context.Context, tenantID string) error {
-	_, err := f.pool.Exec(ctx, `
+	tx, err := f.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, `
 		INSERT INTO organizations (org_id, org_code, org_name)
-		VALUES ($1, $2, $3)`, tenantID, tenantID, tenantID)
-	return err
+		VALUES ($1, $2, $3)`, tenantID, tenantID, tenantID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO tenant_quotas (
+			tenant_id, max_agents, max_credentials_per_agent, max_queues, max_topics,
+			max_subscriptions, max_message_bytes, max_stored_bytes, send_per_second,
+			publish_per_second, updated_at_ns
+		) VALUES ($1, 10000, 2, 10000, 1000, 1000, 1048576, 10737418240, 1000, 1000, 0)`,
+		tenantID,
+	); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO tenant_resource_usage (
+			tenant_id, agent_count, queue_count, topic_count, subscription_count,
+			stored_messaging_bytes, updated_at_ns
+		) VALUES ($1, 0, 0, 0, 0, 0, 0)`, tenantID); err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
 }
 
 func (f *registryFixture) SeedAgentPrincipal(ctx context.Context, tenantID, agentID string) error {

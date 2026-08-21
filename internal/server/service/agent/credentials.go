@@ -18,6 +18,7 @@ import (
 	"google.golang.org/grpc/peer"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/marsolab/plainq/internal/server/authz"
 	"github.com/marsolab/plainq/internal/server/principal"
 	agentv1 "github.com/marsolab/plainq/internal/server/schema/agent/v1"
 )
@@ -91,6 +92,8 @@ func parseBootstrapCredential(rawCredential string) (parsedBootstrapCredential, 
 }
 
 // CreateAgentCredential issues a high-entropy bootstrap credential exactly once.
+//
+//nolint:cyclop // Credential issuance keeps validation, authorization, hashing, and one-time response handling explicit.
 func (s *Service) CreateAgentCredential(
 	ctx context.Context,
 	req *agentv1.CreateAgentCredentialRequest,
@@ -134,9 +137,19 @@ func (s *Service) CreateAgentCredential(
 		return nil, fmt.Errorf("create agent credential: %w", err)
 	}
 
+	policy, err := s.mutationFor(ctx, p, authz.ActionCredentialCreate, authz.Resource{
+		Type: authz.ResourceAgent, TenantID: p.TenantID, ID: req.GetAgentId(),
+	}, req, now, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build create credential policy: %w", err)
+	}
+
+	policy = bindMutationToGeneratedSecret(policy, credentialID)
+
 	record, err := s.credentials.CreateCredential(ctx, CreateCredentialInput{
 		CredentialID: credentialID, TenantID: p.TenantID, AgentID: req.GetAgentId(),
 		Name: name, Prefix: issued.prefix, SecretHash: issued.hash, CreatedAt: now, ExpiresAt: expiresAt,
+		Policy: policy,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create agent credential: %w", err)
@@ -197,6 +210,8 @@ func (s *Service) ListAgentCredentials(
 }
 
 // RegisterAgentCredential idempotently installs an externally generated SHA-256 credential hash.
+//
+//nolint:cyclop // Registration keeps validation, authorization, hashing, and idempotency checks explicit.
 func (s *Service) RegisterAgentCredential(
 	ctx context.Context,
 	req *agentv1.RegisterAgentCredentialRequest,
@@ -241,10 +256,18 @@ func (s *Service) RegisterAgentCredential(
 	var hash [sha256.Size]byte
 	copy(hash[:], req.GetSecretSha256())
 
+	policy, err := s.mutationFor(ctx, p, authz.ActionCredentialRegister, authz.Resource{
+		Type: authz.ResourceAgent, TenantID: p.TenantID, ID: req.GetAgentId(),
+	}, req, now, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build register credential policy: %w", err)
+	}
+
 	result, err := s.credentials.RegisterCredential(ctx, RegisterCredentialInput{
 		CredentialID: req.GetCredentialId(), TenantID: p.TenantID, AgentID: req.GetAgentId(),
 		Name: name, Prefix: credentialPrefixMarker + req.GetCredentialId(), SecretHash: hash,
 		CreatedAt: now, ExpiresAt: expiresAt,
+		Policy: policy,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("register agent credential: %w", err)
@@ -282,9 +305,18 @@ func (s *Service) RevokeAgentCredential(
 		return nil, fmt.Errorf("get agent for credential revocation: %w", err)
 	}
 
+	now := s.clock().UTC()
+
+	policy, err := s.mutationFor(ctx, p, authz.ActionCredentialRevoke, authz.Resource{
+		Type: authz.ResourceAgent, TenantID: p.TenantID, ID: req.GetAgentId(),
+	}, req, now, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build revoke credential policy: %w", err)
+	}
+
 	if err := s.credentials.RevokeCredential(ctx, RevokeCredentialInput{
 		TenantID: p.TenantID, AgentID: req.GetAgentId(), CredentialID: req.GetCredentialId(),
-		RevokedAt: s.clock().UTC(),
+		RevokedAt: now, Policy: policy,
 	}); err != nil {
 		return nil, fmt.Errorf("revoke agent credential: %w", err)
 	}
@@ -313,8 +345,22 @@ func (s *Service) ExchangeAgentCredential(
 	}
 
 	now := s.clock().UTC()
+	actor := principal.Principal{
+		Kind: principal.KindAgent, ID: record.AgentID, TenantID: record.TenantID,
+		Roles: []string{"agent"}, CredentialID: record.CredentialID, AuthVersion: agentRecord.AuthVersion,
+	}
+
+	policy, err := s.mutationFor(ctx, actor, authz.ActionCredentialExchange, authz.Resource{
+		Type: authz.ResourceAgent, TenantID: record.TenantID, ID: record.AgentID,
+		OwnerKind: principal.KindAgent, OwnerID: record.AgentID,
+	}, req, now, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build credential exchange policy: %w", err)
+	}
+
 	if err := s.credentials.TouchCredential(ctx, TouchCredentialInput{
 		TenantID: record.TenantID, AgentID: record.AgentID, CredentialID: record.CredentialID, UsedAt: now,
+		Policy: policy,
 	}); err != nil {
 		if errors.Is(err, ErrUnauthenticated) || errors.Is(err, ErrNotFound) {
 			return nil, ErrUnauthenticated

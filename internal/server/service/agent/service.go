@@ -11,9 +11,11 @@ import (
 	"github.com/marsolab/servekit/idkit"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/marsolab/plainq/internal/server/authz"
 	"github.com/marsolab/plainq/internal/server/principal"
 	agentv1 "github.com/marsolab/plainq/internal/server/schema/agent/v1"
 	"github.com/marsolab/plainq/internal/server/security"
+	"github.com/marsolab/plainq/internal/server/service/securityaudit"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
 )
 
@@ -30,9 +32,12 @@ type ServiceConfig struct {
 	Registry         RegistryStore
 	Principals       PrincipalStore
 	Credentials      CredentialStore
+	Grants           GrantStore
+	Auditor          securityaudit.Auditor
 	Tokens           TokenManager
 	Clock            func() time.Time
 	NextID           func() string
+	NextMutationID   func() string
 	Random           io.Reader
 	MaxCredentialTTL time.Duration
 	PreAuth          PreAuthConfig
@@ -43,9 +48,12 @@ type Service struct {
 	registry         RegistryStore
 	principals       PrincipalStore
 	credentials      CredentialStore
+	grants           GrantStore
+	auditor          securityaudit.Auditor
 	tokens           TokenManager
 	clock            func() time.Time
 	nextID           func() string
+	nextMutationID   func() string
 	random           io.Reader
 	maxCredentialTTL time.Duration
 	preAuth          *preAuthLimiter
@@ -81,6 +89,19 @@ func NewService(config ServiceConfig) (*Service, error) {
 		nextID = idkit.ULID
 	}
 
+	nextMutationID := config.NextMutationID
+	if nextMutationID == nil {
+		nextMutationID = idkit.ULID
+	}
+
+	grants := config.Grants
+	if grants == nil {
+		registryGrants, ok := config.Registry.(GrantStore)
+		if ok {
+			grants = registryGrants
+		}
+	}
+
 	random := config.Random
 	if random == nil {
 		random = crand.Reader
@@ -101,8 +122,9 @@ func NewService(config ServiceConfig) (*Service, error) {
 	}
 
 	return &Service{
-		registry: config.Registry, principals: config.Principals, credentials: config.Credentials, tokens: config.Tokens,
-		clock: clock, nextID: nextID, random: random,
+		registry: config.Registry, principals: config.Principals, credentials: config.Credentials,
+		grants: grants, auditor: config.Auditor, tokens: config.Tokens,
+		clock: clock, nextID: nextID, nextMutationID: nextMutationID, random: random,
 		maxCredentialTTL: maxCredentialTTL, preAuth: preAuth,
 	}, nil
 }
@@ -133,10 +155,18 @@ func (s *Service) CreateAgent(
 
 	now := s.clock().UTC()
 
+	policy, err := s.mutationFor(ctx, p, authz.ActionAgentCreate, authz.Resource{
+		Type: authz.ResourceAgent, TenantID: p.TenantID, ID: agentID,
+	}, req, now, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build create agent policy: %w", err)
+	}
+
 	record, err := s.registry.CreateAgent(ctx, CreateAgentInput{
 		AgentID: agentID, TenantID: p.TenantID, Name: name,
 		Status: agentv1.AgentStatus_AGENT_STATUS_ACTIVE, AuthVersion: 1,
 		CreatedBy: p.Ref(), CreatedAt: now, UpdatedAt: now,
+		Policy: policy,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create agent: %w", err)
@@ -252,8 +282,18 @@ func (s *Service) SetAgentStatus(
 		return nil, invalidInput("agent status must be active or disabled")
 	}
 
+	now := s.clock().UTC()
+
+	policy, err := s.mutationFor(ctx, p, authz.ActionAgentStatusSet, authz.Resource{
+		Type: authz.ResourceAgent, TenantID: p.TenantID, ID: req.GetAgentId(),
+	}, req, now, map[string]string{"status": req.GetStatus().String()})
+	if err != nil {
+		return nil, fmt.Errorf("build set agent status policy: %w", err)
+	}
+
 	record, err := s.registry.SetAgentStatus(ctx, SetAgentStatusInput{
-		TenantID: p.TenantID, AgentID: req.GetAgentId(), Status: req.GetStatus(), UpdatedAt: s.clock().UTC(),
+		TenantID: p.TenantID, AgentID: req.GetAgentId(), Status: req.GetStatus(), UpdatedAt: now,
+		Policy: policy,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("set agent status: %w", err)

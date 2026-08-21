@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/marsolab/plainq/internal/server/authz"
 	"github.com/marsolab/plainq/internal/server/config"
 	"github.com/marsolab/plainq/internal/server/middleware"
 	"github.com/marsolab/plainq/internal/server/principal"
@@ -362,14 +363,14 @@ func TestEveryGeneratedProtectedLegacyRPCIsAuthorized(t *testing.T) {
 		if _, ok := invocations[fullMethod]; !ok {
 			t.Errorf("generated legacy method %q lacks a denial regression", fullMethod)
 		}
-		if policy, ok := legacyV1Policies[fullMethod]; !ok || policy.authorization == 0 {
+		if action, ok := legacyGRPCActionInventory[fullMethod]; !ok || !authz.ValidAction(action) {
 			t.Errorf("generated legacy method %q lacks an explicit authorization policy", fullMethod)
 		}
 	}
-	if len(invocations) != len(generated) || len(legacyV1Policies) != len(generated) {
+	if len(invocations) != len(generated) || len(legacyGRPCActionInventory) != len(generated) {
 		t.Fatalf(
 			"legacy inventories = %d denial regressions / %d policies, generated service has %d methods",
-			len(invocations), len(legacyV1Policies), len(generated),
+			len(invocations), len(legacyGRPCActionInventory), len(generated),
 		)
 	}
 

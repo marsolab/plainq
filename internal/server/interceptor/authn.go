@@ -7,17 +7,34 @@ import (
 	"strings"
 	"time"
 
+	"github.com/marsolab/plainq/internal/metrics"
+	"github.com/marsolab/plainq/internal/server/authz"
 	"github.com/marsolab/plainq/internal/server/principal"
 	"github.com/marsolab/plainq/internal/server/security"
+	"github.com/marsolab/plainq/internal/server/service/securityaudit"
 	"github.com/marsolab/servekit/authkit/jwtkit"
+	"github.com/marsolab/servekit/idkit"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 )
 
-const defaultStreamAuthenticationRecheck = time.Second
+const (
+	defaultStreamAuthenticationRecheck = time.Second
+	maxAuthenticationAuditFieldBytes   = 256
+	authenticationAuditTenantID        = "unknown"
+	authenticationAuditActorID         = "unauthenticated"
+	authenticationAuditResourceID      = "authentication"
+	authenticationFailureAction        = "authentication.failure"
+	authenticationFailureOutcome       = "failure"
+	authenticationReasonMetadata       = "invalid_authorization_metadata"
+	authenticationReasonUnavailable    = "authentication_unavailable"
+	authenticationReasonInvalidToken   = "invalid_access_token"
+	authenticationReasonExpiredToken   = "access_token_expired"
+)
 
 var (
 	errTokenExpired       = errors.New("agent access token expired")
@@ -297,6 +314,7 @@ func resolveAuthToken(ctx context.Context, method string, protectLegacy bool) (a
 
 type unaryAuthConfig struct {
 	protectLegacy bool
+	auditor       securityaudit.Auditor
 }
 
 // UnaryAuthOption configures unary authentication compatibility.
@@ -306,6 +324,12 @@ type UnaryAuthOption func(*unaryAuthConfig)
 // enabled. When disabled, only a truly absent credential becomes legacy-v1.
 func WithUnaryLegacyProtection(enabled bool) UnaryAuthOption {
 	return func(config *unaryAuthConfig) { config.protectLegacy = enabled }
+}
+
+// WithUnaryAuthenticationAuditor records metadata-only authentication
+// failures without changing the fail-closed response when persistence fails.
+func WithUnaryAuthenticationAuditor(auditor securityaudit.Auditor) UnaryAuthOption {
+	return func(config *unaryAuthConfig) { config.auditor = auditor }
 }
 
 // UnaryAuth injects a verified principal for every protected unary route.
@@ -327,6 +351,8 @@ func UnaryAuth(a Authenticator, public map[string]struct{}, options ...UnaryAuth
 
 		resolution, err := resolveAuthToken(ctx, info.FullMethod, config.protectLegacy)
 		if err != nil {
+			auditAuthenticationFailure(ctx, config.auditor, authenticationReasonMetadata)
+
 			return nil, err
 		}
 
@@ -335,11 +361,15 @@ func UnaryAuth(a Authenticator, public map[string]struct{}, options ...UnaryAuth
 		}
 
 		if a == nil {
+			auditAuthenticationFailure(ctx, config.auditor, authenticationReasonUnavailable)
+
 			return nil, status.Error(codes.Unauthenticated, "access token authentication is unavailable")
 		}
 
 		p, err := a.Authenticate(ctx, resolution.token)
 		if err != nil {
+			auditAuthenticationFailure(ctx, config.auditor, authenticationReasonInvalidToken)
+
 			return nil, status.Error(codes.Unauthenticated, "invalid access token")
 		}
 
@@ -357,6 +387,7 @@ func (s *principalStream) Context() context.Context { return s.ctx }
 type streamAuthConfig struct {
 	recheckInterval time.Duration
 	protectLegacy   bool
+	auditor         securityaudit.Auditor
 }
 
 // StreamAuthOption configures stream authentication monitoring.
@@ -375,6 +406,12 @@ func WithStreamAuthenticationRecheck(interval time.Duration) StreamAuthOption {
 // schema.v1 streaming methods when enabled.
 func WithStreamLegacyProtection(enabled bool) StreamAuthOption {
 	return func(config *streamAuthConfig) { config.protectLegacy = enabled }
+}
+
+// WithStreamAuthenticationAuditor records metadata-only authentication
+// failures without changing the fail-closed response when persistence fails.
+func WithStreamAuthenticationAuditor(auditor securityaudit.Auditor) StreamAuthOption {
+	return func(config *streamAuthConfig) { config.auditor = auditor }
 }
 
 // StreamAuth injects a verified principal and ends a stream no later than the
@@ -404,6 +441,8 @@ func StreamAuth(
 
 		resolution, err := resolveAuthToken(stream.Context(), info.FullMethod, config.protectLegacy)
 		if err != nil {
+			auditAuthenticationFailure(stream.Context(), config.auditor, authenticationReasonMetadata)
+
 			return err
 		}
 
@@ -414,11 +453,15 @@ func StreamAuth(
 		}
 
 		if a == nil {
+			auditAuthenticationFailure(stream.Context(), config.auditor, authenticationReasonUnavailable)
+
 			return status.Error(codes.Unauthenticated, "access token authentication is unavailable")
 		}
 
 		p, err := a.Authenticate(stream.Context(), resolution.token)
 		if err != nil {
+			auditAuthenticationFailure(stream.Context(), config.auditor, authenticationReasonInvalidToken)
+
 			return status.Error(codes.Unauthenticated, "invalid access token")
 		}
 
@@ -443,15 +486,65 @@ func StreamAuth(
 
 		switch {
 		case errors.Is(context.Cause(ctx), errTokenExpired):
+			auditAuthenticationFailure(stream.Context(), config.auditor, authenticationReasonExpiredToken)
+
 			return tokenExpiredStatus()
 
 		case errors.Is(context.Cause(ctx), errStreamAuthInvalid):
+			auditAuthenticationFailure(stream.Context(), config.auditor, authenticationReasonInvalidToken)
+
 			return status.Error(codes.Unauthenticated, "invalid access token")
 
 		default:
 			return handlerErr
 		}
 	}
+}
+
+func auditAuthenticationFailure(ctx context.Context, auditor securityaudit.Auditor, reason string) {
+	if auditor == nil {
+		return
+	}
+
+	event := securityaudit.Event{
+		EventID: idkit.ULID(), TenantID: authenticationAuditTenantID,
+		ActorKind: principal.KindSystem, ActorID: authenticationAuditActorID,
+		Action: authenticationFailureAction, ResourceType: string(authz.ResourceTenant),
+		ResourceID: authenticationAuditResourceID, Outcome: authenticationFailureOutcome,
+		Reason: reason, RequestID: incomingAuthenticationMetadata(ctx, "x-request-id"),
+		SourceIP: authenticationSourceIP(ctx), UserAgent: incomingAuthenticationMetadata(ctx, "user-agent"),
+		Metadata: map[string]string{"status": "denied"}, CreatedAt: time.Now().UTC(),
+	}
+
+	if err := auditor.Append(ctx, event); err != nil {
+		metrics.RecordSecurityAuditFailure()
+	}
+}
+
+func incomingAuthenticationMetadata(ctx context.Context, key string) string {
+	values := metadata.ValueFromIncomingContext(ctx, key)
+	if len(values) == 0 {
+		return ""
+	}
+
+	return boundedAuthenticationAuditField(values[0])
+}
+
+func authenticationSourceIP(ctx context.Context) string {
+	connection, ok := peer.FromContext(ctx)
+	if !ok || connection.Addr == nil {
+		return ""
+	}
+
+	return boundedAuthenticationAuditField(connection.Addr.String())
+}
+
+func boundedAuthenticationAuditField(value string) string {
+	if len(value) <= maxAuthenticationAuditFieldBytes {
+		return value
+	}
+
+	return value[:maxAuthenticationAuditFieldBytes]
 }
 
 func monitorStreamAuthentication(

@@ -6,14 +6,17 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/heartwilltell/hc"
 	"github.com/marsolab/plainq/internal/metrics"
+	"github.com/marsolab/plainq/internal/server/authz"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/service/queue"
 	"github.com/marsolab/plainq/internal/server/service/queue/litestore/sqlcgen"
+	"github.com/marsolab/plainq/internal/server/service/quota"
 	"github.com/marsolab/plainq/internal/server/service/telemetry"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/marsolab/plainq/internal/shared/pqlite"
@@ -202,7 +205,7 @@ func New(db pqlite.DB, options ...Option) (*Storage, error) {
 	return &s, nil
 }
 
-//nolint:cyclop,gocyclo // Queue creation keeps validation, SQL, cache, and cleanup failures distinct.
+//nolint:cyclop,funlen,gocyclo // Queue creation keeps validation, SQL, cache, and cleanup failures distinct.
 func (s *Storage) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest) (_ *v1.CreateQueueResponse, sErr error) {
 	scope := queue.ScopeFromContext(ctx)
 	// Under replication the leader has already chosen the id and the creation
@@ -244,6 +247,26 @@ func (s *Storage) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest)
 		}
 	}()
 
+	var policyTransaction sqliteQueuePolicyTx
+
+	if mutation, ok := sqliteQueueMutation(ctx); ok {
+		replayed, found, err := replaySQLiteQueuePolicy[v1.CreateQueueResponse](
+			ctx, tx, mutation, authz.ActionQueueCreate, mutation.TenantID,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		if found {
+			return &replayed, nil
+		}
+
+		policyTransaction, err = reserveSQLiteQueuePolicy(ctx, tx, mutation)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	if err := s.queries.WithTx(tx).InsertQueueProperties(ctx, sqlcgen.InsertQueuePropertiesParams{
 		QueueID:                  queueID,
 		QueueName:                input.QueueName,
@@ -275,6 +298,20 @@ func (s *Storage) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest)
 		}
 	}
 
+	output := v1.CreateQueueResponse{QueueId: queueID}
+
+	if mutation, ok := sqliteQueueMutation(ctx); ok {
+		if err := quota.ApplyActualUsageTx(ctx, policyTransaction, quota.UsageDelta{
+			TenantID: mutation.TenantID, QueueCountAdded: 1,
+		}); err != nil {
+			return nil, fmt.Errorf("apply created queue usage: %w", err)
+		}
+
+		if err := finishSQLiteQueuePolicy(ctx, policyTransaction, mutation, &output); err != nil {
+			return nil, err
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
@@ -301,10 +338,6 @@ func (s *Storage) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest)
 	}
 
 	s.cache.put(props)
-
-	output := v1.CreateQueueResponse{
-		QueueId: queueID,
-	}
 
 	s.observer.QueueCreated()
 
@@ -408,6 +441,7 @@ func (s *Storage) DescribeQueue(ctx context.Context, input *v1.DescribeQueueRequ
 	return output, nil
 }
 
+//nolint:cyclop,gocyclo // Purge keeps dynamic-table, exact count, audit, replay, and rollback paths together.
 func (s *Storage) PurgeQueue(ctx context.Context, input *v1.PurgeQueueRequest) (_ *v1.PurgeQueueResponse, sErr error) {
 	if err := s.ensureQueueAccessible(ctx, input.GetQueueId()); err != nil {
 		return nil, err
@@ -423,6 +457,26 @@ func (s *Storage) PurgeQueue(ctx context.Context, input *v1.PurgeQueueRequest) (
 			sErr = errors.Join(sErr, fmt.Errorf("rollback transaction: %w", err))
 		}
 	}()
+
+	var policyTransaction sqliteQueuePolicyTx
+
+	if mutation, ok := sqliteQueueMutation(ctx); ok {
+		replayed, found, err := replaySQLiteQueuePolicy[v1.PurgeQueueResponse](
+			ctx, tx, mutation, authz.ActionQueuePurge, input.GetQueueId(),
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		if found {
+			return &replayed, nil
+		}
+
+		policyTransaction, err = reserveSQLiteQueuePolicy(ctx, tx, mutation)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	queueID := input.GetQueueId()
 
@@ -445,16 +499,22 @@ func (s *Storage) PurgeQueue(ctx context.Context, input *v1.PurgeQueueRequest) (
 		return nil, fmt.Errorf("purge queue %q count (%d) != rows affected (%d) by purge", queueID, count, rows)
 	}
 
+	output := v1.PurgeQueueResponse{MessagesCount: count}
+	if mutation, ok := sqliteQueueMutation(ctx); ok {
+		mutation.Audit.Metadata = map[string]string{auditMetadataMessageCount: strconv.FormatUint(count, 10)}
+		if err := finishSQLiteQueuePolicy(ctx, policyTransaction, mutation, &output); err != nil {
+			return nil, err
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
 
-	output := v1.PurgeQueueResponse{MessagesCount: count}
-
 	return &output, nil
 }
 
-//nolint:cyclop // Delete keeps force, non-empty, rollback, cache, and telemetry outcomes distinct.
+//nolint:cyclop,funlen,gocyclo // Delete keeps force, non-empty, rollback, cache, and telemetry outcomes distinct.
 func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest) (_ *v1.DeleteQueueResponse, sErr error) {
 	queueID := input.GetQueueId()
 
@@ -477,6 +537,26 @@ func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest)
 		}
 	}()
 
+	var policyTransaction sqliteQueuePolicyTx
+
+	if mutation, ok := sqliteQueueMutation(ctx); ok {
+		replayed, found, err := replaySQLiteQueuePolicy[v1.DeleteQueueResponse](
+			ctx, tx, mutation, authz.ActionQueueDelete, queueID,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		if found {
+			return &replayed, nil
+		}
+
+		policyTransaction, err = reserveSQLiteQueuePolicy(ctx, tx, mutation)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	var messageCount uint64
 	if err := tx.QueryRowContext(ctx, queryCountMessages(queueID)).Scan(&messageCount); err != nil {
 		return nil, fmt.Errorf("count queue %q messages: %w", queueID, err)
@@ -484,6 +564,14 @@ func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest)
 
 	if err := canDeleteQueue(input.GetForce(), messageCount); err != nil {
 		return nil, err
+	}
+
+	var removedSubscriptions uint64
+	if _, ok := sqliteQueueMutation(ctx); ok {
+		removedSubscriptions, err = deleteSQLiteSubscriptionsForQueue(ctx, tx, scope.TenantID, queueID)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	rows, queueHeaderErr := s.queries.WithTx(tx).DeleteQueueProperties(ctx, sqlcgen.DeleteQueuePropertiesParams{
@@ -501,13 +589,27 @@ func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest)
 		return nil, fmt.Errorf("drop queue %q table: %w", queueID, err)
 	}
 
+	output := v1.DeleteQueueResponse{}
+
+	if mutation, ok := sqliteQueueMutation(ctx); ok {
+		if err := quota.ApplyActualUsageTx(ctx, policyTransaction, quota.UsageDelta{
+			TenantID: mutation.TenantID, QueueCountRemoved: 1,
+			SubscriptionCountRemoved: removedSubscriptions,
+		}); err != nil {
+			return nil, fmt.Errorf("apply deleted queue usage: %w", err)
+		}
+
+		mutation.Audit.Metadata = map[string]string{auditMetadataMessageCount: strconv.FormatUint(messageCount, 10)}
+		if err := finishSQLiteQueuePolicy(ctx, policyTransaction, mutation, &output); err != nil {
+			return nil, err
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
 
 	s.cache.delete(props.ID, props.Name)
-
-	output := v1.DeleteQueueResponse{}
 
 	s.observer.QueueDeleted(queueID)
 
@@ -522,6 +624,7 @@ func canDeleteQueue(force bool, messageCount uint64) error {
 	return nil
 }
 
+//nolint:cyclop,gocyclo // Validation, dynamic-table insertion, audit, replay, rollback, and metrics share this mutation path.
 func (s *Storage) Send(ctx context.Context, input *v1.SendRequest) (_ *v1.SendResponse, sErr error) {
 	queueID := input.GetQueueId()
 	if err := s.ensureQueueAccessible(ctx, queueID); err != nil {
@@ -534,7 +637,7 @@ func (s *Storage) Send(ctx context.Context, input *v1.SendRequest) (_ *v1.SendRe
 		MessageIds: make([]string, 0, len(messages)),
 	}
 
-	if len(messages) == 0 {
+	if _, policyMutation := sqliteQueueMutation(ctx); len(messages) == 0 && !policyMutation {
 		return &output, nil
 	}
 
@@ -561,6 +664,26 @@ func (s *Storage) Send(ctx context.Context, input *v1.SendRequest) (_ *v1.SendRe
 		}
 	}()
 
+	var policyTransaction sqliteQueuePolicyTx
+
+	if mutation, ok := sqliteQueueMutation(ctx); ok {
+		replayed, found, err := replaySQLiteQueuePolicy[v1.SendResponse](
+			ctx, tx, mutation, authz.ActionQueueSend, queueID,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		if found {
+			return &replayed, nil
+		}
+
+		policyTransaction, err = reserveSQLiteQueuePolicy(ctx, tx, mutation)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	// One multi-row INSERT per chunk instead of one INSERT per message. Chunks
 	// stay under SQLite's bind-parameter limit; the surrounding transaction
 	// keeps the whole Send all-or-nothing.
@@ -574,6 +697,13 @@ func (s *Storage) Send(ctx context.Context, input *v1.SendRequest) (_ *v1.SendRe
 		}
 	}
 
+	if mutation, ok := sqliteQueueMutation(ctx); ok {
+		mutation.Audit.Metadata = map[string]string{auditMetadataMessageCount: strconv.Itoa(len(output.MessageIds))}
+		if err := finishSQLiteQueuePolicy(ctx, policyTransaction, mutation, &output); err != nil {
+			return nil, err
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
@@ -581,6 +711,7 @@ func (s *Storage) Send(ctx context.Context, input *v1.SendRequest) (_ *v1.SendRe
 	return &output, nil
 }
 
+//nolint:cyclop // Lease, visibility, replay, audit, rollback, and redelivery metrics remain one mutation path.
 func (s *Storage) Receive(ctx context.Context, input *v1.ReceiveRequest) (_ *v1.ReceiveResponse, sErr error) {
 	queueID := input.GetQueueId()
 	if err := s.ensureQueueAccessible(ctx, queueID); err != nil {
@@ -603,6 +734,26 @@ func (s *Storage) Receive(ctx context.Context, input *v1.ReceiveRequest) (_ *v1.
 		}
 	}()
 
+	var policyTransaction sqliteQueuePolicyTx
+
+	if mutation, ok := sqliteQueueMutation(ctx); ok {
+		replayed, found, err := replaySQLiteQueuePolicy[v1.ReceiveResponse](
+			ctx, tx, mutation, authz.ActionQueueReceive, queueID,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		if found {
+			return &replayed, nil
+		}
+
+		policyTransaction, err = reserveSQLiteQueuePolicy(ctx, tx, mutation)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	// Both the visibility predicate and the new deadline are anchored to one
 	// instant, taken from the command under replication. Reading the clock
 	// twice — or letting SQLite read its own — would have two replicas claim
@@ -621,6 +772,14 @@ func (s *Storage) Receive(ctx context.Context, input *v1.ReceiveRequest) (_ *v1.
 		return nil, err
 	}
 
+	output := v1.ReceiveResponse{Messages: messages}
+	if mutation, ok := sqliteQueueMutation(ctx); ok {
+		mutation.Audit.Metadata = map[string]string{"batch_size": strconv.Itoa(len(messages))}
+		if err := finishSQLiteQueuePolicy(ctx, policyTransaction, mutation, &output); err != nil {
+			return nil, err
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit transaction: %w", err)
 	}
@@ -630,7 +789,7 @@ func (s *Storage) Receive(ctx context.Context, input *v1.ReceiveRequest) (_ *v1.
 	// separates "consumers are busy" from "consumers are failing".
 	s.observer.Redelivered(queueID, redelivered)
 
-	return &v1.ReceiveResponse{Messages: messages}, nil
+	return &output, nil
 }
 
 // sendInsertColumnsFor reports how many parameters each message binds.
@@ -765,6 +924,10 @@ func (s *Storage) Delete(ctx context.Context, input *v1.DeleteRequest) (*v1.Dele
 	output := v1.DeleteResponse{
 		Successful: make([]string, 0, len(ids)),
 		Failed:     make([]*v1.DeleteFailure, 0),
+	}
+
+	if mutation, ok := sqliteQueueMutation(ctx); ok {
+		return s.deleteWithPolicy(ctx, input, mutation)
 	}
 
 	if len(ids) == 0 {

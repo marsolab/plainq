@@ -61,6 +61,10 @@ func (s *Storage) CreateTopic(ctx context.Context, input *queue.CreateTopicReque
 	id := queue.NextID(ctx, idkit.XID)
 
 	scope := queue.ScopeFromContext(ctx)
+	if mutation, ok := sqliteQueueMutation(ctx); ok {
+		return s.createTopicWithPolicy(ctx, id, input, scope, mutation)
+	}
+
 	if _, err := s.db.ExecContext(
 		ctx,
 		`INSERT INTO topic_properties (
@@ -81,6 +85,9 @@ func (s *Storage) CreateTopic(ctx context.Context, input *queue.CreateTopicReque
 
 func (s *Storage) DeleteTopic(ctx context.Context, topicID string) error {
 	scope := queue.ScopeFromContext(ctx)
+	if mutation, ok := sqliteQueueMutation(ctx); ok {
+		return s.deleteTopicWithPolicy(ctx, topicID, scope, mutation)
+	}
 
 	res, err := s.db.ExecContext(ctx, `
 		DELETE FROM topic_properties
@@ -114,6 +121,10 @@ func (s *Storage) Subscribe(ctx context.Context, topicID string, input *queue.Su
 	}
 
 	id := queue.NextID(ctx, idkit.XID)
+	if mutation, ok := sqliteQueueMutation(ctx); ok {
+		return s.subscribeWithPolicy(ctx, id, topicID, input, mutation)
+	}
+
 	if _, err := s.db.ExecContext(
 		ctx,
 		`INSERT INTO topic_subscriptions (subscription_id, topic_id, queue_id, created_at) VALUES (?, ?, ?, ?);`,
@@ -130,6 +141,9 @@ func (s *Storage) Subscribe(ctx context.Context, topicID string, input *queue.Su
 
 func (s *Storage) Unsubscribe(ctx context.Context, topicID, subscriptionID string) error {
 	scope := queue.ScopeFromContext(ctx)
+	if mutation, ok := sqliteQueueMutation(ctx); ok {
+		return s.unsubscribeWithPolicy(ctx, topicID, subscriptionID, scope, mutation)
+	}
 
 	res, err := s.db.ExecContext(
 		ctx,
@@ -167,6 +181,10 @@ func (s *Storage) Unsubscribe(ctx context.Context, topicID, subscriptionID strin
 func (s *Storage) Publish(ctx context.Context, topicID string, input *queue.PublishRequest) (*queue.PublishResponse, error) {
 	if len(input.Messages) == 0 {
 		return nil, fmt.Errorf("%w: messages are empty", errkit.ErrInvalidArgument)
+	}
+
+	if mutation, ok := sqliteQueueMutation(ctx); ok {
+		return s.publishWithPolicy(ctx, topicID, input, mutation)
 	}
 
 	if err := s.ensureTopicExists(ctx, topicID); err != nil {

@@ -203,3 +203,71 @@ sql:
         emit_methods_with_db_argument: false
         emit_pointers_for_null_types: false
         omit_unused_structs: true
+
+  - engine: "sqlite"
+    queries: "internal/server/service/securityaudit/litestore/queries"
+    schema: "internal/server/sqlc/sqlite/schema.sql"
+    gen:
+      go:
+        package: "sqlcgen"
+        out: "internal/server/service/securityaudit/litestore/sqlcgen"
+        sql_package: "database/sql"
+        emit_json_tags: false
+        emit_interface: false
+        emit_prepared_queries: false
+        emit_exact_table_names: false
+        emit_empty_slices: true
+        emit_methods_with_db_argument: false
+        emit_pointers_for_null_types: false
+        omit_unused_structs: true
+
+  - engine: "postgresql"
+    queries: "internal/server/service/securityaudit/pgstore/queries"
+    schema: "internal/server/sqlc/postgres/schema.sql"
+    gen:
+      go:
+        package: "sqlcgen"
+        out: "internal/server/service/securityaudit/pgstore/sqlcgen"
+        sql_package: "pgx/v5"
+        emit_json_tags: false
+        emit_interface: false
+        emit_prepared_queries: false
+        emit_exact_table_names: false
+        emit_empty_slices: true
+        emit_methods_with_db_argument: false
+        emit_pointers_for_null_types: false
+        omit_unused_structs: true
+
+  - engine: "sqlite"
+    queries: "internal/server/service/quota/litestore/queries"
+    schema: "internal/server/sqlc/sqlite/schema.sql"
+    gen:
+      go:
+        package: "sqlcgen"
+        out: "internal/server/service/quota/litestore/sqlcgen"
+        sql_package: "database/sql"
+        emit_json_tags: false
+        emit_interface: false
+        emit_prepared_queries: false
+        emit_exact_table_names: false
+        emit_empty_slices: true
+        emit_methods_with_db_argument: false
+        emit_pointers_for_null_types: false
+        omit_unused_structs: true
+
+  - engine: "postgresql"
+    queries: "internal/server/service/quota/pgstore/queries"
+    schema: "internal/server/sqlc/postgres/schema.sql"
+    gen:
+      go:
+        package: "sqlcgen"
+        out: "internal/server/service/quota/pgstore/sqlcgen"
+        sql_package: "pgx/v5"
+        emit_json_tags: false
+        emit_interface: false
+        emit_prepared_queries: false
+        emit_exact_table_names: false
+        emit_empty_slices: true
+        emit_methods_with_db_argument: false
+        emit_pointers_for_null_types: false
+        omit_unused_structs: true
