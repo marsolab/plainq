@@ -56,6 +56,23 @@ func (q *Queries) CreateOAuthProvider(ctx context.Context, arg CreateOAuthProvid
 	return err
 }
 
+const deleteHumanSecurityPrincipal = `-- name: DeleteHumanSecurityPrincipal :exec
+DELETE FROM security_principals
+WHERE tenant_id = ?1
+  AND principal_kind = 'human'
+  AND principal_id = ?2
+`
+
+type DeleteHumanSecurityPrincipalParams struct {
+	TenantID    string
+	PrincipalID string
+}
+
+func (q *Queries) DeleteHumanSecurityPrincipal(ctx context.Context, arg DeleteHumanSecurityPrincipalParams) error {
+	_, err := q.db.ExecContext(ctx, deleteHumanSecurityPrincipal, arg.TenantID, arg.PrincipalID)
+	return err
+}
+
 const deleteOAuthProvider = `-- name: DeleteOAuthProvider :execrows
 DELETE FROM oauth_providers
 WHERE provider_id = ?
@@ -114,6 +131,29 @@ func (q *Queries) GetOAuthProviderByName(ctx context.Context, arg GetOAuthProvid
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
+	return i, err
+}
+
+const getOAuthUserIdentity = `-- name: GetOAuthUserIdentity :one
+SELECT user_id, org_id
+FROM users
+WHERE oauth_provider = ? AND oauth_sub = ?
+`
+
+type GetOAuthUserIdentityParams struct {
+	OauthProvider sql.NullString
+	OauthSub      sql.NullString
+}
+
+type GetOAuthUserIdentityRow struct {
+	UserID string
+	OrgID  string
+}
+
+func (q *Queries) GetOAuthUserIdentity(ctx context.Context, arg GetOAuthUserIdentityParams) (GetOAuthUserIdentityRow, error) {
+	row := q.db.QueryRowContext(ctx, getOAuthUserIdentity, arg.OauthProvider, arg.OauthSub)
+	var i GetOAuthUserIdentityRow
+	err := row.Scan(&i.UserID, &i.OrgID)
 	return i, err
 }
 
@@ -224,24 +264,6 @@ func (q *Queries) GetUserByOAuthSub(ctx context.Context, arg GetUserByOAuthSubPa
 		&i.UpdatedAt,
 	)
 	return i, err
-}
-
-const getUserIDByOAuthSub = `-- name: GetUserIDByOAuthSub :one
-SELECT user_id
-FROM users
-WHERE oauth_provider = ? AND oauth_sub = ?
-`
-
-type GetUserIDByOAuthSubParams struct {
-	OauthProvider sql.NullString
-	OauthSub      sql.NullString
-}
-
-func (q *Queries) GetUserIDByOAuthSub(ctx context.Context, arg GetUserIDByOAuthSubParams) (string, error) {
-	row := q.db.QueryRowContext(ctx, getUserIDByOAuthSub, arg.OauthProvider, arg.OauthSub)
-	var user_id string
-	err := row.Scan(&user_id)
-	return user_id, err
 }
 
 const getUserOrgID = `-- name: GetUserOrgID :one
@@ -559,11 +581,15 @@ func (q *Queries) UpdateOAuthProvider(ctx context.Context, arg UpdateOAuthProvid
 
 const updateOAuthUser = `-- name: UpdateOAuthUser :exec
 UPDATE users
-SET email        = ?,
-    org_id       = ?,
-    last_sync_at = ?,
-    updated_at   = ?
-WHERE user_id = ?
+SET email        = ?1,
+    auth_version = auth_version + CASE
+        WHEN org_id <> CAST(?2 AS text) THEN 1
+        ELSE 0
+    END,
+    org_id       = ?2,
+    last_sync_at = ?3,
+    updated_at   = ?4
+WHERE user_id = ?5
 `
 
 type UpdateOAuthUserParams struct {

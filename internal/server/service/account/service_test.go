@@ -24,6 +24,8 @@ type authStorageStub struct {
 	denied       string
 	deletedToken string
 	deletedHash  []byte
+	revoked      DeniedToken
+	revokeCalls  int
 }
 
 func (s *authStorageStub) CreateAccount(_ context.Context, got Account) error {
@@ -68,6 +70,13 @@ func (s *authStorageStub) DeleteRefreshTokenByTokenID(_ context.Context, id stri
 
 func (s *authStorageStub) DeleteRefreshToken(_ context.Context, tokenHash []byte) error {
 	s.deletedHash = append([]byte(nil), tokenHash...)
+
+	return nil
+}
+
+func (s *authStorageStub) RevokeSession(_ context.Context, token DeniedToken) error {
+	s.revokeCalls++
+	s.revoked = token
 
 	return nil
 }
@@ -268,8 +277,28 @@ func TestSignoutStoresOnlyTokenID(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("signout status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
 	}
-	if storage.denied != "session-jti" {
-		t.Fatalf("denylist key = %q, want token id", storage.denied)
+	if storage.revoked.TokenID != "session-jti" {
+		t.Fatalf("denylist key = %q, want token id", storage.revoked.TokenID)
+	}
+}
+
+func TestSignoutUsesOneAtomicSessionRevocation(t *testing.T) {
+	storage := &authStorageStub{}
+	svc := newAuthService(config.Config{}, storage)
+	req := httptest.NewRequest(http.MethodPost, "/signout", nil)
+	req.Header.Set("Authorization", "Bearer clear-access-token")
+	rec := httptest.NewRecorder()
+
+	svc.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("signout status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if storage.revokeCalls != 1 || storage.revoked.TokenID != "session-jti" {
+		t.Fatalf("atomic revocation = %d calls with %#v", storage.revokeCalls, storage.revoked)
+	}
+	if storage.denied != "" || storage.deletedToken != "" {
+		t.Fatalf("signout used split writes: denied %q deleted refresh %q", storage.denied, storage.deletedToken)
 	}
 }
 

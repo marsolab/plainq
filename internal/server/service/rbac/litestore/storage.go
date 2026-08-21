@@ -163,13 +163,48 @@ func (s *Storage) UpdateRole(ctx context.Context, role rbac.Role) error {
 }
 
 func (s *Storage) DeleteRole(ctx context.Context, roleID string) error {
-	rows, err := s.queries.DeleteRole(ctx, roleID)
-	if err != nil {
-		return fmt.Errorf("delete role: %w", err)
-	}
+	err := pqlite.WithWriteTx(ctx, s.db, pqlite.DefaultWriteRetry(), func(tx pqlite.Tx) error {
+		sqlTx, ok := tx.(*sql.Tx)
+		if !ok {
+			return errors.New("role deletion transaction is not database/sql")
+		}
 
-	if rows == 0 {
-		return fmt.Errorf("role not found: %w", pqerr.ErrNotFound)
+		q := s.queries.WithTx(sqlTx)
+
+		rows, err := q.DeleteRole(ctx, roleID)
+		if err != nil {
+			return fmt.Errorf("delete role row: %w", err)
+		}
+
+		if rows == 1 {
+			return nil
+		}
+
+		if _, err := q.GetRoleByID(ctx, roleID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("role not found: %w", pqerr.ErrNotFound)
+			}
+
+			return fmt.Errorf("check role after conditional delete: %w", err)
+		}
+
+		holders, err := q.CountUsersWithRole(ctx, roleID)
+		if err != nil {
+			return fmt.Errorf("count role holders after conditional delete: %w", err)
+		}
+
+		if holders > 0 {
+			return rbac.ErrRoleInUse
+		}
+
+		return errors.New("conditional role delete affected no rows")
+	})
+	if err != nil {
+		if errors.Is(err, rbac.ErrRoleInUse) {
+			return rbac.ErrRoleInUse
+		}
+
+		return fmt.Errorf("delete role: %w", err)
 	}
 
 	return nil

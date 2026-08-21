@@ -169,13 +169,15 @@ func (s *Storage) SyncOAuthUser(ctx context.Context, user oauth.OAuthUser, provi
 
 	q := s.queries.WithTx(tx)
 
-	userID, lookupErr := q.GetUserIDByOAuthSub(ctx, sqlcgen.GetUserIDByOAuthSubParams{
+	identity, lookupErr := q.GetOAuthUserIdentity(ctx, sqlcgen.GetOAuthUserIdentityParams{
 		OauthProvider: toPgText(providerName),
 		OauthSub:      toPgText(user.Subject),
 	})
 
 	nowTime := time.Now()
 	now := toTimestamptz(nowTime)
+
+	var userID string
 
 	switch {
 	case errors.Is(lookupErr, pgx.ErrNoRows):
@@ -198,6 +200,7 @@ func (s *Storage) SyncOAuthUser(ctx context.Context, user oauth.OAuthUser, provi
 		return fmt.Errorf("check existing oauth user: %w", lookupErr)
 
 	default:
+		userID = identity.UserID
 		if err := q.UpdateOAuthUser(ctx, sqlcgen.UpdateOAuthUserParams{
 			Email:      user.Email,
 			OrgID:      orgID,
@@ -206,6 +209,14 @@ func (s *Storage) SyncOAuthUser(ctx context.Context, user oauth.OAuthUser, provi
 			UserID:     userID,
 		}); err != nil {
 			return fmt.Errorf("update oauth user: %w", err)
+		}
+
+		if identity.OrgID != orgID {
+			if err := q.DeleteHumanSecurityPrincipal(ctx, sqlcgen.DeleteHumanSecurityPrincipalParams{
+				TenantID: identity.OrgID, PrincipalID: userID,
+			}); err != nil {
+				return fmt.Errorf("delete previous oauth human security principal: %w", err)
+			}
 		}
 	}
 

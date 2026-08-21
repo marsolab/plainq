@@ -201,22 +201,11 @@ func (s *Service) signOutHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.storage.DenyAccessToken(r.Context(), DeniedToken{
+	if err := s.storage.RevokeSession(r.Context(), DeniedToken{
 		TokenID: parsed.ID, AID: claims.accountID, ExpiresAt: parsed.ExpiresAt.UTC(),
 		CreatedAt: time.Now(), Reason: "logout",
 	}); err != nil {
-		httpkit.ErrorHTTP(w, r, fmt.Errorf("deny access token: %w", err))
-
-		return
-	}
-
-	// Denying the access token is not enough: the session's refresh token would
-	// still mint a new one via the public /refresh endpoint. Access and refresh
-	// tokens of a session share a token id (jti), so drop the refresh row by
-	// that id to revoke the whole session. Best effort — an unparseable token
-	// has no id to match, and the access token is already denied regardless.
-	if err := s.storage.DeleteRefreshTokenByTokenID(r.Context(), parsed.ID); err != nil {
-		httpkit.ErrorHTTP(w, r, fmt.Errorf("delete refresh token: %w", err))
+		httpkit.ErrorHTTP(w, r, fmt.Errorf("revoke session: %w", err))
 
 		return
 	}

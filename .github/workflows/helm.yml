@@ -27,14 +27,21 @@ jobs:
         uses: azure/setup-helm@v4
 
       - name: helm lint
-        run: helm lint deploy/helm/plainq --set auth.jwtSecret=ci-test-secret
+        run: >-
+          helm lint deploy/helm/plainq
+          --set auth.jwtSecret=ci-test-jwt-secret-at-least-32-bytes
+          --set auth.bootstrap.secret=ci-test-bootstrap-secret-32-bytes
 
       - name: helm template (sqlite)
-        run: helm template plainq deploy/helm/plainq --set auth.jwtSecret=ci-test-secret > /dev/null
+        run: >-
+          helm template plainq deploy/helm/plainq
+          --set auth.jwtSecret=ci-test-jwt-secret-at-least-32-bytes
+          --set auth.bootstrap.secret=ci-test-bootstrap-secret-32-bytes > /dev/null
 
       - name: helm template (postgres)
         run: |
           helm template plainq deploy/helm/plainq \
             --set storage.driver=postgres \
             --set storage.postgres.dsn=postgres://user:pass@db:5432/plainq \
-            --set auth.jwtSecret=ci-test-secret > /dev/null
+            --set auth.jwtSecret=ci-test-jwt-secret-at-least-32-bytes \
+            --set auth.bootstrap.secret=ci-test-bootstrap-secret-32-bytes > /dev/null

@@ -61,4 +61,43 @@ func TestSyncOAuthUserUpsertsHumanSecurityPrincipal(t *testing.T) {
 			tenantID, kind, status, rolesJSON, authVersion, principal.LegacyTenantID,
 		)
 	}
+
+	const tenantB = "01J0000000000000000000000B"
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO organizations (org_id, org_code, org_name)
+		VALUES (?, 'tenant-b', 'Tenant B')`, tenantB); err != nil {
+		t.Fatalf("create reassignment tenant: %v", err)
+	}
+	if err := store.SyncOAuthUser(ctx, user, "example", tenantB); err != nil {
+		t.Fatalf("reassign OAuth user: %v", err)
+	}
+
+	var currentTenant string
+	var currentVersion, oldProjectionCount, newProjectionCount int64
+	if err := db.QueryRowContext(ctx, `
+		SELECT org_id, auth_version FROM users WHERE user_id = ?`, synced.UserID,
+	).Scan(&currentTenant, &currentVersion); err != nil {
+		t.Fatalf("get reassigned OAuth user: %v", err)
+	}
+	if err := db.QueryRowContext(ctx, `
+		SELECT count(*) FROM security_principals
+		WHERE tenant_id = ? AND principal_kind = 'human' AND principal_id = ?`,
+		principal.LegacyTenantID, synced.UserID,
+	).Scan(&oldProjectionCount); err != nil {
+		t.Fatalf("count old human projection: %v", err)
+	}
+	if err := db.QueryRowContext(ctx, `
+		SELECT count(*) FROM security_principals
+		WHERE tenant_id = ? AND principal_kind = 'human' AND principal_id = ? AND auth_version = 2`,
+		tenantB, synced.UserID,
+	).Scan(&newProjectionCount); err != nil {
+		t.Fatalf("count new human projection: %v", err)
+	}
+
+	if currentTenant != tenantB || currentVersion != 2 || oldProjectionCount != 0 || newProjectionCount != 1 {
+		t.Fatalf(
+			"reassignment = tenant %q version %d old projections %d new projections %d, want %q/2/0/1",
+			currentTenant, currentVersion, oldProjectionCount, newProjectionCount, tenantB,
+		)
+	}
 }

@@ -30,8 +30,8 @@ SELECT user_id, email, org_id, oauth_provider, oauth_sub, is_oauth_user, last_sy
 FROM users
 WHERE oauth_provider = $1 AND oauth_sub = $2;
 
--- name: GetUserIDByOAuthSub :one
-SELECT user_id
+-- name: GetOAuthUserIdentity :one
+SELECT user_id, org_id
 FROM users
 WHERE oauth_provider = $1 AND oauth_sub = $2;
 
@@ -41,11 +41,21 @@ VALUES ($1, $2, '', TRUE, $3, $4, $5, TRUE, $6, $7, $8);
 
 -- name: UpdateOAuthUser :exec
 UPDATE users
-SET email        = $1,
-    org_id       = $2,
-    last_sync_at = $3,
-    updated_at   = $4
-WHERE user_id = $5;
+SET email        = @email,
+    auth_version = auth_version + CASE
+        WHEN org_id <> @org_id::text THEN 1
+        ELSE 0
+    END,
+    org_id       = @org_id,
+    last_sync_at = @last_sync_at,
+    updated_at   = @updated_at
+WHERE user_id = @user_id;
+
+-- name: DeleteHumanSecurityPrincipal :exec
+DELETE FROM security_principals
+WHERE tenant_id = @tenant_id
+  AND principal_kind = 'human'
+  AND principal_id = @principal_id;
 
 -- name: UpsertHumanSecurityPrincipal :exec
 INSERT INTO security_principals (

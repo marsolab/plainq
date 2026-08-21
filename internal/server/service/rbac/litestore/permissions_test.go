@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/marsolab/plainq/internal/server/service/rbac"
@@ -42,7 +44,9 @@ create table if not exists user_roles
     user_id    text      not null,
     role_id    text      not null,
     created_at timestamp not null default current_timestamp,
-    primary key (user_id, role_id)
+    primary key (user_id, role_id),
+    foreign key (user_id) references users (user_id) on delete cascade,
+    foreign key (role_id) references roles (role_id) on delete cascade
 );
 
 create table if not exists queue_properties
@@ -136,6 +140,87 @@ func TestRoleMutationBumpsAuthVersionAndProjectsPrincipal(t *testing.T) {
 
 	td.Require(t).CmpNoError(storage.RemoveRoleFromUser(ctx, "user-1", "role-consumer"), "remove role")
 	assertHumanSecurityProjection(t, storage.db, 4, `[]`)
+}
+
+func TestDeleteRoleRefusesAssignedRoleWithoutCascadingPrincipalState(t *testing.T) {
+	storage, ctx := newPermissionsStorage(t)
+
+	td.Require(t).CmpNoError(storage.AssignRoleToUser(ctx, "user-1", "role-consumer"), "assign role")
+	err := storage.DeleteRole(ctx, "role-consumer")
+	if !errors.Is(err, rbac.ErrRoleInUse) {
+		t.Fatalf("DeleteRole() error = %v, want ErrRoleInUse", err)
+	}
+
+	var assignments, roles int
+	td.Require(t).CmpNoError(
+		storage.db.QueryRowContext(ctx, `SELECT count(*) FROM user_roles WHERE user_id = 'user-1' AND role_id = 'role-consumer'`).Scan(&assignments),
+		"count preserved assignment",
+	)
+	td.Require(t).CmpNoError(
+		storage.db.QueryRowContext(ctx, `SELECT count(*) FROM roles WHERE role_id = 'role-consumer'`).Scan(&roles),
+		"count preserved role",
+	)
+	if assignments != 1 || roles != 1 {
+		t.Fatalf("in-use delete state = assignments %d roles %d, want 1/1", assignments, roles)
+	}
+	assertHumanSecurityProjection(t, storage.db, 2, `["consumer"]`)
+}
+
+func TestAssignRoleAndDeleteRoleSerializeWithoutCascadingAssignment(t *testing.T) {
+	storage, ctx := newPermissionsStorage(t)
+
+	for index := range 20 {
+		roleID := fmt.Sprintf("role-race-%02d", index)
+		td.Require(t).CmpNoError(storage.CreateRole(ctx, rbac.Role{
+			RoleID: roleID, RoleName: roleID,
+		}), "create raced role")
+
+		start := make(chan struct{})
+		var assignErr, deleteErr error
+		var group sync.WaitGroup
+		group.Add(2)
+		go func() {
+			defer group.Done()
+			<-start
+			assignErr = storage.AssignRoleToUser(ctx, "user-2", roleID)
+		}()
+		go func() {
+			defer group.Done()
+			<-start
+			deleteErr = storage.DeleteRole(ctx, roleID)
+		}()
+		close(start)
+		group.Wait()
+
+		var roleCount, assignmentCount int
+		td.Require(t).CmpNoError(
+			storage.db.QueryRowContext(ctx, `SELECT count(*) FROM roles WHERE role_id = ?`, roleID).Scan(&roleCount),
+			"count raced role",
+		)
+		td.Require(t).CmpNoError(
+			storage.db.QueryRowContext(ctx, `SELECT count(*) FROM user_roles WHERE user_id = 'user-2' AND role_id = ?`, roleID).Scan(&assignmentCount),
+			"count raced assignment",
+		)
+
+		switch {
+		case assignErr == nil:
+			if !errors.Is(deleteErr, rbac.ErrRoleInUse) || roleCount != 1 || assignmentCount != 1 {
+				t.Fatalf(
+					"assignment winner %s = assign %v delete %v role %d assignment %d",
+					roleID, assignErr, deleteErr, roleCount, assignmentCount,
+				)
+			}
+		case deleteErr == nil:
+			if roleCount != 0 || assignmentCount != 0 {
+				t.Fatalf(
+					"deletion winner %s = assign %v delete %v role %d assignment %d",
+					roleID, assignErr, deleteErr, roleCount, assignmentCount,
+				)
+			}
+		default:
+			t.Fatalf("race %s had no winner: assign %v delete %v", roleID, assignErr, deleteErr)
+		}
+	}
 }
 
 func assertHumanSecurityProjection(t *testing.T, db interface {

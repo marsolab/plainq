@@ -56,4 +56,10 @@ docker:
 
 .PHONY: helm-lint
 helm-lint:
-	helm lint deploy/helm/plainq --set auth.jwtSecret=ci-test-secret
+	helm lint deploy/helm/plainq \
+		--set auth.jwtSecret=ci-test-jwt-secret-at-least-32-bytes \
+		--set auth.bootstrap.secret=ci-test-bootstrap-secret-32-bytes
+
+.PHONY: helm-test
+helm-test:
+	deploy/helm/plainq/tests/bootstrap-secret.sh

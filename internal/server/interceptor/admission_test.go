@@ -7,6 +7,7 @@ import (
 
 	"github.com/marsolab/plainq/internal/server/principal"
 	agentv1 "github.com/marsolab/plainq/internal/server/schema/agent/v1"
+	legacyv1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -79,6 +80,52 @@ func TestPrincipalAdmissionBoundsEntries(t *testing.T) {
 	limiter.mu.Unlock()
 	if got != 2 {
 		t.Fatalf("entry count = %d, want 2", got)
+	}
+}
+
+func TestAuthenticatedLegacyCallsAreLimitedButCompatibilityFallbackIsExcluded(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 8, 21, 0, 0, 0, 0, time.UTC)
+	limiter, err := newPrincipalAdmissionLimiter(PrincipalAdmissionConfig{
+		RequestsPerSecond: 1,
+		Burst:             1,
+		MaxEntries:        4,
+		Clock:             func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("new limiter: %v", err)
+	}
+
+	interceptor := UnaryAdmission(limiter)
+	info := &grpc.UnaryServerInfo{FullMethod: legacyv1.PlainQService_ListQueues_FullMethodName}
+	handlerCalls := 0
+	handler := func(context.Context, any) (any, error) {
+		handlerCalls++
+
+		return "ok", nil
+	}
+
+	human := principal.Principal{Kind: principal.KindHuman, ID: "human-a", TenantID: "tenant-a"}
+	humanContext := principal.With(context.Background(), human)
+	if _, err := interceptor(humanContext, nil, info, handler); err != nil {
+		t.Fatalf("first authenticated legacy call: %v", err)
+	}
+	if _, err := interceptor(humanContext, nil, info, handler); status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("second authenticated legacy call code = %v, want %v", status.Code(err), codes.ResourceExhausted)
+	}
+
+	fallback := principal.Principal{
+		Kind: principal.KindSystem, ID: principal.LegacyPrincipalID, TenantID: principal.LegacyTenantID,
+	}
+	fallbackContext := principal.With(context.Background(), fallback)
+	for range 2 {
+		if _, err := interceptor(fallbackContext, nil, info, handler); err != nil {
+			t.Fatalf("unprotected compatibility fallback: %v", err)
+		}
+	}
+	if handlerCalls != 3 {
+		t.Fatalf("handler calls = %d, want 3", handlerCalls)
 	}
 }
 

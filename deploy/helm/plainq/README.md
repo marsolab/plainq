@@ -10,15 +10,18 @@ read-only-root-filesystem, distroless workload.
 ## TL;DR
 
 ```sh
-# SQLite (default) — single replica, persistent volume, inline dev JWT secret
+# SQLite (default) — single replica, persistent volume, inline development secrets
 helm install plainq ./deploy/helm/plainq \
-  --set auth.jwtSecret=$(openssl rand -hex 32)
+  --set auth.jwtSecret=$(openssl rand -hex 32) \
+  --set auth.bootstrap.secret=$(openssl rand -hex 32)
 
-# Production — JWT secret from a pre-created Kubernetes Secret
-kubectl create secret generic plainq-jwt --from-literal=jwt-secret=$(openssl rand -hex 32)
+# Production — authentication secrets from a pre-created Kubernetes Secret
+kubectl create secret generic plainq-auth \
+  --from-literal=jwt-secret=$(openssl rand -hex 32) \
+  --from-literal=bootstrap-secret=$(openssl rand -hex 32)
 helm install plainq ./deploy/helm/plainq \
-  --set auth.existingSecret=plainq-jwt \
-  --set auth.secretKey=jwt-secret
+  --set auth.existingSecret=plainq-auth \
+  --set auth.bootstrap.existingSecret=plainq-auth
 ```
 
 ## Ports
@@ -28,16 +31,17 @@ helm install plainq ./deploy/helm/plainq \
 | 8080 | grpc | Primary gRPC queue API |
 | 8081 | http | Houston admin UI, REST auth API, `/health`, `/metrics` |
 
-## How the JWT secret is wired
+## How authentication secrets are wired
 
 PlainQ reads configuration only from CLI flags, not environment variables. To
 keep the secret out of the rendered manifest, the chart:
 
-1. Stores the secret in a Kubernetes `Secret` (generated, or one you supply via
-   `auth.existingSecret`).
-2. Exposes it to the container as the env var `PLAINQ_JWT_SECRET` via
+1. Stores each credential in a Kubernetes `Secret` (generated for development,
+   or supplied through `auth.existingSecret` and `auth.bootstrap.existingSecret`).
+2. Exposes them as `PLAINQ_JWT_SECRET` and `PLAINQ_BOOTSTRAP_SECRET` via
    `secretKeyRef`.
-3. Passes the flag as `-auth.jwt.secret=$(PLAINQ_JWT_SECRET)`.
+3. Passes only variable references in `-auth.jwt.secret` and
+   `-auth.bootstrap.secret` arguments.
 
 Kubernetes itself expands `$(VAR)` references in container `args` (a native
 kubelet feature, independent of any shell), so this works on the distroless image
@@ -60,7 +64,8 @@ appears in the rendered YAML. The Postgres DSN is wired the same way via
 helm install plainq ./deploy/helm/plainq \
   --set storage.driver=sqlite \
   --set storage.sqlite.persistence.size=20Gi \
-  --set auth.existingSecret=plainq-jwt
+  --set auth.existingSecret=plainq-auth \
+  --set auth.bootstrap.existingSecret=plainq-auth
 ```
 
 The PVC is created by `templates/pvc.yaml` and mounted at `dir(storage.sqlite.path)`
@@ -75,7 +80,8 @@ helm install plainq ./deploy/helm/plainq \
   --set storage.postgres.existingSecret=plainq-pg \
   --set storage.postgres.secretKey=dsn \
   --set replicaCount=3 \
-  --set auth.existingSecret=plainq-jwt
+  --set auth.existingSecret=plainq-auth \
+  --set auth.bootstrap.existingSecret=plainq-auth
 ```
 
 ## Ingress and gRPC
@@ -127,6 +133,9 @@ separate Ingress/host if you need different backend protocols.
 | `auth.existingSecret` | `""` | Secret holding the JWT secret. |
 | `auth.jwtSecret` | `""` | Inline JWT secret (dev only). |
 | `auth.secretKey` | `jwt-secret` | Key within the JWT secret. |
+| `auth.bootstrap.existingSecret` | `""` | Secret holding the remote bootstrap secret. |
+| `auth.bootstrap.secret` | `""` | Inline bootstrap secret (development only). |
+| `auth.bootstrap.secretKey` | `bootstrap-secret` | Key within the bootstrap Secret. |
 | `config.logLevel` | `info` | Log level. |
 | `extraArgs` | `[]` | Extra `serve` flags. |
 | `resources` | requests 100m/128Mi | Container resources. |
@@ -147,6 +156,7 @@ automatically:
 ```shell
 helm install plainq deploy/helm/plainq \
   --set auth.jwtSecret="$(openssl rand -hex 32)" \
+  --set auth.bootstrap.secret="$(openssl rand -hex 32)" \
   --set metrics.serviceMonitor.enabled=true \
   --set metrics.serviceMonitor.labels.release=kube-prometheus-stack
 ```
@@ -167,7 +177,8 @@ helm install plainq ./deploy/helm/plainq \
   --set cluster.replicas=3 \
   --set cluster.gossipSecret="$(openssl rand -base64 32)" \
   --set cluster.secret="$(openssl rand -hex 32)" \
-  --set auth.jwtSecret="$(openssl rand -hex 32)"
+  --set auth.jwtSecret="$(openssl rand -hex 32)" \
+  --set auth.bootstrap.secret="$(openssl rand -hex 32)"
 ```
 
 | Value                       | Default      | Purpose                                                     |
@@ -223,8 +234,9 @@ already shared, so run several stateless nodes against one Postgres instead.
   releases.
 - Changing the JWT or Postgres secret content rolls the pods automatically (a
   `checksum/secret` pod annotation tracks the rendered Secret).
-- When `auth.enabled=true`, rendering fails if neither `auth.jwtSecret` nor
-  `auth.existingSecret` is set — this is intentional to prevent insecure deploys.
+- When `auth.enabled=true`, rendering requires both a JWT signing credential and
+  a remote bootstrap credential. Prefer the corresponding `existingSecret`
+  values in production so neither plaintext credential enters Helm values.
 - Switching `storage.driver` between `sqlite` and `postgres` swaps the workload
   kind (StatefulSet <-> Deployment); Helm replaces the old object on upgrade. Data
   is not migrated between backends.
@@ -233,7 +245,7 @@ already shared, so run several stateless nodes against one Postgres instead.
 
 ```sh
 helm lint ./deploy/helm/plainq
-helm template ./deploy/helm/plainq --set auth.jwtSecret=dev
-helm template ./deploy/helm/plainq --set storage.driver=postgres --set storage.postgres.dsn=postgres://x --set auth.jwtSecret=dev
-helm template ./deploy/helm/plainq --set auth.jwtSecret=dev --set cluster.enabled=true --set cluster.gossipSecret="$(openssl rand -base64 32)" --set cluster.secret=dev
+helm template ./deploy/helm/plainq --set auth.existingSecret=plainq-auth --set auth.bootstrap.existingSecret=plainq-auth
+helm template ./deploy/helm/plainq --set storage.driver=postgres --set storage.postgres.existingSecret=plainq-pg --set auth.existingSecret=plainq-auth --set auth.bootstrap.existingSecret=plainq-auth
+helm template ./deploy/helm/plainq --set auth.existingSecret=plainq-auth --set auth.bootstrap.existingSecret=plainq-auth --set cluster.enabled=true --set cluster.existingSecret=plainq-cluster
 ```

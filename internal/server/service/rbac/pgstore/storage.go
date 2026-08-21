@@ -165,17 +165,54 @@ func (s *Storage) UpdateRole(ctx context.Context, role rbac.Role) (sErr error) {
 	return nil
 }
 
-func (s *Storage) DeleteRole(ctx context.Context, roleID string) error {
-	rows, err := s.queries.DeleteRole(ctx, roleID)
+func (s *Storage) DeleteRole(ctx context.Context, roleID string) (sErr error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
-		return fmt.Errorf("delete role: %w", err)
+		return fmt.Errorf("delete role: begin transaction: %w", err)
+	}
+	defer func() {
+		if err := tx.Rollback(ctx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+			sErr = errors.Join(sErr, fmt.Errorf("delete role: rollback transaction: %w", err))
+		}
+	}()
+
+	q := s.queries.WithTx(tx)
+
+	rows, err := q.DeleteRole(ctx, roleID)
+	if err != nil {
+		return fmt.Errorf("delete role: delete row: %w", err)
 	}
 
 	if rows == 0 {
-		return fmt.Errorf("role not found: %w", pqerr.ErrNotFound)
+		return classifyRoleDeleteMiss(ctx, q, roleID)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("delete role: commit transaction: %w", err)
 	}
 
 	return nil
+}
+
+func classifyRoleDeleteMiss(ctx context.Context, q *sqlcgen.Queries, roleID string) error {
+	if _, err := q.GetRoleByID(ctx, roleID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("role not found: %w", pqerr.ErrNotFound)
+		}
+
+		return fmt.Errorf("delete role: check role after conditional delete: %w", err)
+	}
+
+	holders, err := q.CountUsersWithRole(ctx, roleID)
+	if err != nil {
+		return fmt.Errorf("delete role: count holders after conditional delete: %w", err)
+	}
+
+	if holders > 0 {
+		return rbac.ErrRoleInUse
+	}
+
+	return errors.New("delete role: conditional delete affected no rows")
 }
 
 func (s *Storage) AssignRoleToUser(ctx context.Context, userID, roleID string) (sErr error) {

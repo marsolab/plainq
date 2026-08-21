@@ -4,6 +4,7 @@ package grpccodec
 import (
 	"fmt"
 
+	"google.golang.org/grpc/encoding"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -18,6 +19,12 @@ type vtMessage interface {
 // standard protobuf implementation for ecosystem services such as gRPC
 // health and google.rpc status details.
 type Codec struct{}
+
+// Register before any server or client can read gRPC's process-wide codec
+// registry. Registering from service constructors races with concurrent RPCs.
+func init() { //nolint:gochecknoinits // gRPC codecs are registered through a process-wide init-time registry.
+	encoding.RegisterCodec(Codec{})
+}
 
 // Marshal implements encoding.Codec.
 func (Codec) Marshal(value any) ([]byte, error) {

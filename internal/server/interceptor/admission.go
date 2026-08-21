@@ -78,7 +78,7 @@ func UnaryAdmission(limiter *PrincipalAdmissionLimiter) grpc.UnaryServerIntercep
 		info *grpc.UnaryServerInfo,
 		handler grpc.UnaryHandler,
 	) (any, error) {
-		if methodAllowsAnonymous(info.FullMethod, PublicMethods()) || isLegacyCompatibilityMethod(info.FullMethod) {
+		if bypassPrincipalAdmission(ctx, info.FullMethod) {
 			return handler(ctx, req)
 		}
 
@@ -103,7 +103,7 @@ func StreamAdmission(limiter *PrincipalAdmissionLimiter) grpc.StreamServerInterc
 		info *grpc.StreamServerInfo,
 		handler grpc.StreamHandler,
 	) error {
-		if methodAllowsAnonymous(info.FullMethod, PublicMethods()) || isLegacyCompatibilityMethod(info.FullMethod) {
+		if bypassPrincipalAdmission(stream.Context(), info.FullMethod) {
 			return handler(srv, stream)
 		}
 
@@ -118,6 +118,21 @@ func StreamAdmission(limiter *PrincipalAdmissionLimiter) grpc.StreamServerInterc
 
 		return handler(srv, stream)
 	}
+}
+
+func bypassPrincipalAdmission(ctx context.Context, method string) bool {
+	if methodAllowsAnonymous(method, PublicMethods()) {
+		return true
+	}
+
+	if !isLegacyCompatibilityMethod(method) {
+		return false
+	}
+
+	p, ok := principal.From(ctx)
+
+	return ok && p.Kind == principal.KindSystem && p.ID == principal.LegacyPrincipalID &&
+		p.TenantID == principal.LegacyTenantID
 }
 
 func (l *PrincipalAdmissionLimiter) allow(p principal.Principal) bool {

@@ -227,8 +227,8 @@ cluster:
   extraArgs: []
 
 auth:
-  # -- Enable authentication. When true a JWT secret MUST be provided via
-  # auth.jwtSecret or auth.existingSecret, otherwise rendering fails.
+  # -- Enable authentication. When true both the JWT signing secret and the
+  # remote-safe bootstrap secret must be provided, otherwise rendering fails.
   enabled: true
   # -- HMAC secret used to sign access/refresh tokens. Stored in a generated
   # Secret. Leave empty and use existingSecret in production.
@@ -238,6 +238,18 @@ auth:
   existingSecret: ""
   # -- Key within the Secret (generated or existing) that holds the JWT secret.
   secretKey: jwt-secret
+
+  # Remote-safe secret that serializes creation of the first human account.
+  # Keep this separate from the JWT signing key so either credential can be
+  # rotated independently.
+  bootstrap:
+    # -- Bootstrap secret stored in a chart-managed Secret (development only).
+    secret: ""
+    # -- Name of an existing Secret holding the bootstrap secret. Recommended
+    # for production and upgrades; the value never appears in rendered YAML.
+    existingSecret: ""
+    # -- Key within the generated or existing Secret.
+    secretKey: bootstrap-secret
 
 # Agent-first gRPC APIs. Disabled by default for compatibility; when enabled,
 # authentication and TLS are mandatory unless the explicit loopback-only

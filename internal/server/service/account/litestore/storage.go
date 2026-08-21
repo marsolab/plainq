@@ -223,6 +223,34 @@ func (s *Storage) DenyAccessToken(ctx context.Context, token account.DeniedToken
 	return nil
 }
 
+func (s *Storage) RevokeSession(ctx context.Context, token account.DeniedToken) error {
+	err := pqlite.WithWriteTx(ctx, s.db, pqlite.DefaultWriteRetry(), func(tx pqlite.Tx) error {
+		sqlTx, ok := tx.(*sql.Tx)
+		if !ok {
+			return errors.New("session revocation transaction is not database/sql")
+		}
+
+		q := s.queries.WithTx(sqlTx)
+		if err := q.DenyAccessToken(ctx, sqlcgen.DenyAccessTokenParams{
+			TokenID: token.TokenID, Aid: token.AID, ExpiresAtNs: token.ExpiresAt.UnixNano(),
+			CreatedAtNs: token.CreatedAt.UnixNano(), Reason: token.Reason,
+		}); err != nil {
+			return fmt.Errorf("deny access token: %w", err)
+		}
+
+		if err := q.DeleteRefreshTokenByTokenID(ctx, token.TokenID); err != nil {
+			return fmt.Errorf("delete refresh token by id: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("revoke session: %w", err)
+	}
+
+	return nil
+}
+
 func (s *Storage) IsAccessTokenDenied(ctx context.Context, tokenID string) (bool, error) {
 	count, err := s.queries.IsAccessTokenDenied(ctx, sqlcgen.IsAccessTokenDeniedParams{
 		TokenID:     tokenID,

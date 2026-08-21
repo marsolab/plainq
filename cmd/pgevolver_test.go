@@ -17,12 +17,16 @@ import (
 	"github.com/marsolab/plainq/internal/server/mutations"
 	"github.com/marsolab/plainq/internal/server/principal"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
+	"github.com/marsolab/plainq/internal/server/service/account"
+	accountpg "github.com/marsolab/plainq/internal/server/service/account/pgstore"
 	"github.com/marsolab/plainq/internal/server/service/oauth"
 	oauthpg "github.com/marsolab/plainq/internal/server/service/oauth/pgstore"
 	"github.com/marsolab/plainq/internal/server/service/onboarding"
 	onboardpg "github.com/marsolab/plainq/internal/server/service/onboarding/pgstore"
 	queueservice "github.com/marsolab/plainq/internal/server/service/queue"
 	queuepg "github.com/marsolab/plainq/internal/server/service/queue/pgstore"
+	"github.com/marsolab/plainq/internal/server/service/rbac"
+	rbacpg "github.com/marsolab/plainq/internal/server/service/rbac/pgstore"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
 )
 
@@ -534,6 +538,196 @@ func TestPostgresOAuthSyncUpsertsHumanSecurityPrincipal(t *testing.T) {
 			"security principal = (%q, %q, %q, %s, %d), want (%q, human, active, [], 1)",
 			tenantID, kind, status, rolesJSON, authVersion, principal.LegacyTenantID,
 		)
+	}
+
+	const tenantB = "01J0000000000000000000000B"
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO organizations (org_id, org_code, org_name)
+		VALUES ($1, 'tenant-b', 'Tenant B')`, tenantB); err != nil {
+		t.Fatalf("create reassignment tenant: %v", err)
+	}
+	if err := storage.SyncOAuthUser(ctx, user, "example", tenantB); err != nil {
+		t.Fatalf("reassign OAuth user: %v", err)
+	}
+
+	var currentTenant string
+	var currentVersion, oldProjectionCount, newProjectionCount int64
+	if err := pool.QueryRow(ctx, `SELECT org_id, auth_version FROM users WHERE user_id = $1`, synced.UserID).
+		Scan(&currentTenant, &currentVersion); err != nil {
+		t.Fatalf("get reassigned OAuth user: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM security_principals
+		WHERE tenant_id = $1 AND principal_kind = 'human' AND principal_id = $2`,
+		principal.LegacyTenantID, synced.UserID,
+	).Scan(&oldProjectionCount); err != nil {
+		t.Fatalf("count old human projection: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*) FROM security_principals
+		WHERE tenant_id = $1 AND principal_kind = 'human' AND principal_id = $2 AND auth_version = 2`,
+		tenantB, synced.UserID,
+	).Scan(&newProjectionCount); err != nil {
+		t.Fatalf("count new human projection: %v", err)
+	}
+	if currentTenant != tenantB || currentVersion != 2 || oldProjectionCount != 0 || newProjectionCount != 1 {
+		t.Fatalf(
+			"reassignment = tenant %q version %d old projections %d new projections %d, want %q/2/0/1",
+			currentTenant, currentVersion, oldProjectionCount, newProjectionCount, tenantB,
+		)
+	}
+}
+
+func TestPostgresRevokeSessionRollsBackDenylistWhenRefreshDeleteFails(t *testing.T) {
+	pool := openPGEvolverTestPool(t)
+	if err := newPgEvolver(pool, mutations.PostgresStorageMutations()).MutateSchema(); err != nil {
+		t.Fatalf("apply storage schema: %v", err)
+	}
+	storage, err := accountpg.NewStorage(pool, nil)
+	if err != nil {
+		t.Fatalf("create account storage: %v", err)
+	}
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	user := account.Account{
+		ID: "logout-user", Email: "logout@example.test", Password: "password-hash", Verified: true,
+		CreatedAt: now, UpdatedAt: now, TenantID: principal.LegacyTenantID,
+		AuthVersion: 1, Status: account.AccountStatusActive,
+	}
+	if err := storage.CreateAccount(ctx, user); err != nil {
+		t.Fatalf("create logout account: %v", err)
+	}
+	refresh := account.RefreshToken{
+		ID: "logout-jti", AID: user.ID, TokenHash: make([]byte, 32),
+		CreatedAt: now, ExpiresAt: now.Add(time.Hour), LastUsedAt: now,
+	}
+	if err := storage.CreateRefreshToken(ctx, refresh); err != nil {
+		t.Fatalf("create refresh token: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		CREATE FUNCTION reject_refresh_delete() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			RAISE EXCEPTION 'injected refresh delete failure';
+		END
+		$$;
+		CREATE TRIGGER reject_refresh_delete
+		BEFORE DELETE ON refresh_tokens
+		FOR EACH ROW EXECUTE FUNCTION reject_refresh_delete()`); err != nil {
+		t.Fatalf("install refresh deletion failure: %v", err)
+	}
+
+	err = storage.RevokeSession(ctx, account.DeniedToken{
+		TokenID: refresh.ID, AID: user.ID, ExpiresAt: refresh.ExpiresAt,
+		CreatedAt: now, Reason: "logout",
+	})
+	if err == nil {
+		t.Fatal("RevokeSession() unexpectedly succeeded")
+	}
+
+	var denied, remaining int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM denylist WHERE token_id = $1`, refresh.ID).Scan(&denied); err != nil {
+		t.Fatalf("count denied access token: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM refresh_tokens WHERE id = $1`, refresh.ID).Scan(&remaining); err != nil {
+		t.Fatalf("count refresh token: %v", err)
+	}
+	if denied != 0 || remaining != 1 {
+		t.Fatalf("partial revocation state = denied %d refresh %d, want 0/1", denied, remaining)
+	}
+}
+
+func TestPostgresRoleDeleteRefusesAssignmentsAndDoesNotCascadeRaces(t *testing.T) {
+	pool := openPGEvolverTestPool(t)
+	if err := newPgEvolver(pool, mutations.PostgresStorageMutations()).MutateSchema(); err != nil {
+		t.Fatalf("apply storage schema: %v", err)
+	}
+	accounts, err := accountpg.NewStorage(pool, nil)
+	if err != nil {
+		t.Fatalf("create account storage: %v", err)
+	}
+	roles, err := rbacpg.NewStorage(pool, nil)
+	if err != nil {
+		t.Fatalf("create RBAC storage: %v", err)
+	}
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	for _, id := range []string{"role-user-1", "role-user-2"} {
+		if err := accounts.CreateAccount(ctx, account.Account{
+			ID: id, Email: id + "@example.test", Password: "password-hash", Verified: true,
+			CreatedAt: now, UpdatedAt: now, TenantID: principal.LegacyTenantID,
+			AuthVersion: 1, Status: account.AccountStatusActive,
+		}); err != nil {
+			t.Fatalf("create role account %s: %v", id, err)
+		}
+	}
+
+	if err := roles.CreateRole(ctx, rbac.Role{RoleID: "role-in-use", RoleName: "role-in-use"}); err != nil {
+		t.Fatalf("create in-use role: %v", err)
+	}
+	if err := roles.AssignRoleToUser(ctx, "role-user-1", "role-in-use"); err != nil {
+		t.Fatalf("assign in-use role: %v", err)
+	}
+	if err := roles.DeleteRole(ctx, "role-in-use"); !errors.Is(err, rbac.ErrRoleInUse) {
+		t.Fatalf("DeleteRole() error = %v, want ErrRoleInUse", err)
+	}
+	var roleCount, assignmentCount int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM roles WHERE role_id = 'role-in-use'`).Scan(&roleCount); err != nil {
+		t.Fatalf("count preserved role: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM user_roles WHERE role_id = 'role-in-use'`).Scan(&assignmentCount); err != nil {
+		t.Fatalf("count preserved assignment: %v", err)
+	}
+	if roleCount != 1 || assignmentCount != 1 {
+		t.Fatalf("in-use delete state = role %d assignment %d, want 1/1", roleCount, assignmentCount)
+	}
+
+	for index := range 10 {
+		roleID := fmt.Sprintf("role-race-%02d", index)
+		if err := roles.CreateRole(ctx, rbac.Role{RoleID: roleID, RoleName: roleID}); err != nil {
+			t.Fatalf("create raced role: %v", err)
+		}
+
+		start := make(chan struct{})
+		var assignErr, deleteErr error
+		var group sync.WaitGroup
+		group.Add(2)
+		go func() {
+			defer group.Done()
+			<-start
+			assignErr = roles.AssignRoleToUser(ctx, "role-user-2", roleID)
+		}()
+		go func() {
+			defer group.Done()
+			<-start
+			deleteErr = roles.DeleteRole(ctx, roleID)
+		}()
+		close(start)
+		group.Wait()
+
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM roles WHERE role_id = $1`, roleID).Scan(&roleCount); err != nil {
+			t.Fatalf("count raced role: %v", err)
+		}
+		if err := pool.QueryRow(ctx, `SELECT count(*) FROM user_roles WHERE user_id = 'role-user-2' AND role_id = $1`, roleID).Scan(&assignmentCount); err != nil {
+			t.Fatalf("count raced assignment: %v", err)
+		}
+
+		switch {
+		case roleCount == 1 && assignmentCount == 1:
+			if assignErr != nil || deleteErr == nil {
+				t.Fatalf("assignment winner %s = assign %v delete %v", roleID, assignErr, deleteErr)
+			}
+		case roleCount == 0 && assignmentCount == 0:
+			if deleteErr != nil || assignErr == nil {
+				t.Fatalf("deletion winner %s = assign %v delete %v", roleID, assignErr, deleteErr)
+			}
+		default:
+			t.Fatalf(
+				"unsafe role race %s = assign %v delete %v role %d assignment %d",
+				roleID, assignErr, deleteErr, roleCount, assignmentCount,
+			)
+		}
 	}
 }
 

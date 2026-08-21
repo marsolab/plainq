@@ -3,7 +3,6 @@ package queue
 import (
 	"context"
 
-	"github.com/marsolab/plainq/internal/server/middleware"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/marsolab/servekit/grpckit"
@@ -13,6 +12,12 @@ import (
 )
 
 func (s *Service) ListQueues(ctx context.Context, r *v1.ListQueuesRequest) (*v1.ListQueuesResponse, error) {
+	if err := s.authorizeProtectedLegacyRPC(
+		ctx, v1.PlainQService_ListQueues_FullMethodName, legacyV1Resource{},
+	); err != nil {
+		return grpckit.ErrorGRPC[*v1.ListQueuesResponse](ctx, pqerr.AsTransport(err))
+	}
+
 	output, listErr := s.storage.ListQueues(ctx, r)
 	if listErr != nil {
 		return grpckit.ErrorGRPC[*v1.ListQueuesResponse](ctx, listErr)
@@ -26,6 +31,12 @@ func (s *Service) DescribeQueue(ctx context.Context, r *v1.DescribeQueueRequest)
 		return grpckit.ErrorGRPC[*v1.DescribeQueueResponse](ctx, err)
 	}
 
+	if err := s.authorizeProtectedLegacyRPC(ctx, v1.PlainQService_DescribeQueue_FullMethodName, legacyV1Resource{
+		queueID: r.GetQueueId(), queueName: r.GetQueueName(),
+	}); err != nil {
+		return grpckit.ErrorGRPC[*v1.DescribeQueueResponse](ctx, pqerr.AsTransport(err))
+	}
+
 	output, describeErr := s.storage.DescribeQueue(ctx, r)
 	if describeErr != nil {
 		return grpckit.ErrorGRPC[*v1.DescribeQueueResponse](ctx, pqerr.AsTransport(describeErr))
@@ -35,6 +46,12 @@ func (s *Service) DescribeQueue(ctx context.Context, r *v1.DescribeQueueRequest)
 }
 
 func (s *Service) CreateQueue(ctx context.Context, r *v1.CreateQueueRequest) (*v1.CreateQueueResponse, error) {
+	if err := s.authorizeProtectedLegacyRPC(
+		ctx, v1.PlainQService_CreateQueue_FullMethodName, legacyV1Resource{},
+	); err != nil {
+		return grpckit.ErrorGRPC[*v1.CreateQueueResponse](ctx, pqerr.AsTransport(err))
+	}
+
 	output, createErr := s.storage.CreateQueue(ctx, r)
 	if createErr != nil {
 		return grpckit.ErrorGRPC[*v1.CreateQueueResponse](ctx, createErr)
@@ -49,7 +66,9 @@ func (s *Service) DeleteQueue(ctx context.Context, r *v1.DeleteQueueRequest) (*v
 		return grpckit.ErrorGRPC[*v1.DeleteQueueResponse](ctx, err)
 	}
 
-	if err := s.requireProtectedLegacyQueuePermission(ctx, r.GetQueueId(), middleware.PermissionDelete); err != nil {
+	if err := s.authorizeProtectedLegacyRPC(ctx, v1.PlainQService_DeleteQueue_FullMethodName, legacyV1Resource{
+		queueID: r.GetQueueId(),
+	}); err != nil {
 		return grpckit.ErrorGRPC[*v1.DeleteQueueResponse](ctx, pqerr.AsTransport(err))
 	}
 
@@ -71,7 +90,9 @@ func (s *Service) PurgeQueue(ctx context.Context, r *v1.PurgeQueueRequest) (*v1.
 		return grpckit.ErrorGRPC[*v1.PurgeQueueResponse](ctx, err)
 	}
 
-	if err := s.requireProtectedLegacyQueuePermission(ctx, r.GetQueueId(), middleware.PermissionPurge); err != nil {
+	if err := s.authorizeProtectedLegacyRPC(ctx, v1.PlainQService_PurgeQueue_FullMethodName, legacyV1Resource{
+		queueID: r.GetQueueId(),
+	}); err != nil {
 		return grpckit.ErrorGRPC[*v1.PurgeQueueResponse](ctx, pqerr.AsTransport(err))
 	}
 
@@ -88,7 +109,9 @@ func (s *Service) Send(ctx context.Context, r *v1.SendRequest) (*v1.SendResponse
 		return grpckit.ErrorGRPC[*v1.SendResponse](ctx, err)
 	}
 
-	if err := s.requireProtectedLegacyQueuePermission(ctx, r.GetQueueId(), middleware.PermissionSend); err != nil {
+	if err := s.authorizeProtectedLegacyRPC(ctx, v1.PlainQService_Send_FullMethodName, legacyV1Resource{
+		queueID: r.GetQueueId(),
+	}); err != nil {
 		return grpckit.ErrorGRPC[*v1.SendResponse](ctx, pqerr.AsTransport(err))
 	}
 
@@ -105,7 +128,9 @@ func (s *Service) Receive(ctx context.Context, r *v1.ReceiveRequest) (*v1.Receiv
 		return grpckit.ErrorGRPC[*v1.ReceiveResponse](ctx, err)
 	}
 
-	if err := s.requireProtectedLegacyQueuePermission(ctx, r.GetQueueId(), middleware.PermissionReceive); err != nil {
+	if err := s.authorizeProtectedLegacyRPC(ctx, v1.PlainQService_Receive_FullMethodName, legacyV1Resource{
+		queueID: r.GetQueueId(),
+	}); err != nil {
 		return grpckit.ErrorGRPC[*v1.ReceiveResponse](ctx, pqerr.AsTransport(err))
 	}
 
@@ -122,7 +147,9 @@ func (s *Service) Delete(ctx context.Context, r *v1.DeleteRequest) (*v1.DeleteRe
 		return grpckit.ErrorGRPC[*v1.DeleteResponse](ctx, err)
 	}
 
-	if err := s.requireProtectedLegacyQueuePermission(ctx, r.GetQueueId(), middleware.PermissionDelete); err != nil {
+	if err := s.authorizeProtectedLegacyRPC(ctx, v1.PlainQService_Delete_FullMethodName, legacyV1Resource{
+		queueID: r.GetQueueId(),
+	}); err != nil {
 		return grpckit.ErrorGRPC[*v1.DeleteResponse](ctx, pqerr.AsTransport(err))
 	}
 
@@ -135,6 +162,12 @@ func (s *Service) Delete(ctx context.Context, r *v1.DeleteRequest) (*v1.DeleteRe
 }
 
 func (s *Service) ListTopics(ctx context.Context, _ *v1.ListTopicsRequest) (*v1.ListTopicsResponse, error) {
+	if err := s.authorizeProtectedLegacyRPC(
+		ctx, v1.PlainQService_ListTopics_FullMethodName, legacyV1Resource{},
+	); err != nil {
+		return grpckit.ErrorGRPC[*v1.ListTopicsResponse](ctx, pqerr.AsTransport(err))
+	}
+
 	output, err := s.storage.ListTopics(ctx)
 	if err != nil {
 		return grpckit.ErrorGRPC[*v1.ListTopicsResponse](ctx, pqerr.AsTransport(err))
@@ -153,6 +186,12 @@ func (s *Service) CreateTopic(ctx context.Context, r *v1.CreateTopicRequest) (*v
 		return grpckit.ErrorGRPC[*v1.CreateTopicResponse](ctx, pqerr.AsTransport(pqerr.ErrInvalidInput))
 	}
 
+	if err := s.authorizeProtectedLegacyRPC(
+		ctx, v1.PlainQService_CreateTopic_FullMethodName, legacyV1Resource{},
+	); err != nil {
+		return grpckit.ErrorGRPC[*v1.CreateTopicResponse](ctx, pqerr.AsTransport(err))
+	}
+
 	output, err := s.storage.CreateTopic(ctx, &CreateTopicRequest{TopicName: r.GetTopicName()})
 	if err != nil {
 		return grpckit.ErrorGRPC[*v1.CreateTopicResponse](ctx, pqerr.AsTransport(err))
@@ -164,6 +203,12 @@ func (s *Service) CreateTopic(ctx context.Context, r *v1.CreateTopicRequest) (*v
 func (s *Service) DeleteTopic(ctx context.Context, r *v1.DeleteTopicRequest) (*v1.DeleteTopicResponse, error) {
 	if r == nil {
 		return grpckit.ErrorGRPC[*v1.DeleteTopicResponse](ctx, pqerr.AsTransport(pqerr.ErrInvalidInput))
+	}
+
+	if err := s.authorizeProtectedLegacyRPC(ctx, v1.PlainQService_DeleteTopic_FullMethodName, legacyV1Resource{
+		topicID: r.GetTopicId(),
+	}); err != nil {
+		return grpckit.ErrorGRPC[*v1.DeleteTopicResponse](ctx, pqerr.AsTransport(err))
 	}
 
 	if err := s.storage.DeleteTopic(ctx, r.GetTopicId()); err != nil {
@@ -184,6 +229,12 @@ func (s *Service) Subscribe(ctx context.Context, r *v1.SubscribeRequest) (*v1.Su
 		return grpckit.ErrorGRPC[*v1.SubscribeResponse](ctx, err)
 	}
 
+	if err := s.authorizeProtectedLegacyRPC(ctx, v1.PlainQService_Subscribe_FullMethodName, legacyV1Resource{
+		topicID: r.GetTopicId(), queueID: r.GetQueueId(),
+	}); err != nil {
+		return grpckit.ErrorGRPC[*v1.SubscribeResponse](ctx, pqerr.AsTransport(err))
+	}
+
 	output, err := s.storage.Subscribe(ctx, r.GetTopicId(), &SubscribeRequest{QueueID: r.GetQueueId()})
 	if err != nil {
 		return grpckit.ErrorGRPC[*v1.SubscribeResponse](ctx, pqerr.AsTransport(err))
@@ -199,6 +250,12 @@ func (s *Service) Unsubscribe(ctx context.Context, r *v1.UnsubscribeRequest) (*v
 		return grpckit.ErrorGRPC[*v1.UnsubscribeResponse](ctx, pqerr.AsTransport(pqerr.ErrInvalidInput))
 	}
 
+	if err := s.authorizeProtectedLegacyRPC(ctx, v1.PlainQService_Unsubscribe_FullMethodName, legacyV1Resource{
+		topicID: r.GetTopicId(),
+	}); err != nil {
+		return grpckit.ErrorGRPC[*v1.UnsubscribeResponse](ctx, pqerr.AsTransport(err))
+	}
+
 	if err := s.storage.Unsubscribe(ctx, r.GetTopicId(), r.GetSubscriptionId()); err != nil {
 		return grpckit.ErrorGRPC[*v1.UnsubscribeResponse](ctx, pqerr.AsTransport(err))
 	}
@@ -211,6 +268,12 @@ func (s *Service) Unsubscribe(ctx context.Context, r *v1.UnsubscribeRequest) (*v
 func (s *Service) Publish(ctx context.Context, r *v1.PublishRequest) (*v1.PublishResponse, error) {
 	if r == nil {
 		return grpckit.ErrorGRPC[*v1.PublishResponse](ctx, pqerr.AsTransport(pqerr.ErrInvalidInput))
+	}
+
+	if err := s.authorizeProtectedLegacyRPC(ctx, v1.PlainQService_Publish_FullMethodName, legacyV1Resource{
+		topicID: r.GetTopicId(),
+	}); err != nil {
+		return grpckit.ErrorGRPC[*v1.PublishResponse](ctx, pqerr.AsTransport(err))
 	}
 
 	messages := make([]PublishMessage, 0, len(r.GetMessages()))

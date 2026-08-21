@@ -227,6 +227,36 @@ func (s *Storage) DenyAccessToken(ctx context.Context, token account.DeniedToken
 	return nil
 }
 
+func (s *Storage) RevokeSession(ctx context.Context, token account.DeniedToken) (sErr error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return fmt.Errorf("revoke session: begin transaction: %w", err)
+	}
+	defer func() {
+		if err := tx.Rollback(ctx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+			sErr = errors.Join(sErr, fmt.Errorf("revoke session: rollback transaction: %w", err))
+		}
+	}()
+
+	q := s.queries.WithTx(tx)
+	if err := q.DenyAccessToken(ctx, sqlcgen.DenyAccessTokenParams{
+		TokenID: token.TokenID, Aid: token.AID, ExpiresAtNs: token.ExpiresAt.UnixNano(),
+		CreatedAtNs: token.CreatedAt.UnixNano(), Reason: token.Reason,
+	}); err != nil {
+		return fmt.Errorf("revoke session: deny access token: %w", err)
+	}
+
+	if err := q.DeleteRefreshTokenByTokenID(ctx, token.TokenID); err != nil {
+		return fmt.Errorf("revoke session: delete refresh token by id: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("revoke session: commit transaction: %w", err)
+	}
+
+	return nil
+}
+
 func (s *Storage) IsAccessTokenDenied(ctx context.Context, tokenID string) (bool, error) {
 	count, err := s.queries.IsAccessTokenDenied(ctx, sqlcgen.IsAccessTokenDeniedParams{
 		TokenID:     tokenID,

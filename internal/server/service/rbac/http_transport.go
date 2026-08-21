@@ -178,25 +178,16 @@ func (s *Service) deleteRoleHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Deleting a role in use cascades its assignments away, silently reducing
-	// what its holders can do. Refuse and say how many accounts are affected.
-	holders, err := s.storage.CountUsersWithRole(r.Context(), roleID)
-	if err != nil {
-		httpkit.ErrorHTTP(w, r, pqerr.AsTransport(fmt.Errorf("count users with role: %w", err)))
-
-		return
-	}
-
-	if holders > 0 {
-		httpkit.ErrorHTTP(w, r, fmt.Errorf(
-			"%w: %d account(s) still hold this role — reassign them first",
-			errkit.ErrAlreadyExists, holders,
-		))
-
-		return
-	}
-
 	if err := s.storage.DeleteRole(r.Context(), roleID); err != nil {
+		if errors.Is(err, ErrRoleInUse) {
+			httpkit.ErrorHTTP(w, r, fmt.Errorf(
+				"%w: accounts still hold this role — reassign them first",
+				errkit.ErrAlreadyExists,
+			))
+
+			return
+		}
+
 		httpkit.ErrorHTTP(w, r, pqerr.AsTransport(fmt.Errorf("delete role: %w", err)))
 
 		return

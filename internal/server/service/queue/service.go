@@ -9,13 +9,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/marsolab/plainq/internal/server/config"
-	"github.com/marsolab/plainq/internal/server/grpccodec"
+	_ "github.com/marsolab/plainq/internal/server/grpccodec" // Register PlainQ's process-wide protobuf codec at init time.
 	"github.com/marsolab/plainq/internal/server/middleware"
-	"github.com/marsolab/plainq/internal/server/principal"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
-	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/encoding"
 )
 
 // Storage encapsulates interaction with queue storage.
@@ -108,8 +105,6 @@ func (s *Service) HasQueuePermission(
 
 // NewService creates a new queue service.
 func NewService(cfg *config.Config, logger *slog.Logger, storage Storage) *Service {
-	encoding.RegisterCodec(grpccodec.Codec{})
-
 	s := Service{
 		cfg:     cfg,
 		logger:  logger,
@@ -153,32 +148,6 @@ func (s *Service) requireQueuePermission(permission middleware.PermissionType) f
 	}
 
 	return middleware.RequireQueuePermission(s, permission)
-}
-
-func (s *Service) requireProtectedLegacyQueuePermission(
-	ctx context.Context,
-	queueID string,
-	permission middleware.PermissionType,
-) error {
-	if s.cfg == nil || !s.cfg.GRPCProtectLegacy {
-		return nil
-	}
-
-	p, err := principal.Require(ctx)
-	if err != nil {
-		return fmt.Errorf("%w: authenticated principal is required", pqerr.ErrUnauthenticated)
-	}
-
-	allowed, err := s.HasQueuePermission(ctx, p.ID, queueID, permission)
-	if err != nil {
-		return err
-	}
-
-	if !allowed {
-		return pqerr.ErrUnauthorized
-	}
-
-	return nil
 }
 
 func (s *Service) SetTopicMetricsRecorder(recorder TopicMetricsRecorder) {

@@ -71,6 +71,11 @@ const AdminRoleName = "admin"
 // showing "role added" for a no-op is describing a change that did not happen.
 var ErrRoleAlreadyAssigned = errors.New("role already assigned to user")
 
+// ErrRoleInUse reports that role deletion was refused because at least one
+// account still holds it. The storage checks and deletes in one transaction so
+// a concurrent assignment cannot be silently removed by an FK cascade.
+var ErrRoleInUse = errors.New("role is assigned to one or more accounts")
+
 // ErrLastRoleHolder reports that the removal was refused because it would leave
 // the role with no holders.
 var ErrLastRoleHolder = errors.New("account is the last holder of the role")

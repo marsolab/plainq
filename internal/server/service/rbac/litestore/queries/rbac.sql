@@ -24,7 +24,12 @@ WHERE role_id = ?;
 
 -- name: DeleteRole :execrows
 DELETE FROM roles
-WHERE role_id = ?;
+WHERE roles.role_id = ?
+  AND NOT EXISTS (
+      SELECT 1
+      FROM user_roles
+      WHERE user_roles.role_id = roles.role_id
+  );
 
 -- name: AssignRoleToUser :execrows
 INSERT INTO user_roles (user_id, role_id, created_at)

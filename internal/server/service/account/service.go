@@ -64,6 +64,11 @@ type Storage interface {
 	// DenyAccessToken denies access token by given token string.
 	DenyAccessToken(ctx context.Context, token DeniedToken) error
 
+	// RevokeSession atomically denies the access-token id and removes the
+	// refresh token sharing that id. Implementations must commit both changes
+	// together or leave both unchanged.
+	RevokeSession(ctx context.Context, token DeniedToken) error
+
 	// IsAccessTokenDenied reports whether the given access token has been
 	// denied (e.g. via sign-out) and is still within its denial window.
 	IsAccessTokenDenied(ctx context.Context, tokenID string) (bool, error)

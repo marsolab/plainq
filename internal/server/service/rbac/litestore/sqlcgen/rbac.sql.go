@@ -157,7 +157,12 @@ func (q *Queries) DeleteQueuePermission(ctx context.Context, arg DeleteQueuePerm
 
 const deleteRole = `-- name: DeleteRole :execrows
 DELETE FROM roles
-WHERE role_id = ?
+WHERE roles.role_id = ?
+  AND NOT EXISTS (
+      SELECT 1
+      FROM user_roles
+      WHERE user_roles.role_id = roles.role_id
+  )
 `
 
 func (q *Queries) DeleteRole(ctx context.Context, roleID string) (int64, error) {

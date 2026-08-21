@@ -1,13 +1,10 @@
 {{/*
 plainq.args builds the argument list for the "serve" subcommand from values.
 
-Note on the JWT secret: PlainQ only reads configuration from CLI flags, not env
-vars. We still source the secret value from a Kubernetes Secret (never inlined in
-the manifest) by exposing it as the env var PLAINQ_JWT_SECRET and referencing it
-in the flag with $(PLAINQ_JWT_SECRET). Kubernetes expands $(VAR) references in
-container args itself — this is a native kubelet feature, not a shell feature, so
-it works on a distroless image with no shell. The expanded plaintext secret never
-appears in the rendered manifest, only the variable reference does.
+PlainQ reads configuration from CLI flags, so authentication credentials are
+sourced from Kubernetes Secrets into environment variables and referenced from
+the flags with $(VAR). Kubelet expands these references without a shell. The
+rendered workload therefore contains only references, never plaintext values.
 */}}
 {{- define "plainq.args" -}}
 - serve
@@ -26,6 +23,7 @@ appears in the rendered manifest, only the variable reference does.
 {{- if .Values.auth.enabled }}
 - -auth.enable=true
 - -auth.jwt.secret=$(PLAINQ_JWT_SECRET)
+- -auth.bootstrap.secret=$(PLAINQ_BOOTSTRAP_SECRET)
 {{- else }}
 - -auth.enable=false
 {{- end }}
@@ -78,6 +76,11 @@ $(VAR) expansion above, plus any user-supplied env.
     secretKeyRef:
       name: {{ include "plainq.jwtSecretName" . }}
       key: {{ .Values.auth.secretKey }}
+- name: PLAINQ_BOOTSTRAP_SECRET
+  valueFrom:
+    secretKeyRef:
+      name: {{ include "plainq.bootstrapSecretName" . }}
+      key: {{ .Values.auth.bootstrap.secretKey }}
 {{- end }}
 {{- if .Values.agent.enabled }}
 - name: PLAINQ_AGENT_JWT_SECRET
