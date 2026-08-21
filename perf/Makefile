@@ -27,7 +27,7 @@ export VUS DURATION BATCH_SIZE MSG_BYTES
 .PHONY: test
 test: ## Test bounded status classification and report verdict logic
 	node k6/status_test.mjs
-	cd scripts && python3 -m unittest -v report_test.py
+	cd scripts && python3 -m unittest discover -v -p '*_test.py'
 
 .PHONY: cli
 cli: ## Build the perfctl CLI -> ./perfctl
