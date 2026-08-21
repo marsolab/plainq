@@ -35,6 +35,8 @@ jobs:
         run: make schema-local
       - name: Check schema lint exception scope
         run: ./scripts/check-schema-lint-scope.sh
+      - name: Test schema lint guard without ripgrep
+        run: ./scripts/check-schema-lint-scope_test.sh
       - name: Test schema publication head guard
         run: ./scripts/check-schema-publish-head_test.sh
       - name: Check tracked generated artifacts

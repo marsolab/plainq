@@ -23,10 +23,28 @@ expect_rejected() {
     echo "$2 unexpectedly passed the publication guard" >&2
     exit 1
   fi
-  if ! rg -q "$3" <<< "$rejection_output"; then
-    echo "$2 failed for an unexpected reason: $rejection_output" >&2
-    exit 1
-  fi
+  case "$rejection_output" in
+    *"$3"*) ;;
+    *)
+      echo "$2 failed for an unexpected reason: $rejection_output" >&2
+      exit 1
+      ;;
+  esac
+}
+
+require_file_block() {
+  file="$1"
+  shift
+  printf -v expected '%s\n' "$@"
+  expected="${expected%$'\n'}"
+  content="$(<"$file")"
+  case "$content" in
+    *"$expected"*) ;;
+    *)
+      echo "$file does not contain expected block: $expected" >&2
+      exit 1
+      ;;
+  esac
 }
 
 git -C "$writer" commit --quiet --allow-empty -m initial
@@ -77,10 +95,27 @@ git -C "$writer" push --quiet --force origin divergent:main
 expect_rejected "$reverted_sha" "non-ancestor SHA" 'not an ancestor'
 expect_rejected invalid-sha "invalid SHA" 'invalid expected git SHA'
 
-rg -U -q 'concurrency:\n      group: plainq-schema-bsr-main-publish\n      cancel-in-progress: false' "$workflow"
-rg -U -q "paths:\n      - 'schema/\\*\\*'\n      - 'internal/server/schema/\\*\\*'\n      - 'scripts/check-schema-\\*\\.sh'\n      - 'Makefile'\n      - '\\.github/workflows/schema-release\\.yaml'" "$workflow"
-rg -F -q 'schema/*|internal/server/schema/*|scripts/check-schema-*.sh|Makefile|.github/workflows/schema-release.yaml)' "$guard"
-rg -F -q -- 'git log --first-parent --diff-merges=first-parent' "$guard"
-rg -U -q -- '- uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n      - uses: bufbuild/buf-setup-action@v1' "$workflow"
-rg -U -q '\./scripts/check-schema-publish-head\.sh "\$server_git_sha" origin >/dev/null\n          buf push schema' "$workflow"
+require_file_block "$workflow" \
+  'concurrency:' \
+  '      group: plainq-schema-bsr-main-publish' \
+  '      cancel-in-progress: false'
+require_file_block "$workflow" \
+  '    paths:' \
+  "      - 'schema/**'" \
+  "      - 'internal/server/schema/**'" \
+  "      - 'scripts/check-schema-*.sh'" \
+  "      - 'Makefile'" \
+  "      - '.github/workflows/schema-release.yaml'"
+require_file_block "$guard" \
+  '      (schema/*|internal/server/schema/*|scripts/check-schema-*.sh|Makefile|.github/workflows/schema-release.yaml)'
+require_file_block "$guard" \
+  'if ! git log --first-parent --diff-merges=first-parent --no-renames --format= --name-only -z \'
+require_file_block "$workflow" \
+  '      - uses: actions/checkout@v4' \
+  '        with:' \
+  '          fetch-depth: 0' \
+  '      - uses: bufbuild/buf-setup-action@v1'
+require_file_block "$workflow" \
+  '          ./scripts/check-schema-publish-head.sh "$server_git_sha" origin >/dev/null' \
+  '          buf push schema \'
 echo "schema publication guard accepted exact, linear-unrelated, and merged-unrelated descendants; rejected relevant/reverted/divergent/invalid heads; and is immediately before buf push"

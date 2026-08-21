@@ -119,7 +119,7 @@ START_TS="$(date +%s)"
 log "Running k6: VUS=${VUS} DURATION=${DURATION} BATCH_SIZE=${BATCH_SIZE} MSG_BYTES=${MSG_BYTES} RUN_ID=${RUN_ID}"
 # Do not let a k6 threshold breach (exit 99) or other non-zero exit abort the
 # pipeline — a breach is exactly when the comparison report matters most. The
-# relative regression verdict from report.py is the real gate.
+# report applies its validity threshold before making a relative verdict.
 set +e
 dc run --rm k6
 K6_RC=$?
@@ -149,6 +149,8 @@ if command -v python3 >/dev/null 2>&1; then
   cat "${REPORT}" 2>/dev/null || true
   if [ "${REPORT_RC}" -eq 1 ]; then
     err "Regression detected — see report above."
+  elif [ "${REPORT_RC}" -eq 2 ]; then
+    err "Result inconclusive — workload success rate did not meet the validity threshold."
   fi
 else
   err "python3 not found; skipping report. Use Grafana for results."
@@ -167,6 +169,6 @@ else
   log "Stack left running. Stop it with: make -C perf down"
 fi
 
-# Preserve report.py's exit status so CI fails on a detected regression
-# (report.py exits 1 on regression) even after teardown/footer above.
+# Preserve report.py's exit status: 1 means regression and 2 means the
+# workload was invalid for a latency verdict.
 exit "${REPORT_RC}"

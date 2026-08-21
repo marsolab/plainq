@@ -13,6 +13,7 @@
 //   k6_plainq_reqs_total{variant,op}     -- request count
 //   k6_plainq_errs_total{variant,op}     -- error count
 //   k6_plainq_latency_p95{variant,op}    -- latency (one series per trend stat)
+//   k6_plainq_rpc_status_total{variant,op,code,grpc_status,reason}
 //
 // Tunables come from the environment (see docker-compose.yml / run.sh):
 //   BASELINE_ADDR, CANDIDATE_ADDR, VUS, DURATION, BATCH_SIZE, MSG_BYTES.
@@ -21,6 +22,7 @@ import grpc from 'k6/net/grpc';
 import encoding from 'k6/encoding';
 import { check } from 'k6';
 import { Counter, Trend } from 'k6/metrics';
+import { boundedCode, boundedReason, statusName } from './status.mjs';
 
 const BASELINE_ADDR = __ENV.BASELINE_ADDR || 'localhost:18080';
 const CANDIDATE_ADDR = __ENV.CANDIDATE_ADDR || 'localhost:28080';
@@ -38,6 +40,7 @@ const BODY = encoding.b64encode('x'.repeat(MSG_BYTES));
 // fully qualified.
 const reqs = new Counter('plainq_reqs');
 const errs = new Counter('plainq_errs');
+const rpcStatus = new Counter('plainq_rpc_status');
 const latency = new Trend('plainq_latency', true);
 
 const SERVICE = 'v1.PlainQService';
@@ -121,16 +124,49 @@ function isOK(res) {
   return !!res && res.status === grpc.StatusOK;
 }
 
+function responseDetail(res) {
+  if (!res) {
+    return '';
+  }
+  if (typeof res.error === 'string') {
+    return res.error;
+  }
+  if (res.error && typeof res.error.message === 'string') {
+    return res.error.message;
+  }
+  if (typeof res.message === 'string') {
+    return res.message;
+  }
+  return '';
+}
+
+function recordRPCStatus(variant, op, res) {
+  const code = res && Number.isInteger(res.status) ? res.status : grpc.StatusUnknown;
+  rpcStatus.add(1, {
+    variant,
+    op,
+    code: boundedCode(code),
+    grpc_status: statusName(code),
+    reason: boundedReason(code, responseDetail(res)),
+  });
+}
+
 // timed invokes fn, records req/err/latency under {variant, op}, and asserts OK.
 function timed(variant, op, fn) {
   const t0 = Date.now();
-  const res = fn();
+  let res;
+  try {
+    res = fn();
+  } catch (error) {
+    res = { status: grpc.StatusUnknown, error };
+  }
   const dt = Date.now() - t0;
 
   const tags = { variant, op };
 
   reqs.add(1, tags);
   latency.add(dt, tags);
+  recordRPCStatus(variant, op, res);
   if (!isOK(res)) {
     errs.add(1, tags);
   }

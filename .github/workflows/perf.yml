@@ -35,6 +35,9 @@ jobs:
           # Full history so the baseline ref + git worktree are available.
           fetch-depth: 0
 
+      - name: Test performance verdict and status instrumentation
+        run: make -C perf test
+
       - name: Resolve workload parameters
         id: cfg
         run: |

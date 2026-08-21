@@ -11,7 +11,9 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -374,15 +376,26 @@ func startSqld(t *testing.T) string {
 	}
 
 	name := fmt.Sprintf("plainq-sqld-%d-%d", os.Getpid(), time.Now().UnixNano())
-	command := exec.Command(
-		docker, "run", "--rm", "-d", "--name", name,
-		"-p", "127.0.0.1::8080", "-e", "SQLD_NODE=primary", sqldImage,
-	)
+	cidFile := filepath.Join(t.TempDir(), "sqld.cid")
+	command := exec.Command(docker, sqldContainerRunArgs(name, cidFile)...)
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("start sqld container: %v: %s", err, output)
 	}
-	containerID := strings.TrimSpace(string(output))
+
+	// Docker writes image-pull progress to the same combined stream that used
+	// to be parsed as the container ID. A cidfile remains unambiguous on a
+	// cold runner, even when the image has to be downloaded first.
+	cidOutput, err := os.ReadFile(cidFile)
+	if err != nil {
+		_, _ = exec.Command(docker, "rm", "-f", name).CombinedOutput()
+		t.Fatalf("read sqld container id: %v; docker output: %s", err, output)
+	}
+	containerID := strings.TrimSpace(string(cidOutput))
+	if containerID == "" {
+		_, _ = exec.Command(docker, "rm", "-f", name).CombinedOutput()
+		t.Fatalf("read sqld container id: cidfile is empty; docker output: %s", output)
+	}
 	t.Cleanup(func() {
 		if output, err := exec.Command(docker, "rm", "-f", containerID).CombinedOutput(); err != nil &&
 			!strings.Contains(string(output), "No such container") {
@@ -390,22 +403,74 @@ func startSqld(t *testing.T) string {
 		}
 	})
 
-	inspect := exec.Command(
-		docker, "inspect", "--format",
-		`{{(index (index .NetworkSettings.Ports "8080/tcp") 0).HostPort}}`, containerID,
-	)
-	portOutput, err := inspect.CombinedOutput()
+	port, err := waitForDockerPort(300, func() ([]byte, error) {
+		inspect := exec.Command(
+			docker, "inspect", "--format",
+			`{{(index (index .NetworkSettings.Ports "8080/tcp") 0).HostPort}}`, containerID,
+		)
+		return inspect.CombinedOutput()
+	}, func() {
+		time.Sleep(100 * time.Millisecond)
+	})
 	if err != nil {
-		t.Fatalf("inspect sqld port: %v: %s", err, portOutput)
-	}
-	port := strings.TrimSpace(string(portOutput))
-	if port == "" {
-		t.Fatal("inspect sqld port: empty host port")
+		t.Fatalf("inspect sqld port: %v", err)
 	}
 
 	dbURL := "http://127.0.0.1:" + port
 	waitForSqld(t, docker, containerID, dbURL)
 	return dbURL
+}
+
+func sqldContainerRunArgs(name, cidFile string) []string {
+	return []string{
+		"run", "--rm", "-d", "--name", name,
+		"--cidfile", cidFile,
+		"-p", "127.0.0.1::8080", "-e", "SQLD_NODE=primary", sqldImage,
+	}
+}
+
+func waitForDockerPort(
+	maxAttempts int,
+	inspect func() ([]byte, error),
+	wait func(),
+) (string, error) {
+	if maxAttempts < 1 {
+		return "", errors.New("inspect mapped sqld port: max attempts must be positive")
+	}
+
+	var (
+		lastOutput []byte
+		lastErr    error
+	)
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		output, err := inspect()
+		lastOutput = output
+		lastErr = err
+
+		port := strings.TrimSpace(string(output))
+		if err == nil {
+			portNumber, parseErr := strconv.Atoi(port)
+			switch {
+			case parseErr != nil:
+				lastErr = fmt.Errorf("invalid mapped port %q: %w", port, parseErr)
+			case portNumber < 1 || portNumber > 65535:
+				lastErr = fmt.Errorf("mapped port %d is outside the valid range", portNumber)
+			default:
+				return port, nil
+			}
+		}
+
+		if attempt < maxAttempts {
+			wait()
+		}
+	}
+
+	return "", fmt.Errorf(
+		"inspect mapped sqld port after %d attempts: %w; last output: %s",
+		maxAttempts,
+		lastErr,
+		strings.TrimSpace(string(lastOutput)),
+	)
 }
 
 func waitForSqld(t *testing.T, docker, containerID, dbURL string) {

@@ -22,9 +22,12 @@ if lint_output="$(buf lint "$tmp_dir/schema" --error-format=json 2>&1)"; then
   echo "non-exempt invalid enum prefix unexpectedly passed Buf lint" >&2
   exit 1
 fi
-if ! rg -q 'ENUM_VALUE_PREFIX' <<< "$lint_output"; then
-  echo "Buf lint failed for an unexpected reason:" >&2
-  echo "$lint_output" >&2
-  exit 1
-fi
+case "$lint_output" in
+  *ENUM_VALUE_PREFIX*) ;;
+  *)
+    echo "Buf lint failed for an unexpected reason:" >&2
+    echo "$lint_output" >&2
+    exit 1
+    ;;
+esac
 echo "Buf lint accepted the scoped agent.v1 exception and rejected a non-exempt enum prefix"
