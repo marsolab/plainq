@@ -21,19 +21,22 @@ const STATUS_NAMES = Object.freeze({
 });
 
 export function boundedCode(code) {
-  return Number.isInteger(code) && Object.prototype.hasOwnProperty.call(STATUS_NAMES, code)
-    ? String(code)
+  const numeric = numericStatusCode(code);
+  return numeric !== null
+    ? String(numeric)
     : 'unknown';
 }
 
 export function statusName(code) {
-  return Number.isInteger(code) && STATUS_NAMES[code]
-    ? STATUS_NAMES[code]
+  const numeric = numericStatusCode(code);
+  return numeric !== null
+    ? STATUS_NAMES[numeric]
     : 'UNKNOWN_STATUS';
 }
 
 export function boundedReason(code, detail) {
-  if (code === 0) {
+  const numeric = numericStatusCode(code);
+  if (numeric === 0) {
     return 'ok';
   }
 
@@ -51,6 +54,19 @@ export function boundedReason(code, detail) {
     return 'not_found';
   }
 
-  const name = statusName(code);
+  const name = statusName(numeric);
   return name === 'UNKNOWN_STATUS' ? 'unknown' : name.toLowerCase();
+}
+
+function numericStatusCode(code) {
+  // k6 0.55 exposes its Go-backed enum as an object even though Number(code)
+  // yields the canonical integer. Strings remain rejected to keep the label
+  // input narrow and predictable.
+  if (typeof code !== 'number' && (typeof code !== 'object' || code === null)) {
+    return null;
+  }
+  const numeric = Number(code);
+  return Number.isInteger(numeric) && Object.prototype.hasOwnProperty.call(STATUS_NAMES, numeric)
+    ? numeric
+    : null;
 }

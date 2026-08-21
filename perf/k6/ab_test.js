@@ -141,7 +141,7 @@ function responseDetail(res) {
 }
 
 function recordRPCStatus(variant, op, res) {
-  const code = res && Number.isInteger(res.status) ? res.status : grpc.StatusUnknown;
+  const code = res && res.status !== undefined ? res.status : grpc.StatusUnknown;
   rpcStatus.add(1, {
     variant,
     op,
