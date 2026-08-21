@@ -154,6 +154,43 @@ func TestNewServerMountsAgentTransportOnlyWithCompleteSecurityDependencies(t *te
 	}
 }
 
+func TestNewServerRequiresCompleteHumanGRPCSecurity(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Config{
+		HTTPAddr: "127.0.0.1:0", GRPCAddr: "127.0.0.1:0",
+		AuthEnable: true, AgentEnable: false, GRPCProtectLegacy: true,
+	}
+	logger := logkit.NewNop()
+	queueService := queue.NewService(&cfg, logger, queueStorageStub{})
+	accountService := account.NewService(&cfg, logger, nil, nil, accountStorageStub{})
+	onboardingService := onboarding.NewService(&cfg, logger, nil, nil, onboardingStorageStub{})
+	rbacService := rbac.NewService(&cfg, logger, rbacStorageStub{})
+	oauthService := oauth.NewService(&cfg, logger, oauthStorageStub{})
+
+	_, err := NewServer(
+		&cfg, logger, healthCheckerStub{}, nil,
+		queueService, accountService, onboardingService, rbacService, oauthService,
+	)
+	if err == nil {
+		t.Fatal("NewServer() unexpectedly accepted human gRPC without authentication and admission dependencies")
+	}
+
+	admission, err := interceptor.NewPrincipalAdmissionLimiter(100, 200)
+	if err != nil {
+		t.Fatalf("NewPrincipalAdmissionLimiter() error = %v", err)
+	}
+
+	_, err = NewServer(
+		&cfg, logger, healthCheckerStub{}, nil,
+		queueService, accountService, onboardingService, rbacService, oauthService,
+		WithHumanGRPCSecurity(grpcAuthenticatorStub{}, admission),
+	)
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+}
+
 // withCollectorForTest wires a metrics handler without opening a telemetry
 // database, so the dashboard branch of the route tree is exercised. The nil
 // store is only read by background workers this test never starts.

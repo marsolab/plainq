@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"google.golang.org/grpc/encoding"
+	_ "google.golang.org/grpc/encoding/proto" // Initialize gRPC's default before PlainQ replaces the proto codec.
 	"google.golang.org/protobuf/proto"
 )
 
@@ -23,6 +24,10 @@ type Codec struct{}
 // Register before any server or client can read gRPC's process-wide codec
 // registry. Registering from service constructors races with concurrent RPCs.
 func init() { //nolint:gochecknoinits // gRPC codecs are registered through a process-wide init-time registry.
+	if encoding.GetCodecV2(codecName) == nil {
+		panic("gRPC default proto codec must initialize before PlainQ's codec")
+	}
+
 	encoding.RegisterCodec(Codec{})
 }
 

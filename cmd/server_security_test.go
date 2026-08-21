@@ -1,13 +1,49 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/cristalhq/jwt/v5"
 	"github.com/marsolab/plainq/internal/cluster"
+	"github.com/marsolab/plainq/internal/server"
 	"github.com/marsolab/plainq/internal/server/config"
+	"github.com/marsolab/plainq/internal/server/interceptor"
+	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
+	"github.com/marsolab/plainq/internal/server/service/account"
+	"github.com/marsolab/plainq/internal/server/service/queue"
+	"github.com/marsolab/servekit/authkit/jwtkit"
+	"github.com/marsolab/servekit/logkit"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
+
+type protectedLegacyAccountStorage struct{ account.Storage }
+
+func (protectedLegacyAccountStorage) IsAccessTokenDenied(context.Context, string) (bool, error) {
+	return false, nil
+}
+
+func (protectedLegacyAccountStorage) ResolveHumanSecurity(
+	context.Context,
+	string,
+) (string, string, uint64, error) {
+	return "tenant-1", account.AccountStatusActive, 1, nil
+}
+
+type protectedLegacyQueueStorage struct{ queue.Storage }
+
+func (protectedLegacyQueueStorage) ListQueues(
+	context.Context,
+	*v1.ListQueuesRequest,
+) (*v1.ListQueuesResponse, error) {
+	return &v1.ListQueuesResponse{}, nil
+}
 
 func TestValidateAgentSecurity(t *testing.T) {
 	t.Parallel()
@@ -180,6 +216,7 @@ func TestValidateHumanSecurity(t *testing.T) {
 			AuthJWTIssuer: "plainq-server", AuthJWTAudience: "plainq-human",
 			AuthBootstrapSecret: strings.Repeat("b", 32), AuthRequestMaxBytes: 32 << 10,
 			AuthRateRequestsPerSecond: 5, AuthRateBurst: 10,
+			AgentRateRequestsPerSecond: 100, AgentRateBurst: 200,
 			AuthAccessTokenTTL: time.Hour, AuthRefreshTokenTTL: 30 * 24 * time.Hour,
 		}
 	}
@@ -192,6 +229,8 @@ func TestValidateHumanSecurity(t *testing.T) {
 		"missing body limit":               func(cfg *config.Config) { cfg.AuthRequestMaxBytes = 0 },
 		"invalid rate":                     func(cfg *config.Config) { cfg.AuthRateRequestsPerSecond = 0 },
 		"invalid burst":                    func(cfg *config.Config) { cfg.AuthRateBurst = 0 },
+		"invalid gRPC rate":                func(cfg *config.Config) { cfg.AgentRateRequestsPerSecond = 0 },
+		"invalid gRPC burst":               func(cfg *config.Config) { cfg.AgentRateBurst = 0 },
 		"verification dependencies absent": func(cfg *config.Config) { cfg.AuthEmailVerificationEnable = true },
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -210,6 +249,128 @@ func TestValidateHumanSecurity(t *testing.T) {
 
 	if err := validateHumanSecurity(&config.Config{GRPCProtectLegacy: true}); err == nil {
 		t.Fatal("legacy protection without a human or agent authenticator unexpectedly succeeded")
+	}
+}
+
+func TestHumanOnlyProtectedLegacyGRPCInitializesAdmission(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Config{
+		AuthEnable: true, AgentEnable: false, GRPCProtectLegacy: true,
+		AuthJWTSecret: strings.Repeat("h", 32), AuthJWTIssuer: "plainq-server",
+		AuthJWTAudience: "plainq-human", AgentRateRequestsPerSecond: 0.000001, AgentRateBurst: 1,
+		GRPCAddr: "127.0.0.1:0",
+	}
+
+	tokens, err := initTokenManager(&cfg)
+	if err != nil {
+		t.Fatalf("initTokenManager() error = %v", err)
+	}
+
+	accountStorage := protectedLegacyAccountStorage{}
+	authenticator, admission, err := initHumanGRPCSecurity(&cfg, tokens, accountStorage)
+	if err != nil {
+		t.Fatalf("initHumanGRPCSecurity() error = %v", err)
+	}
+
+	listener, err := server.NewGRPCListener(cfg.GRPCAddr, nil, []grpc.UnaryServerInterceptor{
+		interceptor.UnaryAuth(
+			authenticator, interceptor.PublicMethods(),
+			interceptor.WithUnaryLegacyProtection(cfg.GRPCProtectLegacy),
+		),
+		interceptor.UnaryAdmission(admission),
+		interceptor.UnaryAuthorize(nil),
+	}, nil)
+	if err != nil {
+		t.Fatalf("NewGRPCListener() error = %v", err)
+	}
+
+	listener.Mount(queue.NewService(&cfg, logkit.NewNop(), protectedLegacyQueueStorage{}))
+	ctx, cancel := context.WithCancel(context.Background())
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- listener.Serve(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		if serveErr := <-serveDone; serveErr != nil {
+			t.Errorf("Serve() error = %v", serveErr)
+		}
+	})
+
+	conn, err := grpc.NewClient(
+		listener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		t.Fatalf("grpc.NewClient() error = %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	now := time.Now().UTC()
+	rawToken, err := tokens.Sign(&jwtkit.Token{
+		Claims: jwtkit.Claims{
+			ID: "human-jti", Subject: "user-1", Issuer: cfg.AuthJWTIssuer,
+			Audience: []string{cfg.AuthJWTAudience}, ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour)),
+			IssuedAt: jwt.NewNumericDate(now), NotBefore: jwt.NewNumericDate(now),
+		},
+		Meta: map[string]any{
+			"uid": "user-1", "tenant_id": "tenant-1", "auth_version": uint64(1),
+			"token_use": "access", "roles": []string{"admin"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Sign() error = %v", err)
+	}
+
+	requestCtx := metadata.NewOutgoingContext(
+		context.Background(), metadata.Pairs("authorization", "Bearer "+rawToken),
+	)
+	client := v1.NewPlainQServiceClient(conn)
+	if _, err := client.ListQueues(requestCtx, &v1.ListQueuesRequest{}); err != nil {
+		t.Fatalf("first protected ListQueues() error = %v", err)
+	}
+
+	_, err = client.ListQueues(requestCtx, &v1.ListQueuesRequest{})
+	if got := status.Code(err); got != codes.ResourceExhausted {
+		t.Fatalf("second protected ListQueues() code = %s, want %s (error %v)", got, codes.ResourceExhausted, err)
+	}
+}
+
+func TestDisabledAuthLegacyCompatibilityBypassesAdmission(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Config{AuthEnable: false, AgentEnable: false, GRPCProtectLegacy: false, GRPCAddr: "127.0.0.1:0"}
+	listener, err := server.NewGRPCListener(cfg.GRPCAddr, nil, []grpc.UnaryServerInterceptor{
+		interceptor.UnaryAuth(nil, interceptor.PublicMethods(), interceptor.WithUnaryLegacyProtection(false)),
+		interceptor.UnaryAdmission(nil),
+		interceptor.UnaryAuthorize(nil),
+	}, nil)
+	if err != nil {
+		t.Fatalf("NewGRPCListener() error = %v", err)
+	}
+
+	listener.Mount(queue.NewService(&cfg, logkit.NewNop(), protectedLegacyQueueStorage{}))
+	ctx, cancel := context.WithCancel(context.Background())
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- listener.Serve(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		if serveErr := <-serveDone; serveErr != nil {
+			t.Errorf("Serve() error = %v", serveErr)
+		}
+	})
+
+	conn, err := grpc.NewClient(
+		listener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
+	if err != nil {
+		t.Fatalf("grpc.NewClient() error = %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	client := v1.NewPlainQServiceClient(conn)
+	for call := 1; call <= 2; call++ {
+		if _, err := client.ListQueues(context.Background(), &v1.ListQueuesRequest{}); err != nil {
+			t.Fatalf("anonymous compatibility ListQueues() call %d error = %v", call, err)
+		}
 	}
 }
 

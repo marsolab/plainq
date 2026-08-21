@@ -30,7 +30,6 @@ import (
 	"github.com/marsolab/servekit/authkit/jwtkit"
 	"github.com/marsolab/servekit/httpkit"
 	"google.golang.org/grpc"
-	_ "google.golang.org/grpc/encoding/proto"
 	"google.golang.org/grpc/health"
 	healthv1 "google.golang.org/grpc/health/grpc_health_v1"
 )
@@ -104,6 +103,10 @@ func NewServer(
 	if cfg.AgentEnable && (pq.agentTransport == nil || pq.authenticator == nil ||
 		pq.resources == nil || pq.admission == nil) {
 		return nil, errors.New("agent APIs require transport, authentication, authorization, and admission dependencies")
+	}
+
+	if cfg.AuthEnable && (pq.authenticator == nil || pq.admission == nil) {
+		return nil, errors.New("human-authenticated gRPC requires authentication and admission dependencies")
 	}
 
 	// Initialize metrics collector if telemetry database is provided.
@@ -501,11 +504,18 @@ func WithAgentMessaging(
 	}
 }
 
-// WithGRPCAuthenticator installs human-session authentication for protected
-// legacy gRPC when the agent API (and therefore its composite authenticator)
-// is disabled.
-func WithGRPCAuthenticator(authenticator interceptor.Authenticator) Option {
-	return func(pq *PlainQ) { pq.authenticator = authenticator }
+// WithHumanGRPCSecurity installs human-session authentication and admission
+// together when the agent API (and therefore its complete security option) is
+// disabled. Keeping these dependencies in one option prevents authenticated
+// legacy calls from reaching a nil limiter.
+func WithHumanGRPCSecurity(
+	authenticator interceptor.Authenticator,
+	admission *interceptor.PrincipalAdmissionLimiter,
+) Option {
+	return func(pq *PlainQ) {
+		pq.authenticator = authenticator
+		pq.admission = admission
+	}
 }
 
 // WithServerVersion reports the current build in agent capabilities.

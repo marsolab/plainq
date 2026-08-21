@@ -586,15 +586,14 @@ func serverCommand() *commandSpec {
 			serverOpts = append(serverOpts, server.WithServerVersion(Commit))
 
 			if cfg.AuthEnable && !cfg.AgentEnable {
-				grpcAuthenticator, grpcAuthenticatorErr := interceptor.NewCompositeAuthenticator(
-					nil, tokenManager, accountStorage, accountStorage,
-					interceptor.WithCompositeHumanTokenPolicy(cfg.AuthJWTIssuer, cfg.AuthJWTAudience),
+				grpcAuthenticator, grpcAdmission, grpcSecurityErr := initHumanGRPCSecurity(
+					&cfg, tokenManager, accountStorage,
 				)
-				if grpcAuthenticatorErr != nil {
-					return fmt.Errorf("create human gRPC authenticator: %w", grpcAuthenticatorErr)
+				if grpcSecurityErr != nil {
+					return grpcSecurityErr
 				}
 
-				serverOpts = append(serverOpts, server.WithGRPCAuthenticator(grpcAuthenticator))
+				serverOpts = append(serverOpts, server.WithHumanGRPCSecurity(grpcAuthenticator, grpcAdmission))
 			}
 
 			if cfg.AgentEnable {
@@ -680,11 +679,38 @@ func validateHumanSecurity(cfg *config.Config) error {
 		return errors.New("auth rate and burst must be finite and positive")
 	}
 
+	if err := cfg.ValidateAgentAdmission(); err != nil {
+		return fmt.Errorf("validate authenticated gRPC admission: %w", err)
+	}
+
 	if cfg.AuthEmailVerificationEnable {
 		return errors.New("email verification requires a verifier and delivery backend; none is configured")
 	}
 
 	return nil
+}
+
+func initHumanGRPCSecurity(
+	cfg *config.Config,
+	humanTokens jwtkit.TokenManager,
+	accountStorage account.Storage,
+) (interceptor.Authenticator, *interceptor.PrincipalAdmissionLimiter, error) {
+	authenticator, err := interceptor.NewCompositeAuthenticator(
+		nil, humanTokens, accountStorage, accountStorage,
+		interceptor.WithCompositeHumanTokenPolicy(cfg.AuthJWTIssuer, cfg.AuthJWTAudience),
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create human gRPC authenticator: %w", err)
+	}
+
+	admission, err := interceptor.NewPrincipalAdmissionLimiter(
+		cfg.AgentRateRequestsPerSecond, cfg.AgentRateBurst,
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create human gRPC admission limiter: %w", err)
+	}
+
+	return authenticator, admission, nil
 }
 
 //nolint:gocyclo,cyclop // validation mirrors the explicit security contract one rule at a time.
