@@ -2,9 +2,32 @@
 deps:
 	go mod tidy && go mod download
 
-.PHONY: schema
-schema:
+.PHONY: schema schema-local schema-public-check schema-published schema-check
+schema: schema-local
+
+schema-local:
+	buf generate schema --template internal/server/schema/buf.gen.yaml --output internal/server/schema
+	cd schema && buf generate . --template buf.docs.gen.yaml
+
+schema-public-check:
+	@tmp=$$(mktemp -d); \
+	trap 'rm -rf "$$tmp"' EXIT; \
+	buf generate schema --template schema/buf.gen.yaml --output "$$tmp"; \
+	test -s "$$tmp/go/v1/schema.pb.go"; \
+	test -s "$$tmp/go/v1/schema.pb.json.go"; \
+	test -s "$$tmp/go/v1/schema.pb.validate.go"; \
+	test -s "$$tmp/go/v1/schema_grpc.pb.go"; \
+	test -s "$$tmp/go/v1/v1connect/schema.connect.go"; \
+	cd "$$tmp/go"; \
+	go mod init github.com/plainq/go; \
+	go mod tidy; \
+	go test ./...
+
+schema-published:
 	cd internal/server/schema && buf generate buf.build/plainq/schema
+
+schema-check: schema-local schema-public-check
+	git diff --exit-code -- internal/server/schema/v1 schema/docs
 
 .PHONY: sqlc-generate
 sqlc-generate:

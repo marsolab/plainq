@@ -40,11 +40,23 @@ jobs:
           input: schema
           against: buf.build/plainq/schema
 
+  generated:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bufbuild/buf-setup-action@v1
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: regenerate bindings, clients, validation, Connect, and docs
+        run: make schema-check
+
   # Append-only publish. Never delete/recreate buf.build/plainq/schema or
   # rewrite labels so existing consumer pins stop resolving — fix forward only.
   push:
     runs-on: ubuntu-latest
     needs:
+      - generated
       - breaking
       - lint
     steps:

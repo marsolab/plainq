@@ -1318,13 +1318,14 @@ func (x *DeleteFailure) GetError() string {
 	return ""
 }
 
-// Topic represents a publish/subscribe topic. A topic owns no storage of its
-// own: publishing to it fans the message out to every subscribed queue.
+// Topic represents a publish/subscribe topic. Its topic_id is an XID and its
+// topic_name is unique. A topic stores no message bodies: publishing to it
+// fans messages out to every subscribed queue.
 type Topic struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// topic_id represents the unique identifier for the topic.
+	// topic_id is the topic's XID.
 	TopicId string `protobuf:"bytes,1,opt,name=topic_id,json=topicId,proto3" json:"topic_id,omitempty"`
-	// topic_name represents the name of the topic.
+	// topic_name is unique.
 	TopicName string `protobuf:"bytes,2,opt,name=topic_name,json=topicName,proto3" json:"topic_name,omitempty"`
 	// created_at denotes the timestamp when the topic was created.
 	CreatedAt *timestamppb.Timestamp `protobuf:"bytes,3,opt,name=created_at,json=createdAt,proto3" json:"created_at,omitempty"`
@@ -1392,10 +1393,11 @@ func (x *Topic) GetSubscriptions() []*Subscription {
 	return nil
 }
 
-// Subscription represents a binding between a topic and a queue.
+// Subscription represents a binding between a topic and a queue. Its
+// subscription_id is an XID, and each (topic_id, queue_id) binding is unique.
 type Subscription struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// subscription_id represents the unique identifier for the subscription.
+	// subscription_id is the subscription's XID.
 	SubscriptionId string `protobuf:"bytes,1,opt,name=subscription_id,json=subscriptionId,proto3" json:"subscription_id,omitempty"`
 	// topic_id represents the unique identifier of the subscribed topic.
 	TopicId string `protobuf:"bytes,2,opt,name=topic_id,json=topicId,proto3" json:"topic_id,omitempty"`
@@ -2035,10 +2037,11 @@ type PublishResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// topic_id represents the unique identifier of the topic published to.
 	TopicId string `protobuf:"bytes,1,opt,name=topic_id,json=topicId,proto3" json:"topic_id,omitempty"`
-	// queue_ids represents an array of queue IDs the messages were fanned out to.
+	// queue_ids is a flattened list of destination queue identifiers with no
+	// positional relational guarantee to message_ids.
 	QueueIds []string `protobuf:"bytes,2,rep,name=queue_ids,json=queueIds,proto3" json:"queue_ids,omitempty"`
-	// message_ids represents an array of message IDs that has been enqueued
-	// across all subscribed queues.
+	// message_ids is a flattened list of enqueued message identifiers with no
+	// positional relational guarantee to queue_ids.
 	MessageIds []string `protobuf:"bytes,3,rep,name=message_ids,json=messageIds,proto3" json:"message_ids,omitempty"`
 	// delivered_count represents the total number of deliveries performed,
 	// which is the number of published messages times the number of subscribers.
