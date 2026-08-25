@@ -22,6 +22,10 @@ func AsTransport(err error) error {
 
 	sentinel := transportSentinel(err)
 	if sentinel == nil {
+		if errors.Is(err, ErrPartialFanout) {
+			return partialFanoutTransportError{err: err}
+		}
+
 		return err
 	}
 
@@ -53,5 +57,41 @@ func transportSentinel(err error) error {
 
 	default:
 		return nil
+	}
+}
+
+// partialFanoutTransportError keeps domain diagnostics available without
+// exposing nested Servekit sentinels to its HTTP or gRPC responders.
+type partialFanoutTransportError struct {
+	err error
+}
+
+func (e partialFanoutTransportError) Error() string {
+	return e.err.Error()
+}
+
+func (e partialFanoutTransportError) Is(target error) bool {
+	if isServekitTransportSentinel(target) {
+		return false
+	}
+
+	return errors.Is(e.err, target)
+}
+
+func (e partialFanoutTransportError) As(target any) bool {
+	return errors.As(e.err, target)
+}
+
+func isServekitTransportSentinel(err error) bool {
+	switch err {
+	case errkit.ErrAlreadyExists,
+		errkit.ErrNotFound,
+		errkit.ErrUnauthenticated,
+		errkit.ErrUnauthorized,
+		errkit.ErrInvalidArgument,
+		errkit.ErrUnavailable:
+		return true
+	default:
+		return false
 	}
 }

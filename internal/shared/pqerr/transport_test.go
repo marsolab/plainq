@@ -1,11 +1,18 @@
 package pqerr
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/marsolab/servekit/errkit"
+	"github.com/marsolab/servekit/grpckit"
+	"github.com/marsolab/servekit/httpkit"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func TestAsTransportMapsStorageErrorsOntoTransportSentinels(t *testing.T) {
@@ -72,11 +79,20 @@ func TestAsTransportPassesNilThrough(t *testing.T) {
 }
 
 func TestPartialFanoutAlwaysMapsToInternal(t *testing.T) {
-	partial := &partialFanoutError{causes: []error{ErrPartialFanout, ErrUnavailable}}
+	unknownCause := errors.New("queue connection reset")
+	partial := &partialFanoutError{causes: []error{
+		ErrPartialFanout,
+		ErrUnavailable,
+		errkit.ErrUnavailable,
+		unknownCause,
+	}}
 
 	got := AsTransport(partial)
-	if got != partial {
-		t.Fatalf("AsTransport(%v) = %v, want original partial error", partial, got)
+	if got == partial {
+		t.Fatalf("AsTransport(%v) returned the original error, want a transport-safe facade", partial)
+	}
+	if got.Error() != partial.Error() {
+		t.Fatalf("AsTransport(%v) error string = %q, want %q", partial, got.Error(), partial.Error())
 	}
 	if !errors.Is(got, ErrPartialFanout) {
 		t.Fatalf("AsTransport(%v) = %v, want partial fan-out marker preserved", partial, got)
@@ -84,8 +100,31 @@ func TestPartialFanoutAlwaysMapsToInternal(t *testing.T) {
 	if !errors.Is(got, ErrUnavailable) {
 		t.Fatalf("AsTransport(%v) = %v, want nested %v preserved for diagnostics", partial, got, ErrUnavailable)
 	}
-	if errors.Is(got, errkit.ErrUnavailable) {
-		t.Fatalf("AsTransport(%v) unexpectedly matched %v", partial, errkit.ErrUnavailable)
+	if !errors.Is(got, unknownCause) {
+		t.Fatalf("AsTransport(%v) = %v, want unknown diagnostic cause preserved", partial, got)
+	}
+	for _, sentinel := range []error{
+		errkit.ErrAlreadyExists,
+		errkit.ErrNotFound,
+		errkit.ErrUnauthenticated,
+		errkit.ErrUnauthorized,
+		errkit.ErrInvalidArgument,
+		errkit.ErrUnavailable,
+	} {
+		if errors.Is(got, sentinel) {
+			t.Fatalf("AsTransport(%v) unexpectedly matched transport sentinel %v", partial, sentinel)
+		}
+	}
+
+	w := httptest.NewRecorder()
+	httpkit.ErrorHTTP(w, httptest.NewRequest(http.MethodPost, "/publish", nil), got)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("ErrorHTTP(AsTransport(%v)) status = %d, want %d", partial, w.Code, http.StatusInternalServerError)
+	}
+
+	_, grpcErr := grpckit.ErrorGRPC[struct{}](context.Background(), got)
+	if code := status.Code(grpcErr); code != codes.Internal {
+		t.Fatalf("ErrorGRPC(AsTransport(%v)) code = %v, want %v", partial, code, codes.Internal)
 	}
 }
 

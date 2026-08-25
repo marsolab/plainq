@@ -46,7 +46,7 @@ func TestFanOutAttemptsEverySelectedDestination(t *testing.T) {
 			case "queue-a":
 				return &v1.SendResponse{MessageIds: []string{"a-1", "a-2"}}, nil
 			case "queue-b":
-				return nil, pqerr.ErrUnavailable
+				return nil, errors.Join(pqerr.ErrUnavailable, errkit.ErrUnavailable)
 			case "queue-c":
 				return &v1.SendResponse{MessageIds: []string{"c-1", "c-2"}}, nil
 			default:
@@ -68,16 +68,27 @@ func TestFanOutAttemptsEverySelectedDestination(t *testing.T) {
 	if !errors.Is(err, pqerr.ErrUnavailable) {
 		t.Fatalf("FanOut() error = %v, want nested %v for diagnostics", err, pqerr.ErrUnavailable)
 	}
-	if got := pqerr.AsTransport(err); got != err {
-		t.Fatalf("AsTransport(FanOut error) = %v, want original partial error", got)
+	mapped := pqerr.AsTransport(err)
+	if mapped == err {
+		t.Fatal("AsTransport(FanOut error) returned the original error, want a transport-safe facade")
 	}
-	if errors.Is(pqerr.AsTransport(err), errkit.ErrUnavailable) {
+	if !errors.Is(mapped, pqerr.ErrUnavailable) {
+		t.Fatalf("AsTransport(FanOut error) = %v, want nested %v for diagnostics", mapped, pqerr.ErrUnavailable)
+	}
+	if errors.Is(mapped, errkit.ErrUnavailable) {
 		t.Fatalf("AsTransport(FanOut error) unexpectedly matched %v", errkit.ErrUnavailable)
 	}
 
 	var partial *PartialPublishError
 	if !errors.As(err, &partial) {
 		t.Fatalf("FanOut() error = %v, want PartialPublishError", err)
+	}
+	var mappedPartial *PartialPublishError
+	if !errors.As(mapped, &mappedPartial) {
+		t.Fatalf("AsTransport(FanOut error) = %v, want PartialPublishError diagnostic", mapped)
+	}
+	if mappedPartial != partial {
+		t.Fatal("AsTransport(FanOut error) returned a different PartialPublishError diagnostic")
 	}
 	if partial.Outcome.FailedDeliveries != 2 {
 		t.Fatalf("FanOut() failed deliveries = %d, want 2", partial.Outcome.FailedDeliveries)
