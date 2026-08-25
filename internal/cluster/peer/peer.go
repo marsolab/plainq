@@ -27,8 +27,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/marsolab/plainq/internal/cluster/consensus"
+	"github.com/marsolab/plainq/internal/cluster/deletewire"
 	"github.com/marsolab/plainq/internal/cluster/transport"
 	"github.com/marsolab/plainq/internal/metrics"
+	"github.com/marsolab/plainq/internal/server/service/queue"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/marsolab/servekit/errkit"
 	"github.com/marsolab/servekit/logkit"
@@ -304,6 +306,9 @@ func (s *Server) writeApplyError(w http.ResponseWriter, err error) {
 	case errors.Is(err, pqerr.ErrInvalidInput), errors.Is(err, pqerr.ErrInvalidID),
 		errors.Is(err, errkit.ErrInvalidArgument):
 		status, class = http.StatusBadRequest, "invalid-argument"
+
+	case errors.Is(err, pqerr.ErrUnavailable):
+		status, class = http.StatusServiceUnavailable, "unavailable"
 	}
 
 	w.Header().Set(errorHeader, class)
@@ -396,11 +401,20 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 
 // encodeResponse renders a state machine response for the wire.
 //
-// Schema types carry their own codec; everything else is JSON. The caller
-// knows which to expect from the command it sent, so no tag is needed.
+// Schema types carry their own codec, internal delete effects use the
+// mixed-version protobuf envelope, and remaining internal types use JSON.
+// The caller knows which to expect from the command it sent.
 func encodeResponse(response any) ([]byte, error) {
 	if response == nil {
 		return nil, nil
+	}
+
+	switch response := response.(type) {
+	case *queue.DeleteQueueResult:
+		return deletewire.Encode(response)
+
+	case *queue.DeleteTopicResult:
+		return deletewire.Encode(response)
 	}
 
 	if marshaler, ok := response.(interface{ MarshalVT() ([]byte, error) }); ok {
@@ -585,6 +599,9 @@ func peerError(addr string, resp *http.Response, body []byte) error {
 
 	case "invalid-argument":
 		return fmt.Errorf("%w: %w", pqerr.ErrInvalidInput, base)
+
+	case "unavailable":
+		return fmt.Errorf("%w: %w", pqerr.ErrUnavailable, base)
 
 	default:
 		return base

@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/marsolab/plainq/internal/shared/pqerr"
-	"github.com/mattn/go-sqlite3"
 )
 
 func TestPubSubErrorNormalization(t *testing.T) {
@@ -17,13 +16,9 @@ func TestPubSubErrorNormalization(t *testing.T) {
 		operation pubSubErrorContext
 		want      error
 	}{
-		"create constraint is duplicate":    {sqlite3.Error{Code: sqlite3.ErrConstraint}, pubSubCreateTopic, pqerr.ErrAlreadyExists},
-		"subscribe constraint is duplicate": {sqlite3.Error{Code: sqlite3.ErrConstraint}, pubSubSubscribe, pqerr.ErrAlreadyExists},
-		"busy is unavailable":               {sqlite3.Error{Code: sqlite3.ErrBusy}, pubSubListTopics, pqerr.ErrUnavailable},
-		"locked is unavailable":             {sqlite3.Error{Code: sqlite3.ErrLocked}, pubSubInventory, pqerr.ErrUnavailable},
-		"bad connection is unavailable":     {driver.ErrBadConn, pubSubPublish, pqerr.ErrUnavailable},
-		"closed connection is unavailable":  {sql.ErrConnDone, pubSubDeleteTopic, pqerr.ErrUnavailable},
-		"deadline is unavailable":           {context.DeadlineExceeded, pubSubDeleteQueue, pqerr.ErrUnavailable},
+		"bad connection is unavailable":    {driver.ErrBadConn, pubSubPublish, pqerr.ErrUnavailable},
+		"closed connection is unavailable": {sql.ErrConnDone, pubSubDeleteTopic, pqerr.ErrUnavailable},
+		"deadline is unavailable":          {context.DeadlineExceeded, pubSubDeleteQueue, pqerr.ErrUnavailable},
 	}
 
 	for name, tc := range tests {

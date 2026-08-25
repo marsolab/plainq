@@ -3,9 +3,11 @@ package pgstore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +18,13 @@ import (
 	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/marsolab/servekit/idkit"
 )
+
+func TestPostgresTestSchemaNameIsLowercase(t *testing.T) {
+	got := postgresTestSchemaName("D5ABCDEF")
+	if got != "plainq_pubsub_d5abcdef" {
+		t.Fatalf("postgresTestSchemaName() = %q, want lowercase schema", got)
+	}
+}
 
 func TestPostgresTopicConformance(t *testing.T) {
 	ctx, storage, pool, _ := newPostgresPubSubStorage(t)
@@ -116,88 +125,211 @@ func TestPostgresTopicConformance(t *testing.T) {
 	}
 }
 
-func TestPostgresDeleteTopicSerializesConcurrentSubscribe(t *testing.T) {
+func TestPostgresDeleteTopicWaitsForUncommittedSubscribeBeforeCapture(t *testing.T) {
 	ctx, storage, pool, applicationName := newPostgresPubSubStorage(t)
-	topic, err := storage.CreateTopic(ctx, &queue.CreateTopicRequest{TopicName: "concurrency-topic"})
+	topic, err := storage.CreateTopic(ctx, &queue.CreateTopicRequest{TopicName: "topic-subscribe-race"})
 	if err != nil {
 		t.Fatalf("create topic: %v", err)
 	}
-	queueID := createPostgresQueue(t, ctx, storage, "concurrency-queue")
-
+	queueID := createPostgresQueue(t, ctx, storage, "topic-subscribe-race")
 	const advisoryKey int64 = 82620261
-	if _, err := pool.Exec(ctx, `
-CREATE FUNCTION block_concurrency_topic_delete() RETURNS trigger LANGUAGE plpgsql AS $function$
-BEGIN
-  IF OLD.topic_name = 'concurrency-topic' THEN
-    PERFORM pg_advisory_xact_lock(82620261);
-  END IF;
-  RETURN OLD;
-END;
-$function$;
-CREATE TRIGGER block_concurrency_topic_delete
-BEFORE DELETE ON topic_properties
-FOR EACH ROW EXECUTE FUNCTION block_concurrency_topic_delete();`); err != nil {
-		t.Fatalf("create blocking topic-delete trigger: %v", err)
-	}
+	installBlockingSubscriptionTrigger(t, ctx, pool, advisoryKey)
+	blocker := holdPostgresAdvisoryLock(t, ctx, pool, advisoryKey)
 
-	blocker, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin advisory blocker: %v", err)
-	}
-	t.Cleanup(func() { _ = blocker.Rollback(context.Background()) })
-	if _, err := blocker.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, advisoryKey); err != nil {
-		t.Fatalf("acquire advisory blocker: %v", err)
-	}
-
-	type deleteOutcome struct {
-		result *queue.DeleteTopicResult
-		err    error
-	}
-	type subscribeOutcome struct {
-		result *queue.SubscribeResponse
-		err    error
-	}
-	deleteDone := make(chan deleteOutcome, 1)
-	go func() {
-		result, err := storage.DeleteTopic(ctx, topic.TopicID)
-		deleteDone <- deleteOutcome{result: result, err: err}
-	}()
-	waitForPostgresAdvisoryWait(t, ctx, pool, applicationName)
-
-	subscribeDone := make(chan subscribeOutcome, 1)
+	subscribeDone := make(chan postgresSubscribeOutcome, 1)
 	go func() {
 		result, err := storage.Subscribe(ctx, topic.TopicID, &queue.SubscribeRequest{QueueID: queueID})
-		subscribeDone <- subscribeOutcome{result: result, err: err}
+		subscribeDone <- postgresSubscribeOutcome{result: result, err: err}
 	}()
+	waitForPostgresQueryWait(t, ctx, pool, applicationName, "INSERT INTO topic_subscriptions", "advisory")
 
-	var earlySubscribe *subscribeOutcome
-	select {
-	case outcome := <-subscribeDone:
-		earlySubscribe = &outcome
-	case <-time.After(500 * time.Millisecond):
+	deleteDone := make(chan postgresTopicDeleteOutcome, 1)
+	go func() {
+		result, err := storage.DeleteTopic(ctx, topic.TopicID)
+		deleteDone <- postgresTopicDeleteOutcome{result: result, err: err}
+	}()
+	waitForPostgresQueryWait(t, ctx, pool, applicationName, "SELECT topic_id FROM topic_properties", "")
+	commitPostgresBlocker(t, ctx, blocker)
+
+	subscribed := <-subscribeDone
+	if subscribed.err != nil {
+		t.Fatalf("commit concurrent subscription: %v", subscribed.err)
 	}
-	if err := blocker.Commit(ctx); err != nil {
-		t.Fatalf("release advisory blocker: %v", err)
+	deleted := <-deleteDone
+	if deleted.err != nil {
+		t.Fatalf("delete topic after subscription commit: %v", deleted.err)
 	}
+	if !slices.Contains(subscriptionIDs(deleted.result.RemovedSubscriptions), subscribed.result.SubscriptionID) {
+		t.Fatalf("delete result %#v omitted committed subscription %q", deleted.result, subscribed.result.SubscriptionID)
+	}
+}
+
+func TestPostgresDeleteQueueWaitsForUncommittedSubscribeBeforeCapture(t *testing.T) {
+	ctx, storage, pool, applicationName := newPostgresPubSubStorage(t)
+	topic, err := storage.CreateTopic(ctx, &queue.CreateTopicRequest{TopicName: "queue-subscribe-race"})
+	if err != nil {
+		t.Fatalf("create topic: %v", err)
+	}
+	queueID := createPostgresQueue(t, ctx, storage, "queue-subscribe-race")
+	const advisoryKey int64 = 82620262
+	installBlockingSubscriptionTrigger(t, ctx, pool, advisoryKey)
+	blocker := holdPostgresAdvisoryLock(t, ctx, pool, advisoryKey)
+
+	subscribeDone := make(chan postgresSubscribeOutcome, 1)
+	go func() {
+		result, err := storage.Subscribe(ctx, topic.TopicID, &queue.SubscribeRequest{QueueID: queueID})
+		subscribeDone <- postgresSubscribeOutcome{result: result, err: err}
+	}()
+	waitForPostgresQueryWait(t, ctx, pool, applicationName, "INSERT INTO topic_subscriptions", "advisory")
+
+	deleteDone := make(chan postgresQueueDeleteOutcome, 1)
+	go func() {
+		result, err := storage.DeleteQueue(ctx, &v1.DeleteQueueRequest{QueueId: queueID, Force: true})
+		deleteDone <- postgresQueueDeleteOutcome{result: result, err: err}
+	}()
+	waitForPostgresQueryWait(t, ctx, pool, applicationName, "SELECT queue_id FROM queue_properties", "")
+	commitPostgresBlocker(t, ctx, blocker)
+
+	subscribed := <-subscribeDone
+	if subscribed.err != nil {
+		t.Fatalf("commit concurrent subscription: %v", subscribed.err)
+	}
+	deleted := <-deleteDone
+	if deleted.err != nil {
+		if deleted.result != nil || !errors.Is(deleted.err, pqerr.ErrUnavailable) {
+			t.Fatalf("aborted queue delete = %#v, %v; want nil result and %v", deleted.result, deleted.err, pqerr.ErrUnavailable)
+		}
+		assertPostgresParentAndSubscription(t, ctx, pool, "queue_properties", "queue_id", queueID, subscribed.result.SubscriptionID)
+		return
+	}
+	if !slices.Contains(subscriptionIDs(deleted.result.RemovedSubscriptions), subscribed.result.SubscriptionID) {
+		t.Fatalf("queue delete result %#v omitted committed subscription %q", deleted.result, subscribed.result.SubscriptionID)
+	}
+}
+
+func TestPostgresTopicAndQueueDeleteOwnBindingEffectOnce(t *testing.T) {
+	ctx, storage, pool, applicationName := newPostgresPubSubStorage(t)
+	topic, err := storage.CreateTopic(ctx, &queue.CreateTopicRequest{TopicName: "competing-deletes"})
+	if err != nil {
+		t.Fatalf("create topic: %v", err)
+	}
+	queueID := createPostgresQueue(t, ctx, storage, "competing-deletes")
+	subscription, err := storage.Subscribe(ctx, topic.TopicID, &queue.SubscribeRequest{QueueID: queueID})
+	if err != nil {
+		t.Fatalf("create subscription: %v", err)
+	}
+	const advisoryKey int64 = 82620263
+	installBlockingTopicDeleteTrigger(t, ctx, pool, advisoryKey)
+	blocker := holdPostgresAdvisoryLock(t, ctx, pool, advisoryKey)
+
+	topicDone := make(chan postgresTopicDeleteOutcome, 1)
+	go func() {
+		result, err := storage.DeleteTopic(ctx, topic.TopicID)
+		topicDone <- postgresTopicDeleteOutcome{result: result, err: err}
+	}()
+	waitForPostgresQueryWait(t, ctx, pool, applicationName, "DELETE FROM topic_properties", "advisory")
+
+	queueDone := make(chan postgresQueueDeleteOutcome, 1)
+	go func() {
+		result, err := storage.DeleteQueue(ctx, &v1.DeleteQueueRequest{QueueId: queueID, Force: true})
+		queueDone <- postgresQueueDeleteOutcome{result: result, err: err}
+	}()
+	waitForPostgresQueryWait(t, ctx, pool, applicationName, "SELECT s.subscription_id", "")
+	commitPostgresBlocker(t, ctx, blocker)
+
+	topicDeleted := <-topicDone
+	if topicDeleted.err != nil {
+		t.Fatalf("delete topic: %v", topicDeleted.err)
+	}
+	queueDeleted := <-queueDone
+	owned := subscriptionIDs(topicDeleted.result.RemovedSubscriptions)
+	if queueDeleted.err != nil {
+		if queueDeleted.result != nil || !errors.Is(queueDeleted.err, pqerr.ErrUnavailable) {
+			t.Fatalf("aborted queue delete = %#v, %v; want nil result and %v", queueDeleted.result, queueDeleted.err, pqerr.ErrUnavailable)
+		}
+	} else {
+		owned = append(owned, subscriptionIDs(queueDeleted.result.RemovedSubscriptions)...)
+	}
+	if countOccurrences(owned, subscription.SubscriptionID) != 1 {
+		t.Fatalf("binding %q ownership across delete results = %v, want exactly once", subscription.SubscriptionID, owned)
+	}
+}
+
+func TestPostgresDeleteAndUnsubscribeOwnBindingEffectOnce(t *testing.T) {
+	ctx, storage, pool, applicationName := newPostgresPubSubStorage(t)
+	topic, err := storage.CreateTopic(ctx, &queue.CreateTopicRequest{TopicName: "delete-unsubscribe"})
+	if err != nil {
+		t.Fatalf("create topic: %v", err)
+	}
+	queueID := createPostgresQueue(t, ctx, storage, "delete-unsubscribe")
+	subscription, err := storage.Subscribe(ctx, topic.TopicID, &queue.SubscribeRequest{QueueID: queueID})
+	if err != nil {
+		t.Fatalf("create subscription: %v", err)
+	}
+	const advisoryKey int64 = 82620264
+	installBlockingTopicDeleteTrigger(t, ctx, pool, advisoryKey)
+	blocker := holdPostgresAdvisoryLock(t, ctx, pool, advisoryKey)
+
+	deleteDone := make(chan postgresTopicDeleteOutcome, 1)
+	go func() {
+		result, err := storage.DeleteTopic(ctx, topic.TopicID)
+		deleteDone <- postgresTopicDeleteOutcome{result: result, err: err}
+	}()
+	waitForPostgresQueryWait(t, ctx, pool, applicationName, "DELETE FROM topic_properties", "advisory")
+
+	unsubscribeDone := make(chan error, 1)
+	go func() { unsubscribeDone <- storage.Unsubscribe(ctx, topic.TopicID, subscription.SubscriptionID) }()
+	waitForPostgresQueryWait(t, ctx, pool, applicationName, "DELETE FROM topic_subscriptions", "")
+	commitPostgresBlocker(t, ctx, blocker)
 
 	deleted := <-deleteDone
 	if deleted.err != nil {
 		t.Fatalf("delete topic: %v", deleted.err)
 	}
-	var subscribed subscribeOutcome
-	if earlySubscribe != nil {
-		subscribed = *earlySubscribe
-	} else {
-		subscribed = <-subscribeDone
+	if countOccurrences(subscriptionIDs(deleted.result.RemovedSubscriptions), subscription.SubscriptionID) != 1 {
+		t.Fatalf("delete result %#v does not own binding exactly once", deleted.result)
 	}
-	if subscribed.err == nil {
-		if subscribed.result == nil || !slices.Contains(subscriptionIDs(deleted.result.RemovedSubscriptions), subscribed.result.SubscriptionID) {
-			t.Fatalf("successful concurrent subscription %#v was removed but missing from delete result %#v", subscribed.result, deleted.result)
-		}
-		return
+	if err := <-unsubscribeDone; !errors.Is(err, pqerr.ErrNotFound) {
+		t.Fatalf("concurrent unsubscribe error = %v, want %v after delete owns effect", err, pqerr.ErrNotFound)
 	}
-	if !errors.Is(subscribed.err, pqerr.ErrNotFound) {
-		t.Fatalf("concurrent subscribe error = %v, want %v", subscribed.err, pqerr.ErrNotFound)
+}
+
+func TestPostgresDeleteQueueAndUnsubscribeOwnBindingEffectOnce(t *testing.T) {
+	ctx, storage, pool, applicationName := newPostgresPubSubStorage(t)
+	topic, err := storage.CreateTopic(ctx, &queue.CreateTopicRequest{TopicName: "queue-delete-unsubscribe"})
+	if err != nil {
+		t.Fatalf("create topic: %v", err)
+	}
+	queueID := createPostgresQueue(t, ctx, storage, "queue-delete-unsubscribe")
+	subscription, err := storage.Subscribe(ctx, topic.TopicID, &queue.SubscribeRequest{QueueID: queueID})
+	if err != nil {
+		t.Fatalf("create subscription: %v", err)
+	}
+	const advisoryKey int64 = 82620265
+	installBlockingQueueDeleteTrigger(t, ctx, pool, advisoryKey)
+	blocker := holdPostgresAdvisoryLock(t, ctx, pool, advisoryKey)
+
+	deleteDone := make(chan postgresQueueDeleteOutcome, 1)
+	go func() {
+		result, err := storage.DeleteQueue(ctx, &v1.DeleteQueueRequest{QueueId: queueID, Force: true})
+		deleteDone <- postgresQueueDeleteOutcome{result: result, err: err}
+	}()
+	waitForPostgresQueryWait(t, ctx, pool, applicationName, "-- name: DeleteQueueProperties", "advisory")
+
+	unsubscribeDone := make(chan error, 1)
+	go func() { unsubscribeDone <- storage.Unsubscribe(ctx, topic.TopicID, subscription.SubscriptionID) }()
+	waitForPostgresQueryWait(t, ctx, pool, applicationName, "DELETE FROM topic_subscriptions", "")
+	commitPostgresBlocker(t, ctx, blocker)
+
+	deleted := <-deleteDone
+	if deleted.err != nil {
+		t.Fatalf("delete queue: %v", deleted.err)
+	}
+	if countOccurrences(subscriptionIDs(deleted.result.RemovedSubscriptions), subscription.SubscriptionID) != 1 {
+		t.Fatalf("delete result %#v does not own binding exactly once", deleted.result)
+	}
+	if err := <-unsubscribeDone; !errors.Is(err, pqerr.ErrNotFound) {
+		t.Fatalf("concurrent unsubscribe error = %v, want %v after queue delete owns effect", err, pqerr.ErrNotFound)
 	}
 }
 
@@ -288,7 +420,7 @@ func newPostgresPubSubStorage(t *testing.T) (context.Context, *Storage, *pgxpool
 	}
 	t.Cleanup(bootstrap.Close)
 
-	schema := "plainq_pubsub_" + idkit.XID()
+	schema := postgresTestSchemaName(idkit.XID())
 	if _, err := bootstrap.Exec(ctx, "CREATE SCHEMA "+pgx.Identifier{schema}.Sanitize()); err != nil {
 		t.Fatalf("create test schema: %v", err)
 	}
@@ -325,7 +457,108 @@ func newPostgresPubSubStorage(t *testing.T) (context.Context, *Storage, *pgxpool
 	return ctx, storage, pool, schema
 }
 
-func waitForPostgresAdvisoryWait(t *testing.T, ctx context.Context, pool *pgxpool.Pool, applicationName string) {
+func postgresTestSchemaName(id string) string {
+	return "plainq_pubsub_" + strings.ToLower(id)
+}
+
+type postgresSubscribeOutcome struct {
+	result *queue.SubscribeResponse
+	err    error
+}
+
+type postgresTopicDeleteOutcome struct {
+	result *queue.DeleteTopicResult
+	err    error
+}
+
+type postgresQueueDeleteOutcome struct {
+	result *queue.DeleteQueueResult
+	err    error
+}
+
+func installBlockingSubscriptionTrigger(t *testing.T, ctx context.Context, pool *pgxpool.Pool, advisoryKey int64) {
+	t.Helper()
+	query := fmt.Sprintf(`
+CREATE FUNCTION block_subscription_insert() RETURNS trigger LANGUAGE plpgsql AS $function$
+BEGIN
+  PERFORM pg_advisory_xact_lock(%d);
+  RETURN NEW;
+END;
+$function$;
+CREATE TRIGGER block_subscription_insert
+AFTER INSERT ON topic_subscriptions
+FOR EACH ROW EXECUTE FUNCTION block_subscription_insert();`, advisoryKey)
+	if _, err := pool.Exec(ctx, query); err != nil {
+		t.Fatalf("create blocking subscription trigger: %v", err)
+	}
+}
+
+func installBlockingTopicDeleteTrigger(t *testing.T, ctx context.Context, pool *pgxpool.Pool, advisoryKey int64) {
+	t.Helper()
+	query := fmt.Sprintf(`
+CREATE FUNCTION block_topic_delete() RETURNS trigger LANGUAGE plpgsql AS $function$
+BEGIN
+  PERFORM pg_advisory_xact_lock(%d);
+  RETURN OLD;
+END;
+$function$;
+CREATE TRIGGER block_topic_delete
+BEFORE DELETE ON topic_properties
+FOR EACH ROW EXECUTE FUNCTION block_topic_delete();`, advisoryKey)
+	if _, err := pool.Exec(ctx, query); err != nil {
+		t.Fatalf("create blocking topic-delete trigger: %v", err)
+	}
+}
+
+func installBlockingQueueDeleteTrigger(t *testing.T, ctx context.Context, pool *pgxpool.Pool, advisoryKey int64) {
+	t.Helper()
+	query := fmt.Sprintf(`
+CREATE FUNCTION block_queue_delete() RETURNS trigger LANGUAGE plpgsql AS $function$
+BEGIN
+  PERFORM pg_advisory_xact_lock(%d);
+  RETURN OLD;
+END;
+$function$;
+CREATE TRIGGER block_queue_delete
+BEFORE DELETE ON queue_properties
+FOR EACH ROW EXECUTE FUNCTION block_queue_delete();`, advisoryKey)
+	if _, err := pool.Exec(ctx, query); err != nil {
+		t.Fatalf("create blocking queue-delete trigger: %v", err)
+	}
+}
+
+func holdPostgresAdvisoryLock(t *testing.T, ctx context.Context, pool *pgxpool.Pool, advisoryKey int64) pgx.Tx {
+	t.Helper()
+	blocker, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin advisory blocker: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := blocker.Rollback(context.Background()); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+			t.Errorf("rollback advisory blocker: %v", err)
+		}
+	})
+	if _, err := blocker.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, advisoryKey); err != nil {
+		t.Fatalf("acquire advisory blocker: %v", err)
+	}
+	return blocker
+}
+
+func commitPostgresBlocker(t *testing.T, ctx context.Context, blocker pgx.Tx) {
+	t.Helper()
+	if err := blocker.Commit(ctx); err != nil {
+		t.Fatalf("release advisory blocker: %v", err)
+	}
+}
+
+func waitForPostgresQueryWait(
+	t *testing.T,
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	applicationName string,
+	queryPrefix string,
+	waitEvent string,
+) {
 	t.Helper()
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
@@ -336,11 +569,11 @@ func waitForPostgresAdvisoryWait(t *testing.T, ctx context.Context, pool *pgxpoo
 		if err := pool.QueryRow(ctx, `SELECT EXISTS (
 SELECT 1 FROM pg_stat_activity
 WHERE application_name = $1
-  AND query LIKE 'DELETE FROM topic_properties%'
+  AND left(query, length($2)) = $2
   AND wait_event_type = 'Lock'
-  AND wait_event = 'advisory'
-)`, applicationName).Scan(&waiting); err != nil {
-			t.Fatalf("inspect PostgreSQL advisory wait: %v", err)
+  AND ($3 = '' OR wait_event = $3)
+)`, applicationName, queryPrefix, waitEvent).Scan(&waiting); err != nil {
+			t.Fatalf("inspect PostgreSQL query wait: %v", err)
 		}
 		if waiting {
 			return
@@ -348,11 +581,21 @@ WHERE application_name = $1
 		select {
 		case <-ticker.C:
 		case <-timeout.C:
-			t.Fatal("topic delete did not reach advisory trigger")
+			t.Fatalf("PostgreSQL query %q did not reach expected lock wait", queryPrefix)
 		case <-ctx.Done():
 			t.Fatalf("wait for topic delete advisory trigger: %v", ctx.Err())
 		}
 	}
+}
+
+func countOccurrences(values []string, target string) int {
+	count := 0
+	for _, value := range values {
+		if value == target {
+			count++
+		}
+	}
+	return count
 }
 
 func assertPostgresParentAndSubscription(

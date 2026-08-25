@@ -14,6 +14,28 @@ import (
 	"github.com/marsolab/servekit/idkit"
 )
 
+const (
+	listTopicSubscriptionsQuery = `SELECT s.subscription_id, s.topic_id, s.queue_id, COALESCE(q.queue_name, ''), s.created_at
+FROM topic_subscriptions s
+LEFT JOIN queue_properties q ON q.queue_id = s.queue_id
+WHERE s.topic_id = $1
+ORDER BY s.created_at, s.subscription_id;`
+
+	captureTopicSubscriptionsQuery = `SELECT s.subscription_id, s.topic_id, s.queue_id, COALESCE(q.queue_name, ''), s.created_at
+FROM topic_subscriptions s
+LEFT JOIN queue_properties q ON q.queue_id = s.queue_id
+WHERE s.topic_id = $1
+ORDER BY s.created_at, s.subscription_id
+FOR UPDATE OF s;`
+
+	captureQueueSubscriptionsQuery = `SELECT s.subscription_id, s.topic_id, s.queue_id, COALESCE(q.queue_name, ''), s.created_at
+FROM topic_subscriptions s
+LEFT JOIN queue_properties q ON q.queue_id = s.queue_id
+WHERE s.queue_id = $1
+ORDER BY s.topic_id, s.created_at, s.subscription_id
+FOR UPDATE OF s;`
+)
+
 var _ queue.Storage = (*Storage)(nil)
 
 func (s *Storage) ListTopics(ctx context.Context) (*queue.ListTopicsResponse, error) {
@@ -75,7 +97,7 @@ func (s *Storage) DeleteTopic(ctx context.Context, topicID string) (_ *queue.Del
 	if err := lockTopicForDelete(ctx, tx, topicID); err != nil {
 		return nil, err
 	}
-	removed, err := listSubscriptions(ctx, tx, topicID, pubSubDeleteTopic)
+	removed, err := querySubscriptions(ctx, tx, captureTopicSubscriptionsQuery, topicID, pubSubDeleteTopic)
 	if err != nil {
 		return nil, fmt.Errorf("capture topic subscriptions: %w", err)
 	}
@@ -256,7 +278,17 @@ func (s *Storage) listSubscriptions(ctx context.Context, topicID string) ([]queu
 }
 
 func listSubscriptions(ctx context.Context, db pgQueryRunner, topicID string, operation pubSubErrorContext) ([]queue.Subscription, error) {
-	rows, err := db.Query(ctx, `SELECT s.subscription_id, s.topic_id, s.queue_id, COALESCE(q.queue_name, ''), s.created_at FROM topic_subscriptions s LEFT JOIN queue_properties q ON q.queue_id = s.queue_id WHERE s.topic_id = $1 ORDER BY s.created_at, s.subscription_id;`, topicID)
+	return querySubscriptions(ctx, db, listTopicSubscriptionsQuery, topicID, operation)
+}
+
+func querySubscriptions(
+	ctx context.Context,
+	db pgQueryRunner,
+	query string,
+	parentID string,
+	operation pubSubErrorContext,
+) ([]queue.Subscription, error) {
+	rows, err := db.Query(ctx, query, parentID)
 	if err != nil {
 		return nil, fmt.Errorf("list subscriptions: %w", normalizePubSubError(err, operation))
 	}
@@ -276,7 +308,7 @@ func listSubscriptions(ctx context.Context, db pgQueryRunner, topicID string, op
 }
 
 func listSubscriptionsByQueue(ctx context.Context, tx pgx.Tx, queueID string) ([]queue.Subscription, error) {
-	rows, err := tx.Query(ctx, `SELECT s.subscription_id, s.topic_id, s.queue_id, COALESCE(q.queue_name, ''), s.created_at FROM topic_subscriptions s LEFT JOIN queue_properties q ON q.queue_id = s.queue_id WHERE s.queue_id = $1 ORDER BY s.topic_id, s.created_at, s.subscription_id;`, queueID)
+	rows, err := tx.Query(ctx, captureQueueSubscriptionsQuery, queueID)
 	if err != nil {
 		return nil, fmt.Errorf("list queue subscriptions: %w", normalizePubSubError(err, pubSubDeleteQueue))
 	}

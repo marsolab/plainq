@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/marsolab/plainq/internal/cluster/consensus"
+	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
+	"github.com/marsolab/plainq/internal/server/service/queue"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/maxatome/go-testdeep/td"
 )
@@ -137,6 +139,7 @@ func TestForwardTranslatesConsensusErrors(t *testing.T) {
 		"not found":      {err: pqerr.ErrNotFound, status: http.StatusNotFound, class: "not-found"},
 		"already exists": {err: pqerr.ErrAlreadyExists, status: http.StatusConflict, class: "already-exists"},
 		"invalid input":  {err: pqerr.ErrInvalidInput, status: http.StatusBadRequest, class: "invalid-argument"},
+		"unavailable":    {err: pqerr.ErrUnavailable, status: http.StatusServiceUnavailable, class: "unavailable"},
 		"anything else":  {err: errors.New("disk on fire"), status: http.StatusInternalServerError, class: "internal"},
 	}
 
@@ -164,6 +167,7 @@ func TestPeerErrorsKeepTheirClass(t *testing.T) {
 		"not-found":        {class: "not-found", target: pqerr.ErrNotFound},
 		"already-exists":   {class: "already-exists", target: pqerr.ErrAlreadyExists},
 		"invalid-argument": {class: "invalid-argument", target: pqerr.ErrInvalidInput},
+		"unavailable":      {class: "unavailable", target: pqerr.ErrUnavailable},
 	}
 
 	for name, tc := range cases {
@@ -189,8 +193,8 @@ func TestPeerErrorsKeepTheirClass(t *testing.T) {
 	}
 }
 
-// A schema response carries its own codec; anything else is JSON. The caller
-// knows which to expect from the command it sent, so nothing has to be tagged.
+// A schema response carries its own codec, delete effects use the
+// mixed-version envelope, and remaining internal responses are JSON.
 func TestEncodeResponse(t *testing.T) {
 	encoded, err := encodeResponse(&vtResponse{payload: []byte{1, 2, 3}})
 	td.Require(t).CmpNoError(err)
@@ -199,6 +203,19 @@ func TestEncodeResponse(t *testing.T) {
 	encoded, err = encodeResponse(map[string]string{"topicId": "t1"})
 	td.Require(t).CmpNoError(err)
 	td.Cmp(t, string(encoded), `{"topicId":"t1"}`)
+
+	encoded, err = encodeResponse(&queue.DeleteQueueResult{RemovedSubscriptions: []queue.Subscription{{SubscriptionID: "subscription-1"}}})
+	td.Require(t).CmpNoError(err)
+	legacy := &v1.DeleteQueueResponse{}
+	td.CmpNoError(t, legacy.UnmarshalVT(encoded), "an old follower accepts the new leader delete envelope")
+	remarshaled, err := legacy.MarshalVT()
+	td.Require(t).CmpNoError(err)
+	td.Cmp(t, remarshaled, encoded, "an old follower preserves the unknown delete envelope")
+
+	encoded, err = encodeResponse(&queue.DeleteTopicResult{RemovedSubscriptions: []queue.Subscription{{SubscriptionID: "subscription-2"}}})
+	td.Require(t).CmpNoError(err)
+	legacyTopic := &v1.DeleteTopicResponse{}
+	td.CmpNoError(t, legacyTopic.UnmarshalVT(encoded), "an old follower accepts the new leader topic-delete envelope")
 
 	encoded, err = encodeResponse(nil)
 	td.Require(t).CmpNoError(err)

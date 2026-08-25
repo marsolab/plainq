@@ -61,6 +61,9 @@ func normalizePubSubError(err error, operation pubSubErrorContext) error {
 	if strings.HasPrefix(pgErr.Code, "08") || pgErr.Code == "57P01" || pgErr.Code == "57P02" || pgErr.Code == "57P03" {
 		return errors.Join(pqerr.ErrUnavailable, err)
 	}
+	if pgErr.Code == "40001" || pgErr.Code == "40P01" {
+		return errors.Join(pqerr.ErrUnavailable, err)
+	}
 	if pgErr.Code == "23505" {
 		switch operation {
 		case pubSubCreateTopic:

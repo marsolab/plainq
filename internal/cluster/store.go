@@ -10,6 +10,7 @@ import (
 
 	"github.com/marsolab/plainq/internal/cluster/command"
 	"github.com/marsolab/plainq/internal/cluster/consensus"
+	"github.com/marsolab/plainq/internal/cluster/deletewire"
 	"github.com/marsolab/plainq/internal/metrics"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/service/queue"
@@ -149,7 +150,7 @@ func (s *Store) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest) (
 
 // DeleteQueue implements queue.Storage.
 func (s *Store) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest) (*queue.DeleteQueueResult, error) {
-	return jsonResponse[queue.DeleteQueueResult](s.applyProto(ctx, command.OpDeleteQueue, input, nil))
+	return deleteResultResponse[queue.DeleteQueueResult](s.applyProto(ctx, command.OpDeleteQueue, input, nil))
 }
 
 // PurgeQueue implements queue.Storage.
@@ -269,7 +270,7 @@ func (s *Store) CreateTopic(ctx context.Context, input *queue.CreateTopicRequest
 
 // DeleteTopic implements queue.Storage.
 func (s *Store) DeleteTopic(ctx context.Context, topicID string) (*queue.DeleteTopicResult, error) {
-	return jsonResponse[queue.DeleteTopicResult](s.applyJSON(ctx, command.OpDeleteTopic, struct{}{}, topicID, nil))
+	return deleteResultResponse[queue.DeleteTopicResult](s.applyJSON(ctx, command.OpDeleteTopic, struct{}{}, topicID, nil))
 }
 
 // TopicInventory implements queue.Storage using the configured read barrier.
@@ -615,6 +616,47 @@ func jsonResponse[U any](response any, err error) (*U, error) {
 
 	if unmarshalErr := json.Unmarshal(raw, out); unmarshalErr != nil {
 		return nil, fmt.Errorf("decode forwarded response: %w", unmarshalErr)
+	}
+
+	return out, nil
+}
+
+// deleteResultResponse handles the internal mixed-version delete envelope.
+// A legacy leader returned an empty public protobuf response after committing
+// the delete, so an empty body is a successful, non-nil result with no effects
+// available to report.
+func deleteResultResponse[U any](response any, err error) (*U, error) {
+	if err != nil {
+		return nil, err
+	}
+
+	if response == nil {
+		return new(U), nil
+	}
+
+	if typed, ok := response.(*U); ok {
+		if typed == nil {
+			return new(U), nil
+		}
+
+		return typed, nil
+	}
+
+	raw, ok := response.([]byte)
+	if !ok {
+		return nil, fmt.Errorf("state machine returned %T, want *%T or an encoded delete response", response, *new(U))
+	}
+	if len(raw) == 0 {
+		return new(U), nil
+	}
+
+	out := new(U)
+	found, decodeErr := deletewire.Decode(raw, out)
+	if decodeErr != nil {
+		return nil, fmt.Errorf("decode forwarded delete response: %w", decodeErr)
+	}
+	if !found {
+		return nil, errors.New("decode forwarded delete response: non-empty response has no delete result")
 	}
 
 	return out, nil

@@ -40,6 +40,22 @@ func TestLockParentForDeleteMapsMissingParent(t *testing.T) {
 	}
 }
 
+func TestDeleteCaptureQueriesLockSubscriptionRowsInDeterministicOrder(t *testing.T) {
+	tests := map[string]string{
+		"topic": captureTopicSubscriptionsQuery,
+		"queue": captureQueueSubscriptionsQuery,
+	}
+	for name, query := range tests {
+		t.Run(name, func(t *testing.T) {
+			order := strings.Index(query, "ORDER BY")
+			lock := strings.Index(query, "FOR UPDATE OF s")
+			if order < 0 || lock < 0 || order > lock {
+				t.Fatalf("capture query = %q, want deterministic ORDER BY before FOR UPDATE OF s", query)
+			}
+		})
+	}
+}
+
 type parentLockDB struct {
 	query string
 	row   pgx.Row
