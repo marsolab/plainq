@@ -128,10 +128,6 @@ type Storage struct {
 	// observer is responsible for observing certain events and transform them to metrics.
 	observer *telemetry.Observer
 
-	// deleteResultMaxBytes overrides the peer envelope ceiling in focused
-	// storage tests. Zero uses the production transport ceiling.
-	deleteResultMaxBytes int
-
 	// stop is a function that can be called to stop the telemetry and garbage collection processes.
 	stop func()
 
@@ -443,9 +439,6 @@ func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest)
 		return nil, fmt.Errorf("capture queue %q subscriptions: %w", queueID, captureErr)
 	}
 	deleteResult := &queue.DeleteQueueResult{RemovedSubscriptions: removedSubscriptions}
-	if err := s.preflightDeleteResult(deleteResult); err != nil {
-		return nil, fmt.Errorf("preflight queue %q delete result: %w", queueID, err)
-	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM topic_subscriptions WHERE queue_id = ?;`, queueID); err != nil {
 		return nil, fmt.Errorf("delete queue %q subscriptions: %w", queueID, normalizePubSubError(err, pubSubDeleteQueue))
 	}

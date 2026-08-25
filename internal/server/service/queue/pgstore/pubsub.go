@@ -10,7 +10,6 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/service/queue"
-	"github.com/marsolab/plainq/internal/shared/deleteresult"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/marsolab/servekit/idkit"
 )
@@ -103,9 +102,6 @@ func (s *Storage) DeleteTopic(ctx context.Context, topicID string) (_ *queue.Del
 		return nil, fmt.Errorf("capture topic subscriptions: %w", err)
 	}
 	deleteResult := &queue.DeleteTopicResult{RemovedSubscriptions: removed}
-	if err := s.preflightDeleteResult(deleteResult); err != nil {
-		return nil, fmt.Errorf("preflight topic delete result: %w", err)
-	}
 	tag, err := tx.Exec(ctx, `DELETE FROM topic_properties WHERE topic_id = $1;`, topicID)
 	if err != nil {
 		return nil, fmt.Errorf("delete topic: %w", normalizePubSubError(err, pubSubDeleteTopic))
@@ -345,15 +341,4 @@ func publishedMessageBytes(messages []queue.PublishMessage) uint64 {
 		total += uint64(len(message.Body))
 	}
 	return total
-}
-
-func (s *Storage) preflightDeleteResult(result any) error {
-	limit := s.deleteResultMaxBytes
-	if limit == 0 {
-		limit = deleteresult.MaxEnvelopeBytes
-	}
-
-	_, err := deleteresult.Marshal(result, limit)
-
-	return err
 }

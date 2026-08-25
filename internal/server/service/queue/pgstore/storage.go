@@ -85,10 +85,6 @@ type Storage struct {
 	gcTimeout time.Duration
 	observer  *telemetry.Observer
 
-	// deleteResultMaxBytes overrides the peer envelope ceiling in focused
-	// storage tests. Zero uses the production transport ceiling.
-	deleteResultMaxBytes int
-
 	stop func()
 }
 
@@ -334,9 +330,6 @@ func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest)
 		return nil, fmt.Errorf("capture queue %q subscriptions: %w", queueID, captureErr)
 	}
 	deleteResult := &queue.DeleteQueueResult{RemovedSubscriptions: removedSubscriptions}
-	if err := s.preflightDeleteResult(deleteResult); err != nil {
-		return nil, fmt.Errorf("preflight queue %q delete result: %w", queueID, err)
-	}
 
 	rows, delErr := s.queries.WithTx(tx).DeleteQueueProperties(ctx, queueID)
 	if delErr != nil {

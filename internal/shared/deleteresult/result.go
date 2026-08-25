@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
@@ -20,6 +19,8 @@ const (
 
 // CapacityError reports an internal delete result that cannot fit on the peer
 // transport. It contains sizes only and never includes the serialized data.
+// It intentionally has no domain-error classification: this is a server-side
+// representation limit, not invalid client input and not a retryable failure.
 type CapacityError struct {
 	EncodedBytes int
 	Limit        int
@@ -32,10 +33,6 @@ func (e *CapacityError) Error() string {
 		e.Limit,
 	)
 }
-
-// Unwrap makes capacity exhaustion a deliberate, non-retryable input error at
-// the storage and peer transport boundaries.
-func (*CapacityError) Unwrap() error { return pqerr.ErrInvalidInput }
 
 // Marshal returns the canonical protobuf envelope, including JSON escaping,
 // after enforcing the exact encoded-byte limit.

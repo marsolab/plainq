@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/service/queue"
+	"github.com/marsolab/plainq/internal/shared/deleteresult"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/marsolab/servekit/idkit"
 )
@@ -396,33 +397,37 @@ FOR EACH ROW EXECUTE FUNCTION reject_named_queue_delete();`); err != nil {
 	assertPostgresParentAndSubscription(t, ctx, pool, "queue_properties", "queue_id", queueID, queueSubscription.SubscriptionID)
 }
 
-func TestPostgresDeleteCapacityPreflightPreservesParentsAndBinding(t *testing.T) {
+func TestPostgresStandaloneDeleteIsNotBoundByPeerEnvelope(t *testing.T) {
 	ctx, storage, pool, _ := newPostgresPubSubStorage(t)
-	topic, err := storage.CreateTopic(ctx, &queue.CreateTopicRequest{TopicName: "capacity-topic"})
-	if err != nil {
-		t.Fatalf("create capacity topic: %v", err)
-	}
-	queueID := createPostgresQueue(t, ctx, storage, strings.Repeat(`<legacy & "uncapped">`, 8))
-	subscription, err := storage.Subscribe(ctx, topic.TopicID, &queue.SubscribeRequest{QueueID: queueID})
-	if err != nil {
-		t.Fatalf("create capacity subscription: %v", err)
-	}
-	storage.deleteResultMaxBytes = 128
 
-	topicResult, err := storage.DeleteTopic(ctx, topic.TopicID)
-	if topicResult != nil || !errors.Is(err, pqerr.ErrInvalidInput) || !strings.Contains(err.Error(), "transport capacity") {
-		t.Fatalf("oversized topic delete = %#v, %v; want nil and typed capacity error", topicResult, err)
+	queueName := strings.Repeat("q", 2000)
+	createdQueue, err := storage.CreateQueue(ctx, &v1.CreateQueueRequest{QueueName: queueName})
+	if err != nil {
+		t.Fatalf("create oversized-name queue: %v", err)
 	}
-	assertPostgresParentAndSubscription(t, ctx, pool, "topic_properties", "topic_id", topic.TopicID, subscription.SubscriptionID)
 
-	queueResult, err := storage.DeleteQueue(ctx, &v1.DeleteQueueRequest{QueueId: queueID, Force: true})
-	if queueResult != nil || !errors.Is(err, pqerr.ErrInvalidInput) || !strings.Contains(err.Error(), "transport capacity") {
-		t.Fatalf("oversized queue delete = %#v, %v; want nil and typed capacity error", queueResult, err)
+	const subscriptionCount = 34_000
+	if _, err := pool.Exec(ctx, `INSERT INTO topic_properties (topic_id, topic_name, created_at)
+SELECT 'topic-' || lpad(i::text, 20, '0'), 'standalone-topic-' || i, TIMESTAMPTZ '2026-08-26 00:00:00Z' + i * INTERVAL '1 microsecond'
+FROM generate_series(1, $1) AS i;`, subscriptionCount); err != nil {
+		t.Fatalf("bulk-create standalone topics: %v", err)
 	}
-	assertPostgresParentAndSubscription(t, ctx, pool, "queue_properties", "queue_id", queueID, subscription.SubscriptionID)
-	var messages uint64
-	if err := pool.QueryRow(ctx, queryCountMessages(queueID)).Scan(&messages); err != nil {
-		t.Fatalf("read preserved queue table: %v", err)
+	if _, err := pool.Exec(ctx, `INSERT INTO topic_subscriptions (subscription_id, topic_id, queue_id, created_at)
+SELECT 'sub-' || lpad(i::text, 22, '0'), 'topic-' || lpad(i::text, 20, '0'), $1, TIMESTAMPTZ '2026-08-26 00:00:00Z' + i * INTERVAL '1 microsecond'
+FROM generate_series(1, $2) AS i;`, createdQueue.QueueId, subscriptionCount); err != nil {
+		t.Fatalf("bulk-create standalone subscriptions: %v", err)
+	}
+	queueResult, err := storage.DeleteQueue(ctx, &v1.DeleteQueueRequest{QueueId: createdQueue.QueueId, Force: true})
+	if err != nil {
+		t.Fatalf("standalone oversized queue delete: %v", err)
+	}
+	if len(queueResult.RemovedSubscriptions) != subscriptionCount {
+		t.Fatalf("standalone queue delete returned %d subscriptions, want %d", len(queueResult.RemovedSubscriptions), subscriptionCount)
+	}
+	_, err = deleteresult.Marshal(queueResult, deleteresult.MaxEnvelopeBytes)
+	var capacityErr *deleteresult.CapacityError
+	if !errors.As(err, &capacityErr) {
+		t.Fatalf("standalone queue delete result size check = %v, want over peer envelope", err)
 	}
 }
 

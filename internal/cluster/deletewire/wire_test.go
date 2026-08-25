@@ -62,12 +62,15 @@ func TestDeleteResultWireUsesCanonicalEnvelopeBytesAndLimit(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Encode() bytes differ from canonical Marshal(): got %d bytes, want %d", len(got), len(want))
 	}
+	if _, err := deleteresult.Marshal(result, len(want)); err != nil {
+		t.Fatalf("Marshal() at exact envelope limit: %v", err)
+	}
 
 	tooSmall := len(want) - 1
 	_, err = deleteresult.Marshal(result, tooSmall)
 	var capacityErr *deleteresult.CapacityError
-	if !errors.Is(err, pqerr.ErrInvalidInput) || !errors.As(err, &capacityErr) {
-		t.Fatalf("Marshal() error = %v, want typed invalid-input capacity error", err)
+	if !errors.As(err, &capacityErr) || errors.Is(err, pqerr.ErrInvalidInput) {
+		t.Fatalf("Marshal() error = %v, want typed unclassified capacity error", err)
 	}
 	if capacityErr.EncodedBytes != len(want) || capacityErr.Limit != tooSmall {
 		t.Fatalf("capacity error = %#v, want encoded=%d limit=%d", capacityErr, len(want), tooSmall)

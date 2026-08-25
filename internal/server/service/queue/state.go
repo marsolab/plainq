@@ -152,4 +152,13 @@ type ReplicatedStorage interface {
 	Storage
 	StateSnapshotter
 	StateRestorer
+	DeleteEffectPreviewer
+}
+
+// DeleteEffectPreviewer returns the exact internal effects a clustered delete
+// would produce without mutating storage. The leader uses it before proposing
+// a destructive command whose result must fit the peer response envelope.
+type DeleteEffectPreviewer interface {
+	PreviewDeleteTopic(ctx context.Context, topicID string) (*DeleteTopicResult, error)
+	PreviewDeleteQueue(ctx context.Context, queueID string) (*DeleteQueueResult, error)
 }

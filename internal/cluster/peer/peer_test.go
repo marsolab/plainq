@@ -210,11 +210,11 @@ func TestDeleteCapacityErrorIsFollowerRoutable(t *testing.T) {
 	resp := post(t, server, http.MethodPost, "/v1/forward", "", "delete-command")
 	body, err := io.ReadAll(resp.Body)
 	td.Require(t).CmpNoError(err)
-	td.Cmp(t, resp.StatusCode, http.StatusBadRequest)
-	td.Cmp(t, resp.Header.Get(errorHeader), "invalid-argument")
+	td.Cmp(t, resp.StatusCode, http.StatusInternalServerError)
+	td.Cmp(t, resp.Header.Get(errorHeader), "internal")
 
 	followerErr := peerError("leader:8082", resp, body)
-	td.Cmp(t, errors.Is(followerErr, pqerr.ErrInvalidInput), true)
+	td.Cmp(t, errors.Is(followerErr, pqerr.ErrInvalidInput), false)
 	td.Cmp(t, followerErr.Error(), td.Contains("transport capacity"))
 }
 

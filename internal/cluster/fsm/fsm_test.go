@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +18,8 @@ import (
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/service/queue"
 	"github.com/marsolab/plainq/internal/server/service/queue/litestore"
+	"github.com/marsolab/plainq/internal/shared/deleteresult"
+	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/marsolab/servekit/dbkit/litekit"
 	"github.com/maxatome/go-testdeep/td"
 )
@@ -79,6 +83,64 @@ func jsonCommand(t *testing.T, op command.Op, target string, value any, ids ...s
 	td.Require(t).CmpNoError(err, "marshal request")
 
 	return &command.Command{Op: op, Timestamp: stamp.UnixNano(), Target: target, IDs: ids, Payload: payload}
+}
+
+func TestNewFollowerAppliesLegacyOversizedDeletesWithoutCapacityCheck(t *testing.T) {
+	machine, storage := newFSM(t)
+	queueID := "queueone"
+	topicID := "topicone"
+	queueName := strings.Repeat(`<legacy & "uncapped">`, 32)
+
+	requireApplied(t, apply(t, machine, 1, protoCommand(t, command.OpCreateQueue,
+		&v1.CreateQueueRequest{QueueName: queueName}, queueID)), "create legacy queue")
+	requireApplied(t, apply(t, machine, 2, jsonCommand(t, command.OpCreateTopic, "",
+		&queue.CreateTopicRequest{TopicName: "legacy-one"}, topicID)), "create legacy topic")
+	requireApplied(t, apply(t, machine, 3, jsonCommand(t, command.OpSubscribe, topicID,
+		&queue.SubscribeRequest{QueueID: queueID}, "subone")), "create legacy subscription")
+
+	preview, err := storage.PreviewDeleteTopic(context.Background(), topicID)
+	if err != nil {
+		t.Fatalf("preview legacy delete: %v", err)
+	}
+	_, err = deleteresult.Marshal(preview, 128)
+	var capacityErr *deleteresult.CapacityError
+	if !errors.As(err, &capacityErr) {
+		t.Fatalf("legacy delete preview size error = %v, want capacity error at test limit", err)
+	}
+
+	response := apply(t, machine, 4, &command.Command{Op: command.OpDeleteTopic, Target: topicID})
+	result, ok := response.(*queue.DeleteTopicResult)
+	if !ok || len(result.RemovedSubscriptions) != 1 {
+		t.Fatalf("legacy committed delete response = %#v, want one removed subscription", response)
+	}
+	td.Cmp(t, result, preview, "topic preview exactly matches committed legacy effect")
+	if _, err := storage.DeleteTopic(context.Background(), topicID); !errors.Is(err, pqerr.ErrNotFound) {
+		t.Fatalf("topic after legacy committed delete error = %v, want not found", err)
+	}
+
+	secondTopicID := "topictwo"
+	requireApplied(t, apply(t, machine, 5, jsonCommand(t, command.OpCreateTopic, "",
+		&queue.CreateTopicRequest{TopicName: "legacy-two"}, secondTopicID)), "create second legacy topic")
+	requireApplied(t, apply(t, machine, 6, jsonCommand(t, command.OpSubscribe, secondTopicID,
+		&queue.SubscribeRequest{QueueID: queueID}, "subtwo")), "create second legacy subscription")
+	queuePreview, err := storage.PreviewDeleteQueue(context.Background(), queueID)
+	if err != nil {
+		t.Fatalf("preview legacy queue delete: %v", err)
+	}
+	_, err = deleteresult.Marshal(queuePreview, 128)
+	if !errors.As(err, &capacityErr) {
+		t.Fatalf("legacy queue delete preview size error = %v, want capacity error at test limit", err)
+	}
+	response = apply(t, machine, 7, protoCommand(t, command.OpDeleteQueue,
+		&v1.DeleteQueueRequest{QueueId: queueID, Force: true}))
+	queueResult, ok := response.(*queue.DeleteQueueResult)
+	if !ok || len(queueResult.RemovedSubscriptions) != 1 {
+		t.Fatalf("legacy committed queue delete response = %#v, want one removed subscription", response)
+	}
+	td.Cmp(t, queueResult, queuePreview, "queue preview exactly matches committed legacy effect")
+	if _, err := storage.DescribeQueue(context.Background(), &v1.DescribeQueueRequest{QueueId: queueID}); !errors.Is(err, pqerr.ErrNotFound) {
+		t.Fatalf("queue after legacy committed delete error = %v, want not found", err)
+	}
 }
 
 // This is the property the whole cluster rests on: the same log, applied to

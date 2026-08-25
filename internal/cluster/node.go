@@ -149,15 +149,16 @@ func NewNode(cfg Config, local queue.ReplicatedStorage, logger *slog.Logger) (*N
 	if cfg.ApplyTimeout > 0 {
 		storeOpts = append(storeOpts, WithApplyTimeout(cfg.ApplyTimeout))
 	}
+	proposals := newProposalGuard(engine, local)
 
 	node := Node{
 		cfg:        cfg,
 		logger:     logger,
 		mux:        mux,
-		consensus:  engine,
+		consensus:  proposals,
 		fsm:        stateMachine,
 		peerClient: peerClient,
-		store:      NewStore(local, engine, peerClient, storeOpts...),
+		store:      NewStore(local, proposals, peerClient, storeOpts...),
 		lastSeen:   make(map[string]time.Time),
 		departed:   make(map[string]time.Time),
 		done:       make(chan struct{}),
@@ -167,7 +168,7 @@ func NewNode(cfg Config, local queue.ReplicatedStorage, logger *slog.Logger) (*N
 	// the engine, so a removal asked for by a peer is recorded the same way
 	// one asked for locally is.
 	node.peerServer = peer.NewServer(peer.ServerConfig{
-		Applier:    engine,
+		Applier:    proposals,
 		Membership: &nodeMembership{node: &node},
 		Secret:     cfg.Secret,
 		Logger:     logger,

@@ -10,6 +10,7 @@ import (
 
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/service/queue"
+	"github.com/marsolab/plainq/internal/shared/deleteresult"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/marsolab/servekit/dbkit/litekit"
 )
@@ -180,61 +181,50 @@ func TestStorageRolledBackDeleteCascadeReturnsNoEffects(t *testing.T) {
 	}
 }
 
-func TestStorageDeleteCapacityPreflightPreservesParentsAndBinding(t *testing.T) {
+func TestStandaloneStorageDeletesAreNotBoundByPeerEnvelope(t *testing.T) {
 	ctx := context.Background()
-	storage, conn := newPubSubStorage(t)
-	topic, err := storage.CreateTopic(ctx, &queue.CreateTopicRequest{TopicName: "capacity-topic"})
-	if err != nil {
-		t.Fatalf("create capacity topic: %v", err)
-	}
-	queueID := createQueue(t, ctx, storage, strings.Repeat(`<legacy & "uncapped">`, 8))
-	subscription, err := storage.Subscribe(ctx, topic.TopicID, &queue.SubscribeRequest{QueueID: queueID})
-	if err != nil {
-		t.Fatalf("create capacity subscription: %v", err)
-	}
-	storage.deleteResultMaxBytes = 128
+	storage, _ := newPubSubStorage(t)
 
+	queueName := strings.Repeat("q", deleteresult.MaxEnvelopeBytes+1)
+	createdQueue, err := storage.CreateQueue(ctx, &v1.CreateQueueRequest{QueueName: queueName})
+	if err != nil {
+		t.Fatalf("create oversized-name queue: %v", err)
+	}
+
+	topic, err := storage.CreateTopic(ctx, &queue.CreateTopicRequest{TopicName: "standalone-topic-delete"})
+	if err != nil {
+		t.Fatalf("create standalone topic: %v", err)
+	}
+	if _, err := storage.Subscribe(ctx, topic.TopicID, &queue.SubscribeRequest{QueueID: createdQueue.QueueId}); err != nil {
+		t.Fatalf("subscribe oversized-name queue for topic delete: %v", err)
+	}
 	topicResult, err := storage.DeleteTopic(ctx, topic.TopicID)
-	if topicResult != nil || !errors.Is(err, pqerr.ErrInvalidInput) || !strings.Contains(err.Error(), "transport capacity") {
-		t.Fatalf("oversized topic delete = %#v, %v; want nil and typed capacity error", topicResult, err)
+	if err != nil {
+		t.Fatalf("standalone oversized topic delete: %v", err)
 	}
-	assertSQLiteDeleteState(t, ctx, conn, topic.TopicID, queueID, subscription.SubscriptionID)
-
-	queueResult, err := storage.DeleteQueue(ctx, &v1.DeleteQueueRequest{QueueId: queueID, Force: true})
-	if queueResult != nil || !errors.Is(err, pqerr.ErrInvalidInput) || !strings.Contains(err.Error(), "transport capacity") {
-		t.Fatalf("oversized queue delete = %#v, %v; want nil and typed capacity error", queueResult, err)
+	if len(topicResult.RemovedSubscriptions) != 1 {
+		t.Fatalf("standalone topic delete returned %d subscriptions, want one", len(topicResult.RemovedSubscriptions))
 	}
-	assertSQLiteDeleteState(t, ctx, conn, topic.TopicID, queueID, subscription.SubscriptionID)
-}
-
-func assertSQLiteDeleteState(
-	t *testing.T,
-	ctx context.Context,
-	conn *litekit.Conn,
-	topicID string,
-	queueID string,
-	subscriptionID string,
-) {
-	t.Helper()
-
-	var topicExists, queueExists, subscriptionExists bool
-	if err := conn.QueryRowContext(ctx, `SELECT
-EXISTS(SELECT 1 FROM topic_properties WHERE topic_id = ?),
-EXISTS(SELECT 1 FROM queue_properties WHERE queue_id = ?),
-EXISTS(SELECT 1 FROM topic_subscriptions WHERE subscription_id = ?);`, topicID, queueID, subscriptionID).Scan(
-		&topicExists,
-		&queueExists,
-		&subscriptionExists,
-	); err != nil {
-		t.Fatalf("read delete rollback state: %v", err)
-	}
-	if !topicExists || !queueExists || !subscriptionExists {
-		t.Fatalf("delete rollback state topic=%t queue=%t subscription=%t, want all true", topicExists, queueExists, subscriptionExists)
+	if got := len(topicResult.RemovedSubscriptions[0].QueueName); got <= deleteresult.MaxEnvelopeBytes {
+		t.Fatalf("standalone topic delete queue-name bytes = %d, want over peer limit", got)
 	}
 
-	var messages uint64
-	if err := conn.QueryRowContext(ctx, queryCountMessages(queueID)).Scan(&messages); err != nil {
-		t.Fatalf("read preserved queue table: %v", err)
+	queueTopic, err := storage.CreateTopic(ctx, &queue.CreateTopicRequest{TopicName: "standalone-queue-delete"})
+	if err != nil {
+		t.Fatalf("create standalone queue-delete topic: %v", err)
+	}
+	if _, err := storage.Subscribe(ctx, queueTopic.TopicID, &queue.SubscribeRequest{QueueID: createdQueue.QueueId}); err != nil {
+		t.Fatalf("subscribe oversized-name queue for queue delete: %v", err)
+	}
+	queueResult, err := storage.DeleteQueue(ctx, &v1.DeleteQueueRequest{QueueId: createdQueue.QueueId, Force: true})
+	if err != nil {
+		t.Fatalf("standalone oversized queue delete: %v", err)
+	}
+	if len(queueResult.RemovedSubscriptions) != 1 {
+		t.Fatalf("standalone queue delete returned %d subscriptions, want one", len(queueResult.RemovedSubscriptions))
+	}
+	if got := len(queueResult.RemovedSubscriptions[0].QueueName); got <= deleteresult.MaxEnvelopeBytes {
+		t.Fatalf("standalone queue delete queue-name bytes = %d, want over peer limit", got)
 	}
 }
 
