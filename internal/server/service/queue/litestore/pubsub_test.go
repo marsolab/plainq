@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
@@ -176,6 +177,64 @@ func TestStorageRolledBackDeleteCascadeReturnsNoEffects(t *testing.T) {
 	inventory, err := storage.TopicInventory(ctx)
 	if err != nil || inventory.SubscriptionCounts[topic.TopicID] != 1 {
 		t.Fatalf("inventory after rollbacks = %#v, %v", inventory, err)
+	}
+}
+
+func TestStorageDeleteCapacityPreflightPreservesParentsAndBinding(t *testing.T) {
+	ctx := context.Background()
+	storage, conn := newPubSubStorage(t)
+	topic, err := storage.CreateTopic(ctx, &queue.CreateTopicRequest{TopicName: "capacity-topic"})
+	if err != nil {
+		t.Fatalf("create capacity topic: %v", err)
+	}
+	queueID := createQueue(t, ctx, storage, strings.Repeat(`<legacy & "uncapped">`, 8))
+	subscription, err := storage.Subscribe(ctx, topic.TopicID, &queue.SubscribeRequest{QueueID: queueID})
+	if err != nil {
+		t.Fatalf("create capacity subscription: %v", err)
+	}
+	storage.deleteResultMaxBytes = 128
+
+	topicResult, err := storage.DeleteTopic(ctx, topic.TopicID)
+	if topicResult != nil || !errors.Is(err, pqerr.ErrInvalidInput) || !strings.Contains(err.Error(), "transport capacity") {
+		t.Fatalf("oversized topic delete = %#v, %v; want nil and typed capacity error", topicResult, err)
+	}
+	assertSQLiteDeleteState(t, ctx, conn, topic.TopicID, queueID, subscription.SubscriptionID)
+
+	queueResult, err := storage.DeleteQueue(ctx, &v1.DeleteQueueRequest{QueueId: queueID, Force: true})
+	if queueResult != nil || !errors.Is(err, pqerr.ErrInvalidInput) || !strings.Contains(err.Error(), "transport capacity") {
+		t.Fatalf("oversized queue delete = %#v, %v; want nil and typed capacity error", queueResult, err)
+	}
+	assertSQLiteDeleteState(t, ctx, conn, topic.TopicID, queueID, subscription.SubscriptionID)
+}
+
+func assertSQLiteDeleteState(
+	t *testing.T,
+	ctx context.Context,
+	conn *litekit.Conn,
+	topicID string,
+	queueID string,
+	subscriptionID string,
+) {
+	t.Helper()
+
+	var topicExists, queueExists, subscriptionExists bool
+	if err := conn.QueryRowContext(ctx, `SELECT
+EXISTS(SELECT 1 FROM topic_properties WHERE topic_id = ?),
+EXISTS(SELECT 1 FROM queue_properties WHERE queue_id = ?),
+EXISTS(SELECT 1 FROM topic_subscriptions WHERE subscription_id = ?);`, topicID, queueID, subscriptionID).Scan(
+		&topicExists,
+		&queueExists,
+		&subscriptionExists,
+	); err != nil {
+		t.Fatalf("read delete rollback state: %v", err)
+	}
+	if !topicExists || !queueExists || !subscriptionExists {
+		t.Fatalf("delete rollback state topic=%t queue=%t subscription=%t, want all true", topicExists, queueExists, subscriptionExists)
+	}
+
+	var messages uint64
+	if err := conn.QueryRowContext(ctx, queryCountMessages(queueID)).Scan(&messages); err != nil {
+		t.Fatalf("read preserved queue table: %v", err)
 	}
 }
 

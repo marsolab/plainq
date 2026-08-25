@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/marsolab/plainq/internal/shared/deleteresult"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
@@ -13,28 +14,15 @@ const (
 	// This high, non-reserved unknown field is the version marker for the
 	// first internal delete-result envelope. Older generated protobuf codecs
 	// preserve it while continuing to expose an empty public response.
-	resultFieldNumber protowire.Number = 51000
+	resultFieldNumber = deleteresult.FieldNumber
 
-	// Leave enough room for the protobuf tag and length inside the peer RPC's
-	// 64 MiB response ceiling.
-	maxPayloadBytes = (64 << 20) - 16
+	maxEnvelopeBytes = deleteresult.MaxEnvelopeBytes
 )
 
 // Encode wraps a JSON delete result in a length-delimited protobuf unknown
 // field. The public empty response types accept and preserve this field.
 func Encode(result any) ([]byte, error) {
-	payload, err := json.Marshal(result)
-	if err != nil {
-		return nil, fmt.Errorf("marshal delete result: %w", err)
-	}
-	if len(payload) > maxPayloadBytes {
-		return nil, fmt.Errorf("delete result payload is too large: %d bytes", len(payload))
-	}
-
-	encoded := protowire.AppendTag(nil, resultFieldNumber, protowire.BytesType)
-	encoded = protowire.AppendBytes(encoded, payload)
-
-	return encoded, nil
+	return deleteresult.Marshal(result, maxEnvelopeBytes)
 }
 
 // Decode unwraps a delete result. An empty body is the legacy response from
@@ -44,6 +32,9 @@ func Encode(result any) ([]byte, error) {
 func Decode(data []byte, result any) (bool, error) {
 	if len(data) == 0 {
 		return false, nil
+	}
+	if len(data) > maxEnvelopeBytes {
+		return false, fmt.Errorf("delete result envelope is too large: %d bytes", len(data))
 	}
 
 	var (
@@ -79,7 +70,7 @@ func Decode(data []byte, result any) (bool, error) {
 		if lengthLen < 0 {
 			return false, fmt.Errorf("malformed delete result envelope length: %w", protowire.ParseError(lengthLen))
 		}
-		if payloadLen > maxPayloadBytes {
+		if payloadLen > maxEnvelopeBytes {
 			return false, fmt.Errorf("delete result payload is too large: %d bytes", payloadLen)
 		}
 		data = data[lengthLen:]

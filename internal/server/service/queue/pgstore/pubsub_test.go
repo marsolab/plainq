@@ -396,6 +396,36 @@ FOR EACH ROW EXECUTE FUNCTION reject_named_queue_delete();`); err != nil {
 	assertPostgresParentAndSubscription(t, ctx, pool, "queue_properties", "queue_id", queueID, queueSubscription.SubscriptionID)
 }
 
+func TestPostgresDeleteCapacityPreflightPreservesParentsAndBinding(t *testing.T) {
+	ctx, storage, pool, _ := newPostgresPubSubStorage(t)
+	topic, err := storage.CreateTopic(ctx, &queue.CreateTopicRequest{TopicName: "capacity-topic"})
+	if err != nil {
+		t.Fatalf("create capacity topic: %v", err)
+	}
+	queueID := createPostgresQueue(t, ctx, storage, strings.Repeat(`<legacy & "uncapped">`, 8))
+	subscription, err := storage.Subscribe(ctx, topic.TopicID, &queue.SubscribeRequest{QueueID: queueID})
+	if err != nil {
+		t.Fatalf("create capacity subscription: %v", err)
+	}
+	storage.deleteResultMaxBytes = 128
+
+	topicResult, err := storage.DeleteTopic(ctx, topic.TopicID)
+	if topicResult != nil || !errors.Is(err, pqerr.ErrInvalidInput) || !strings.Contains(err.Error(), "transport capacity") {
+		t.Fatalf("oversized topic delete = %#v, %v; want nil and typed capacity error", topicResult, err)
+	}
+	assertPostgresParentAndSubscription(t, ctx, pool, "topic_properties", "topic_id", topic.TopicID, subscription.SubscriptionID)
+
+	queueResult, err := storage.DeleteQueue(ctx, &v1.DeleteQueueRequest{QueueId: queueID, Force: true})
+	if queueResult != nil || !errors.Is(err, pqerr.ErrInvalidInput) || !strings.Contains(err.Error(), "transport capacity") {
+		t.Fatalf("oversized queue delete = %#v, %v; want nil and typed capacity error", queueResult, err)
+	}
+	assertPostgresParentAndSubscription(t, ctx, pool, "queue_properties", "queue_id", queueID, subscription.SubscriptionID)
+	var messages uint64
+	if err := pool.QueryRow(ctx, queryCountMessages(queueID)).Scan(&messages); err != nil {
+		t.Fatalf("read preserved queue table: %v", err)
+	}
+}
+
 func createPostgresQueue(t *testing.T, ctx context.Context, storage *Storage, name string) string {
 	t.Helper()
 	created, err := storage.CreateQueue(ctx, &v1.CreateQueueRequest{QueueName: name})

@@ -1,11 +1,15 @@
 package deletewire
 
 import (
+	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/marsolab/plainq/internal/server/service/queue"
+	"github.com/marsolab/plainq/internal/shared/deleteresult"
+	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
@@ -26,6 +30,47 @@ func TestDeleteResultWireRoundTrip(t *testing.T) {
 	}
 	if !found || !reflect.DeepEqual(&got, want) {
 		t.Fatalf("decoded delete result found=%t got=%#v, want %#v", found, got, want)
+	}
+}
+
+func TestDeleteResultWireUsesCanonicalEnvelopeBytesAndLimit(t *testing.T) {
+	result := &queue.DeleteQueueResult{RemovedSubscriptions: []queue.Subscription{{
+		SubscriptionID: "subscription-1",
+		TopicID:        "topic-1",
+		QueueID:        "queue-1",
+		QueueName:      `<legacy & "uncapped">`,
+	}}}
+
+	payload, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal expected JSON payload: %v", err)
+	}
+	want := protowire.AppendTag(nil, resultFieldNumber, protowire.BytesType)
+	want = protowire.AppendBytes(want, payload)
+
+	canonical, err := deleteresult.Marshal(result, deleteresult.MaxEnvelopeBytes)
+	if err != nil {
+		t.Fatalf("marshal canonical delete result: %v", err)
+	}
+	if !reflect.DeepEqual(canonical, want) {
+		t.Fatalf("canonical Marshal() bytes differ from JSON protobuf envelope: got %d bytes, want %d", len(canonical), len(want))
+	}
+	got, err := Encode(result)
+	if err != nil {
+		t.Fatalf("encode delete result: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Encode() bytes differ from canonical Marshal(): got %d bytes, want %d", len(got), len(want))
+	}
+
+	tooSmall := len(want) - 1
+	_, err = deleteresult.Marshal(result, tooSmall)
+	var capacityErr *deleteresult.CapacityError
+	if !errors.Is(err, pqerr.ErrInvalidInput) || !errors.As(err, &capacityErr) {
+		t.Fatalf("Marshal() error = %v, want typed invalid-input capacity error", err)
+	}
+	if capacityErr.EncodedBytes != len(want) || capacityErr.Limit != tooSmall {
+		t.Fatalf("capacity error = %#v, want encoded=%d limit=%d", capacityErr, len(want), tooSmall)
 	}
 }
 
@@ -69,7 +114,7 @@ func TestDeleteResultWireRejectsInvalidEnvelopes(t *testing.T) {
 		"oversized envelope": {
 			data: protowire.AppendVarint(
 				protowire.AppendTag(nil, resultFieldNumber, protowire.BytesType),
-				uint64(maxPayloadBytes+1),
+				uint64(maxEnvelopeBytes+1),
 			),
 			wantErr: "too large",
 		},

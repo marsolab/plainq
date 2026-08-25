@@ -3,6 +3,7 @@ package peer
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/marsolab/plainq/internal/cluster/consensus"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/service/queue"
+	"github.com/marsolab/plainq/internal/shared/deleteresult"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/maxatome/go-testdeep/td"
 )
@@ -191,6 +193,29 @@ func TestPeerErrorsKeepTheirClass(t *testing.T) {
 			td.Cmp(t, err.Error(), td.Contains("something went wrong"))
 		})
 	}
+}
+
+func TestDeleteCapacityErrorIsFollowerRoutable(t *testing.T) {
+	if deleteresult.MaxEnvelopeBytes != maxRequestBytes {
+		t.Fatalf(
+			"delete envelope ceiling = %d, peer ceiling = %d",
+			deleteresult.MaxEnvelopeBytes,
+			maxRequestBytes,
+		)
+	}
+
+	capacityErr := &deleteresult.CapacityError{EncodedBytes: 129, Limit: 128}
+	server := newTestServer(t, &stubApplier{err: capacityErr}, &stubMembership{}, "")
+
+	resp := post(t, server, http.MethodPost, "/v1/forward", "", "delete-command")
+	body, err := io.ReadAll(resp.Body)
+	td.Require(t).CmpNoError(err)
+	td.Cmp(t, resp.StatusCode, http.StatusBadRequest)
+	td.Cmp(t, resp.Header.Get(errorHeader), "invalid-argument")
+
+	followerErr := peerError("leader:8082", resp, body)
+	td.Cmp(t, errors.Is(followerErr, pqerr.ErrInvalidInput), true)
+	td.Cmp(t, followerErr.Error(), td.Contains("transport capacity"))
 }
 
 // A schema response carries its own codec, delete effects use the
