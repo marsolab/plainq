@@ -1,9 +1,11 @@
 package queue
 
 import (
+	"errors"
 	"testing"
 
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
+	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/marsolab/servekit/errkit"
 	"github.com/marsolab/servekit/idkit"
 	"github.com/maxatome/go-testdeep/td"
@@ -105,4 +107,126 @@ func Test_validateQueueID(t *testing.T) {
 		err := validateQueueID("")
 		td.CmpErrorIs(t, err, errkit.ErrInvalidID)
 	})
+}
+
+func TestValidateTopicIDRejectsMalformedXID(t *testing.T) {
+	tests := map[string]struct {
+		id      string
+		wantErr bool
+	}{
+		"valid":     {id: idkit.XID()},
+		"malformed": {id: "not-a-topic-id", wantErr: true},
+		"empty":     {id: "", wantErr: true},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			err := validateTopicID(tc.id)
+			if tc.wantErr {
+				if !errors.Is(err, pqerr.ErrInvalidID) {
+					t.Fatalf("validateTopicID(%q) error = %v, want %v", tc.id, err, pqerr.ErrInvalidID)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("validateTopicID(%q) error = %v, want nil", tc.id, err)
+			}
+		})
+	}
+}
+
+func TestValidateSubscriptionIDRejectsMalformedXID(t *testing.T) {
+	tests := map[string]struct {
+		id      string
+		wantErr bool
+	}{
+		"valid":     {id: idkit.XID()},
+		"malformed": {id: "not-a-subscription-id", wantErr: true},
+		"empty":     {id: "", wantErr: true},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			err := validateSubscriptionID(tc.id)
+			if tc.wantErr {
+				if !errors.Is(err, pqerr.ErrInvalidID) {
+					t.Fatalf("validateSubscriptionID(%q) error = %v, want %v", tc.id, err, pqerr.ErrInvalidID)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("validateSubscriptionID(%q) error = %v, want nil", tc.id, err)
+			}
+		})
+	}
+}
+
+func TestValidateCreateTopicRejectsBlankName(t *testing.T) {
+	tests := map[string]struct {
+		input   *CreateTopicRequest
+		wantErr bool
+	}{
+		"nil":   {wantErr: true},
+		"empty": {input: &CreateTopicRequest{}, wantErr: true},
+		"space": {input: &CreateTopicRequest{TopicName: " \t"}, wantErr: true},
+		"valid": {input: &CreateTopicRequest{TopicName: "events"}},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			err := validateCreateTopicRequest(tc.input)
+			if tc.wantErr {
+				if !errors.Is(err, pqerr.ErrInvalidInput) {
+					t.Fatalf("validateCreateTopicRequest(%#v) error = %v, want %v", tc.input, err, pqerr.ErrInvalidInput)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("validateCreateTopicRequest(%#v) error = %v, want nil", tc.input, err)
+			}
+		})
+	}
+}
+
+func TestValidatePublishRejectsEmptyBatch(t *testing.T) {
+	topicID := idkit.XID()
+	tests := map[string]struct {
+		topicID string
+		input   *PublishRequest
+		wantErr error
+	}{
+		"nil": {
+			topicID: topicID,
+			wantErr: pqerr.ErrInvalidInput,
+		},
+		"empty batch": {
+			topicID: topicID,
+			input:   &PublishRequest{},
+			wantErr: pqerr.ErrInvalidInput,
+		},
+		"invalid topic": {
+			topicID: "not-a-topic-id",
+			input:   &PublishRequest{Messages: []PublishMessage{{}}},
+			wantErr: pqerr.ErrInvalidID,
+		},
+		"empty body is valid": {
+			topicID: topicID,
+			input:   &PublishRequest{Messages: []PublishMessage{{}}},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			err := validatePublishRequest(tc.topicID, tc.input)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("validatePublishRequest(%q, %#v) error = %v, want %v", tc.topicID, tc.input, err, tc.wantErr)
+			}
+		})
+	}
 }

@@ -70,3 +70,29 @@ func TestAsTransportPassesNilThrough(t *testing.T) {
 		t.Fatalf("AsTransport(nil) = %v, want nil", got)
 	}
 }
+
+func TestPartialFanoutAlwaysMapsToInternal(t *testing.T) {
+	partial := &partialFanoutError{causes: []error{ErrPartialFanout, ErrUnavailable}}
+
+	got := AsTransport(partial)
+	if got != partial {
+		t.Fatalf("AsTransport(%v) = %v, want original partial error", partial, got)
+	}
+	if !errors.Is(got, ErrPartialFanout) {
+		t.Fatalf("AsTransport(%v) = %v, want partial fan-out marker preserved", partial, got)
+	}
+	if !errors.Is(got, ErrUnavailable) {
+		t.Fatalf("AsTransport(%v) = %v, want nested %v preserved for diagnostics", partial, got, ErrUnavailable)
+	}
+	if errors.Is(got, errkit.ErrUnavailable) {
+		t.Fatalf("AsTransport(%v) unexpectedly matched %v", partial, errkit.ErrUnavailable)
+	}
+}
+
+type partialFanoutError struct {
+	causes []error
+}
+
+func (e *partialFanoutError) Error() string { return "partial topic fan-out" }
+
+func (e *partialFanoutError) Unwrap() []error { return e.causes }

@@ -30,6 +30,10 @@ const (
 	// This kind of error is retryable. Caller should retry with a backoff.
 	ErrUnavailable Error = "temporarily unavailable"
 
+	// ErrPartialFanout means at least one selected destination rejected a publish
+	// after another destination may already have accepted its queue copies.
+	ErrPartialFanout Error = "partial topic fan-out"
+
 	// Transport related errors.
 
 	// ErrGracefulShutdown indicates that it is not possible to shut down

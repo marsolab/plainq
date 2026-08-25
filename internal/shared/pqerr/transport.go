@@ -30,6 +30,9 @@ func AsTransport(err error) error {
 
 func transportSentinel(err error) error {
 	switch {
+	case errors.Is(err, ErrPartialFanout):
+		return nil
+
 	case errors.Is(err, ErrNotFound):
 		return errkit.ErrNotFound
 

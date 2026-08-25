@@ -1,6 +1,11 @@
 package queue
 
-import "time"
+import (
+	"fmt"
+	"time"
+
+	"github.com/marsolab/plainq/internal/shared/pqerr"
+)
 
 type Topic struct {
 	TopicID       string         `json:"topicId"`
@@ -52,4 +57,39 @@ type PublishResponse struct {
 	QueueIDs       []string `json:"queueIds"`
 	MessageIDs     []string `json:"messageIds"`
 	DeliveredCount int      `json:"deliveredCount"`
+}
+
+type PublishDeliveryFailure struct {
+	QueueID  string `json:"queueId"`
+	Messages uint64 `json:"messages"`
+	Cause    string `json:"cause"`
+}
+
+type PublishOutcome struct {
+	Response         *PublishResponse         `json:"response"`
+	SelectedQueues   uint64                   `json:"selectedQueues"`
+	FailedDeliveries uint64                   `json:"failedDeliveries"`
+	DeliveryFailures []PublishDeliveryFailure `json:"deliveryFailures"`
+}
+
+type PartialPublishError struct {
+	Outcome PublishOutcome
+	Causes  []error
+}
+
+func (e *PartialPublishError) Error() string {
+	return fmt.Sprintf(
+		"%s: %d queue messages failed across %d destinations",
+		pqerr.ErrPartialFanout,
+		e.Outcome.FailedDeliveries,
+		len(e.Outcome.DeliveryFailures),
+	)
+}
+
+func (e *PartialPublishError) Unwrap() []error {
+	errs := make([]error, 0, len(e.Causes)+1)
+	errs = append(errs, pqerr.ErrPartialFanout)
+	errs = append(errs, e.Causes...)
+
+	return errs
 }
