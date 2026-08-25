@@ -190,11 +190,12 @@ func (f *FSM) dispatch(ctx context.Context, cmd *command.Command) (any, error) {
 		})
 
 	case command.OpDeleteTopic:
-		if err := f.storage.DeleteTopic(ctx, cmd.Target); err != nil {
+		result, err := f.storage.DeleteTopic(ctx, cmd.Target)
+		if err != nil {
 			return nil, fmt.Errorf("delete topic %q: %w", cmd.Target, err)
 		}
 
-		return nil, nil //nolint:nilnil // a delete has no response to return.
+		return result, nil
 
 	case command.OpSubscribe:
 		return decodeJSONAnd(cmd, func(req *queue.SubscribeRequest) (any, error) {

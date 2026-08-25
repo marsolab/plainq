@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
+	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/marsolab/servekit/errkit"
 	"github.com/marsolab/servekit/httpkit"
 )
@@ -121,16 +122,16 @@ func (s *Service) deleteQueueHandler(w http.ResponseWriter, r *http.Request) {
 		Force:   force,
 	}
 
-	output, deleteErr := s.storage.DeleteQueue(r.Context(), &input)
+	_, deleteErr := s.storage.DeleteQueue(r.Context(), &input)
 	if deleteErr != nil {
-		httpkit.ErrorHTTP(w, r, deleteErr)
+		httpkit.ErrorHTTP(w, r, pqerr.AsTransport(deleteErr))
 
 		return
 	}
 
 	s.reconcileTopicSubscriptionCounts(r.Context())
 
-	httpkit.JSON(w, r, output, httpkit.WithStatus(http.StatusOK))
+	httpkit.JSON(w, r, &v1.DeleteQueueResponse{}, httpkit.WithStatus(http.StatusOK))
 }
 
 func (s *Service) purgeQueueHandler(w http.ResponseWriter, r *http.Request) {

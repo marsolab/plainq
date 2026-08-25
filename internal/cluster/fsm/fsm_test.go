@@ -284,9 +284,12 @@ func TestTopicCommands(t *testing.T) {
 		Op: command.OpUnsubscribe, Timestamp: stamp.UnixNano(), Target: "topicone", IDs: []string{"subone"},
 	}), td.Nil())
 
-	td.Cmp(t, apply(t, machine, 6, &command.Command{
+	deleted := apply(t, machine, 6, &command.Command{
 		Op: command.OpDeleteTopic, Timestamp: stamp.UnixNano(), Target: "topicone",
-	}), td.Nil())
+	})
+	deletedResult, ok := deleted.(*queue.DeleteTopicResult)
+	td.Require(t).Cmp(ok, true, "got %T: %v", deleted, deleted)
+	td.Cmp(t, deletedResult.RemovedSubscriptions, td.Len(0))
 
 	topics, listErr := storage.ListTopics(ctx)
 	td.Require(t).CmpNoError(listErr)

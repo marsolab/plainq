@@ -98,7 +98,7 @@ func (s *ObservedStorage) PurgeQueue(ctx context.Context, input *v1.PurgeQueueRe
 func (s *ObservedStorage) DeleteQueue(
 	ctx context.Context,
 	input *v1.DeleteQueueRequest,
-) (*v1.DeleteQueueResponse, error) {
+) (*DeleteQueueResult, error) {
 	start := time.Now()
 
 	out, err := s.inner.DeleteQueue(ctx, input)
@@ -228,10 +228,10 @@ func (s *ObservedStorage) CreateTopic(ctx context.Context, input *CreateTopicReq
 }
 
 // DeleteTopic implements Storage.
-func (s *ObservedStorage) DeleteTopic(ctx context.Context, topicID string) error {
+func (s *ObservedStorage) DeleteTopic(ctx context.Context, topicID string) (*DeleteTopicResult, error) {
 	start := time.Now()
 
-	err := s.inner.DeleteTopic(ctx, topicID)
+	out, err := s.inner.DeleteTopic(ctx, topicID)
 
 	s.observer.TopicOperation(metrics.OpDeleteTopic, start, err)
 
@@ -239,7 +239,13 @@ func (s *ObservedStorage) DeleteTopic(ctx context.Context, topicID string) error
 		metrics.ResetTopic(topicID)
 	}
 
-	return err
+	return out, err
+}
+
+// TopicInventory implements Storage. Maintenance reconciliation is deliberately
+// not recorded as a seventh public topic storage operation.
+func (s *ObservedStorage) TopicInventory(ctx context.Context) (TopicInventory, error) {
+	return s.inner.TopicInventory(ctx)
 }
 
 // Subscribe implements Storage.

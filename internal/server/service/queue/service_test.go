@@ -7,21 +7,22 @@ import (
 )
 
 type mockStorage struct {
-	createQueueFunc   func(ctx context.Context, input *v1.CreateQueueRequest) (*v1.CreateQueueResponse, error)
-	describeQueueFunc func(ctx context.Context, input *v1.DescribeQueueRequest) (*v1.DescribeQueueResponse, error)
-	listQueuesFunc    func(ctx context.Context, input *v1.ListQueuesRequest) (*v1.ListQueuesResponse, error)
-	purgeQueueFunc    func(ctx context.Context, input *v1.PurgeQueueRequest) (*v1.PurgeQueueResponse, error)
-	deleteQueueFunc   func(ctx context.Context, input *v1.DeleteQueueRequest) (*v1.DeleteQueueResponse, error)
-	sendFunc          func(ctx context.Context, input *v1.SendRequest) (*v1.SendResponse, error)
-	receiveFunc       func(ctx context.Context, input *v1.ReceiveRequest) (*v1.ReceiveResponse, error)
-	deleteFunc        func(ctx context.Context, input *v1.DeleteRequest) (*v1.DeleteResponse, error)
-	peekFunc          func(ctx context.Context, input *PeekRequest) (*PeekResponse, error)
-	listTopicsFunc    func(ctx context.Context) (*ListTopicsResponse, error)
-	createTopicFunc   func(ctx context.Context, input *CreateTopicRequest) (*CreateTopicResponse, error)
-	deleteTopicFunc   func(ctx context.Context, topicID string) error
-	subscribeFunc     func(ctx context.Context, topicID string, input *SubscribeRequest) (*SubscribeResponse, error)
-	unsubscribeFunc   func(ctx context.Context, topicID, subscriptionID string) error
-	publishFunc       func(ctx context.Context, topicID string, input *PublishRequest) (*PublishResponse, error)
+	createQueueFunc    func(ctx context.Context, input *v1.CreateQueueRequest) (*v1.CreateQueueResponse, error)
+	describeQueueFunc  func(ctx context.Context, input *v1.DescribeQueueRequest) (*v1.DescribeQueueResponse, error)
+	listQueuesFunc     func(ctx context.Context, input *v1.ListQueuesRequest) (*v1.ListQueuesResponse, error)
+	purgeQueueFunc     func(ctx context.Context, input *v1.PurgeQueueRequest) (*v1.PurgeQueueResponse, error)
+	deleteQueueFunc    func(ctx context.Context, input *v1.DeleteQueueRequest) (*DeleteQueueResult, error)
+	sendFunc           func(ctx context.Context, input *v1.SendRequest) (*v1.SendResponse, error)
+	receiveFunc        func(ctx context.Context, input *v1.ReceiveRequest) (*v1.ReceiveResponse, error)
+	deleteFunc         func(ctx context.Context, input *v1.DeleteRequest) (*v1.DeleteResponse, error)
+	peekFunc           func(ctx context.Context, input *PeekRequest) (*PeekResponse, error)
+	listTopicsFunc     func(ctx context.Context) (*ListTopicsResponse, error)
+	createTopicFunc    func(ctx context.Context, input *CreateTopicRequest) (*CreateTopicResponse, error)
+	deleteTopicFunc    func(ctx context.Context, topicID string) (*DeleteTopicResult, error)
+	subscribeFunc      func(ctx context.Context, topicID string, input *SubscribeRequest) (*SubscribeResponse, error)
+	unsubscribeFunc    func(ctx context.Context, topicID, subscriptionID string) error
+	publishFunc        func(ctx context.Context, topicID string, input *PublishRequest) (*PublishResponse, error)
+	topicInventoryFunc func(ctx context.Context) (TopicInventory, error)
 }
 
 func (m *mockStorage) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest) (*v1.CreateQueueResponse, error) {
@@ -40,7 +41,7 @@ func (m *mockStorage) PurgeQueue(ctx context.Context, input *v1.PurgeQueueReques
 	return m.purgeQueueFunc(ctx, input)
 }
 
-func (m *mockStorage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest) (*v1.DeleteQueueResponse, error) {
+func (m *mockStorage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest) (*DeleteQueueResult, error) {
 	return m.deleteQueueFunc(ctx, input)
 }
 
@@ -74,11 +75,11 @@ func (m *mockStorage) CreateTopic(ctx context.Context, input *CreateTopicRequest
 	return &CreateTopicResponse{}, nil
 }
 
-func (m *mockStorage) DeleteTopic(ctx context.Context, topicID string) error {
+func (m *mockStorage) DeleteTopic(ctx context.Context, topicID string) (*DeleteTopicResult, error) {
 	if m.deleteTopicFunc != nil {
 		return m.deleteTopicFunc(ctx, topicID)
 	}
-	return nil
+	return &DeleteTopicResult{}, nil
 }
 
 func (m *mockStorage) Subscribe(ctx context.Context, topicID string, input *SubscribeRequest) (*SubscribeResponse, error) {
@@ -100,4 +101,11 @@ func (m *mockStorage) Publish(ctx context.Context, topicID string, input *Publis
 		return m.publishFunc(ctx, topicID, input)
 	}
 	return &PublishResponse{}, nil
+}
+
+func (m *mockStorage) TopicInventory(ctx context.Context) (TopicInventory, error) {
+	if m.topicInventoryFunc != nil {
+		return m.topicInventoryFunc(ctx)
+	}
+	return TopicInventory{SubscriptionCounts: map[string]int64{}}, nil
 }

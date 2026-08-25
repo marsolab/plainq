@@ -148,8 +148,8 @@ func (s *Store) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest) (
 }
 
 // DeleteQueue implements queue.Storage.
-func (s *Store) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest) (*v1.DeleteQueueResponse, error) {
-	return protoResponse[v1.DeleteQueueResponse](s.applyProto(ctx, command.OpDeleteQueue, input, nil))
+func (s *Store) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest) (*queue.DeleteQueueResult, error) {
+	return jsonResponse[queue.DeleteQueueResult](s.applyProto(ctx, command.OpDeleteQueue, input, nil))
 }
 
 // PurgeQueue implements queue.Storage.
@@ -268,10 +268,20 @@ func (s *Store) CreateTopic(ctx context.Context, input *queue.CreateTopicRequest
 }
 
 // DeleteTopic implements queue.Storage.
-func (s *Store) DeleteTopic(ctx context.Context, topicID string) error {
-	_, err := s.applyJSON(ctx, command.OpDeleteTopic, struct{}{}, topicID, nil)
+func (s *Store) DeleteTopic(ctx context.Context, topicID string) (*queue.DeleteTopicResult, error) {
+	return jsonResponse[queue.DeleteTopicResult](s.applyJSON(ctx, command.OpDeleteTopic, struct{}{}, topicID, nil))
+}
 
-	return err
+// TopicInventory implements queue.Storage using the configured read barrier.
+func (s *Store) TopicInventory(ctx context.Context) (queue.TopicInventory, error) {
+	if err := s.readBarrier(ctx); err != nil {
+		return queue.TopicInventory{}, err
+	}
+	inventory, err := s.local.TopicInventory(ctx)
+	if err != nil {
+		return queue.TopicInventory{}, fmt.Errorf("read topic inventory on the local replica: %w", err)
+	}
+	return inventory, nil
 }
 
 // Subscribe implements queue.Storage.

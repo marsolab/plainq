@@ -203,10 +203,10 @@ func TestServer_TopicRPCs(t *testing.T) {
 
 			return &CreateTopicResponse{TopicID: topic.TopicID}, nil
 		},
-		deleteTopicFunc: func(_ context.Context, topicID string) error {
+		deleteTopicFunc: func(_ context.Context, topicID string) (*DeleteTopicResult, error) {
 			td.Cmp(t, topicID, topic.TopicID)
 
-			return nil
+			return &DeleteTopicResult{}, nil
 		},
 		subscribeFunc: func(_ context.Context, topicID string, input *SubscribeRequest) (*SubscribeResponse, error) {
 			td.Cmp(t, topicID, topic.TopicID)

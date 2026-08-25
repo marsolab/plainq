@@ -46,7 +46,7 @@ func (s *Service) DeleteQueue(ctx context.Context, r *v1.DeleteQueueRequest) (*v
 	}
 
 	if _, err := s.storage.DeleteQueue(ctx, r); err != nil {
-		return grpckit.ErrorGRPC[*v1.DeleteQueueResponse](ctx, err)
+		return grpckit.ErrorGRPC[*v1.DeleteQueueResponse](ctx, pqerr.AsTransport(err))
 	}
 
 	s.reconcileTopicSubscriptionCounts(ctx)
@@ -138,7 +138,7 @@ func (s *Service) DeleteTopic(ctx context.Context, r *v1.DeleteTopicRequest) (*v
 		return grpckit.ErrorGRPC[*v1.DeleteTopicResponse](ctx, pqerr.AsTransport(pqerr.ErrInvalidInput))
 	}
 
-	if err := s.storage.DeleteTopic(ctx, r.GetTopicId()); err != nil {
+	if _, err := s.storage.DeleteTopic(ctx, r.GetTopicId()); err != nil {
 		return grpckit.ErrorGRPC[*v1.DeleteTopicResponse](ctx, pqerr.AsTransport(err))
 	}
 

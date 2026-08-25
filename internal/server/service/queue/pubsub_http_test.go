@@ -10,8 +10,48 @@ import (
 
 	"github.com/marsolab/plainq/internal/server/config"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
+	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/marsolab/servekit/logkit"
 )
+
+func TestPubSubHTTPMapsDomainErrors(t *testing.T) {
+	tests := map[string]struct {
+		storage *mockStorage
+		method  string
+		target  string
+		body    string
+		want    int
+	}{
+		"duplicate topic": {
+			storage: &mockStorage{createTopicFunc: func(context.Context, *CreateTopicRequest) (*CreateTopicResponse, error) {
+				return nil, pqerr.ErrAlreadyExists
+			}},
+			method: http.MethodPost, target: "/topics/", body: `{"topicName":"events"}`, want: http.StatusConflict,
+		},
+		"missing topic": {
+			storage: &mockStorage{deleteTopicFunc: func(context.Context, string) (*DeleteTopicResult, error) {
+				return nil, pqerr.ErrNotFound
+			}},
+			method: http.MethodDelete, target: "/topics/missing", want: http.StatusNotFound,
+		},
+		"temporarily unavailable": {
+			storage: &mockStorage{publishFunc: func(context.Context, string, *PublishRequest) (*PublishResponse, error) {
+				return nil, pqerr.ErrUnavailable
+			}},
+			method: http.MethodPost, target: "/topics/topic/publish", body: `{"messages":[{"body":"eA=="}]}`, want: http.StatusServiceUnavailable,
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.target, strings.NewReader(tc.body))
+			rec := httptest.NewRecorder()
+			NewService(&config.Config{}, logkit.NewNop(), tc.storage).ServeHTTP(rec, req)
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d; body=%s", rec.Code, tc.want, rec.Body.String())
+			}
+		})
+	}
+}
 
 func TestPublishTopicRecordsTopicMetricsAfterSuccess(t *testing.T) {
 	storage := &mockStorage{
@@ -79,14 +119,8 @@ func TestSubscribeTopicRecordsCurrentSubscriptionCount(t *testing.T) {
 		subscribeFunc: func(context.Context, string, *SubscribeRequest) (*SubscribeResponse, error) {
 			return &SubscribeResponse{SubscriptionID: "sub-1"}, nil
 		},
-		listTopicsFunc: func(context.Context) (*ListTopicsResponse, error) {
-			return &ListTopicsResponse{Topics: []Topic{{
-				TopicID: "topic-1",
-				Subscriptions: []Subscription{
-					{SubscriptionID: "sub-1"},
-					{SubscriptionID: "sub-2"},
-				},
-			}}}, nil
+		topicInventoryFunc: func(context.Context) (TopicInventory, error) {
+			return TopicInventory{TopicsExist: 1, SubscriptionCounts: map[string]int64{"topic-1": 2}}, nil
 		},
 	}
 	recorder := &fakeTopicMetricsRecorder{}
@@ -137,14 +171,8 @@ func TestSubscribeTopicDoesNotRecordTopicMetricsOnFailure(t *testing.T) {
 
 func TestSetTopicMetricsRecorderReconcilesExistingTopicSubscriptions(t *testing.T) {
 	storage := &mockStorage{
-		listTopicsFunc: func(context.Context) (*ListTopicsResponse, error) {
-			return &ListTopicsResponse{Topics: []Topic{{
-				TopicID: "topic-1",
-				Subscriptions: []Subscription{
-					{SubscriptionID: "sub-1"},
-					{SubscriptionID: "sub-2"},
-				},
-			}}}, nil
+		topicInventoryFunc: func(context.Context) (TopicInventory, error) {
+			return TopicInventory{TopicsExist: 1, SubscriptionCounts: map[string]int64{"topic-1": 2}}, nil
 		},
 	}
 	recorder := &fakeTopicMetricsRecorder{}
@@ -159,19 +187,14 @@ func TestSetTopicMetricsRecorderReconcilesExistingTopicSubscriptions(t *testing.
 
 func TestDeleteTopicReconcilesTopicSubscriptionMetrics(t *testing.T) {
 	storage := &mockStorage{
-		deleteTopicFunc: func(_ context.Context, topicID string) error {
+		deleteTopicFunc: func(_ context.Context, topicID string) (*DeleteTopicResult, error) {
 			if topicID != "topic-1" {
 				t.Fatalf("topicID = %q, want topic-1", topicID)
 			}
-			return nil
+			return &DeleteTopicResult{RemovedSubscriptions: []Subscription{{SubscriptionID: "internal-only"}}}, nil
 		},
-		listTopicsFunc: func(context.Context) (*ListTopicsResponse, error) {
-			return &ListTopicsResponse{Topics: []Topic{{
-				TopicID: "topic-2",
-				Subscriptions: []Subscription{
-					{SubscriptionID: "sub-2"},
-				},
-			}}}, nil
+		topicInventoryFunc: func(context.Context) (TopicInventory, error) {
+			return TopicInventory{TopicsExist: 1, SubscriptionCounts: map[string]int64{"topic-2": 1}}, nil
 		},
 	}
 	recorder := &fakeTopicMetricsRecorder{}
@@ -186,6 +209,9 @@ func TestDeleteTopicReconcilesTopicSubscriptionMetrics(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
+	if got := strings.TrimSpace(rec.Body.String()); got != `{}` {
+		t.Fatalf("delete topic body = %s, want {}", got)
+	}
 	if got := recorder.reconciledCounts["topic-2"]; got != 1 {
 		t.Fatalf("reconciled topic-2 count = %d, want 1", got)
 	}
@@ -196,19 +222,14 @@ func TestDeleteTopicReconcilesTopicSubscriptionMetrics(t *testing.T) {
 
 func TestDeleteQueueReconcilesTopicSubscriptionMetrics(t *testing.T) {
 	storage := &mockStorage{
-		deleteQueueFunc: func(_ context.Context, input *v1.DeleteQueueRequest) (*v1.DeleteQueueResponse, error) {
+		deleteQueueFunc: func(_ context.Context, input *v1.DeleteQueueRequest) (*DeleteQueueResult, error) {
 			if input.QueueId != "c5s8b4p9e8rg5u5fgq10" {
 				t.Fatalf("QueueId = %q, want c5s8b4p9e8rg5u5fgq10", input.QueueId)
 			}
-			return &v1.DeleteQueueResponse{}, nil
+			return &DeleteQueueResult{RemovedSubscriptions: []Subscription{{SubscriptionID: "internal-only"}}}, nil
 		},
-		listTopicsFunc: func(context.Context) (*ListTopicsResponse, error) {
-			return &ListTopicsResponse{Topics: []Topic{{
-				TopicID: "topic-1",
-				Subscriptions: []Subscription{
-					{SubscriptionID: "sub-remaining", QueueID: "c5s8b4p9e8rg5u5fgq11"},
-				},
-			}}}, nil
+		topicInventoryFunc: func(context.Context) (TopicInventory, error) {
+			return TopicInventory{TopicsExist: 1, SubscriptionCounts: map[string]int64{"topic-1": 1}}, nil
 		},
 	}
 	recorder := &fakeTopicMetricsRecorder{}
@@ -223,6 +244,9 @@ func TestDeleteQueueReconcilesTopicSubscriptionMetrics(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
 	}
+	if got := strings.TrimSpace(rec.Body.String()); got != `{}` {
+		t.Fatalf("delete queue body = %s, want {}", got)
+	}
 	if got := recorder.reconciledCounts["topic-1"]; got != 1 {
 		t.Fatalf("reconciled topic-1 count = %d, want 1", got)
 	}
@@ -233,13 +257,8 @@ func TestUnsubscribeTopicRecordsCurrentSubscriptionCount(t *testing.T) {
 		unsubscribeFunc: func(context.Context, string, string) error {
 			return nil
 		},
-		listTopicsFunc: func(context.Context) (*ListTopicsResponse, error) {
-			return &ListTopicsResponse{Topics: []Topic{{
-				TopicID: "topic-1",
-				Subscriptions: []Subscription{
-					{SubscriptionID: "sub-remaining"},
-				},
-			}}}, nil
+		topicInventoryFunc: func(context.Context) (TopicInventory, error) {
+			return TopicInventory{TopicsExist: 1, SubscriptionCounts: map[string]int64{"topic-1": 1}}, nil
 		},
 	}
 	recorder := &fakeTopicMetricsRecorder{}

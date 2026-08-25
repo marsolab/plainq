@@ -22,6 +22,19 @@ type Subscription struct {
 	CreatedAt      time.Time `json:"createdAt"`
 }
 
+type TopicInventory struct {
+	TopicsExist        int64
+	SubscriptionCounts map[string]int64
+}
+
+type DeleteTopicResult struct {
+	RemovedSubscriptions []Subscription `json:"removedSubscriptions"`
+}
+
+type DeleteQueueResult struct {
+	RemovedSubscriptions []Subscription `json:"removedSubscriptions"`
+}
+
 type ListTopicsRequest struct{}
 
 type ListTopicsResponse struct {

@@ -34,7 +34,7 @@ type Storage interface {
 
 	// DeleteQueue deletes a queue if it's not empty. Also supports DeleteQueueInput.Force
 	// to delete queue with messages.
-	DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest) (*v1.DeleteQueueResponse, error)
+	DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest) (*DeleteQueueResult, error)
 
 	// Send sends message to the queue.
 	Send(ctx context.Context, input *v1.SendRequest) (*v1.SendResponse, error)
@@ -51,10 +51,11 @@ type Storage interface {
 
 	ListTopics(ctx context.Context) (*ListTopicsResponse, error)
 	CreateTopic(ctx context.Context, input *CreateTopicRequest) (*CreateTopicResponse, error)
-	DeleteTopic(ctx context.Context, topicID string) error
+	DeleteTopic(ctx context.Context, topicID string) (*DeleteTopicResult, error)
 	Subscribe(ctx context.Context, topicID string, input *SubscribeRequest) (*SubscribeResponse, error)
 	Unsubscribe(ctx context.Context, topicID, subscriptionID string) error
 	Publish(ctx context.Context, topicID string, input *PublishRequest) (*PublishResponse, error)
+	TopicInventory(ctx context.Context) (TopicInventory, error)
 }
 
 type TopicMetricsRecorder interface {

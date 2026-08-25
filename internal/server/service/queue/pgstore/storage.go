@@ -306,24 +306,29 @@ func (s *Storage) PurgeQueue(ctx context.Context, input *v1.PurgeQueueRequest) (
 	return &v1.PurgeQueueResponse{MessagesCount: count}, nil
 }
 
-func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest) (_ *v1.DeleteQueueResponse, sErr error) {
+func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest) (_ *queue.DeleteQueueResult, sErr error) {
 	queueID := input.GetQueueId()
 
 	props, ok := s.cache.getByID(queueID)
 	if !ok {
-		return nil, fmt.Errorf("queue props (id: %q) not cached", queueID)
+		return nil, fmt.Errorf("queue props (id: %q): %w", queueID, pqerr.ErrNotFound)
 	}
 
 	tx, txErr := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if txErr != nil {
-		return nil, fmt.Errorf(fmtBeginTxError, txErr)
+		return nil, fmt.Errorf(fmtBeginTxError, normalizePubSubError(txErr, pubSubDeleteQueue))
 	}
 
-	defer func() { sErr = errors.Join(sErr, rollback(ctx, tx)) }()
+	defer func() { sErr = joinPostgresRollback(ctx, sErr, tx, pubSubDeleteQueue, "delete queue") }()
+
+	removedSubscriptions, captureErr := listSubscriptionsByQueue(ctx, tx, queueID)
+	if captureErr != nil {
+		return nil, fmt.Errorf("capture queue %q subscriptions: %w", queueID, captureErr)
+	}
 
 	rows, delErr := s.queries.WithTx(tx).DeleteQueueProperties(ctx, queueID)
 	if delErr != nil {
-		return nil, fmt.Errorf("delete queue %q info record: %w", queueID, delErr)
+		return nil, fmt.Errorf("delete queue %q info record: %w", queueID, normalizePubSubError(delErr, pubSubDeleteQueue))
 	}
 
 	if rows < 1 {
@@ -331,18 +336,18 @@ func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest)
 	}
 
 	if _, err := tx.Exec(ctx, queryDeleteQueueTable(queueID)); err != nil {
-		return nil, fmt.Errorf("drop queue %q table: %w", queueID, err)
+		return nil, fmt.Errorf("drop queue %q table: %w", queueID, normalizePubSubError(err, pubSubDeleteQueue))
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit transaction: %w", err)
+		return nil, fmt.Errorf("commit transaction: %w", normalizePubSubError(err, pubSubDeleteQueue))
 	}
 
 	s.cache.delete(props.ID, props.Name)
 
 	s.observer.QueueDeleted(queueID)
 
-	return &v1.DeleteQueueResponse{}, nil
+	return &queue.DeleteQueueResult{RemovedSubscriptions: removedSubscriptions}, nil
 }
 
 func (s *Storage) Send(ctx context.Context, input *v1.SendRequest) (*v1.SendResponse, error) {

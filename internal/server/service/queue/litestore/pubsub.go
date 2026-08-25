@@ -2,238 +2,282 @@ package litestore
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/service/queue"
-	"github.com/marsolab/servekit/errkit"
+	"github.com/marsolab/plainq/internal/shared/pqerr"
+	"github.com/marsolab/plainq/internal/shared/pqlite"
 	"github.com/marsolab/servekit/idkit"
 )
 
 func (s *Storage) ListTopics(ctx context.Context) (*queue.ListTopicsResponse, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT topic_id, topic_name, created_at
-		FROM topic_properties
-		ORDER BY created_at DESC;
-	`)
+	rows, err := s.db.QueryContext(ctx, `SELECT topic_id, topic_name, created_at FROM topic_properties ORDER BY created_at DESC, topic_id;`)
 	if err != nil {
-		return nil, fmt.Errorf("list topics: %w", err)
+		return nil, fmt.Errorf("list topics: %w", normalizePubSubError(err, pubSubListTopics))
 	}
-
 	defer rows.Close()
 
 	out := &queue.ListTopicsResponse{Topics: []queue.Topic{}}
-
 	for rows.Next() {
 		var topic queue.Topic
 		if err := rows.Scan(&topic.TopicID, &topic.TopicName, &topic.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scan topic: %w", err)
+			return nil, fmt.Errorf("scan topic: %w", normalizePubSubError(err, pubSubListTopics))
 		}
-
-		topic.Subscriptions, err = s.listSubscriptions(ctx, topic.TopicID)
+		topic.Subscriptions, err = listSubscriptions(ctx, s.db, topic.TopicID, pubSubListTopics)
 		if err != nil {
 			return nil, fmt.Errorf("list subscriptions for topic %q: %w", topic.TopicID, err)
 		}
-
 		out.Topics = append(out.Topics, topic)
 	}
-
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate topics: %w", err)
+		return nil, fmt.Errorf("iterate topics: %w", normalizePubSubError(err, pubSubListTopics))
 	}
-
 	return out, nil
 }
 
-func (s *Storage) CreateTopic(ctx context.Context, input *queue.CreateTopicRequest) (*queue.CreateTopicResponse, error) {
-	if strings.TrimSpace(input.TopicName) == "" {
-		return nil, fmt.Errorf("%w: topic name is empty", errkit.ErrInvalidArgument)
+func (s *Storage) CreateTopic(ctx context.Context, input *queue.CreateTopicRequest) (_ *queue.CreateTopicResponse, sErr error) {
+	if input == nil || strings.TrimSpace(input.TopicName) == "" {
+		return nil, fmt.Errorf("%w: topic name is empty", pqerr.ErrInvalidInput)
 	}
+	tx, err := pqlite.BeginTx(ctx, s.db)
+	if err != nil {
+		return nil, fmt.Errorf("begin create topic: %w", normalizePubSubError(err, pubSubCreateTopic))
+	}
+	defer func() { sErr = joinSQLiteRollback(sErr, tx, pubSubCreateTopic, "create topic") }()
 
-	// created_at is written rather than left to the column default: a default
-	// reads the local clock, and two replicas applying the same CreateTopic
-	// would then disagree about when the topic appeared.
 	id := queue.NextID(ctx, idkit.XID)
-	if _, err := s.db.ExecContext(
-		ctx,
-		`INSERT INTO topic_properties (topic_id, topic_name, created_at) VALUES (?, ?, ?);`,
-		id,
-		input.TopicName,
-		writeTime(ctx),
-	); err != nil {
-		return nil, fmt.Errorf("create topic: %w", err)
+	result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO topic_properties (topic_id, topic_name, created_at) VALUES (?, ?, ?);`, id, input.TopicName, writeTime(ctx))
+	if err != nil {
+		return nil, fmt.Errorf("create topic: %w", normalizePubSubError(err, pubSubCreateTopic))
 	}
-
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("create topic rows affected: %w", normalizePubSubError(err, pubSubCreateTopic))
+	}
+	if rows == 0 {
+		return nil, fmt.Errorf("create topic: %w", pqerr.ErrAlreadyExists)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit create topic: %w", normalizePubSubError(err, pubSubCreateTopic))
+	}
 	return &queue.CreateTopicResponse{TopicID: id}, nil
 }
 
-func (s *Storage) DeleteTopic(ctx context.Context, topicID string) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM topic_properties WHERE topic_id = ?;`, topicID)
+func (s *Storage) DeleteTopic(ctx context.Context, topicID string) (_ *queue.DeleteTopicResult, sErr error) {
+	tx, err := pqlite.BeginTx(ctx, s.db)
 	if err != nil {
-		return fmt.Errorf("delete topic: %w", err)
+		return nil, fmt.Errorf("begin delete topic: %w", normalizePubSubError(err, pubSubDeleteTopic))
 	}
+	defer func() { sErr = joinSQLiteRollback(sErr, tx, pubSubDeleteTopic, "delete topic") }()
 
-	rows, err := res.RowsAffected()
+	removed, err := listSubscriptions(ctx, tx, topicID, pubSubDeleteTopic)
 	if err != nil {
-		return fmt.Errorf("delete topic rows affected: %w", err)
+		return nil, fmt.Errorf("capture topic subscriptions: %w", err)
 	}
-
+	if _, err := tx.ExecContext(ctx, `DELETE FROM topic_subscriptions WHERE topic_id = ?;`, topicID); err != nil {
+		return nil, fmt.Errorf("delete topic subscriptions: %w", normalizePubSubError(err, pubSubDeleteTopic))
+	}
+	result, err := tx.ExecContext(ctx, `DELETE FROM topic_properties WHERE topic_id = ?;`, topicID)
+	if err != nil {
+		return nil, fmt.Errorf("delete topic: %w", normalizePubSubError(err, pubSubDeleteTopic))
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("delete topic rows affected: %w", normalizePubSubError(err, pubSubDeleteTopic))
+	}
 	if rows == 0 {
-		return fmt.Errorf("delete topic: %w", errkit.ErrNotFound)
+		return nil, fmt.Errorf("delete topic: %w", pqerr.ErrNotFound)
 	}
-
-	return nil
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit delete topic: %w", normalizePubSubError(err, pubSubDeleteTopic))
+	}
+	return &queue.DeleteTopicResult{RemovedSubscriptions: removed}, nil
 }
 
-func (s *Storage) Subscribe(ctx context.Context, topicID string, input *queue.SubscribeRequest) (*queue.SubscribeResponse, error) {
-	if _, err := s.DescribeQueue(ctx, &v1.DescribeQueueRequest{QueueId: input.QueueID}); err != nil {
-		return nil, fmt.Errorf("describe subscription queue: %w", err)
+func (s *Storage) Subscribe(ctx context.Context, topicID string, input *queue.SubscribeRequest) (_ *queue.SubscribeResponse, sErr error) {
+	if input == nil {
+		return nil, fmt.Errorf("subscribe queue: %w", pqerr.ErrInvalidInput)
+	}
+	tx, err := pqlite.BeginTx(ctx, s.db)
+	if err != nil {
+		return nil, fmt.Errorf("begin subscribe: %w", normalizePubSubError(err, pubSubSubscribe))
+	}
+	defer func() { sErr = joinSQLiteRollback(sErr, tx, pubSubSubscribe, "subscribe") }()
+
+	topicExists, err := exists(ctx, tx, `SELECT EXISTS(SELECT 1 FROM topic_properties WHERE topic_id = ?);`, topicID)
+	if err != nil {
+		return nil, fmt.Errorf("check subscription topic: %w", normalizePubSubError(err, pubSubSubscribe))
+	}
+	queueExists, err := exists(ctx, tx, `SELECT EXISTS(SELECT 1 FROM queue_properties WHERE queue_id = ?);`, input.QueueID)
+	if err != nil {
+		return nil, fmt.Errorf("check subscription queue: %w", normalizePubSubError(err, pubSubSubscribe))
+	}
+	if !topicExists || !queueExists {
+		return nil, fmt.Errorf("subscribe queue: %w", pqerr.ErrNotFound)
 	}
 
 	id := queue.NextID(ctx, idkit.XID)
-	if _, err := s.db.ExecContext(
-		ctx,
-		`INSERT INTO topic_subscriptions (subscription_id, topic_id, queue_id, created_at) VALUES (?, ?, ?, ?);`,
-		id,
-		topicID,
-		input.QueueID,
-		writeTime(ctx),
-	); err != nil {
-		return nil, fmt.Errorf("subscribe queue: %w", err)
+	result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO topic_subscriptions (subscription_id, topic_id, queue_id, created_at) VALUES (?, ?, ?, ?);`, id, topicID, input.QueueID, writeTime(ctx))
+	if err != nil {
+		return nil, fmt.Errorf("subscribe queue: %w", normalizePubSubError(err, pubSubSubscribe))
 	}
-
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("subscribe rows affected: %w", normalizePubSubError(err, pubSubSubscribe))
+	}
+	if rows == 0 {
+		return nil, fmt.Errorf("subscribe queue: %w", pqerr.ErrAlreadyExists)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit subscribe: %w", normalizePubSubError(err, pubSubSubscribe))
+	}
 	return &queue.SubscribeResponse{SubscriptionID: id}, nil
 }
 
 func (s *Storage) Unsubscribe(ctx context.Context, topicID, subscriptionID string) error {
-	res, err := s.db.ExecContext(
-		ctx,
-		`DELETE FROM topic_subscriptions WHERE topic_id = ? AND subscription_id = ?;`,
-		topicID,
-		subscriptionID,
-	)
+	result, err := s.db.ExecContext(ctx, `DELETE FROM topic_subscriptions WHERE topic_id = ? AND subscription_id = ?;`, topicID, subscriptionID)
 	if err != nil {
-		return fmt.Errorf("unsubscribe queue: %w", err)
+		return fmt.Errorf("unsubscribe queue: %w", normalizePubSubError(err, pubSubUnsubscribe))
 	}
-
-	rows, err := res.RowsAffected()
+	rows, err := result.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("unsubscribe queue rows affected: %w", err)
+		return fmt.Errorf("unsubscribe queue rows affected: %w", normalizePubSubError(err, pubSubUnsubscribe))
 	}
-
 	if rows == 0 {
-		return fmt.Errorf("unsubscribe queue: %w", errkit.ErrNotFound)
+		return fmt.Errorf("unsubscribe queue: %w", pqerr.ErrNotFound)
 	}
-
 	return nil
 }
 
 func (s *Storage) Publish(ctx context.Context, topicID string, input *queue.PublishRequest) (*queue.PublishResponse, error) {
-	if len(input.Messages) == 0 {
-		return nil, fmt.Errorf("%w: messages are empty", errkit.ErrInvalidArgument)
+	if input == nil || len(input.Messages) == 0 {
+		return nil, fmt.Errorf("%w: messages are empty", pqerr.ErrInvalidInput)
 	}
-
 	if err := s.ensureTopicExists(ctx, topicID); err != nil {
 		return nil, err
 	}
-
-	subs, err := s.listSubscriptions(ctx, topicID)
+	subscriptions, err := listSubscriptions(ctx, s.db, topicID, pubSubPublish)
 	if err != nil {
 		return nil, err
 	}
 
-	out := &queue.PublishResponse{
-		TopicID:    topicID,
-		QueueIDs:   []string{},
-		MessageIDs: []string{},
-	}
-
-	for _, sub := range subs {
-		msgs := make([]*v1.SendMessage, 0, len(input.Messages))
-		for _, msg := range input.Messages {
-			msgs = append(msgs, &v1.SendMessage{Body: msg.Body})
-		}
-
-		sent, err := s.Send(ctx, &v1.SendRequest{QueueId: sub.QueueID, Messages: msgs})
+	bytes := publishedMessageBytes(input.Messages)
+	return queue.FanOut(ctx, topicID, subscriptions, input.Messages, func(ctx context.Context, request *v1.SendRequest) (*v1.SendResponse, error) {
+		sent, err := s.Send(ctx, request)
 		if err != nil {
-			return nil, fmt.Errorf("publish to queue %q: %w", sub.QueueID, err)
+			return sent, normalizePubSubError(err, pubSubPublish)
 		}
+		s.observer.Sent(request.GetQueueId(), uint64(len(sent.GetMessageIds())), bytes)
+		return sent, nil
+	})
+}
 
-		// Fan-out reaches Send directly, below the layer that records queue
-		// traffic, so a message delivered through a topic would otherwise
-		// never appear in its destination queue's counters or depth.
-		s.observer.Sent(sub.QueueID, uint64(len(sent.MessageIds)), publishedBytes(msgs))
-
-		out.QueueIDs = append(out.QueueIDs, sub.QueueID)
-		out.MessageIDs = append(out.MessageIDs, sent.MessageIds...)
-		out.DeliveredCount += len(sent.MessageIds)
+func (s *Storage) TopicInventory(ctx context.Context) (queue.TopicInventory, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT t.topic_id, COUNT(s.subscription_id) FROM topic_properties t LEFT JOIN topic_subscriptions s ON s.topic_id = t.topic_id GROUP BY t.topic_id ORDER BY t.topic_id;`)
+	if err != nil {
+		return queue.TopicInventory{}, fmt.Errorf("topic inventory: %w", normalizePubSubError(err, pubSubInventory))
 	}
+	defer rows.Close()
 
-	return out, nil
+	inventory := queue.TopicInventory{SubscriptionCounts: map[string]int64{}}
+	for rows.Next() {
+		var topicID string
+		var count int64
+		if err := rows.Scan(&topicID, &count); err != nil {
+			return queue.TopicInventory{}, fmt.Errorf("scan topic inventory: %w", normalizePubSubError(err, pubSubInventory))
+		}
+		inventory.TopicsExist++
+		inventory.SubscriptionCounts[topicID] = count
+	}
+	if err := rows.Err(); err != nil {
+		return queue.TopicInventory{}, fmt.Errorf("iterate topic inventory: %w", normalizePubSubError(err, pubSubInventory))
+	}
+	return inventory, nil
+}
+
+type queryContextRunner interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
 func (s *Storage) ensureTopicExists(ctx context.Context, topicID string) error {
-	var exists bool
-
-	if err := s.db.QueryRowContext(
-		ctx,
-		`SELECT EXISTS(SELECT 1 FROM topic_properties WHERE topic_id = ?);`,
-		topicID,
-	).Scan(&exists); err != nil {
-		return fmt.Errorf("check topic exists: %w", err)
+	ok, err := exists(ctx, s.db, `SELECT EXISTS(SELECT 1 FROM topic_properties WHERE topic_id = ?);`, topicID)
+	if err != nil {
+		return fmt.Errorf("check topic exists: %w", normalizePubSubError(err, pubSubPublish))
 	}
-
-	if !exists {
-		return fmt.Errorf("check topic exists: %w", errkit.ErrNotFound)
+	if !ok {
+		return fmt.Errorf("check topic exists: %w", pqerr.ErrNotFound)
 	}
-
 	return nil
 }
 
-func (s *Storage) listSubscriptions(ctx context.Context, topicID string) ([]queue.Subscription, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT s.subscription_id,
-		       s.topic_id,
-		       s.queue_id,
-		       COALESCE(q.queue_name, ''),
-		       s.created_at
-		FROM topic_subscriptions s
-		LEFT JOIN queue_properties q ON q.queue_id = s.queue_id
-		WHERE s.topic_id = ?
-		ORDER BY s.created_at DESC;
-	`, topicID)
-	if err != nil {
-		return nil, fmt.Errorf("list subscriptions: %w", err)
-	}
-
-	defer rows.Close()
-
-	subs := []queue.Subscription{}
-
-	for rows.Next() {
-		var sub queue.Subscription
-		if err := rows.Scan(&sub.SubscriptionID, &sub.TopicID, &sub.QueueID, &sub.QueueName, &sub.CreatedAt); err != nil {
-			return nil, fmt.Errorf("scan subscription: %w", err)
-		}
-
-		subs = append(subs, sub)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate subscriptions: %w", err)
-	}
-
-	return subs, nil
+func exists(ctx context.Context, db queryContextRunner, query string, arg any) (bool, error) {
+	var ok bool
+	err := db.QueryRowContext(ctx, query, arg).Scan(&ok)
+	return ok, err
 }
 
-// publishedBytes totals the bodies one fan-out delivery carried.
-func publishedBytes(messages []*v1.SendMessage) uint64 {
-	var total uint64
+func (s *Storage) listSubscriptions(ctx context.Context, topicID string) ([]queue.Subscription, error) {
+	return listSubscriptions(ctx, s.db, topicID, pubSubListTopics)
+}
 
-	for _, message := range messages {
-		total += uint64(len(message.GetBody()))
+func listSubscriptions(ctx context.Context, db queryContextRunner, topicID string, operation pubSubErrorContext) ([]queue.Subscription, error) {
+	rows, err := db.QueryContext(ctx, `SELECT s.subscription_id, s.topic_id, s.queue_id, COALESCE(q.queue_name, ''), s.created_at FROM topic_subscriptions s LEFT JOIN queue_properties q ON q.queue_id = s.queue_id WHERE s.topic_id = ? ORDER BY s.created_at, s.subscription_id;`, topicID)
+	if err != nil {
+		return nil, fmt.Errorf("list subscriptions: %w", normalizePubSubError(err, operation))
 	}
+	defer rows.Close()
 
+	subscriptions := []queue.Subscription{}
+	for rows.Next() {
+		var subscription queue.Subscription
+		if err := rows.Scan(&subscription.SubscriptionID, &subscription.TopicID, &subscription.QueueID, &subscription.QueueName, &subscription.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan subscription: %w", normalizePubSubError(err, operation))
+		}
+		subscriptions = append(subscriptions, subscription)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate subscriptions: %w", normalizePubSubError(err, operation))
+	}
+	return subscriptions, nil
+}
+
+func listSubscriptionsByQueue(ctx context.Context, tx *sql.Tx, queueID string) ([]queue.Subscription, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT s.subscription_id, s.topic_id, s.queue_id, COALESCE(q.queue_name, ''), s.created_at FROM topic_subscriptions s LEFT JOIN queue_properties q ON q.queue_id = s.queue_id WHERE s.queue_id = ? ORDER BY s.topic_id, s.created_at, s.subscription_id;`, queueID)
+	if err != nil {
+		return nil, fmt.Errorf("list queue subscriptions: %w", normalizePubSubError(err, pubSubDeleteQueue))
+	}
+	defer rows.Close()
+
+	subscriptions := []queue.Subscription{}
+	for rows.Next() {
+		var subscription queue.Subscription
+		if err := rows.Scan(&subscription.SubscriptionID, &subscription.TopicID, &subscription.QueueID, &subscription.QueueName, &subscription.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan queue subscription: %w", normalizePubSubError(err, pubSubDeleteQueue))
+		}
+		subscriptions = append(subscriptions, subscription)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate queue subscriptions: %w", normalizePubSubError(err, pubSubDeleteQueue))
+	}
+	return subscriptions, nil
+}
+
+func joinSQLiteRollback(current error, tx *sql.Tx, operation pubSubErrorContext, label string) error {
+	if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+		return errors.Join(current, fmt.Errorf("rollback %s: %w", label, normalizePubSubError(err, operation)))
+	}
+	return current
+}
+
+func publishedMessageBytes(messages []queue.PublishMessage) uint64 {
+	var total uint64
+	for _, message := range messages {
+		total += uint64(len(message.Body))
+	}
 	return total
 }

@@ -92,11 +92,14 @@ func (*recorderSpy) RecordDLQ(string, uint64)        {}
 type fakeStorage struct {
 	Storage
 
-	sendResp    *v1.SendResponse
-	receiveResp *v1.ReceiveResponse
-	deleteResp  *v1.DeleteResponse
-	publishResp *PublishResponse
-	err         error
+	sendResp        *v1.SendResponse
+	receiveResp     *v1.ReceiveResponse
+	deleteResp      *v1.DeleteResponse
+	publishResp     *PublishResponse
+	deleteQueueResp *DeleteQueueResult
+	deleteTopicResp *DeleteTopicResult
+	inventory       TopicInventory
+	err             error
 }
 
 func (f *fakeStorage) Send(context.Context, *v1.SendRequest) (*v1.SendResponse, error) {
@@ -113,6 +116,40 @@ func (f *fakeStorage) Delete(context.Context, *v1.DeleteRequest) (*v1.DeleteResp
 
 func (f *fakeStorage) Publish(context.Context, string, *PublishRequest) (*PublishResponse, error) {
 	return f.publishResp, f.err
+}
+
+func (f *fakeStorage) DeleteQueue(context.Context, *v1.DeleteQueueRequest) (*DeleteQueueResult, error) {
+	return f.deleteQueueResp, f.err
+}
+
+func (f *fakeStorage) DeleteTopic(context.Context, string) (*DeleteTopicResult, error) {
+	return f.deleteTopicResp, f.err
+}
+
+func (f *fakeStorage) TopicInventory(context.Context) (TopicInventory, error) {
+	return f.inventory, f.err
+}
+
+func TestObservedStoragePreservesDeleteResultsAndUnmeasuredInventory(t *testing.T) {
+	removed := []Subscription{{SubscriptionID: "sub-1", TopicID: "topic-1", QueueID: "queue-1"}}
+	inner := &fakeStorage{
+		deleteQueueResp: &DeleteQueueResult{RemovedSubscriptions: removed},
+		deleteTopicResp: &DeleteTopicResult{RemovedSubscriptions: removed},
+		inventory:       TopicInventory{TopicsExist: 1, SubscriptionCounts: map[string]int64{"topic-1": 1}},
+	}
+	store := NewObservedStorage(inner, telemetry.NewObserver(metrics.BackendSQLite))
+
+	queueResult, err := store.DeleteQueue(context.Background(), &v1.DeleteQueueRequest{QueueId: "queue-1"})
+	td.Require(t).CmpNoError(err)
+	td.Cmp(t, queueResult, inner.deleteQueueResp)
+	topicResult, err := store.DeleteTopic(context.Background(), "topic-1")
+	td.Require(t).CmpNoError(err)
+	td.Cmp(t, topicResult, inner.deleteTopicResp)
+	inventory, err := store.TopicInventory(context.Background())
+	td.Require(t).CmpNoError(err)
+	td.Cmp(t, inventory, inner.inventory)
+	td.Cmp(t, strings.Contains(scrapeMetrics(), `operation="topic_inventory"`), false,
+		"maintenance inventory reads are not public storage operations")
 }
 
 // Test_ObservedStorage_recordsTheWholeQueueLifecycle proves the decorator
