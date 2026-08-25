@@ -321,6 +321,9 @@ func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest)
 
 	defer func() { sErr = joinPostgresRollback(ctx, sErr, tx, pubSubDeleteQueue, "delete queue") }()
 
+	if err := lockQueueForDelete(ctx, tx, queueID); err != nil {
+		return nil, err
+	}
 	removedSubscriptions, captureErr := listSubscriptionsByQueue(ctx, tx, queueID)
 	if captureErr != nil {
 		return nil, fmt.Errorf("capture queue %q subscriptions: %w", queueID, captureErr)

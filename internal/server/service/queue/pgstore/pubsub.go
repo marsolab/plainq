@@ -72,6 +72,9 @@ func (s *Storage) DeleteTopic(ctx context.Context, topicID string) (_ *queue.Del
 	}
 	defer func() { sErr = joinPostgresRollback(ctx, sErr, tx, pubSubDeleteTopic, "delete topic") }()
 
+	if err := lockTopicForDelete(ctx, tx, topicID); err != nil {
+		return nil, err
+	}
 	removed, err := listSubscriptions(ctx, tx, topicID, pubSubDeleteTopic)
 	if err != nil {
 		return nil, fmt.Errorf("capture topic subscriptions: %w", err)
@@ -185,6 +188,50 @@ type pgQueryRunner interface {
 	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
 	Query(context.Context, string, ...any) (pgx.Rows, error)
 	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+type pgQueryRower interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func lockTopicForDelete(ctx context.Context, db pgQueryRower, topicID string) error {
+	return lockParentForDelete(
+		ctx,
+		db,
+		`SELECT topic_id FROM topic_properties WHERE topic_id = $1 FOR UPDATE;`,
+		topicID,
+		pubSubDeleteTopic,
+		"topic",
+	)
+}
+
+func lockQueueForDelete(ctx context.Context, db pgQueryRower, queueID string) error {
+	return lockParentForDelete(
+		ctx,
+		db,
+		`SELECT queue_id FROM queue_properties WHERE queue_id = $1 FOR UPDATE;`,
+		queueID,
+		pubSubDeleteQueue,
+		"queue",
+	)
+}
+
+func lockParentForDelete(
+	ctx context.Context,
+	db pgQueryRower,
+	query string,
+	parentID string,
+	operation pubSubErrorContext,
+	parentName string,
+) error {
+	var lockedID string
+	if err := db.QueryRow(ctx, query, parentID).Scan(&lockedID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("lock %s for delete: %w", parentName, pqerr.ErrNotFound)
+		}
+		return fmt.Errorf("lock %s for delete: %w", parentName, normalizePubSubError(err, operation))
+	}
+	return nil
 }
 
 func (s *Storage) ensureTopicExists(ctx context.Context, topicID string) error {

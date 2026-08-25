@@ -42,3 +42,25 @@ func TestPubSubErrorNormalization(t *testing.T) {
 		}
 	}
 }
+
+func TestPubSubErrorNormalizationPreservesOpaqueNetError(t *testing.T) {
+	err := testNetError{}
+	if got := normalizePubSubError(err, pubSubPublish); got != err {
+		t.Fatalf("normalizePubSubError(%v) = %v, want original error", err, got)
+	}
+}
+
+func TestPubSubErrorNormalizationMapsTemporaryNetErrorUnavailable(t *testing.T) {
+	err := testNetError{temporary: true}
+	if got := normalizePubSubError(err, pubSubPublish); !errors.Is(got, pqerr.ErrUnavailable) {
+		t.Fatalf("normalizePubSubError(%v) = %v, want %v", err, got, pqerr.ErrUnavailable)
+	}
+}
+
+type testNetError struct {
+	temporary bool
+}
+
+func (testNetError) Error() string     { return "network failure" }
+func (testNetError) Timeout() bool     { return false }
+func (e testNetError) Temporary() bool { return e.temporary }

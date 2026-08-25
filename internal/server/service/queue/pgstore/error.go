@@ -46,7 +46,11 @@ func normalizePubSubError(err error, operation pubSubErrorContext) error {
 		return errors.Join(pqerr.ErrUnavailable, err)
 	}
 	var netErr net.Error
-	if errors.As(err, &netErr) {
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return errors.Join(pqerr.ErrUnavailable, err)
+	}
+	var temporaryErr interface{ Temporary() bool }
+	if errors.As(err, &temporaryErr) && temporaryErr.Temporary() {
 		return errors.Join(pqerr.ErrUnavailable, err)
 	}
 
