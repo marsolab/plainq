@@ -2,7 +2,7 @@
 
 ## Status
 
-Approved design, pending user review of this written specification.
+Approved design.
 
 ## Context
 
@@ -297,6 +297,15 @@ telemetry write failure never changes the pub/sub result. The existing
 families expose collector failures so a silent or stale dashboard is itself
 observable.
 
+Duration/fan-out events and deleted-topic terminal gauge state each use a
+65,536-entry bounded queue. Event overflow increments
+`plainq_telemetry_event_buffer_dropped_total{metric}`; terminal-state overflow
+increments `plainq_telemetry_terminal_state_dropped_total`. The collector writes
+no coverage for a dropped value, so Houston reports `notRecorded` rather than a
+fabricated zero. A terminal zero is persisted exactly once with exact-series
+coverage before its retained topic state is removed; a coverage retry must not
+insert a duplicate raw zero.
+
 HTTP, gRPC, CLI-over-gRPC, SQLite, PostgreSQL, and clustered storage therefore
 share the same business metric semantics. Transport handlers must not separately
 record the same application or storage event, because that creates
@@ -320,6 +329,17 @@ successful topic delete decrements or reconciles it, records a terminal zero for
 the deleted topic's subscription gauge, and then removes that topic from the
 internal current-state map.
 
+Clustered publish apply is additionally fail-closed. A permanent guard-version
+bit lives in the Raft stable store, so lost sidecars cannot look like a first
+upgrade. Before mutating replicated publish state, each replica durably changes
+a clean sidecar beside the Raft log to dirty. It restores clean only after deterministic full success or a
+known non-mutating precondition failure. A local partial/unknown result leaves
+the guard dirty, quarantines that replica, rejects later public reads/writes, and
+survives restart even if writing a secondary diagnostic marker fails. Verified
+snapshot restore or full replica wipe/reseed is required to recover. `/live`
+remains process liveness while `/health` reports storage, quorum, and quarantine
+readiness; orchestration must not erase quarantine by restarting a live process.
+
 Every binding actually removed increments the subscription-deleted lifecycle
 counter, whether removal came from explicit unsubscribe, topic deletion, or the
 queue foreign-key cascade. The delete path reads affected bindings before the
@@ -333,7 +353,7 @@ or deleted lifecycle events.
 | --- | --- | --- | --- |
 | all six decoded request outcomes | request counter by backend, operation, result | labeled cumulative request outcomes | topic summaries plus system overview |
 | all six decoded request duration | request histogram by backend and operation | request-duration samples | topic summaries plus system overview |
-| storage calls and duration | existing operation counter/histogram | labeled storage outcomes and duration samples | queryable, not graphed |
+| storage calls and duration | existing operation counter/histogram | labeled storage outcomes and duration samples | range-scoped `storageOperationSummaries`, not graphed |
 | messages published | per-topic counter | total and per-second rate | delivery chart and summaries |
 | published body bytes | per-topic counter | total and per-second rate | range summary |
 | successful queue deliveries | per-topic counter | total and per-second rate | delivery chart and summaries |
@@ -365,6 +385,16 @@ lifecycle outcomes without changing their meaning:
 - `plainq_topic_subscriptions_created_total{topic}`
 - `plainq_topic_subscriptions_deleted_total{topic}`
 - `plainq_topics_exist`
+
+The same process registry exposes the fail-closed/collector health families:
+
+- `plainq_cluster_replica_quarantined{node_id}`
+- `plainq_telemetry_event_buffer_dropped_total{metric}`
+- `plainq_telemetry_terminal_state_dropped_total`
+
+These health counters/gauges are intentionally not fed back into the internal
+collector, avoiding recursive telemetry about a collector that is already
+degraded.
 
 The process enables metric metadata so `/metrics` emits Prometheus-compatible
 `# HELP` and `# TYPE` lines. Histograms use classic `le` buckets. The runtime
@@ -423,7 +453,7 @@ The internal types and dimensions are fixed as follows:
 | published, byte, delivery, failure, and subscription lifecycle totals | counter snapshot | topic subject and system subject | reset-aware increase |
 | current subscriptions | gauge sample | topic subject and system subject | last value, plus min/max/average metadata |
 | topics present | gauge sample | system subject only | last value, plus min/max/average metadata |
-| rate series | gauge sample | topic subject and system subject | average as chart value, plus min/max/sum/count metadata |
+| rate series | rate sample | topic subject and system subject | average as chart value, plus min/max/sum/count metadata |
 | `plainq_topic_fanout` | event sample | topic subject and system subject | max and weighted average from sum/count |
 
 The six `operation` values are `list_topics`, `create_topic`, `delete_topic`,
@@ -461,6 +491,10 @@ types require:
 - counter buckets retain reset-aware increase as well as first and last values;
 - event-sample buckets retain min/max/weighted-average/sum/count.
 
+A counter bucket is complete only with an immediately adjacent, covered prior
+source bucket. An older value across an uncovered gap is never used as the
+baseline, because that would smear a multi-bucket delta into one bucket.
+
 The legacy `metrics_5m` table has no producer and lacks the fields needed for
 correct typed aggregation. It remains readable for database compatibility, but
 the selector does not choose it. The exact automatic mapping is:
@@ -475,8 +509,20 @@ the selector does not choose it. The exact automatic mapping is:
 `--telemetry.sqlite.collection.timeout` retains its existing public name and is
 the collection interval despite the legacy `timeout` suffix. The collector uses
 that configured interval, divides counter deltas by actual elapsed seconds, and
-reports the actual interval in response metadata. `--telemetry.sqlite.gc.timeout`
-sets the cleanup interval. Both must be positive.
+reports the actual interval in response metadata. Because public timestamps and
+sample metadata are integer milliseconds and raw buckets feed exact minute
+rollups, the interval must be at least one millisecond, be an exact whole number
+of milliseconds, and divide one minute evenly. `--telemetry.sqlite.gc.timeout`
+sets the cleanup interval and must be positive.
+
+On restart with a changed collection interval, the collector first rolls all
+complete old-grid raw buckets into retained coarse tiers, then transactionally
+removes retained raw rows and raw coverage before collecting on the new grid.
+An independent singleton collection-state row stores the active raw interval;
+coverage is not used as the only grid detector. Its first upgrade initialization
+also clears uncovered legacy raw rows. The transition is an explicit
+`notRecorded` raw gap; one response never advertises a `sampleIntervalMs` that
+disagrees with retained raw coverage or off-grid orphan rows.
 
 `--telemetry.sqlite.retention.period` is the maximum internal-telemetry horizon
 and must be at least 24 hours while telemetry is enabled, so every Houston
@@ -587,18 +633,19 @@ Unix milliseconds. A point timestamp is its bucket start and
 `(effectiveTimeRange.to-effectiveTimeRange.from)/sampleIntervalMs`.
 
 `samples.returnedPointCount` equals `len(dataPoints)`. `complete` is true only
-when the effective range is inside retention and telemetry coverage contains
-every expected bucket. Each `missingRanges` entry uses the same half-open Unix-
+when `expectedPointCount > 0`, the effective range is inside retention, and
+telemetry coverage contains every expected bucket. Each `missingRanges` entry uses the same half-open Unix-
 millisecond bounds and a `reason` of `notRecorded` or `outsideRetention`. The
 first/last sample fields are nullable bucket-start timestamps.
 
 Every data point requires `timestamp` (signed 64-bit Unix milliseconds),
 `value` (JSON number), and `source` (`observed`, `aggregated`, or
 `carriedForward`). Aggregated points also include `min`, `max`, `avg`, `sum`
-and signed 64-bit `count`, even when any of those values is zero; `value` is
-`avg`. Observed raw points include `count: 1`. A carried-forward gauge point has
-no aggregate fields. Empty series and missing-range arrays encode as `[]`, never
-`null`.
+and signed 64-bit `count`, even when any of those values is zero. Their `value`
+follows the stored type: gauge uses `last`, counter uses reset-aware `increase`,
+and rate or event sample uses `avg`. Observed raw points include `count: 1`. A
+carried-forward gauge point has no aggregate fields. Empty series and
+missing-range arrays encode as `[]`, never `null`.
 
 Add `GET /api/v1/metrics/topic/{id}/subscriptions` with this exact additive
 admin response. As above, the schema illustration expands the first of three
@@ -659,8 +706,9 @@ removed-rate order, named
 
 For the active gauge, the server queries the last known sample before the
 effective range. If that sample is still within uninterrupted telemetry
-coverage, it emits a `carriedForward` point at the range start. A carried value
-never crosses a declared missing range.
+coverage and there is no covered point already at the range start, it emits one
+`carriedForward` point there. A carried value never duplicates a timestamp or
+crosses a declared missing range.
 
 The existing topic summary response keeps all current fields and adds:
 
@@ -689,19 +737,27 @@ The existing topic summary response keeps all current fields and adds:
         "count": 0
       }
     }
-  ]
+  ],
+  "storageOperationSummaries": []
 }
 ```
+
+Its preserved top-level `from` and `to` fields remain the exact requested
+half-open bounds, matching `timeRange`; only calculations and
+`effectiveTimeRange` use aligned closed-bucket bounds.
 
 Nullable summary numbers are populated only when the effective window has the
 baseline or samples needed to calculate them. All totals and operation summaries
 are scoped to that effective range, never include an event outside the requested
 range, and are not process-lifetime Prometheus counters.
 Operation summaries are ordered by backend then by the fixed operation order.
-For a topic response they include only operations attributable to that topic;
-these summaries use the request-level families and storage-operation families
-remain separate. `operationSummaries` is `null` when coverage is insufficient
-and `[]` when coverage is complete but no attributable request occurred.
+For a topic response they include only operations attributable to that topic.
+`operationSummaries` uses request-level families;
+`storageOperationSummaries` uses the storage-operation counter/duration families
+and has the same nullable array/item schema. Each field independently encodes
+`null` when its own coverage is insufficient and `[]` when coverage is complete
+but no attributable operation occurred. This makes storage history queryable by
+arbitrary supported range without mixing it into request summaries or graphs.
 
 `GET /api/v1/metrics/topics/overview` accepts the same `range` or `from`/`to`
 query as topic detail, defaulting to one hour. It preserves the existing
@@ -713,15 +769,17 @@ query as topic detail, defaulting to one hour. It preserves the existing
   "publishedBytes": 0,
   "deliveryFailures": 0,
   "topicsExist": 0,
-  "operationSummaries": []
+  "operationSummaries": [],
+  "storageOperationSummaries": []
 }
 ```
 
 The first three are current process counters/gauge, matching the other existing
-overview totals. System `operationSummaries` is range-scoped and has the same
-nullable array and item schema as the topic summary, including list and create
-requests. The overview's `timeRange` is the requested half-open range and
-`effectiveTimeRange` uses the closed-bucket rules above.
+overview totals. System request and storage operation summaries are independently
+range-scoped and have the same nullable array/item schema as the topic summary,
+including system-attributable list and create calls. The overview's `timeRange`
+is the requested half-open range and `effectiveTimeRange` uses the closed-bucket
+rules above.
 
 These authenticated metrics routes retain the current access model. A future
 tenant authorization design must add resource checks before exposing
