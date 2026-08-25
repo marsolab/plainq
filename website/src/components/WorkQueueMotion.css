@@ -1,0 +1,227 @@
+.work-queue-motion {
+  overflow: hidden;
+  border-top: 1px solid var(--color-border);
+  background-image: radial-gradient(var(--color-border) 0.7px, transparent 0.7px);
+  background-size: 18px 18px;
+}
+
+.work-queue-motion__player {
+  display: block;
+  pointer-events: none;
+}
+
+.work-queue-motion__static {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1200 / 340;
+}
+
+.work-queue-motion.is-compact .work-queue-motion__static {
+  aspect-ratio: 390 / 270;
+}
+
+.work-queue-motion__scene {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  color: var(--color-foreground);
+}
+
+.work-queue-motion__node,
+.work-queue-motion__queue,
+.work-queue-motion__worker {
+  box-sizing: border-box;
+  border: 1px solid var(--color-border);
+  background: #fff;
+}
+
+.work-queue-motion__node {
+  position: absolute;
+}
+
+.work-queue-motion__app {
+  top: 141px;
+  left: 42px;
+  display: grid;
+  width: 74px;
+  height: 64px;
+  place-items: center;
+  font: 600 17px/1 var(--font-mono);
+  box-shadow: 0 12px 28px rgba(17, 19, 16, 0.06);
+}
+
+.work-queue-motion__rail {
+  position: absolute;
+  height: 1px;
+  background: var(--color-border);
+}
+
+.work-queue-motion__rail--in {
+  top: 173px;
+  left: 116px;
+  width: 286px;
+}
+
+.work-queue-motion__rail--out {
+  top: 173px;
+  left: 530px;
+  width: 286px;
+}
+
+.work-queue-motion__queue {
+  position: absolute;
+  top: 120px;
+  left: 402px;
+  display: flex;
+  width: 128px;
+  height: 104px;
+  flex-direction: column;
+  justify-content: center;
+  padding: 18px 20px;
+  transform-origin: center;
+}
+
+.work-queue-motion__job-bar {
+  display: block;
+  height: 8px;
+  transform-origin: left center;
+  background: var(--color-accent);
+}
+
+.work-queue-motion__job-bar--one {
+  width: 84px;
+}
+
+.work-queue-motion__job-bar--two {
+  width: 58px;
+  margin-top: 7px;
+  opacity: 0.68;
+}
+
+.work-queue-motion__job-bar--three {
+  width: 40px;
+  margin-top: 7px;
+  opacity: 0.35;
+}
+
+.work-queue-motion__jobs-label {
+  display: block;
+  margin-top: 13px;
+  color: var(--color-muted-foreground);
+  font: 500 14px/1 var(--font-mono);
+}
+
+.work-queue-motion__workers {
+  position: absolute;
+  top: 96px;
+  left: 816px;
+  display: grid;
+  width: 342px;
+  gap: 10px;
+}
+
+.work-queue-motion__worker {
+  display: flex;
+  height: 46px;
+  align-items: center;
+  padding: 0 18px;
+  color: var(--color-muted-foreground);
+  font: 500 14px/1 var(--font-mono);
+}
+
+.work-queue-motion__packet {
+  position: absolute;
+  z-index: 2;
+  box-sizing: border-box;
+  width: 12px;
+  height: 12px;
+  border: 2px solid #fff;
+  border-radius: 999px;
+  background: var(--color-accent);
+  box-shadow: 0 0 0 1px rgba(49, 92, 255, 0.2), 0 4px 12px rgba(49, 92, 255, 0.24);
+}
+
+.work-queue-motion__scene.is-compact .work-queue-motion__app {
+  top: 24px;
+  left: 20px;
+  width: 350px;
+  height: 41px;
+  justify-content: flex-start;
+  padding-left: 16px;
+  font-size: 13px;
+}
+
+.work-queue-motion__scene.is-compact .work-queue-motion__rail {
+  width: 1px;
+  height: 20px;
+}
+
+.work-queue-motion__scene.is-compact .work-queue-motion__rail--in {
+  top: 65px;
+  left: 195px;
+}
+
+.work-queue-motion__scene.is-compact .work-queue-motion__rail--out {
+  top: 149px;
+  left: 195px;
+}
+
+.work-queue-motion__scene.is-compact .work-queue-motion__queue {
+  top: 85px;
+  left: 20px;
+  width: 350px;
+  height: 64px;
+  padding: 12px 16px;
+}
+
+.work-queue-motion__scene.is-compact .work-queue-motion__job-bar {
+  height: 5px;
+}
+
+.work-queue-motion__scene.is-compact .work-queue-motion__job-bar--one {
+  width: 62px;
+}
+
+.work-queue-motion__scene.is-compact .work-queue-motion__job-bar--two {
+  width: 44px;
+  margin-top: 5px;
+}
+
+.work-queue-motion__scene.is-compact .work-queue-motion__job-bar--three {
+  width: 30px;
+  margin-top: 5px;
+}
+
+.work-queue-motion__scene.is-compact .work-queue-motion__jobs-label {
+  position: absolute;
+  top: 23px;
+  right: 16px;
+  margin: 0;
+  font-size: 11px;
+}
+
+.work-queue-motion__scene.is-compact .work-queue-motion__workers {
+  top: 181px;
+  left: 20px;
+  width: 350px;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.work-queue-motion__scene.is-compact .work-queue-motion__worker {
+  height: 48px;
+  justify-content: center;
+  padding: 0 5px;
+  overflow: hidden;
+  font-size: 10px;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .work-queue-motion__packet {
+    display: none;
+  }
+}

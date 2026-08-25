@@ -1,18 +1,24 @@
 ---
+import FeatureIcon from "./FeatureIcon.tsx";
+
 const promises = [
   {
+    icon: "delivery" as const,
     title: "At-least-once delivery",
     body: "A received message is hidden while work is in progress. If the worker disappears, it becomes available again.",
   },
   {
+    icon: "retry" as const,
     title: "Retries with an end",
     body: "Set visibility, retention, and receive limits per queue. Drop exhausted work or send it to a dead-letter queue.",
   },
   {
+    icon: "batch" as const,
     title: "Efficient batches",
     body: "Send many messages in one call and receive batches of up to ten when workers are ready for more.",
   },
   {
+    icon: "payload" as const,
     title: "Payloads stay yours",
     body: "PlainQ carries bytes as-is: JSON, protobuf, text, or a pointer to a larger object.",
   },
@@ -25,7 +31,13 @@ const promises = [
       <div>
         <span class="section-label">Why PlainQ</span>
         <h2 class="font-display mt-7 max-w-xl text-4xl font-semibold leading-[1.02] tracking-[-0.05em] sm:text-6xl">
-          Workers fail. Messages wait. That’s normal.
+          Workers fail. Messages wait.
+          <span
+            class="block"
+            style="width: max-content; max-width: 100%; margin-left: -0.08em; padding: 0.02em 0.08em 0.04em; background: var(--color-accent); color: var(--color-accent-foreground);"
+          >
+            That’s normal.
+          </span>
         </h2>
         <p class="mt-6 max-w-xl text-base leading-7 text-[var(--color-muted-foreground)] sm:text-lg">
           PlainQ keeps unfinished work available without forcing your application
@@ -37,7 +49,10 @@ const promises = [
           {
             promises.map((item) => (
               <article class="grid gap-2 border-b border-[var(--color-border)] py-5 sm:grid-cols-[1fr_1.25fr] sm:gap-6">
-                <h3 class="text-sm font-semibold">{item.title}</h3>
+                <div class="flex items-center gap-3">
+                  <FeatureIcon name={item.icon} />
+                  <h3 class="text-sm font-semibold">{item.title}</h3>
+                </div>
                 <p class="text-sm leading-6 text-[var(--color-muted-foreground)]">{item.body}</p>
               </article>
             ))
@@ -48,7 +63,6 @@ const promises = [
       <div class="lifecycle-panel self-start lg:sticky lg:top-28">
         <div class="lifecycle-head">
           <span>Message lifecycle</span>
-          <code>visibility_timeout = 30s</code>
         </div>
         <div class="lifecycle-body">
           <div class="life-row">
@@ -78,8 +92,7 @@ const promises = [
 
 <style>
   .lifecycle-panel { overflow:hidden; border:1px solid var(--color-border); background:#fff; box-shadow:0 28px 70px rgba(17,19,16,.07); }
-  .lifecycle-head { display:flex; justify-content:space-between; gap:16px; padding:18px 20px; border-bottom:1px solid var(--color-border); font:600 12px/1 var(--font-display); }
-  .lifecycle-head code { font:500 10px/1 var(--font-mono); color:var(--color-muted-foreground); }
+  .lifecycle-head { padding:18px 20px; border-bottom:1px solid var(--color-border); font:600 12px/1 var(--font-display); }
   .lifecycle-body { padding:34px 26px 22px; background-image:radial-gradient(var(--color-border) .7px,transparent .7px); background-size:18px 18px; }
   .life-row { display:grid; grid-template-columns:30px 28px 1fr; min-height:142px; }
   .life-index { padding-top:4px; font:500 10px/1 var(--font-mono); color:var(--color-muted-foreground); }

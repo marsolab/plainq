@@ -23,7 +23,7 @@ const backends = [
   <div class="section-shell py-24 sm:py-32">
     <div class="grid items-center gap-14 lg:grid-cols-[1.15fr_.85fr] lg:gap-20">
       <div class="storage-visual">
-        <div class="storage-head"><span>Storage topology</span><code>choose at startup</code></div>
+        <div class="storage-head"><span>Storage topology</span></div>
         <div class="storage-body">
           <div class="plainq-core">
             <span class="core-mark">Q</span>
@@ -84,8 +84,7 @@ const backends = [
 
 <style>
   .storage-visual { overflow:hidden; border:1px solid var(--color-border); background:#fff; box-shadow:0 28px 70px rgba(17,19,16,.07); }
-  .storage-head { display:flex; align-items:center; justify-content:space-between; gap:14px; border-bottom:1px solid var(--color-border); padding:17px 20px; font:600 12px/1 var(--font-display); }
-  .storage-head code { font:500 10px/1 var(--font-mono); color:var(--color-muted-foreground); }
+  .storage-head { display:flex; align-items:center; border-bottom:1px solid var(--color-border); padding:17px 20px; font:600 12px/1 var(--font-display); }
   .storage-body { display:grid; grid-template-columns:minmax(130px,.8fr) minmax(54px,.4fr) minmax(220px,1.2fr); align-items:center; min-height:360px; padding:44px; background-image:radial-gradient(var(--color-border) .7px,transparent .7px); background-size:18px 18px; }
   .plainq-core { display:flex; align-items:center; gap:12px; border:1px solid #bfc9ff; background:#fff; padding:15px; box-shadow:0 10px 26px rgba(49,92,255,.09); }
   .core-mark { display:grid; width:34px; height:34px; place-items:center; background:var(--color-foreground); color:#fff; font:600 14px/1 var(--font-display); }
