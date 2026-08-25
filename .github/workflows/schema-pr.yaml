@@ -11,6 +11,9 @@ on:
       - main
     paths:
       - 'schema/**'
+      - 'internal/server/schema/**'
+      - 'Makefile'
+      - 'go.mod'
       - '.github/workflows/schema-pr.yaml'
 
 jobs:
