@@ -413,6 +413,7 @@ func (s *publishOnlyStorage) TopicInventory(context.Context) (queue.TopicInvento
 type recordingApplyGuard struct {
 	beginCalls  int
 	finishCalls int
+	checkCalls  int
 	beginErr    error
 	finishErr   error
 	checkErr    error
@@ -489,7 +490,11 @@ func TestFSMPublishWithinBudgetMayUseDerivedIdentifiers(t *testing.T) {
 
 func panicIDGenerator() string { panic("replicated publish generated a random identifier") }
 
-func (g *recordingApplyGuard) Check() error { return g.checkErr }
+func (g *recordingApplyGuard) Check() error {
+	g.checkCalls++
+
+	return g.checkErr
+}
 
 func (g *recordingApplyGuard) BeginPublishApply() error {
 	g.beginCalls++
@@ -710,6 +715,37 @@ func TestFSMReconcilesTopicStateAfterEveryMutation(t *testing.T) {
 }
 
 // --- Snapshot and restore --------------------------------------------------
+
+type beginCountingSnapshotStorage struct {
+	queue.ReplicatedStorage
+	beginCalls int
+}
+
+func (s *beginCountingSnapshotStorage) BeginSnapshot(ctx context.Context) (queue.StateSnapshot, error) {
+	s.beginCalls++
+
+	return s.ReplicatedStorage.BeginSnapshot(ctx)
+}
+
+func TestFSMSnapshotRejectsQuarantinedReplicaBeforeStorage(t *testing.T) {
+	storage := &beginCountingSnapshotStorage{ReplicatedStorage: newStore(t)}
+	guard := &recordingApplyGuard{checkErr: pqerr.ErrUnavailable}
+	machine := New(storage, nil, guard, panicFatalApply)
+
+	view, err := machine.Snapshot()
+	if view != nil {
+		view.Release()
+	}
+	if !errors.Is(err, pqerr.ErrUnavailable) {
+		t.Fatalf("Snapshot() = %#v, %v; want nil unavailable result", view, err)
+	}
+	if guard.checkCalls != 1 {
+		t.Fatalf("replica health checks = %d, want 1", guard.checkCalls)
+	}
+	if storage.beginCalls != 0 {
+		t.Fatalf("BeginSnapshot calls = %d, want 0", storage.beginCalls)
+	}
+}
 
 // A node joining an established cluster is caught up by snapshot, not by
 // replaying history. If the round trip loses anything, that node is quietly

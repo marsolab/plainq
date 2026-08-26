@@ -60,6 +60,10 @@ var (
 // replication; the writing out happens later, in Persist, against the pinned
 // view.
 func (f *FSM) Snapshot() (hraft.FSMSnapshot, error) {
+	if err := f.applyGuard.Check(); err != nil {
+		return nil, fmt.Errorf("replica is quarantined before state snapshot: %w", err)
+	}
+
 	// The context outlives this call: it belongs to the pinned view, which is
 	// read later, in Persist. Scoping it to Snapshot with a deferred cancel
 	// hands back a view whose transaction database/sql has already rolled

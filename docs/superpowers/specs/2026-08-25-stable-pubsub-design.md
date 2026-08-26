@@ -363,8 +363,11 @@ must return only if the replica is still healthy at the same generation, so a
 Fail/Recover ABA cannot release data observed across a quarantine boundary.
 After quarantine, later committed publish and non-publish entries return
 unavailable without mutating or terminating again; snapshot restore bypasses
-that apply gate and is the only in-process recovery path. If finishing a clean
-transition cannot sync its directory, the guard rolls clean back to dirty and
+that apply gate and is the only in-process recovery path. Snapshot creation
+checks the same durable latch before storage work, so a quarantined replica
+cannot produce or propagate recovery material and only a snapshot pinned by a
+healthy source may recover it. If finishing a clean transition cannot sync its
+directory, the guard rolls clean back to dirty and
 the process fails stop; restart must remain quarantined even if the diagnostic
 marker also fails. The durable dirty guard is the primary safety record, and a
 restart never clears it. Verified snapshot restore plus exact inventory, or a

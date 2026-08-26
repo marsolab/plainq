@@ -24,9 +24,10 @@ const (
 	queueIDJSONBytes         = QueueIDLength + jsonArrayElementOverhead
 	messageIDJSONBytes       = MessageIDLength + jsonArrayElementOverhead
 
-	// MaxResponseBytes is the finite v2 peer response envelope. FSM preflight
-	// proves a valid compact publish outcome fits this same ceiling before any
-	// storage mutation begins; peer transport still enforces it defensively.
+	// MaxResponseBytes is the finite v2 peer response envelope. Leader-local
+	// proposal admission proves a valid compact publish outcome fits this same
+	// ceiling before consensus Apply; peer transport still enforces it
+	// defensively.
 	MaxResponseBytes = 2*command.MaxEncodedBytes + FramingBytes
 )
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -452,12 +453,16 @@ func TestVerifiedSnapshotRestoreIsTheOnlyReplicaHealthRecoveryPath(t *testing.T)
 	ctx := context.Background()
 	cluster := newTestCluster(t, 1)
 	leader := cluster.leader(10 * time.Second)
+	authoritativeTopic, err := leader.node.Store().CreateTopic(ctx, &queue.CreateTopicRequest{TopicName: "snapshot-authority"})
+	if err != nil {
+		t.Fatalf("create authoritative snapshot state: %v", err)
+	}
 	encoded := persistClusterFSMSnapshot(t, leader.node)
 	healthyGeneration := leader.node.replicaHealth.generation.Load()
 
 	inventoryErr := errors.New("post-commit restored inventory unavailable")
 	leader.replicated.setInventoryError(inventoryErr)
-	err := leader.node.fsm.Restore(io.NopCloser(bytes.NewReader(encoded)))
+	err = leader.node.fsm.Restore(io.NopCloser(bytes.NewReader(encoded)))
 	if !errors.Is(err, inventoryErr) {
 		t.Fatalf("Restore() = %v, want %v", err, inventoryErr)
 	}
@@ -476,6 +481,13 @@ func TestVerifiedSnapshotRestoreIsTheOnlyReplicaHealthRecoveryPath(t *testing.T)
 	}
 	if _, err := leader.node.peerClient.Forward(ctx, leaderAddr, []byte("{}")); !errors.Is(err, pqerr.ErrUnavailable) {
 		t.Fatalf("peer Forward() after failed restore = %v, want unavailable", err)
+	}
+	snapshotsBefore := countClusterSnapshots(t, leader.node.cfg.DataDir)
+	if err := leader.node.Snapshot(ctx); err == nil || !strings.Contains(err.Error(), "quarantined") {
+		t.Errorf("quarantined leader Snapshot() = %v, want quarantined error", err)
+	}
+	if snapshotsAfter := countClusterSnapshots(t, leader.node.cfg.DataDir); snapshotsAfter != snapshotsBefore {
+		t.Errorf("persisted snapshots after quarantined source = %d, want unchanged %d", snapshotsAfter, snapshotsBefore)
 	}
 
 	if err := leader.node.Close(); err != nil {
@@ -513,8 +525,12 @@ func TestVerifiedSnapshotRestoreIsTheOnlyReplicaHealthRecoveryPath(t *testing.T)
 		t.Fatal("successful verified restore did not advance replica health generation")
 	}
 	recoveredStore := NewStore(leader.replicated, nil, nil, WithReplicaHealth(reopened))
-	if _, err := recoveredStore.ListTopics(ctx); err != nil {
+	recoveredTopics, err := recoveredStore.ListTopics(ctx)
+	if err != nil {
 		t.Fatalf("recovered Store.ListTopics() = %v", err)
+	}
+	if len(recoveredTopics.Topics) != 1 || recoveredTopics.Topics[0].TopicID != authoritativeTopic.TopicID {
+		t.Fatalf("recovered topics = %#v, want authoritative topic %q", recoveredTopics.Topics, authoritativeTopic.TopicID)
 	}
 }
 
@@ -525,6 +541,24 @@ type clusterSnapshotSink struct {
 func (*clusterSnapshotSink) ID() string    { return "cluster-test" }
 func (*clusterSnapshotSink) Cancel() error { return nil }
 func (*clusterSnapshotSink) Close() error  { return nil }
+
+func countClusterSnapshots(t *testing.T, dataDir string) int {
+	t.Helper()
+
+	entries, err := os.ReadDir(filepath.Join(dataDir, "snapshots"))
+	if err != nil {
+		t.Fatalf("read cluster snapshot directory: %v", err)
+	}
+
+	count := 0
+	for _, entry := range entries {
+		if entry.IsDir() && !strings.HasSuffix(entry.Name(), ".tmp") {
+			count++
+		}
+	}
+
+	return count
+}
 
 func persistClusterFSMSnapshot(t *testing.T, node *Node) []byte {
 	t.Helper()
