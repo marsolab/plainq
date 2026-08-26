@@ -139,6 +139,8 @@ func cliConventions() []string {
 			`unattended; tui needs a terminal and runs until quit, and is the only command with ` +
 			`"interactive": true in this schema.`,
 		`Queue ids are 20-character identifiers returned by "plainq create"; queue names are not accepted in their place.`,
+		"For nested commands, flags belong after the leaf name. Inside that leaf they may appear " +
+			"before or after positional arguments; group flags before the leaf are unsupported.",
 		`Run "plainq schema -target=cli -json" for this whole surface in machine-readable form.`,
 	}
 }

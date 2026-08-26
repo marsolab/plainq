@@ -158,6 +158,19 @@ func TestRootUsageListsConventions(t *testing.T) {
 	}
 }
 
+func TestCLIConventionsDocumentNestedFlagPosition(t *testing.T) {
+	var found bool
+	for _, convention := range cliConventions() {
+		if strings.Contains(convention, "nested") && strings.Contains(convention, "leaf") {
+			found = true
+		}
+	}
+
+	if !found {
+		t.Fatal("CLI conventions do not explain that nested-command flags follow the leaf name")
+	}
+}
+
 func TestFlagValueType(t *testing.T) {
 	var (
 		set      = flag.NewFlagSet("test", flag.ContinueOnError)
@@ -284,7 +297,7 @@ func TestUsageErrorSurvivesScottyWrapping(t *testing.T) {
 // can never succeed.
 func TestUsageErrorsCarryTheUsageExitCode(t *testing.T) {
 	cases := map[string]error{
-		"missing send payload":  mustErr(collectSendMessages(nil, "")),
+		"missing send payload":  mustErr(collectMessageBodies(nil, "", nil)),
 		"queue name as id":      validateQueueID("orders"),
 		"malformed queue id":    validateQueueID("!!!"),
 		"missing queue id":      mustErr(queueIDArg("send", nil)),

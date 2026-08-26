@@ -535,9 +535,14 @@ func sendCommand() *commandSpec {
 				return idErr
 			}
 
-			bodies, bodiesErr := collectSendMessages(messages, file)
+			bodies, bodiesErr := collectMessageBodies(messages, file, os.Stdin)
 			if bodiesErr != nil {
 				return bodiesErr
+			}
+
+			messageInputs := make([]*v1.SendMessage, 0, len(bodies))
+			for _, body := range bodies {
+				messageInputs = append(messageInputs, &v1.SendMessage{Body: body})
 			}
 
 			cli, cliErr := client.New(addr)
@@ -545,7 +550,7 @@ func sendCommand() *commandSpec {
 				return fmt.Errorf(fmtCreateClientError, cliErr)
 			}
 
-			send, sendErr := cli.Send(ctx, &v1.SendRequest{QueueId: id, Messages: bodies})
+			send, sendErr := cli.Send(ctx, &v1.SendRequest{QueueId: id, Messages: messageInputs})
 			if sendErr != nil {
 				return grpcError(addr, "send messages", sendErr)
 			}

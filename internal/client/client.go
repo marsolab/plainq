@@ -63,6 +63,15 @@ func New(addr string, options ...Option) (*Client, error) {
 	return &c, nil
 }
 
+// Close releases the gRPC connection owned by the client.
+func (c *Client) Close() error {
+	if err := c.conn.Close(); err != nil {
+		return fmt.Errorf("close connection: %w", err)
+	}
+
+	return nil
+}
+
 func (c *Client) ListQueues(
 	ctx context.Context,
 	in *v1.ListQueuesRequest,
@@ -142,6 +151,84 @@ func (c *Client) Delete(ctx context.Context, in *v1.DeleteRequest, opts ...grpc.
 	resp, err := c.client.Delete(ctx, in, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("delete messages: %w", err)
+	}
+
+	return resp, nil
+}
+
+func (c *Client) ListTopics(
+	ctx context.Context,
+	in *v1.ListTopicsRequest,
+	opts ...grpc.CallOption,
+) (*v1.ListTopicsResponse, error) {
+	resp, err := c.client.ListTopics(ctx, in, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("list topics: %w", err)
+	}
+
+	return resp, nil
+}
+
+func (c *Client) CreateTopic(
+	ctx context.Context,
+	in *v1.CreateTopicRequest,
+	opts ...grpc.CallOption,
+) (*v1.CreateTopicResponse, error) {
+	resp, err := c.client.CreateTopic(ctx, in, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("create topic: %w", err)
+	}
+
+	return resp, nil
+}
+
+func (c *Client) DeleteTopic(
+	ctx context.Context,
+	in *v1.DeleteTopicRequest,
+	opts ...grpc.CallOption,
+) (*v1.DeleteTopicResponse, error) {
+	resp, err := c.client.DeleteTopic(ctx, in, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("delete topic: %w", err)
+	}
+
+	return resp, nil
+}
+
+func (c *Client) Subscribe(
+	ctx context.Context,
+	in *v1.SubscribeRequest,
+	opts ...grpc.CallOption,
+) (*v1.SubscribeResponse, error) {
+	resp, err := c.client.Subscribe(ctx, in, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("subscribe: %w", err)
+	}
+
+	return resp, nil
+}
+
+func (c *Client) Unsubscribe(
+	ctx context.Context,
+	in *v1.UnsubscribeRequest,
+	opts ...grpc.CallOption,
+) (*v1.UnsubscribeResponse, error) {
+	resp, err := c.client.Unsubscribe(ctx, in, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("unsubscribe: %w", err)
+	}
+
+	return resp, nil
+}
+
+func (c *Client) Publish(
+	ctx context.Context,
+	in *v1.PublishRequest,
+	opts ...grpc.CallOption,
+) (*v1.PublishResponse, error) {
+	resp, err := c.client.Publish(ctx, in, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("publish: %w", err)
 	}
 
 	return resp, nil

@@ -2,8 +2,8 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -30,7 +30,7 @@ func validateQueueID(id string) error {
 }
 
 const (
-	// initMessageBufBytes is the initial scanner buffer for reading bodies.
+	// initMessageBufBytes is the buffered reader size for message bodies.
 	initMessageBufBytes = 64 * 1024
 
 	// maxMessageLineBytes caps a single newline-delimited message body.
@@ -65,18 +65,18 @@ func (s *stringSliceFlag) Set(value string) error {
 	return nil
 }
 
-// collectSendMessages builds the message list for a send request from the
-// repeated -message flags and/or a -file source ("-" means stdin). It returns
-// an error when no message bodies are provided.
-func collectSendMessages(messages []string, file string) ([]*v1.SendMessage, error) {
-	bodies := make([]*v1.SendMessage, 0, len(messages))
+// collectMessageBodies combines repeated -message values with an optional
+// newline-delimited file source. Explicit flag values are kept verbatim,
+// including an empty string; empty file lines are ignored.
+func collectMessageBodies(messages []string, file string, stdin io.Reader) ([][]byte, error) {
+	bodies := make([][]byte, 0, len(messages))
 
 	for _, msg := range messages {
-		bodies = append(bodies, &v1.SendMessage{Body: []byte(msg)})
+		bodies = append(bodies, []byte(msg))
 	}
 
 	if file != "" {
-		fileBodies, err := readMessageBodies(file)
+		fileBodies, err := readMessageBodyLines(file, stdin)
 		if err != nil {
 			return nil, err
 		}
@@ -94,39 +94,110 @@ func collectSendMessages(messages []string, file string) ([]*v1.SendMessage, err
 	return bodies, nil
 }
 
-// readMessageBodies reads newline-delimited message bodies from a file path or
-// from stdin when path is "-".
-func readMessageBodies(path string) ([]*v1.SendMessage, error) {
-	reader := io.Reader(os.Stdin)
+// readMessageBodyLines reads newline-delimited message bodies from a file path
+// or from stdin when path is "-". One line is capped at maxMessageLineBytes;
+// the reader keeps at most one extra byte so oversized input fails without an
+// unbounded allocation.
+func readMessageBodyLines(path string, stdin io.Reader) (_ [][]byte, err error) {
+	reader := stdin
 
 	if path != "-" {
 		file, openErr := os.Open(path)
 		if openErr != nil {
 			return nil, fmt.Errorf("open message file: %w", openErr)
 		}
-		defer file.Close()
+		defer func() {
+			if closeErr := file.Close(); closeErr != nil {
+				err = errors.Join(err, fmt.Errorf("close message file: %w", closeErr))
+			}
+		}()
 
 		reader = file
 	}
 
-	bodies := make([]*v1.SendMessage, 0)
-	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 0, initMessageBufBytes), maxMessageLineBytes)
+	if reader == nil {
+		return nil, usagef("message input is unavailable")
+	}
 
-	for scanner.Scan() {
-		line := scanner.Bytes()
+	bodies := make([][]byte, 0)
+	buffered := bufio.NewReaderSize(reader, initMessageBufBytes)
+
+	for {
+		line, readErr := readMessageBodyLine(buffered)
+		if errors.Is(readErr, io.EOF) {
+			return bodies, nil
+		}
+
+		if readErr != nil {
+			return nil, fmt.Errorf("read message file: %w", readErr)
+		}
+
 		if len(line) == 0 {
 			continue
 		}
 
-		bodies = append(bodies, &v1.SendMessage{Body: bytes.Clone(line)})
+		bodies = append(bodies, line)
+	}
+}
+
+// readMessageBodyLine reads one line without retaining more than the accepted
+// maximum plus the single byte needed to prove it is oversized.
+func readMessageBodyLine(reader *bufio.Reader) ([]byte, error) {
+	line := make([]byte, 0, initMessageBufBytes)
+
+	for {
+		fragment, err := reader.ReadSlice('\n')
+
+		fragment, terminated := trimMessageLineDelimiter(fragment, err)
+
+		remaining := maxMessageLineBytes + 1 - len(line)
+		if len(fragment) > remaining {
+			fragment = fragment[:remaining]
+		}
+
+		line = append(line, fragment...)
+
+		if len(line) > maxMessageLineBytes {
+			return nil, usagef("message line exceeds %d bytes", maxMessageLineBytes)
+		}
+
+		if terminated {
+			return line, nil
+		}
+
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+
+		return finishMessageBodyLine(line, err)
+	}
+}
+
+func finishMessageBodyLine(line []byte, err error) ([]byte, error) {
+	switch {
+	case errors.Is(err, io.EOF) && len(line) > 0:
+		return line, nil
+	case errors.Is(err, io.EOF):
+		return nil, io.EOF
+	case err != nil:
+		return nil, fmt.Errorf("read line: %w", err)
+	default:
+		return line, nil
+	}
+}
+
+func trimMessageLineDelimiter(fragment []byte, err error) ([]byte, bool) {
+	terminated := len(fragment) > 0 && fragment[len(fragment)-1] == '\n'
+	if terminated {
+		fragment = fragment[:len(fragment)-1]
 	}
 
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("read message file: %w", err)
+	if len(fragment) > 0 && fragment[len(fragment)-1] == '\r' &&
+		(terminated || errors.Is(err, io.EOF)) {
+		fragment = fragment[:len(fragment)-1]
 	}
 
-	return bodies, nil
+	return fragment, terminated
 }
 
 // printReceivedText renders received messages as tab-separated id/body lines.

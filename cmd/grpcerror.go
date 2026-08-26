@@ -29,6 +29,12 @@ const dialPrefix = "transport: Error while dialing: "
 // Failures the server blames on the request come back as usage errors, so the
 // exit code tells a caller whether to fix the command or retry it.
 func grpcError(addr, operation string, err error) error {
+	return grpcErrorWithListHint(addr, operation, "plainq list", err)
+}
+
+// grpcErrorWithListHint renders a gRPC failure like grpcError, but lets a
+// command with its own resource namespace provide the relevant list command.
+func grpcErrorWithListHint(addr, operation, listCommand string, err error) error {
 	st, ok := grpcStatus(err)
 	if !ok {
 		// Not a gRPC status: a dial failure, a context cancellation, an
@@ -50,7 +56,16 @@ func grpcError(addr, operation string, err error) error {
 		)
 
 	case codes.NotFound:
-		return fmt.Errorf(`%s: %s (list the queues that do exist with "plainq list")`, operation, message)
+		advice := fmt.Sprintf(`list the queues that do exist with %q`, listCommand)
+		if listCommand != "plainq list" {
+			advice = fmt.Sprintf(`list the topics that do exist with %q`, listCommand)
+		}
+
+		return &grpcAdvisedError{
+			message: fmt.Sprintf("%s: %s (%s)", operation, message, advice),
+			cause:   err,
+			status:  st,
+		}
 
 	case codes.InvalidArgument:
 		return usagef("%s: %s", operation, message)
@@ -69,6 +84,18 @@ func grpcError(addr, operation string, err error) error {
 		return fmt.Errorf("%s: %s", operation, message)
 	}
 }
+
+// grpcAdvisedError changes the human-facing message without hiding the status
+// or exact cause that callers may inspect programmatically.
+type grpcAdvisedError struct {
+	message string
+	cause   error
+	status  *status.Status
+}
+
+func (e *grpcAdvisedError) Error() string              { return e.message }
+func (e *grpcAdvisedError) Unwrap() error              { return e.cause }
+func (e *grpcAdvisedError) GRPCStatus() *status.Status { return e.status }
 
 // grpcStatus extracts the status from err, however deeply it is wrapped.
 //
