@@ -372,15 +372,18 @@ func TestTerminalStateEnqueueIsDurableAndBounded(t *testing.T) {
 
 	store := newTelemetryTestStore(t)
 	ctx := context.Background()
-	accepted, err := store.EnqueueTerminalState(ctx, "queue-1", 100, 1)
+	first := TerminalState{SubjectID: "queue-1", Generation: 1, ObservedAt: 100}
+	accepted, err := store.EnqueueTerminalState(ctx, first, 1)
 	if err != nil || !accepted {
 		t.Fatalf("first enqueue = %v, %v; want accepted", accepted, err)
 	}
-	accepted, err = store.EnqueueTerminalState(ctx, "queue-1", 200, 1)
+	accepted, err = store.EnqueueTerminalState(ctx, first, 1)
 	if err != nil || !accepted {
 		t.Fatalf("deduplicated enqueue = %v, %v; want accepted", accepted, err)
 	}
-	accepted, err = store.EnqueueTerminalState(ctx, "queue-2", 200, 1)
+	accepted, err = store.EnqueueTerminalState(ctx, TerminalState{
+		SubjectID: "queue-2", Generation: 2, ObservedAt: 200,
+	}, 1)
 	if err != nil || accepted {
 		t.Fatalf("over-cap enqueue = %v, %v; want false,nil", accepted, err)
 	}
@@ -405,7 +408,9 @@ func TestTerminalStateEnqueueHonorsCapConcurrently(t *testing.T) {
 		go func(subject string) {
 			defer wg.Done()
 			<-start
-			accepted, err := store.EnqueueTerminalState(ctx, subject, 100, 1)
+			accepted, err := store.EnqueueTerminalState(ctx, TerminalState{
+				SubjectID: subject, Generation: 1, ObservedAt: 100,
+			}, 1)
 			results <- accepted
 			errors <- err
 		}(subject)
@@ -430,19 +435,45 @@ func TestTerminalStateEnqueueHonorsCapConcurrently(t *testing.T) {
 	}
 }
 
+func TestTerminalStateCancellationIsGenerationExact(t *testing.T) {
+	t.Parallel()
+
+	store := newTelemetryTestStore(t)
+	ctx := context.Background()
+	first := TerminalState{SubjectID: "queue-1", Generation: 1, ObservedAt: 100}
+	second := TerminalState{SubjectID: "queue-1", Generation: 2, ObservedAt: 200}
+	for _, state := range []TerminalState{first, second} {
+		accepted, err := store.EnqueueTerminalState(ctx, state, 2)
+		if err != nil || !accepted {
+			t.Fatalf("enqueue generation %d = %t, %v; want accepted", state.Generation, accepted, err)
+		}
+	}
+	if err := store.CancelTerminalState(ctx, first.SubjectID, first.Generation); err != nil {
+		t.Fatalf("cancel first generation: %v", err)
+	}
+	if err := store.CancelTerminalState(ctx, first.SubjectID, first.Generation); err != nil {
+		t.Fatalf("repeat first-generation cancellation: %v", err)
+	}
+	states, err := store.ListTerminalStates(ctx)
+	if err != nil || len(states) != 1 || states[0].Generation != second.Generation {
+		t.Fatalf("states after exact cancellation = %#v, %v; want only generation 2", states, err)
+	}
+}
+
 func TestTerminalStateCompletionIsAtomicAndIdempotent(t *testing.T) {
 	t.Parallel()
 
 	store, conn := newTelemetryTestStoreWithConn(t)
 	ctx := context.Background()
-	accepted, err := store.EnqueueTerminalState(ctx, "queue-1", 100, 10)
+	state := TerminalState{SubjectID: "queue-1", Generation: 1, ObservedAt: 100}
+	accepted, err := store.EnqueueTerminalState(ctx, state, 10)
 	if err != nil || !accepted {
 		t.Fatalf("enqueue terminal state: %v, %v", accepted, err)
 	}
-	if err := store.AssignTerminalBucket(ctx, "queue-1", 1000, 1000); err != nil {
+	if err := store.AssignTerminalBucket(ctx, "queue-1", state.Generation, 1000, 1000); err != nil {
 		t.Fatalf("assign terminal bucket: %v", err)
 	}
-	if err := store.AssignTerminalBucket(ctx, "queue-1", 2000, 1000); err == nil {
+	if err := store.AssignTerminalBucket(ctx, "queue-1", state.Generation, 2000, 1000); err == nil {
 		t.Fatal("conflicting terminal assignment accepted")
 	}
 	sample := testSample(1000, "queue-1", "depth", MetricKindGauge, 0, 0)
@@ -451,7 +482,7 @@ func TestTerminalStateCompletionIsAtomicAndIdempotent(t *testing.T) {
 BEGIN SELECT RAISE(ABORT, 'terminal coverage failure'); END;`); err != nil {
 		t.Fatalf("install terminal coverage trigger: %v", err)
 	}
-	if err := store.CompleteTerminalState(ctx, "queue-1", sample, coverage); err == nil {
+	if err := store.CompleteTerminalState(ctx, "queue-1", state.Generation, sample, coverage); err == nil {
 		t.Fatal("terminal completion returned nil, want trigger failure")
 	}
 	assertTableCount(t, conn, "metrics_raw", 0)
@@ -459,10 +490,10 @@ BEGIN SELECT RAISE(ABORT, 'terminal coverage failure'); END;`); err != nil {
 	if _, err := conn.Exec(`DROP TRIGGER fail_terminal_coverage`); err != nil {
 		t.Fatalf("drop terminal failure trigger: %v", err)
 	}
-	if err := store.CompleteTerminalState(ctx, "queue-1", sample, coverage); err != nil {
+	if err := store.CompleteTerminalState(ctx, "queue-1", state.Generation, sample, coverage); err != nil {
 		t.Fatalf("complete terminal state: %v", err)
 	}
-	if err := store.CompleteTerminalState(ctx, "queue-1", sample, coverage); err != nil {
+	if err := store.CompleteTerminalState(ctx, "queue-1", state.Generation, sample, coverage); err != nil {
 		t.Fatalf("repeat terminal completion: %v", err)
 	}
 	assertTableCount(t, conn, "metrics_raw", 1)

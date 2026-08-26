@@ -360,10 +360,10 @@ VALUES (1, ?) ON CONFLICT(singleton) DO UPDATE SET raw_sample_interval_ms = excl
 
 // EnqueueTerminalState durably deduplicates and caps terminal work.
 func (s *SQLiteStore) EnqueueTerminalState(
-	ctx context.Context, subjectID string, observedAt int64, limit int,
+	ctx context.Context, state TerminalState, limit int,
 ) (bool, error) {
-	if subjectID == "" || limit <= 0 {
-		return false, errors.New("enqueue terminal state: subject and positive cap are required")
+	if state.SubjectID == "" || state.Generation <= 0 || limit <= 0 {
+		return false, errors.New("enqueue terminal state: subject, positive generation, and positive cap are required")
 	}
 
 	tx, err := pqlite.BeginTx(ctx, s.db)
@@ -374,16 +374,17 @@ func (s *SQLiteStore) EnqueueTerminalState(
 	// This conditional INSERT is deliberately the first statement: the write
 	// lock makes the count check and insert atomic without a nested BEGIN.
 	if _, err := tx.ExecContext(ctx, `
-INSERT INTO telemetry_terminal_state (subject_id, observed_at)
-SELECT ?, ?
+INSERT INTO telemetry_terminal_state (subject_id, generation, observed_at)
+SELECT ?, ?, ?
 WHERE (SELECT COUNT(*) FROM telemetry_terminal_state) < ?
-ON CONFLICT(subject_id) DO NOTHING`, subjectID, observedAt, limit); err != nil {
+ON CONFLICT(subject_id, generation) DO NOTHING`, state.SubjectID, state.Generation, state.ObservedAt, limit); err != nil {
 		return false, fmt.Errorf("enqueue terminal state: insert: %w", err)
 	}
 
 	var exists int
 
-	err = tx.QueryRowContext(ctx, `SELECT 1 FROM telemetry_terminal_state WHERE subject_id = ?`, subjectID).Scan(&exists)
+	err = tx.QueryRowContext(ctx, `SELECT 1 FROM telemetry_terminal_state
+WHERE subject_id = ? AND generation = ?`, state.SubjectID, state.Generation).Scan(&exists)
 
 	accepted := err == nil
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -397,13 +398,27 @@ ON CONFLICT(subject_id) DO NOTHING`, subjectID, observedAt, limit); err != nil {
 	return accepted, nil
 }
 
+// CancelTerminalState removes only the deletion generation made stale by re-admission.
+func (s *SQLiteStore) CancelTerminalState(ctx context.Context, subjectID string, generation int64) error {
+	if subjectID == "" || generation <= 0 {
+		return errors.New("cancel terminal state: subject and positive generation are required")
+	}
+
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM telemetry_terminal_state
+WHERE subject_id = ? AND generation = ?`, subjectID, generation); err != nil {
+		return fmt.Errorf("cancel terminal state: delete: %w", err)
+	}
+
+	return nil
+}
+
 // ListTerminalStates returns durable terminal work in stable order.
 func (s *SQLiteStore) ListTerminalStates(ctx context.Context) ([]TerminalState, error) {
 	result := make([]TerminalState, 0)
 
 	rows, err := s.db.QueryContext(ctx, `
-SELECT subject_id, observed_at, target_bucket, sample_interval_ms
-FROM telemetry_terminal_state ORDER BY observed_at, subject_id`)
+SELECT subject_id, generation, observed_at, target_bucket, sample_interval_ms
+FROM telemetry_terminal_state ORDER BY observed_at, subject_id, generation`)
 	if err != nil {
 		return result, fmt.Errorf("list terminal states: %w", err)
 	}
@@ -414,7 +429,7 @@ FROM telemetry_terminal_state ORDER BY observed_at, subject_id`)
 			state            TerminalState
 			target, interval sql.NullInt64
 		)
-		if err := rows.Scan(&state.SubjectID, &state.ObservedAt, &target, &interval); err != nil {
+		if err := rows.Scan(&state.SubjectID, &state.Generation, &state.ObservedAt, &target, &interval); err != nil {
 			return result, fmt.Errorf("list terminal states: scan: %w", err)
 		}
 
@@ -442,10 +457,10 @@ FROM telemetry_terminal_state ORDER BY observed_at, subject_id`)
 //
 //nolint:cyclop // Stable retry handling explicitly distinguishes absent, identical, and conflicting assignments.
 func (s *SQLiteStore) AssignTerminalBucket(
-	ctx context.Context, subjectID string, targetBucket, sampleIntervalMS int64,
+	ctx context.Context, subjectID string, generation, targetBucket, sampleIntervalMS int64,
 ) error {
-	if subjectID == "" || sampleIntervalMS <= 0 {
-		return errors.New("assign terminal bucket: subject and positive interval are required")
+	if subjectID == "" || generation <= 0 || sampleIntervalMS <= 0 {
+		return errors.New("assign terminal bucket: subject, positive generation, and positive interval are required")
 	}
 
 	if targetBucket%sampleIntervalMS != 0 {
@@ -460,7 +475,8 @@ func (s *SQLiteStore) AssignTerminalBucket(
 
 	result, err := tx.ExecContext(ctx, `UPDATE telemetry_terminal_state
 SET target_bucket = ?, sample_interval_ms = ?
-WHERE subject_id = ? AND target_bucket IS NULL AND sample_interval_ms IS NULL`, targetBucket, sampleIntervalMS, subjectID)
+WHERE subject_id = ? AND generation = ? AND target_bucket IS NULL AND sample_interval_ms IS NULL`,
+		targetBucket, sampleIntervalMS, subjectID, generation)
 	if err != nil {
 		return fmt.Errorf("assign terminal bucket: update: %w", err)
 	}
@@ -473,7 +489,8 @@ WHERE subject_id = ? AND target_bucket IS NULL AND sample_interval_ms IS NULL`, 
 	if changed == 0 {
 		var existingTarget, existingInterval sql.NullInt64
 		if err := tx.QueryRowContext(ctx, `SELECT target_bucket, sample_interval_ms
-FROM telemetry_terminal_state WHERE subject_id = ?`, subjectID).Scan(&existingTarget, &existingInterval); err != nil {
+FROM telemetry_terminal_state WHERE subject_id = ? AND generation = ?`, subjectID, generation).
+			Scan(&existingTarget, &existingInterval); err != nil {
 			return fmt.Errorf("assign terminal bucket: find existing assignment: %w", err)
 		}
 
@@ -494,13 +511,14 @@ FROM telemetry_terminal_state WHERE subject_id = ?`, subjectID).Scan(&existingTa
 //
 //nolint:cyclop,gocyclo // The durable completion protocol keeps validation and each rollback boundary explicit.
 func (s *SQLiteStore) CompleteTerminalState(
-	ctx context.Context, subjectID string, sample MetricSample, coverage CoverageBucket,
+	ctx context.Context, subjectID string, generation int64, sample MetricSample, coverage CoverageBucket,
 ) error {
 	if err := validateMetricCoveragePair(sample, coverage); err != nil {
 		return fmt.Errorf("complete terminal state: %w", err)
 	}
 
-	if subjectID == "" || sample.SubjectID != subjectID || sample.Kind != MetricKindGauge || sample.Value != 0 {
+	if subjectID == "" || generation <= 0 || sample.SubjectID != subjectID ||
+		sample.Kind != MetricKindGauge || sample.Value != 0 {
 		return errors.New("complete terminal state: terminal sample must be the subject's gauge zero")
 	}
 
@@ -513,7 +531,8 @@ func (s *SQLiteStore) CompleteTerminalState(
 	var target, interval sql.NullInt64
 
 	err = tx.QueryRowContext(ctx, `SELECT target_bucket, sample_interval_ms
-FROM telemetry_terminal_state WHERE subject_id = ?`, subjectID).Scan(&target, &interval)
+FROM telemetry_terminal_state WHERE subject_id = ? AND generation = ?`, subjectID, generation).
+		Scan(&target, &interval)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -542,7 +561,8 @@ WHERE timestamp = ? AND queue_id = ? AND metric_name = ? AND labels = ? AND metr
 	}
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM telemetry_terminal_state
-WHERE subject_id = ? AND target_bucket = ? AND sample_interval_ms = ?`, subjectID, target.Int64, interval.Int64); err != nil {
+WHERE subject_id = ? AND generation = ? AND target_bucket = ? AND sample_interval_ms = ?`,
+		subjectID, generation, target.Int64, interval.Int64); err != nil {
 		return fmt.Errorf("complete terminal state: delete pending state: %w", err)
 	}
 

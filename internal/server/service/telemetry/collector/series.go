@@ -89,6 +89,7 @@ type SeriesResult struct {
 // TerminalState is durable work for a subject that disappeared.
 type TerminalState struct {
 	SubjectID        string
+	Generation       int64
 	ObservedAt       int64
 	TargetBucket     *int64
 	SampleIntervalMS *int64

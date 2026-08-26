@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"io/fs"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -20,7 +21,7 @@ func TestTelemetryMigration4UpgradesSeededVersion3Database(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 
-	legacy := mutationPrefix(t, TelemetryMutation(), "4_")
+	legacy := mutationPrefix(t, TelemetryMutation(), "4_", "5_")
 	legacyEvolver, err := litekit.NewEvolver(conn, legacy)
 	if err != nil {
 		t.Fatalf("new legacy evolver: %v", err)
@@ -47,7 +48,7 @@ VALUES (1000, 'queue-1', 'send_rate', 2.5, 2);`); err != nil {
 	if err := current.MutateSchema(); err != nil {
 		t.Fatalf("upgrade telemetry schema: %v", err)
 	}
-	assertSQLiteSchemaVersion(t, conn, 4)
+	assertSQLiteSchemaVersion(t, conn, 5)
 
 	var rawKind string
 	var rawWindow int64
@@ -103,6 +104,49 @@ FROM metrics_1m WHERE bucket_start = 0`).Scan(&aggregateKind, &first, &last, &in
 	}
 }
 
+func TestTelemetryMigration5PreservesAssignedTerminalStateWithGeneration(t *testing.T) {
+	t.Parallel()
+
+	conn, err := litekit.New(filepath.Join(t.TempDir(), "plainq.db"))
+	if err != nil {
+		t.Fatalf("new sqlite connection: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	version4 := mutationPrefix(t, TelemetryMutation(), "5_")
+	evolver, err := litekit.NewEvolver(conn, version4)
+	if err != nil {
+		t.Fatalf("new version 4 evolver: %v", err)
+	}
+	if err := evolver.MutateSchema(); err != nil {
+		t.Fatalf("apply telemetry version 4: %v", err)
+	}
+	if _, err := conn.Exec(`INSERT INTO telemetry_terminal_state
+    (subject_id, observed_at, target_bucket, sample_interval_ms)
+VALUES ('topic-1', 59500, 59000, 1000)`); err != nil {
+		t.Fatalf("seed assigned terminal: %v", err)
+	}
+
+	evolver, err = litekit.NewEvolver(conn, TelemetryMutation())
+	if err != nil {
+		t.Fatalf("new current evolver: %v", err)
+	}
+	if err := evolver.MutateSchema(); err != nil {
+		t.Fatalf("upgrade telemetry schema: %v", err)
+	}
+	assertSQLiteSchemaVersion(t, conn, 5)
+
+	var generation, observedAt, target, interval int64
+	if err := conn.QueryRow(`SELECT generation, observed_at, target_bucket, sample_interval_ms
+FROM telemetry_terminal_state WHERE subject_id = 'topic-1'`).
+		Scan(&generation, &observedAt, &target, &interval); err != nil {
+		t.Fatalf("query upgraded terminal: %v", err)
+	}
+	if generation != 1 || observedAt != 59_500 || target != 59_000 || interval != 1_000 {
+		t.Fatalf("upgraded terminal = generation %d observed %d target %d interval %d", generation, observedAt, target, interval)
+	}
+}
+
 func TestTelemetryMigration4IsSkippedAfterVersionAdvance(t *testing.T) {
 	t.Parallel()
 
@@ -138,7 +182,7 @@ func TestTelemetryMigration4IsSkippedAfterVersionAdvance(t *testing.T) {
 	if err := evolver.MutateSchema(); err != nil {
 		t.Fatalf("repeat telemetry migration: %v", err)
 	}
-	assertSQLiteSchemaVersion(t, conn, 4)
+	assertSQLiteSchemaVersion(t, conn, 5)
 
 	var interval int64
 	if err := conn.QueryRow(`SELECT raw_sample_interval_ms FROM telemetry_collection_state WHERE singleton = 1`).
@@ -150,7 +194,7 @@ func TestTelemetryMigration4IsSkippedAfterVersionAdvance(t *testing.T) {
 	}
 }
 
-func mutationPrefix(t *testing.T, all fs.FS, excludePrefix string) fstest.MapFS {
+func mutationPrefix(t *testing.T, all fs.FS, excludePrefixes ...string) fstest.MapFS {
 	t.Helper()
 
 	selected := fstest.MapFS{}
@@ -159,7 +203,9 @@ func mutationPrefix(t *testing.T, all fs.FS, excludePrefix string) fstest.MapFS 
 		t.Fatalf("read mutations: %v", err)
 	}
 	for _, entry := range entries {
-		if !strings.HasSuffix(entry.Name(), ".sql") || strings.HasPrefix(entry.Name(), excludePrefix) {
+		if !strings.HasSuffix(entry.Name(), ".sql") || slices.ContainsFunc(excludePrefixes, func(prefix string) bool {
+			return strings.HasPrefix(entry.Name(), prefix)
+		}) {
 			continue
 		}
 		data, err := fs.ReadFile(all, entry.Name())

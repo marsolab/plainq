@@ -483,7 +483,7 @@ func TestTopicBoundaryCommitCannotMarkReadmittedAccumulatorDurable(t *testing.T)
 	assertTask9MetricAbsent(t, batch.Samples, "topic-c", MetricTopicRequestsTotal)
 }
 
-func TestTerminalEnqueuePromotionQueueRewriteWorkStaysLinear(t *testing.T) {
+func TestTerminalMaintenanceOrderingNeverHoldsCutoverAndVisitsLinearly(t *testing.T) {
 	const backlog = 32
 
 	store := newTask9Store()
@@ -498,29 +498,64 @@ func TestTerminalEnqueuePromotionQueueRewriteWorkStaysLinear(t *testing.T) {
 	c.RecordTopicState(telemetry.TopicStateEvent{TopicsExist: backlog, Subscriptions: subscriptions})
 	c.RecordTopicState(telemetry.TopicStateEvent{TopicsExist: 0, Subscriptions: map[string]int64{}})
 
-	var (
-		previousQueue []string
-		rewriteWork   int
-	)
-	store.onEnqueue = func() {
-		c.cutoverMu.Lock()
-		currentQueue := append([]string(nil), c.preDurableOrder...)
-		c.cutoverMu.Unlock()
-		if previousQueue != nil {
-			rewriteWork += task9QueueRewriteDistance(previousQueue, currentQueue)
-		}
-		previousQueue = currentQueue
+	promotionEntered := make(chan struct{})
+	promotionRelease := make(chan struct{})
+	promotionVisits := 0
+	var promotionBarrier sync.Once
+	c.terminalVisit = func() {
+		promotionVisits++
+		promotionBarrier.Do(func() {
+			close(promotionEntered)
+			<-promotionRelease
+		})
 	}
-
-	if err := c.promoteTerminalStates(context.Background()); err != nil {
+	promotionDone := make(chan error, 1)
+	go func() { promotionDone <- c.promoteTerminalStates(context.Background()) }()
+	<-promotionEntered
+	assertTopicRequestCompletesWhileTerminalMaintenanceBlocked(t, c)
+	close(promotionRelease)
+	if err := <-promotionDone; err != nil {
 		t.Fatalf("promote terminal backlog: %v", err)
 	}
-	if rewriteWork > backlog {
-		t.Fatalf("observed queue rewrite work = %d, want linear bound <= %d", rewriteWork, backlog)
+	if promotionVisits != backlog {
+		t.Fatalf("promotion visits = %d, want exactly %d", promotionVisits, backlog)
 	}
-	if got := len(c.preDurableOrder); got != 0 {
-		t.Fatalf("pre-durable order length after promotion = %d, want 0", got)
+
+	dueEntered := make(chan struct{})
+	dueRelease := make(chan struct{})
+	dueVisits := 0
+	var dueBarrier sync.Once
+	c.terminalVisit = func() {
+		dueVisits++
+		dueBarrier.Do(func() {
+			close(dueEntered)
+			<-dueRelease
+		})
 	}
+	dueDone := make(chan []TerminalState, 1)
+	go func() { dueDone <- c.terminalStatesDue(2_000) }()
+	<-dueEntered
+	assertTopicRequestCompletesWhileTerminalMaintenanceBlocked(t, c)
+	close(dueRelease)
+	if got := len(<-dueDone); got != backlog {
+		t.Fatalf("due states = %d, want %d", got, backlog)
+	}
+	if dueVisits != backlog {
+		t.Fatalf("due-order visits = %d, want exactly %d", dueVisits, backlog)
+	}
+}
+
+func assertTopicRequestCompletesWhileTerminalMaintenanceBlocked(t *testing.T, c *Collector) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		c.RecordTopicRequest(telemetry.TopicOperationEvent{
+			Backend: metrics.BackendSQLite, Operation: metrics.OpListTopics,
+			Result: metrics.ResultOK, Duration: time.Millisecond,
+		})
+		close(done)
+	}()
+	<-done
 }
 
 func TestRequestOnlySubjectsNeverBecomeTerminalOrPoisonKnownGauge(t *testing.T) {
@@ -588,9 +623,9 @@ func TestTerminalStateBufferReportsOverflowAndStaysBounded(t *testing.T) {
 	if got := c.terminalReservationCount(); got != 1 {
 		t.Fatalf("terminal reservations = %d, want 1", got)
 	}
-	c.cutoverMu.Lock()
-	preDurable := len(c.preDurableTerminals)
-	c.cutoverMu.Unlock()
+	c.terminalMu.Lock()
+	preDurable := c.terminalQueue.Len()
+	c.terminalMu.Unlock()
 	if preDurable != 1 {
 		t.Fatalf("pre-durable terminal count = %d, want 1", preDurable)
 	}
@@ -620,6 +655,82 @@ func TestTerminalStateSurvivesCollectorRestart(t *testing.T) {
 	}
 	if due := restarted.terminalStatesDue(1_101); len(due) != 1 || due[0].SubjectID != "topic-1" {
 		t.Fatalf("terminal due after observed boundary = %#v", due)
+	}
+}
+
+func TestTerminalReappearanceCancelsExactDurableGenerationAndAllowsRedeletion(t *testing.T) {
+	for _, restart := range []bool{false, true} {
+		t.Run(fmt.Sprintf("restart=%t", restart), func(t *testing.T) {
+			ctx := context.Background()
+			store, _ := newTelemetryTestStoreWithConn(t)
+			if reset, err := store.ResetRawInterval(ctx, 1_000); err != nil || !reset {
+				t.Fatalf("reset raw interval = %t, %v; want true, nil", reset, err)
+			}
+
+			clock := newTask9Clock(time.UnixMilli(1_100))
+			current := New(store, WithCollectionInterval(time.Second), WithClock(clock.Now))
+			current.RecordTopicState(telemetry.TopicStateEvent{
+				TopicsExist: 1, Subscriptions: map[string]int64{"topic-1": 3},
+			})
+			requireCollectTopicBoundary(t, current, 2_000)
+
+			clock.Set(time.UnixMilli(2_500))
+			current.RecordTopicState(telemetry.TopicStateEvent{
+				TopicsExist: 0, Subscriptions: map[string]int64{},
+			})
+			if err := current.promoteTerminalStates(ctx); err != nil {
+				t.Fatalf("promote first deletion: %v", err)
+			}
+			if err := current.assignTerminalStates(ctx, 3_000); err != nil {
+				t.Fatalf("assign first deletion: %v", err)
+			}
+			first, err := store.ListTerminalStates(ctx)
+			if err != nil || len(first) != 1 || first[0].TargetBucket == nil || *first[0].TargetBucket != 2_000 {
+				t.Fatalf("first durable deletion = %#v, %v; want assigned target 2000", first, err)
+			}
+
+			if restart {
+				current = New(store, WithCollectionInterval(time.Second), WithClock(clock.Now))
+			}
+
+			clock.Set(time.UnixMilli(2_600))
+			current.RecordTopicState(telemetry.TopicStateEvent{
+				TopicsExist: 1, Subscriptions: map[string]int64{"topic-1": 4},
+			})
+			if err := current.promoteTerminalStates(ctx); err != nil {
+				t.Fatalf("cancel stale deletion: %v", err)
+			}
+			if states, err := store.ListTerminalStates(ctx); err != nil || len(states) != 0 {
+				t.Fatalf("terminal states after reappearance = %#v, %v; want none", states, err)
+			}
+			if due := current.terminalStatesDue(3_000); len(due) != 0 {
+				t.Fatalf("stale assigned state remained due after reappearance: %#v", due)
+			}
+			requireCollectTopicBoundary(t, current, 3_000)
+
+			result := mustQuerySeries(t, store, SeriesQuery{
+				SubjectID: "topic-1", MetricName: MetricTopicSubscriptionsCurrent,
+				Kind: MetricKindGauge, Resolution: ResolutionRaw, From: 2_000, To: 3_000,
+			})
+			if len(result.DataPoints) != 1 || result.DataPoints[0].Value != 4 || len(result.Coverage) != 1 {
+				t.Fatalf("reappeared gauge = %#v, want one exact active value 4", result)
+			}
+
+			clock.Set(time.UnixMilli(3_500))
+			current.RecordTopicState(telemetry.TopicStateEvent{
+				TopicsExist: 0, Subscriptions: map[string]int64{},
+			})
+			if err := current.promoteTerminalStates(ctx); err != nil {
+				t.Fatalf("promote second deletion: %v", err)
+			}
+			second, err := store.ListTerminalStates(ctx)
+			if err != nil || len(second) != 1 || second[0].ObservedAt != 3_500 {
+				t.Fatalf("second durable deletion = %#v, %v; want fresh transition at 3500", second, err)
+			}
+			if second[0].Generation <= first[0].Generation {
+				t.Fatalf("second generation = %d, want greater than first %d", second[0].Generation, first[0].Generation)
+			}
+		})
 	}
 }
 
@@ -738,6 +849,90 @@ func TestTerminalAssignmentAndCompletionReleaseExactlyOnce(t *testing.T) {
 	}
 }
 
+func TestAssignedTerminalRetrySurvivesRestartRollbackAndMinuteRollup(t *testing.T) {
+	ctx := context.Background()
+	store, conn := newTelemetryTestStoreWithConn(t)
+	if reset, err := store.ResetRawInterval(ctx, 1_000); err != nil || !reset {
+		t.Fatalf("reset raw interval = %t, %v; want true, nil", reset, err)
+	}
+	seedRawGrid(t, store, "topic-1", MetricTopicSubscriptionsCurrent, MetricKindGauge,
+		0, 59_000, 1_000, func(int64) (float64, int64) { return 1, 0 })
+
+	clock := newTask9Clock(time.UnixMilli(59_100))
+	first := New(store, WithCollectionInterval(time.Second), WithClock(clock.Now))
+	first.RecordTopicState(telemetry.TopicStateEvent{
+		TopicsExist: 1, Subscriptions: map[string]int64{"topic-1": 1},
+	})
+	clock.Set(time.UnixMilli(59_500))
+	first.RecordTopicState(telemetry.TopicStateEvent{
+		TopicsExist: 0, Subscriptions: map[string]int64{},
+	})
+	if err := first.promoteTerminalStates(ctx); err != nil {
+		t.Fatalf("promote terminal: %v", err)
+	}
+	if err := first.assignTerminalStates(ctx, 60_000); err != nil {
+		t.Fatalf("assign terminal: %v", err)
+	}
+
+	restarted := New(store, WithCollectionInterval(time.Second), WithClock(clock.Now))
+	due := restarted.terminalStatesDue(60_000)
+	if len(due) != 1 || due[0].TargetBucket == nil || *due[0].TargetBucket != 59_000 {
+		t.Fatalf("assigned state after restart = %#v, want original target 59000", due)
+	}
+	if _, err := conn.Exec(`CREATE TRIGGER fail_terminal_rollup_coverage BEFORE INSERT ON telemetry_coverage
+WHEN NEW.subject_id = 'topic-1' AND NEW.metric_name = 'plainq_topic_subscriptions_current'
+BEGIN SELECT RAISE(ABORT, 'terminal coverage failure'); END;`); err != nil {
+		t.Fatalf("install terminal failure trigger: %v", err)
+	}
+	if err := restarted.completeTerminalState(ctx, due[0]); err == nil {
+		t.Fatal("terminal completion returned nil, want injected coverage failure")
+	}
+	failedRaw := mustQuerySeries(t, store, SeriesQuery{
+		SubjectID: "topic-1", MetricName: MetricTopicSubscriptionsCurrent,
+		Kind: MetricKindGauge, Resolution: ResolutionRaw, From: 59_000, To: 60_000,
+	})
+	if len(failedRaw.DataPoints) != 0 || len(failedRaw.Coverage) != 0 {
+		t.Fatalf("failed completion leaked zero or coverage: %#v", failedRaw)
+	}
+	assertTableCount(t, conn, "telemetry_terminal_state", 1)
+	if _, err := conn.Exec(`DROP TRIGGER fail_terminal_rollup_coverage`); err != nil {
+		t.Fatalf("drop terminal failure trigger: %v", err)
+	}
+
+	clock.Set(time.UnixMilli(61_500))
+	afterMinute := New(store, WithCollectionInterval(time.Second), WithClock(clock.Now))
+	due = afterMinute.terminalStatesDue(62_000)
+	if len(due) != 1 || due[0].TargetBucket == nil || *due[0].TargetBucket != 59_000 {
+		t.Fatalf("retry state after minute advance = %#v, want stable target 59000", due)
+	}
+	if err := afterMinute.completeTerminalState(ctx, due[0]); err != nil {
+		t.Fatalf("retry terminal completion: %v", err)
+	}
+	if err := afterMinute.completeTerminalState(ctx, due[0]); err != nil {
+		t.Fatalf("repeat terminal completion: %v", err)
+	}
+	if err := store.Rollup(ctx, Resolution1m, 60_000); err != nil {
+		t.Fatalf("roll up retried terminal zero: %v", err)
+	}
+
+	raw := mustQuerySeries(t, store, SeriesQuery{
+		SubjectID: "topic-1", MetricName: MetricTopicSubscriptionsCurrent,
+		Kind: MetricKindGauge, Resolution: ResolutionRaw, From: 59_000, To: 60_000,
+	})
+	if len(raw.DataPoints) != 1 || raw.DataPoints[0].Value != 0 || len(raw.Coverage) != 1 {
+		t.Fatalf("terminal raw result = %#v, want exactly one covered zero", raw)
+	}
+	coarse := mustQuerySeries(t, store, SeriesQuery{
+		SubjectID: "topic-1", MetricName: MetricTopicSubscriptionsCurrent,
+		Kind: MetricKindGauge, Resolution: Resolution1m, From: 0, To: 60_000,
+	})
+	if len(coarse.DataPoints) != 1 || coarse.DataPoints[0].Value != 0 ||
+		coarse.DataPoints[0].Last != 0 || len(coarse.Coverage) != 1 {
+		t.Fatalf("terminal coarse result = %#v, want exactly one covered bucket ending at zero", coarse)
+	}
+	assertTableCount(t, conn, "telemetry_terminal_state", 0)
+}
+
 func TestCleanZeroEventCoverageHasNoFabricatedRow(t *testing.T) {
 	clock := newTask9Clock(time.UnixMilli(1_100))
 	store := newTask9Store()
@@ -847,7 +1042,7 @@ type task9Store struct {
 	saveErrors      []error
 	saveStarted     chan struct{}
 	saveRelease     chan struct{}
-	terminals       map[string]TerminalState
+	terminals       map[terminalKey]TerminalState
 	enqueueStarted  chan struct{}
 	enqueueRelease  chan struct{}
 	enqueueErr      error
@@ -858,7 +1053,7 @@ type task9Store struct {
 }
 
 func newTask9Store() *task9Store {
-	return &task9Store{recordingStore: newRecordingStore(), terminals: make(map[string]TerminalState)}
+	return &task9Store{recordingStore: newRecordingStore(), terminals: make(map[terminalKey]TerminalState)}
 }
 
 func (s *task9Store) SaveCollectionBoundary(_ context.Context, batch CollectionBatch) error {
@@ -881,7 +1076,7 @@ func (s *task9Store) SaveCollectionBoundary(_ context.Context, batch CollectionB
 }
 
 func (s *task9Store) EnqueueTerminalState(
-	_ context.Context, subjectID string, observedAt int64, limit int,
+	_ context.Context, state TerminalState, limit int,
 ) (bool, error) {
 	if s.onEnqueue != nil {
 		s.onEnqueue()
@@ -899,15 +1094,24 @@ func (s *task9Store) EnqueueTerminalState(
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, exists := s.terminals[subjectID]; exists {
+	key := terminalKey{subjectID: state.SubjectID, generation: state.Generation}
+	if _, exists := s.terminals[key]; exists {
 		return true, nil
 	}
 	if len(s.terminals) >= limit {
 		return false, nil
 	}
-	s.terminals[subjectID] = TerminalState{SubjectID: subjectID, ObservedAt: observedAt}
+	s.terminals[key] = state
 
 	return true, nil
+}
+
+func (s *task9Store) CancelTerminalState(_ context.Context, subjectID string, generation int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.terminals, terminalKey{subjectID: subjectID, generation: generation})
+
+	return nil
 }
 
 func (s *task9Store) ListTerminalStates(context.Context) ([]TerminalState, error) {
@@ -933,6 +1137,12 @@ func (s *task9Store) ListTerminalStates(context.Context) ([]TerminalState, error
 		if a.SubjectID > b.SubjectID {
 			return 1
 		}
+		if a.Generation < b.Generation {
+			return -1
+		}
+		if a.Generation > b.Generation {
+			return 1
+		}
 
 		return 0
 	})
@@ -941,11 +1151,12 @@ func (s *task9Store) ListTerminalStates(context.Context) ([]TerminalState, error
 }
 
 func (s *task9Store) AssignTerminalBucket(
-	_ context.Context, subjectID string, targetBucket, sampleIntervalMS int64,
+	_ context.Context, subjectID string, generation, targetBucket, sampleIntervalMS int64,
 ) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	state, exists := s.terminals[subjectID]
+	key := terminalKey{subjectID: subjectID, generation: generation}
+	state, exists := s.terminals[key]
 	if !exists {
 		return errors.New("terminal state absent")
 	}
@@ -960,21 +1171,22 @@ func (s *task9Store) AssignTerminalBucket(
 	targetCopy, intervalCopy := targetBucket, sampleIntervalMS
 	state.TargetBucket = &targetCopy
 	state.SampleIntervalMS = &intervalCopy
-	s.terminals[subjectID] = state
+	s.terminals[key] = state
 
 	return nil
 }
 
 func (s *task9Store) CompleteTerminalState(
-	_ context.Context, subjectID string, sample MetricSample, _ CoverageBucket,
+	_ context.Context, subjectID string, generation int64, sample MetricSample, _ CoverageBucket,
 ) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, exists := s.terminals[subjectID]; !exists {
+	key := terminalKey{subjectID: subjectID, generation: generation}
+	if _, exists := s.terminals[key]; !exists {
 		return nil
 	}
 	s.terminalSamples = append(s.terminalSamples, sample)
-	delete(s.terminals, subjectID)
+	delete(s.terminals, key)
 
 	return nil
 }
@@ -1325,16 +1537,17 @@ func (s *recordingStore) SaveRateSnapshotAndMetric(context.Context, int64, strin
 func (s *recordingStore) SaveCollectionBoundary(context.Context, CollectionBatch) error { return nil }
 func (s *recordingStore) Rollup(context.Context, Resolution, int64) error               { return nil }
 func (s *recordingStore) ResetRawInterval(context.Context, int64) (bool, error)         { return false, nil }
-func (s *recordingStore) EnqueueTerminalState(context.Context, string, int64, int) (bool, error) {
+func (s *recordingStore) EnqueueTerminalState(context.Context, TerminalState, int) (bool, error) {
 	return false, nil
 }
+func (s *recordingStore) CancelTerminalState(context.Context, string, int64) error { return nil }
 func (s *recordingStore) ListTerminalStates(context.Context) ([]TerminalState, error) {
 	return nil, nil
 }
-func (s *recordingStore) AssignTerminalBucket(context.Context, string, int64, int64) error {
+func (s *recordingStore) AssignTerminalBucket(context.Context, string, int64, int64, int64) error {
 	return nil
 }
-func (s *recordingStore) CompleteTerminalState(context.Context, string, MetricSample, CoverageBucket) error {
+func (s *recordingStore) CompleteTerminalState(context.Context, string, int64, MetricSample, CoverageBucket) error {
 	return nil
 }
 func (s *recordingStore) Aggregate1m(context.Context, int64, int64) error { return nil }

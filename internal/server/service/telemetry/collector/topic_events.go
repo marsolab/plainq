@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"time"
 
@@ -57,6 +58,7 @@ type TopicMetrics struct {
 	subscriptionsKnown   bool
 	authoritative        bool
 	terminalPending      bool
+	terminalGeneration   int64
 	lastUpdated          int64
 	cacheElement         *list.Element
 }
@@ -103,9 +105,25 @@ type frozenTopicBoundary struct {
 	systemRates    TopicRates
 }
 
+type terminalKey struct {
+	subjectID  string
+	generation int64
+}
+
+type terminalOperation uint8
+
+const (
+	terminalEnqueue terminalOperation = iota
+	terminalCancel
+)
+
 type terminalReservation struct {
-	state   TerminalState
-	durable bool
+	state     TerminalState
+	durable   bool
+	canceled  bool
+	operation terminalOperation
+	element   *list.Element
+	inFlight  bool
 }
 
 var (
@@ -302,6 +320,10 @@ func (c *Collector) RecordTopicState(event telemetry.TopicStateEvent) {
 		stateDrops    uint64
 	)
 
+	// State reconciliation takes the terminal lock before the callback locks so
+	// terminal maintenance can never make ordinary event callbacks wait behind
+	// backlog-sized work while they hold cutoverMu.
+	c.terminalMu.Lock()
 	c.cutoverMu.Lock()
 	now := c.stampedNowLocked()
 	c.topicMu.Lock()
@@ -316,7 +338,7 @@ func (c *Collector) RecordTopicState(event telemetry.TopicStateEvent) {
 			current.subscriptionsKnown = false
 			current.terminalPending = true
 
-			if !c.reserveTerminalLocked(topicID, now) {
+			if !c.reserveTerminalLocked(topicID, current, now) {
 				c.deleteTopicLocked(topicID)
 
 				terminalDrops++
@@ -331,6 +353,8 @@ func (c *Collector) RecordTopicState(event telemetry.TopicStateEvent) {
 			subscriptionsTotal += currentCount
 		}
 
+		generation := c.cancelTerminalLocked(topicID)
+
 		m, ok := c.ensureTopicLocked(topicID, true)
 		if !ok {
 			stateDrops++
@@ -339,7 +363,11 @@ func (c *Collector) RecordTopicState(event telemetry.TopicStateEvent) {
 		}
 
 		m.authoritative = true
+
 		m.terminalPending = false
+		if generation > m.terminalGeneration {
+			m.terminalGeneration = generation
+		}
 
 		m.subscriptionsKnown = currentCount >= 0
 		if currentCount >= 0 {
@@ -355,6 +383,7 @@ func (c *Collector) RecordTopicState(event telemetry.TopicStateEvent) {
 	c.topicSystem.subscriptionsKnown = true
 	c.topicMu.Unlock()
 	c.cutoverMu.Unlock()
+	c.terminalMu.Unlock()
 
 	if terminalDrops > 0 {
 		metrics.RecordTelemetryTerminalStateDropped(terminalDrops)
@@ -386,7 +415,10 @@ func (c *Collector) RecordTopicStateUnavailable() {
 func (c *Collector) ensureTopicLocked(topicID string, authoritative bool) (*TopicMetrics, bool) {
 	if current, exists := c.topicMetrics[topicID]; exists {
 		if authoritative && !current.authoritative {
-			c.topicCache.attributed.Remove(current.cacheElement)
+			if current.cacheElement != nil {
+				c.topicCache.attributed.Remove(current.cacheElement)
+			}
+
 			current.cacheElement = nil
 			current.authoritative = true
 		} else if !current.authoritative && current.cacheElement != nil {
@@ -1035,8 +1067,11 @@ func (c *Collector) loadDurableTerminalReservations() {
 		return
 	}
 
+	c.terminalMu.Lock()
+	defer c.terminalMu.Unlock()
+
 	for _, state := range states {
-		if len(c.terminalReservations) >= c.terminalLimit {
+		if len(c.terminalEntries) >= c.terminalLimit {
 			c.terminalLoadFailed = true
 
 			metrics.RecordTelemetryTerminalStateDropped(1)
@@ -1045,135 +1080,291 @@ func (c *Collector) loadDurableTerminalReservations() {
 		}
 
 		stateCopy := state
-		c.terminalReservations[state.SubjectID] = &terminalReservation{state: stateCopy, durable: true}
+		reservation := &terminalReservation{state: stateCopy, durable: true}
+		key := terminalKey{subjectID: state.SubjectID, generation: state.Generation}
+
+		if _, exists := c.terminalEntries[key]; exists {
+			continue
+		}
+
+		c.terminalEntries[key] = reservation
+		if state.Generation > c.terminalNextGeneration {
+			c.terminalNextGeneration = state.Generation
+		}
+
+		current, exists := c.terminalReservations[state.SubjectID]
+		if !exists || current.state.Generation < state.Generation {
+			if exists {
+				c.queueTerminalCancelLocked(current)
+			}
+
+			c.terminalReservations[state.SubjectID] = reservation
+		} else {
+			c.queueTerminalCancelLocked(reservation)
+		}
 	}
 }
 
-func (c *Collector) reserveTerminalLocked(subjectID string, observedAt int64) bool {
+// reserveTerminalLocked runs with terminalMu and topicMu held.
+func (c *Collector) reserveTerminalLocked(subjectID string, topic *TopicMetrics, observedAt int64) bool {
 	if _, exists := c.terminalReservations[subjectID]; exists {
 		return true
 	}
 
-	if c.terminalLoadFailed || c.terminalLimit <= 0 || len(c.terminalReservations) >= c.terminalLimit {
+	if c.terminalLoadFailed || c.terminalLimit <= 0 || len(c.terminalEntries) >= c.terminalLimit ||
+		c.terminalNextGeneration == math.MaxInt64 {
 		return false
 	}
 
+	c.terminalNextGeneration++
 	reservation := &terminalReservation{
-		state: TerminalState{SubjectID: subjectID, ObservedAt: observedAt},
+		state: TerminalState{
+			SubjectID: subjectID, Generation: c.terminalNextGeneration, ObservedAt: observedAt,
+		},
+		operation: terminalEnqueue,
 	}
+	reservation.element = c.terminalQueue.PushBack(reservation)
 	c.terminalReservations[subjectID] = reservation
-	c.preDurableTerminals[subjectID] = reservation
-	c.preDurableOrder = append(c.preDurableOrder, subjectID)
+	c.terminalEntries[terminalKey{subjectID: subjectID, generation: reservation.state.Generation}] = reservation
+	topic.terminalGeneration = reservation.state.Generation
 
 	return true
 }
 
+// cancelTerminalLocked runs with terminalMu and topicMu held. It excludes the
+// stale generation from due work immediately, then leaves exact durable cleanup
+// on the bounded maintenance FIFO.
+func (c *Collector) cancelTerminalLocked(subjectID string) int64 {
+	reservation, exists := c.terminalReservations[subjectID]
+	if !exists {
+		return 0
+	}
+
+	delete(c.terminalReservations, subjectID)
+	c.queueTerminalCancelLocked(reservation)
+
+	return reservation.state.Generation
+}
+
+func (c *Collector) queueTerminalCancelLocked(reservation *terminalReservation) {
+	reservation.canceled = true
+
+	reservation.operation = terminalCancel
+	if reservation.element == nil {
+		reservation.element = c.terminalQueue.PushBack(reservation)
+	}
+}
+
 //nolint:unused // Task 9 tests pin the shared durable/pre-durable budget before Task 10 consumes it.
 func (c *Collector) terminalReservationCount() int {
-	c.cutoverMu.Lock()
-	defer c.cutoverMu.Unlock()
+	c.terminalMu.Lock()
+	defer c.terminalMu.Unlock()
 
-	return len(c.terminalReservations)
+	return len(c.terminalEntries)
 }
 
 // promoteTerminalStates performs SQLite work without holding callback locks.
 func (c *Collector) promoteTerminalStates(ctx context.Context) error {
 	c.terminalPromoteMu.Lock()
 	defer c.terminalPromoteMu.Unlock()
-	defer func() {
-		c.cutoverMu.Lock()
-		c.compactPreDurableOrderLocked()
-		c.cutoverMu.Unlock()
-	}()
 
-	c.cutoverMu.Lock()
-	order := append([]string(nil), c.preDurableOrder...)
-	c.cutoverMu.Unlock()
-
-	for _, subjectID := range order {
-		c.cutoverMu.Lock()
-		reservation, exists := c.preDurableTerminals[subjectID]
-		c.cutoverMu.Unlock()
-
-		if !exists {
-			continue
+	for {
+		reservation, operation, ok := c.nextTerminalAction()
+		if !ok {
+			return nil
 		}
 
-		if c.store == nil {
-			c.dropTerminalReservation(subjectID)
-
-			continue
+		switch operation {
+		case terminalEnqueue:
+			if err := c.promoteTerminalEnqueue(ctx, reservation); err != nil {
+				return err
+			}
+		case terminalCancel:
+			if err := c.promoteTerminalCancel(ctx, reservation); err != nil {
+				return err
+			}
+		default:
+			panic("collector: invalid terminal operation")
 		}
+	}
+}
 
-		accepted, err := c.store.EnqueueTerminalState(
-			ctx, subjectID, reservation.state.ObservedAt, c.terminalLimit,
-		)
-		c.persist(metrics.TelemetryOpTerminalState, err)
+func (c *Collector) promoteTerminalEnqueue(ctx context.Context, reservation *terminalReservation) error {
+	var (
+		accepted bool
+		err      error
+	)
 
-		if err != nil {
-			return fmt.Errorf("promote terminal state %q: %w", subjectID, err)
-		}
+	if c.store != nil {
+		accepted, err = c.store.EnqueueTerminalState(ctx, reservation.state, c.terminalLimit)
+	}
 
-		if !accepted {
-			c.dropTerminalReservation(subjectID)
-			metrics.RecordTelemetryTerminalStateDropped(1)
+	c.persist(metrics.TelemetryOpTerminalState, err)
 
-			continue
-		}
+	if c.finishTerminalEnqueue(reservation, accepted, err) {
+		c.deleteTerminalTopic(reservation.state)
+		metrics.RecordTelemetryTerminalStateDropped(1)
+	}
 
-		c.cutoverMu.Lock()
-		if current, ok := c.preDurableTerminals[subjectID]; ok && current == reservation {
-			current.durable = true
-
-			delete(c.preDurableTerminals, subjectID)
-		}
-		c.cutoverMu.Unlock()
+	if err != nil {
+		return fmt.Errorf("promote terminal state %q/%d: %w",
+			reservation.state.SubjectID, reservation.state.Generation, err)
 	}
 
 	return nil
 }
 
-func (c *Collector) dropTerminalReservation(subjectID string) {
-	c.cutoverMu.Lock()
-	delete(c.preDurableTerminals, subjectID)
-	delete(c.terminalReservations, subjectID)
-	c.topicMu.Lock()
-	if current, exists := c.topicMetrics[subjectID]; exists && current.terminalPending {
-		c.deleteTopicLocked(subjectID)
+func (c *Collector) promoteTerminalCancel(ctx context.Context, reservation *terminalReservation) error {
+	var err error
+
+	if c.store != nil {
+		err = c.store.CancelTerminalState(
+			ctx, reservation.state.SubjectID, reservation.state.Generation,
+		)
 	}
-	c.topicMu.Unlock()
-	c.cutoverMu.Unlock()
+
+	c.persist(metrics.TelemetryOpTerminalState, err)
+	c.finishTerminalCancel(reservation, err)
+
+	if err != nil {
+		return fmt.Errorf("cancel terminal state %q/%d: %w",
+			reservation.state.SubjectID, reservation.state.Generation, err)
+	}
+
+	return nil
 }
 
-func (c *Collector) compactPreDurableOrderLocked() {
-	kept := c.preDurableOrder[:0]
-	for _, subjectID := range c.preDurableOrder {
-		if _, exists := c.preDurableTerminals[subjectID]; exists {
-			kept = append(kept, subjectID)
-		}
+func (c *Collector) nextTerminalAction() (*terminalReservation, terminalOperation, bool) {
+	c.terminalMu.Lock()
+	defer c.terminalMu.Unlock()
+
+	element := c.terminalQueue.Front()
+	if element == nil {
+		return nil, 0, false
 	}
 
-	c.preDurableOrder = kept
+	reservation, ok := element.Value.(*terminalReservation)
+	if !ok {
+		panic("collector: invalid terminal queue entry")
+	}
+
+	if reservation.inFlight {
+		panic("collector: terminal action already in flight")
+	}
+
+	if c.terminalVisit != nil {
+		c.terminalVisit()
+	}
+
+	reservation.inFlight = true
+
+	return reservation, reservation.operation, true
+}
+
+func (c *Collector) finishTerminalEnqueue(
+	reservation *terminalReservation, accepted bool, enqueueErr error,
+) bool {
+	c.terminalMu.Lock()
+	defer c.terminalMu.Unlock()
+
+	reservation.inFlight = false
+	if enqueueErr != nil {
+		if reservation.canceled {
+			reservation.operation = terminalCancel
+		}
+
+		return false
+	}
+
+	if !accepted {
+		dropTopic := !reservation.canceled
+		c.removeTerminalEntryLocked(reservation)
+
+		return dropTopic
+	}
+
+	reservation.durable = true
+	if reservation.canceled {
+		reservation.operation = terminalCancel
+
+		return false
+	}
+
+	c.removeTerminalActionLocked(reservation)
+
+	return false
+}
+
+func (c *Collector) finishTerminalCancel(reservation *terminalReservation, cancelErr error) {
+	c.terminalMu.Lock()
+	defer c.terminalMu.Unlock()
+
+	reservation.inFlight = false
+	if cancelErr == nil {
+		c.removeTerminalEntryLocked(reservation)
+	}
+}
+
+func (c *Collector) removeTerminalEntryLocked(reservation *terminalReservation) {
+	c.removeTerminalActionLocked(reservation)
+
+	key := terminalKey{
+		subjectID: reservation.state.SubjectID, generation: reservation.state.Generation,
+	}
+	if current, exists := c.terminalEntries[key]; exists && current == reservation {
+		delete(c.terminalEntries, key)
+	}
+
+	if current, exists := c.terminalReservations[reservation.state.SubjectID]; exists && current == reservation {
+		delete(c.terminalReservations, reservation.state.SubjectID)
+	}
+}
+
+func (c *Collector) removeTerminalActionLocked(reservation *terminalReservation) {
+	if reservation.element != nil {
+		c.terminalQueue.Remove(reservation.element)
+		reservation.element = nil
+	}
+
+	reservation.inFlight = false
+}
+
+func (c *Collector) deleteTerminalTopic(state TerminalState) {
+	c.topicMu.Lock()
+	defer c.topicMu.Unlock()
+
+	if current, exists := c.topicMetrics[state.SubjectID]; exists && current.terminalPending &&
+		current.terminalGeneration == state.Generation {
+		c.deleteTopicLocked(state.SubjectID)
+	}
 }
 
 //nolint:unused // Task 10's ordered coordinator consumes this Task 9 terminal seam.
 func (c *Collector) terminalStatesDue(boundary int64) []TerminalState {
-	c.cutoverMu.Lock()
-	defer c.cutoverMu.Unlock()
+	c.terminalMu.Lock()
 
 	states := make([]TerminalState, 0, len(c.terminalReservations))
 	for _, reservation := range c.terminalReservations {
-		if reservation.durable && reservation.state.ObservedAt < boundary {
+		if c.terminalVisit != nil {
+			c.terminalVisit()
+		}
+
+		if reservation.durable && !reservation.canceled && reservation.state.ObservedAt < boundary {
 			states = append(states, reservation.state)
 		}
 	}
+	c.terminalMu.Unlock()
 
 	sort.Slice(states, func(i, j int) bool {
 		if states[i].ObservedAt != states[j].ObservedAt {
 			return states[i].ObservedAt < states[j].ObservedAt
 		}
 
-		return states[i].SubjectID < states[j].SubjectID
+		if states[i].SubjectID != states[j].SubjectID {
+			return states[i].SubjectID < states[j].SubjectID
+		}
+
+		return states[i].Generation < states[j].Generation
 	})
 
 	return states
@@ -1194,17 +1385,24 @@ func (c *Collector) assignTerminalStates(ctx context.Context, boundary int64) er
 			continue
 		}
 
-		if err := c.store.AssignTerminalBucket(ctx, state.SubjectID, target, intervalMS); err != nil {
-			return fmt.Errorf("assign terminal state %q: %w", state.SubjectID, err)
+		if !c.terminalStateActive(state) {
+			continue
 		}
 
-		c.cutoverMu.Lock()
-		if current, exists := c.terminalReservations[state.SubjectID]; exists {
+		if err := c.store.AssignTerminalBucket(
+			ctx, state.SubjectID, state.Generation, target, intervalMS,
+		); err != nil {
+			return fmt.Errorf("assign terminal state %q/%d: %w", state.SubjectID, state.Generation, err)
+		}
+
+		c.terminalMu.Lock()
+		if current, exists := c.terminalReservations[state.SubjectID]; exists &&
+			current.state.Generation == state.Generation && !current.canceled {
 			targetCopy, intervalCopy := target, intervalMS
 			current.state.TargetBucket = &targetCopy
 			current.state.SampleIntervalMS = &intervalCopy
 		}
-		c.cutoverMu.Unlock()
+		c.terminalMu.Unlock()
 	}
 
 	return nil
@@ -1214,8 +1412,12 @@ func (c *Collector) assignTerminalStates(ctx context.Context, boundary int64) er
 //
 //nolint:unused // Task 10's ordered coordinator consumes this Task 9 terminal seam.
 func (c *Collector) completeTerminalState(ctx context.Context, state TerminalState) error {
-	if c.store == nil || state.TargetBucket == nil || state.SampleIntervalMS == nil {
+	if c.store == nil || !isAssignedTerminalState(state) {
 		return errors.New("complete terminal state: assigned durable state is required")
+	}
+
+	if !c.terminalStateActive(state) {
+		return nil
 	}
 
 	sample := MetricSample{
@@ -1228,23 +1430,48 @@ func (c *Collector) completeTerminalState(ctx context.Context, state TerminalSta
 		SubjectID: state.SubjectID, MetricName: MetricTopicSubscriptionsCurrent,
 		Kind: MetricKindGauge, SampleIntervalMS: *state.SampleIntervalMS,
 	}
-	if err := c.store.CompleteTerminalState(ctx, state.SubjectID, sample, coverage); err != nil {
-		return fmt.Errorf("complete terminal state %q: %w", state.SubjectID, err)
+	if err := c.store.CompleteTerminalState(
+		ctx, state.SubjectID, state.Generation, sample, coverage,
+	); err != nil {
+		return fmt.Errorf("complete terminal state %q/%d: %w", state.SubjectID, state.Generation, err)
 	}
 
-	c.cutoverMu.Lock()
-	if _, exists := c.terminalReservations[state.SubjectID]; exists {
-		delete(c.terminalReservations, state.SubjectID)
-		delete(c.preDurableTerminals, state.SubjectID)
-		c.topicMu.Lock()
-		if current, ok := c.topicMetrics[state.SubjectID]; ok && current.terminalPending {
-			c.deleteTopicLocked(state.SubjectID)
-		}
-		c.topicMu.Unlock()
+	if c.releaseCompletedTerminal(state) {
+		c.deleteTerminalTopic(state)
 	}
-	c.cutoverMu.Unlock()
 
 	return nil
+}
+
+//nolint:unused // Task 10 consumes this validation through completeTerminalState.
+func isAssignedTerminalState(state TerminalState) bool {
+	return state.Generation > 0 && state.TargetBucket != nil && state.SampleIntervalMS != nil
+}
+
+//nolint:unused // Task 10 consumes this release through completeTerminalState.
+func (c *Collector) releaseCompletedTerminal(state TerminalState) bool {
+	c.terminalMu.Lock()
+	defer c.terminalMu.Unlock()
+
+	current, exists := c.terminalReservations[state.SubjectID]
+
+	if !exists || current.state.Generation != state.Generation || current.canceled {
+		return false
+	}
+
+	c.removeTerminalEntryLocked(current)
+
+	return true
+}
+
+//nolint:unused // Task 10 consumes this check through the assignment/completion seams.
+func (c *Collector) terminalStateActive(state TerminalState) bool {
+	c.terminalMu.Lock()
+	defer c.terminalMu.Unlock()
+
+	current, exists := c.terminalReservations[state.SubjectID]
+
+	return exists && current.state.Generation == state.Generation && current.durable && !current.canceled
 }
 
 // GetTopicRates returns the latest successfully committed rates for one subject.

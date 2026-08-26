@@ -4,6 +4,7 @@
 package collector
 
 import (
+	"container/list"
 	"context"
 	"fmt"
 	"log/slog"
@@ -247,12 +248,15 @@ type Collector struct {
 	frozenBoundary     *frozenTopicBoundary
 	lastTopicBoundary  int64
 
-	terminalLimit        int
-	terminalReservations map[string]*terminalReservation
-	preDurableTerminals  map[string]*terminalReservation
-	preDurableOrder      []string
-	terminalLoadFailed   bool
-	terminalPromoteMu    sync.Mutex
+	terminalLimit          int
+	terminalMu             sync.Mutex
+	terminalReservations   map[string]*terminalReservation
+	terminalEntries        map[terminalKey]*terminalReservation
+	terminalQueue          *list.List
+	terminalNextGeneration int64
+	terminalLoadFailed     bool
+	terminalPromoteMu      sync.Mutex
+	terminalVisit          func()
 
 	// Configuration.
 	collectionInterval time.Duration
@@ -289,11 +293,14 @@ type Store interface {
 	SaveCollectionBoundary(ctx context.Context, batch CollectionBatch) error
 	Rollup(ctx context.Context, resolution Resolution, closedThrough int64) error
 	ResetRawInterval(ctx context.Context, sampleIntervalMS int64) (bool, error)
-	EnqueueTerminalState(ctx context.Context, subjectID string, observedAt int64, limit int) (bool, error)
+	EnqueueTerminalState(ctx context.Context, state TerminalState, limit int) (bool, error)
+	CancelTerminalState(ctx context.Context, subjectID string, generation int64) error
 	ListTerminalStates(ctx context.Context) ([]TerminalState, error)
-	AssignTerminalBucket(ctx context.Context, subjectID string, targetBucket, sampleIntervalMS int64) error
+	AssignTerminalBucket(
+		ctx context.Context, subjectID string, generation, targetBucket, sampleIntervalMS int64,
+	) error
 	CompleteTerminalState(
-		ctx context.Context, subjectID string, sample MetricSample, coverage CoverageBucket,
+		ctx context.Context, subjectID string, generation int64, sample MetricSample, coverage CoverageBucket,
 	) error
 
 	// SaveQueueStats saves queue statistics snapshot.
@@ -379,7 +386,8 @@ func New(store Store, opts ...Option) *Collector {
 		topicDirtyOverflow:   make(map[string]dirtyInterval),
 		terminalLimit:        defaultTerminalStateLimit,
 		terminalReservations: make(map[string]*terminalReservation),
-		preDurableTerminals:  make(map[string]*terminalReservation),
+		terminalEntries:      make(map[terminalKey]*terminalReservation),
+		terminalQueue:        list.New(),
 		stop:                 make(chan struct{}),
 	}
 
