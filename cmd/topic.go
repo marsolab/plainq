@@ -155,7 +155,7 @@ func newTopicCreateCommand(deps topicCommandDeps) *commandSpec {
 		Short:  "Create a topic",
 		Effect: effectMutating,
 		Long: "Creates a topic and prints its identifier. Topic names are human-readable and\n" +
-			"need not be unique; later commands address the topic by the returned id.",
+			"must be unique; later commands address the topic by the returned id.",
 		Args: []argSpec{{
 			Name:        "topic-name",
 			Description: "nonblank human-readable name for the topic",

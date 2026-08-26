@@ -114,6 +114,48 @@ func TestTopicUsageDocumentsEveryLeaf(t *testing.T) {
 	}
 }
 
+func TestTopicCreateHelpAndSchemaDocumentUniqueNames(t *testing.T) {
+	root := testRoot(t)
+	topic := root.lookup("topic")
+	if topic == nil {
+		t.Fatal("topic command not found")
+	}
+
+	create := topic.lookup("create")
+	if create == nil {
+		t.Fatal("topic create command not found")
+	}
+
+	const want = "must be unique; later commands address the topic by the returned id."
+
+	var help strings.Builder
+	create.printUsage(&help)
+	if !strings.Contains(help.String(), want) {
+		t.Fatalf("topic create help is missing %q:\n%s", want, help.String())
+	}
+
+	out, err := buildSchema(root, schemaTargetCLI)
+	if err != nil {
+		t.Fatalf("build CLI schema: %v", err)
+	}
+
+	var schemaLong string
+	for _, command := range out.CLI.Commands {
+		if command.Name != "topic" {
+			continue
+		}
+
+		for _, leaf := range command.Subcommands {
+			if leaf.Name == "create" {
+				schemaLong = leaf.Long
+			}
+		}
+	}
+	if !strings.Contains(schemaLong, want) {
+		t.Fatalf("topic create schema long description is missing %q: %q", want, schemaLong)
+	}
+}
+
 func TestTopicHelpAliasesInSubprocess(t *testing.T) {
 	for _, alias := range []string{"-h", "-help", "--help"} {
 		t.Run(alias, func(t *testing.T) {
