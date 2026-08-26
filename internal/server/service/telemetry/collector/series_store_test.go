@@ -46,6 +46,141 @@ func TestSaveAndQueryTypedRawSeriesUsesHalfOpenRange(t *testing.T) {
 	}
 }
 
+func TestQuerySeriesSQLiteFixtureSeparatesDiagnosticRowsFromExactCoverage(t *testing.T) {
+	t.Parallel()
+
+	store, conn := newTelemetryTestStoreWithConn(t)
+	if _, err := conn.Exec(`
+INSERT INTO metrics_raw (timestamp, queue_id, metric_name, metric_value, labels)
+VALUES (999, 'topic-1', 'plainq_topic_subscriptions_active', 9, ''),
+       (1000, 'topic-1', 'plainq_topic_subscriptions_active', 10, ''),
+       (2000, 'topic-1', 'plainq_topic_subscriptions_active', 20, ''),
+       (3000, 'topic-1', 'plainq_topic_subscriptions_active', 30, '');
+INSERT INTO telemetry_coverage
+    (resolution, bucket_start, subject_id, metric_name, labels, metric_kind, sample_interval_ms)
+VALUES ('raw', 999, 'topic-1', 'plainq_topic_subscriptions_active', '', 'gauge', 1000),
+       ('raw', 1000, 'topic-1', '', '', '', 1000),
+       ('raw', 1000, 'topic-1', 'plainq_topic_subscriptions_active', 'other', 'gauge', 1000),
+       ('raw', 1000, 'topic-1', 'plainq_topic_subscriptions_active', '', 'counter', 1000),
+       ('raw', 2000, 'topic-1', 'plainq_topic_subscriptions_active', '', 'gauge', 1000),
+       ('raw', 3000, 'topic-1', 'plainq_topic_subscriptions_active', '', 'gauge', 1000);`); err != nil {
+		t.Fatalf("seed migrated raw fixture: %v", err)
+	}
+
+	result := mustQuerySeries(t, store, SeriesQuery{
+		MetricName: "plainq_topic_subscriptions_active", SubjectID: "topic-1", Kind: MetricKindGauge,
+		Resolution: ResolutionRaw, From: 1000, To: 3000,
+	})
+
+	assertDataPointTimestamps(t, result.DataPoints, []int64{1000, 2000})
+	assertCoverageBucketStarts(t, result.Coverage, []int64{2000})
+	if result.DataPoints[0].Value != 10 {
+		t.Fatalf("diagnostic pre-migration point value = %v, want 10", result.DataPoints[0].Value)
+	}
+}
+
+func TestQuerySeriesSQLiteFixtureRequiresExactCoveredRawPrior(t *testing.T) {
+	tests := map[string]struct {
+		kind MetricKind
+	}{
+		"counter": {kind: MetricKindCounter},
+		"gauge":   {kind: MetricKindGauge},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			store, conn := newTelemetryTestStoreWithConn(t)
+			if _, err := conn.Exec(`
+INSERT INTO metrics_raw
+    (timestamp, queue_id, metric_name, metric_value, labels, metric_kind, window_ms)
+VALUES (1000, 'topic-1', 'carry_metric', 10, '', ?, 0),
+       (2500, 'topic-1', 'carry_metric', 25, '', ?, 0);
+INSERT INTO telemetry_coverage
+    (resolution, bucket_start, subject_id, metric_name, labels, metric_kind, sample_interval_ms)
+VALUES ('raw', 1000, 'topic-1', 'carry_metric', '', ?, 1000),
+       ('raw', 2000, 'topic-1', 'carry_metric', '', ?, 1000),
+       ('raw', 2500, 'topic-1', '', '', '', 1000);`, string(tc.kind), string(tc.kind), string(tc.kind), string(tc.kind)); err != nil {
+				t.Fatalf("seed %s carry fixture: %v", tc.kind, err)
+			}
+
+			result := mustQuerySeries(t, store, SeriesQuery{
+				MetricName: "carry_metric", SubjectID: "topic-1", Kind: tc.kind,
+				Resolution: ResolutionRaw, From: 3000, To: 4000, CarryForward: true,
+			})
+			if result.Prior == nil {
+				t.Fatal("covered prior = nil, want exact-covered point")
+			}
+			if result.Prior.Timestamp != 1000 || result.Prior.Value != 10 {
+				t.Fatalf("covered prior = %#v, want timestamp 1000/value 10", result.Prior)
+			}
+			assertCoverageBucketStarts(t, result.PriorCoverage, []int64{1000, 2000})
+		})
+	}
+}
+
+func TestQuerySeriesSQLiteFixtureExposesPriorCoverageGap(t *testing.T) {
+	t.Parallel()
+
+	store, conn := newTelemetryTestStoreWithConn(t)
+	if _, err := conn.Exec(`
+INSERT INTO metrics_raw
+    (timestamp, queue_id, metric_name, metric_value, labels, metric_kind, window_ms)
+VALUES (1000, 'topic-1', 'plainq_topic_subscriptions_active', 10, '', 'gauge', 0),
+       (2000, 'topic-1', 'plainq_topic_subscriptions_active', 20, '', 'gauge', 0);
+INSERT INTO telemetry_coverage
+    (resolution, bucket_start, subject_id, metric_name, labels, metric_kind, sample_interval_ms)
+VALUES ('raw', 1000, 'topic-1', 'plainq_topic_subscriptions_active', '', 'gauge', 1000),
+       ('raw', 2000, 'topic-1', '', '', '', 1000);`); err != nil {
+		t.Fatalf("seed gapped carry fixture: %v", err)
+	}
+
+	result := mustQuerySeries(t, store, SeriesQuery{
+		MetricName: "plainq_topic_subscriptions_active", SubjectID: "topic-1", Kind: MetricKindGauge,
+		Resolution: ResolutionRaw, From: 3000, To: 4000, CarryForward: true,
+	})
+	if result.Prior == nil || result.Prior.Timestamp != 1000 {
+		t.Fatalf("covered prior = %#v, want the older exact-covered point at 1000", result.Prior)
+	}
+	assertCoverageBucketStarts(t, result.PriorCoverage, []int64{1000})
+}
+
+func TestQuerySeriesSQLiteFixtureKeepsPhysicalSupportBucketVisible(t *testing.T) {
+	t.Parallel()
+
+	store := newTelemetryTestStore(t)
+	ctx := context.Background()
+	for _, timestamp := range []int64{-1000, 0, 1000, 2000} {
+		sample := testSample(
+			timestamp, "topic-1", "plainq_topic_messages_published_total", MetricKindCounter, float64(timestamp+2000), 0,
+		)
+		if err := store.SaveMetricAndCoverage(ctx, sample, testCoverage(ResolutionRaw, timestamp, sample, 1000)); err != nil {
+			t.Fatalf("seed physical retention bucket %d: %v", timestamp, err)
+		}
+	}
+
+	// The worker retains one extra source bucket at the cleanup cutoff. Public
+	// handlers use their later RetentionFrom bound to classify/filter bucket 0.
+	if err := store.CleanupOldMetrics(ctx, 0, 0, 0, 0, 0); err != nil {
+		t.Fatalf("clean before physical retention cutoff: %v", err)
+	}
+
+	physical := mustQuerySeries(t, store, SeriesQuery{
+		MetricName: "plainq_topic_messages_published_total", SubjectID: "topic-1", Kind: MetricKindCounter,
+		Resolution: ResolutionRaw, From: -1000, To: 2000,
+	})
+	assertDataPointTimestamps(t, physical.DataPoints, []int64{0, 1000})
+	assertCoverageBucketStarts(t, physical.Coverage, []int64{0, 1000})
+
+	public := mustQuerySeries(t, store, SeriesQuery{
+		MetricName: "plainq_topic_messages_published_total", SubjectID: "topic-1", Kind: MetricKindCounter,
+		Resolution: ResolutionRaw, From: 1000, To: 2000,
+	})
+	assertDataPointTimestamps(t, public.DataPoints, []int64{1000})
+	assertCoverageBucketStarts(t, public.Coverage, []int64{1000})
+}
+
 func TestCoverageIsPerResolutionSubjectAndSeries(t *testing.T) {
 	t.Parallel()
 
@@ -957,5 +1092,32 @@ func assertRawCoverageCount(t *testing.T, conn *litekit.Conn, want int) {
 	}
 	if got != want {
 		t.Fatalf("raw coverage count = %d, want %d", got, want)
+	}
+}
+
+func assertDataPointTimestamps(t *testing.T, points []DataPoint, want []int64) {
+	t.Helper()
+	if len(points) != len(want) {
+		t.Fatalf("data point count = %d, want %d: %#v", len(points), len(want), points)
+	}
+	for index, timestamp := range want {
+		if points[index].Timestamp != timestamp {
+			t.Fatalf("data point %d timestamp = %d, want %d: %#v", index, points[index].Timestamp, timestamp, points)
+		}
+	}
+}
+
+func assertCoverageBucketStarts(t *testing.T, coverage []CoverageBucket, want []int64) {
+	t.Helper()
+	if len(coverage) != len(want) {
+		t.Fatalf("coverage count = %d, want %d: %#v", len(coverage), len(want), coverage)
+	}
+	for index, bucketStart := range want {
+		if coverage[index].BucketStart != bucketStart {
+			t.Fatalf(
+				"coverage %d bucket start = %d, want %d: %#v",
+				index, coverage[index].BucketStart, bucketStart, coverage,
+			)
+		}
 	}
 }

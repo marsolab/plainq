@@ -521,6 +521,12 @@ func canonicalResultLabels(backend, operation, result string) string {
 	return string(encoded)
 }
 
+// CanonicalTopicResultLabels returns the persisted label identity for one
+// topic request or storage-operation outcome series.
+func CanonicalTopicResultLabels(backend, operation, result string) string {
+	return canonicalResultLabels(backend, operation, result)
+}
+
 func canonicalDurationLabels(backend, operation string) string {
 	encoded, err := json.Marshal(operationDurationLabels{Backend: backend, Operation: operation})
 	if err != nil {
@@ -528,6 +534,12 @@ func canonicalDurationLabels(backend, operation string) string {
 	}
 
 	return string(encoded)
+}
+
+// CanonicalTopicDurationLabels returns the persisted label identity for one
+// topic request or storage-operation duration series.
+func CanonicalTopicDurationLabels(backend, operation string) string {
+	return canonicalDurationLabels(backend, operation)
 }
 
 func (c *Collector) stampedNowLocked() int64 {

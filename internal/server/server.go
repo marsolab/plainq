@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/cors"
@@ -108,7 +109,11 @@ func NewServer(
 			cleanupInterval:    cfg.TelemetryLiteGCTimeout,
 			retentionPeriod:    cfg.TelemetryLiteRetentionPeriod,
 		})
-		pq.metricsHandler = NewMetricsHandler(pq.metricsCollector, pq.metricsStore)
+		pq.metricsHandler = NewMetricsHandler(
+			pq.metricsCollector,
+			pq.metricsStore,
+			metricsHandlerConfigFromCollector(pq.metricsCollector, time.Now),
+		)
 
 		// The storage observer already emits every queue event to Prometheus.
 		// Attaching the collector to the same observer means Houston's
@@ -265,10 +270,7 @@ func NewServer(
 					queueMetrics.Get("/inflight", pq.metricsHandler.GetInFlightMetrics)
 				})
 
-				metrics.Route("/topic/{id}", func(topicMetrics chi.Router) {
-					topicMetrics.Get("/", pq.metricsHandler.GetTopicMetrics)
-					topicMetrics.Get("/rates", pq.metricsHandler.GetTopicRatesChart)
-				})
+				mountTopicMetricsRoutes(metrics, pq.metricsHandler)
 			})
 		})
 	})
@@ -299,6 +301,14 @@ func NewServer(
 	server.RegisterListener("GRPC", grpcListener)
 
 	return server, nil
+}
+
+func mountTopicMetricsRoutes(metrics chi.Router, handler *MetricsHandler) {
+	metrics.Route("/topic/{id}", func(topicMetrics chi.Router) {
+		topicMetrics.Get("/", handler.GetTopicMetrics)
+		topicMetrics.Get("/rates", handler.GetTopicRatesChart)
+		topicMetrics.Get("/subscriptions", handler.GetTopicSubscriptions)
+	})
 }
 
 func (s *PlainQ) houstonStaticHandler(w http.ResponseWriter, r *http.Request) {

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/marsolab/plainq/internal/metrics"
 	"github.com/marsolab/plainq/internal/server/config"
 	"github.com/marsolab/plainq/internal/server/service/account"
@@ -184,11 +185,31 @@ func Test_NewServer_mountsRoutes(t *testing.T) {
 	}
 }
 
+func TestTopicSubscriptionsRouteDiscoveryIsProtected(t *testing.T) {
+	router := chi.NewRouter()
+	authCalls := 0
+	router.Route("/api/v1/metrics", func(r chi.Router) {
+		r.Use(func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+				authCalls++
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+			})
+		})
+		mountTopicMetricsRoutes(r, NewMetricsHandler(collector.New(nil), nil, MetricsHandlerConfig{}))
+	})
+
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet,
+		"/api/v1/metrics/topic/topic-1/subscriptions?range=1h", nil))
+	td.Cmp(t, recorder.Code, http.StatusUnauthorized)
+	td.Cmp(t, authCalls, 1)
+}
+
 // withCollectorForTest wires a metrics handler without opening a telemetry
 // database, so the dashboard branch of the route tree is exercised. The nil
 // store is only read by background workers this test never starts.
 func withCollectorForTest() Option {
 	return func(pq *PlainQ) {
-		pq.metricsHandler = NewMetricsHandler(collector.New(nil), nil)
+		pq.metricsHandler = NewMetricsHandler(collector.New(nil), nil, MetricsHandlerConfig{})
 	}
 }
