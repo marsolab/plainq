@@ -386,6 +386,7 @@ func listenerHTTP(cfg *config.Config, logger *slog.Logger, checker hc.HealthChec
 	if err := cfg.ValidateHealthRoutes(); err != nil {
 		return nil, fmt.Errorf("validate health routes: %w", err)
 	}
+
 	httpListenerOpts := httpkit.NewListenerOption(
 		httpkit.WithLogger(logger),
 		httpkit.WithHTTPServerTimeouts(
@@ -430,56 +431,92 @@ func readinessHandler(checker hc.HealthChecker, reporter string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			w.WriteHeader(http.StatusMethodNotAllowed)
+
 			return
 		}
 
 		healthErr := checker.Health(r.Context())
-		status := http.StatusOK
-		if healthErr != nil {
-			status = http.StatusServiceUnavailable
-		}
+		status := readinessStatus(healthErr)
 
 		switch reporter {
 		case "json":
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			w.WriteHeader(status)
-			if r.Method == http.MethodHead {
-				return
-			}
-			message := "Service is healthy"
-			if healthErr != nil {
-				message = "Service is temporarily unavailable. Please try again later."
-			}
-			_ = json.NewEncoder(w).Encode(map[string]string{
-				"status":  fmt.Sprintf("%d %s", status, http.StatusText(status)),
-				"message": message,
-			})
+			writeJSONReadiness(w, r.Method, status, healthErr)
 
 		case "html":
-			report := hc.NewServiceReport()
-			if services, ok := checker.(*hc.MultiServiceChecker); ok {
-				report = services.Report()
-			}
-			var body bytes.Buffer
-			if err := statuspage.RenderStatus(&body, report); err != nil {
-				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
-				return
-			}
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.WriteHeader(status)
-			if r.Method != http.MethodHead {
-				_, _ = w.Write(body.Bytes())
-			}
+			writeHTMLReadiness(w, r.Method, status, checker)
 
 		default:
-			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			w.WriteHeader(status)
-			if r.Method == http.MethodHead || healthErr == nil {
-				return
-			}
-			_, _ = w.Write([]byte(http.StatusText(status) + "\n"))
+			writeTextReadiness(w, r.Method, status, healthErr)
 		}
 	})
+}
+
+func readinessStatus(healthErr error) int {
+	if healthErr != nil {
+		return http.StatusServiceUnavailable
+	}
+
+	return http.StatusOK
+}
+
+func writeJSONReadiness(w http.ResponseWriter, method string, status int, healthErr error) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+
+	if method == http.MethodHead {
+		return
+	}
+
+	message := "Service is healthy"
+	if healthErr != nil {
+		message = "Service is temporarily unavailable. Please try again later."
+	}
+
+	if err := json.NewEncoder(w).Encode(map[string]string{
+		"status":  fmt.Sprintf("%d %s", status, http.StatusText(status)),
+		"message": message,
+	}); err != nil {
+		return
+	}
+}
+
+func writeHTMLReadiness(w http.ResponseWriter, method string, status int, checker hc.HealthChecker) {
+	report := hc.NewServiceReport()
+	if services, ok := checker.(*hc.MultiServiceChecker); ok {
+		report = services.Report()
+	}
+
+	var body bytes.Buffer
+
+	if err := statuspage.RenderStatus(&body, report); err != nil {
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+
+	if method == http.MethodHead {
+		return
+	}
+
+	if _, err := w.Write(body.Bytes()); err != nil {
+		return
+	}
+}
+
+func writeTextReadiness(w http.ResponseWriter, method string, status int, healthErr error) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(status)
+
+	if method == http.MethodHead || healthErr == nil {
+		return
+	}
+
+	if _, err := w.Write([]byte(http.StatusText(status) + "\n")); err != nil {
+		return
+	}
 }
 
 func livenessHandler() http.Handler {
