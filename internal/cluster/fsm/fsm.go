@@ -101,9 +101,11 @@ func New(
 	if logger == nil {
 		logger = logkit.NewNop()
 	}
+
 	if applyGuard == nil {
 		panic("cluster FSM requires a replica apply guard")
 	}
+
 	if fatalApply == nil {
 		panic("cluster FSM requires a fatal apply callback")
 	}
@@ -173,8 +175,12 @@ func (f *FSM) Apply(entry *hraft.Log) any {
 	ctx = queue.WithDeterminism(ctx, determinism)
 
 	start := time.Now()
-	var response any
-	var err error
+
+	var (
+		response any
+		err      error
+	)
+
 	if gateErr := f.applyGuard.Check(); gateErr != nil {
 		err = fmt.Errorf("replica is quarantined before applying %s: %w", cmd.Op, gateErr)
 	} else {
@@ -236,7 +242,8 @@ func (f *FSM) dispatch(ctx context.Context, cmd *command.Command) (any, error) {
 			if err == nil {
 				f.reconcileTopics(ctx)
 			}
-			return response, err
+
+			return response, err //nolint:wrapcheck // Preserve storage domain error text in replicated responses.
 		})
 
 	case command.OpPurgeQueue:
@@ -265,7 +272,8 @@ func (f *FSM) dispatch(ctx context.Context, cmd *command.Command) (any, error) {
 			if err == nil {
 				f.reconcileTopics(ctx)
 			}
-			return response, err
+
+			return response, err //nolint:wrapcheck // Preserve storage domain error text in replicated responses.
 		})
 
 	case command.OpDeleteTopic:
@@ -273,6 +281,7 @@ func (f *FSM) dispatch(ctx context.Context, cmd *command.Command) (any, error) {
 		if err != nil {
 			return nil, fmt.Errorf("delete topic %q: %w", cmd.Target, err)
 		}
+
 		f.reconcileTopics(ctx)
 
 		return result, nil
@@ -283,7 +292,8 @@ func (f *FSM) dispatch(ctx context.Context, cmd *command.Command) (any, error) {
 			if err == nil {
 				f.reconcileTopics(ctx)
 			}
-			return response, err
+
+			return response, err //nolint:wrapcheck // Preserve storage domain error text in replicated responses.
 		})
 
 	case command.OpUnsubscribe:
@@ -294,6 +304,7 @@ func (f *FSM) dispatch(ctx context.Context, cmd *command.Command) (any, error) {
 		if err := f.storage.Unsubscribe(ctx, cmd.Target, cmd.IDs[0]); err != nil {
 			return nil, fmt.Errorf("unsubscribe %q from topic %q: %w", cmd.IDs[0], cmd.Target, err)
 		}
+
 		f.reconcileTopics(ctx)
 
 		return nil, nil //nolint:nilnil // an unsubscribe has no response to return.
@@ -329,14 +340,17 @@ func (f *FSM) publish(ctx context.Context, topicID string, request *queue.Publis
 		if response != nil {
 			selected = uint64(len(response.QueueIDs))
 		}
+
 		return &queue.PublishOutcome{Response: response, SelectedQueues: selected}, nil
 	}
 
 	var partial *queue.PartialPublishError
 	if errors.As(err, &partial) {
 		f.reportFault(err)
+
 		outcome := partial.Outcome
 		outcome.Partial = true
+
 		return &outcome, nil
 	}
 
@@ -344,12 +358,15 @@ func (f *FSM) publish(ctx context.Context, topicID string, request *queue.Publis
 		if guardErr := f.applyGuard.FinishPublishApply(); guardErr != nil {
 			f.abortApply(fmt.Errorf("finish non-mutating publish apply guard: %w", guardErr))
 		}
-		return nil, err
+
+		return nil, err //nolint:wrapcheck // Preserve storage domain error text in replicated responses.
 	}
 
 	f.reportFault(err)
-	return nil, err
+
+	return nil, err //nolint:wrapcheck // Preserve storage domain error text in replicated responses.
 }
+
 func (f *FSM) reportFault(err error) {
 	if reportErr := f.reportReplicaFault(err); reportErr != nil {
 		f.logger.Error("Failed to persist replica quarantine diagnostic",
@@ -363,30 +380,34 @@ func (f *FSM) abortApply(err error) {
 	panic("cluster FatalApply returned")
 }
 
-func (f *FSM) reconcileTopics(ctx context.Context) error {
+func (f *FSM) reconcileTopics(ctx context.Context) {
 	if f.reconcileTopicState == nil {
-		return nil
+		return
 	}
 
-	return f.verifyTopicState(ctx)
+	if err := f.verifyTopicState(ctx); err != nil {
+		return
+	}
 }
 
 func (f *FSM) verifyTopicState(ctx context.Context) error {
-
 	inventory, err := f.storage.TopicInventory(ctx)
 	if err != nil {
 		f.logger.Error("Failed to reconcile replica topic state",
 			slog.String("error", err.Error()),
 		)
+
 		if f.reconcileTopicState != nil {
 			f.reconcileTopicState(nil)
 		}
+
 		return fmt.Errorf("read replica topic inventory: %w", err)
 	}
 
 	if f.reconcileTopicState != nil {
 		f.reconcileTopicState(&inventory)
 	}
+
 	return nil
 }
 

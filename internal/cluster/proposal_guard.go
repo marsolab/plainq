@@ -22,7 +22,7 @@ const proposalGateCapacity int64 = math.MaxInt64
 
 type proposalPreflighter interface {
 	queue.DeleteEffectPreflighter
-	TopicInventory(context.Context) (queue.TopicInventory, error)
+	TopicInventory(ctx context.Context) (queue.TopicInventory, error)
 }
 
 // proposalGuard lets ordinary proposals overlap while giving deletes and
@@ -57,46 +57,64 @@ func (g *proposalGuard) Apply(ctx context.Context, data []byte) (any, error) {
 	}
 
 	cmd, decodeErr := command.Decode(data)
-	exclusiveProposal := decodeErr == nil && (cmd.Op == command.OpDeleteTopic ||
-		cmd.Op == command.OpDeleteQueue || cmd.Op == command.OpPublish)
+	exclusiveProposal := decodeErr == nil && isExclusiveProposal(cmd.Op)
+
 	weight := int64(1)
 	if exclusiveProposal {
 		weight = proposalGateCapacity
 	}
+
 	if err := g.gate.Acquire(ctx, weight); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("acquire proposal admission: %w", err)
 	}
 	defer g.gate.Release(weight)
+
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
 	if !exclusiveProposal {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-
-		return g.Consensus.Apply(ctx, data)
+		return g.applyConsensus(ctx, data)
 	}
 
-	if !g.Consensus.IsLeader() {
+	return g.applyExclusive(ctx, data, cmd)
+}
+
+func isExclusiveProposal(op command.Op) bool {
+	return op == command.OpDeleteTopic || op == command.OpDeleteQueue || op == command.OpPublish
+}
+
+func (g *proposalGuard) applyExclusive(ctx context.Context, data []byte, cmd *command.Command) (any, error) {
+	if !g.IsLeader() {
 		return nil, consensus.ErrNotLeader
 	}
+
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if err := g.Consensus.Barrier(ctx); err != nil {
+
+	if err := g.Barrier(ctx); err != nil {
 		return nil, fmt.Errorf("barrier before %s proposal: %w", cmd.Op, err)
 	}
 
 	if err := g.preflightProposal(ctx, cmd); err != nil {
 		return nil, err
 	}
+
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
-	return g.Consensus.Apply(ctx, data)
+	return g.applyConsensus(ctx, data)
+}
+
+func (g *proposalGuard) applyConsensus(ctx context.Context, data []byte) (any, error) {
+	response, err := g.Consensus.Apply(ctx, data)
+	if err != nil {
+		return nil, fmt.Errorf("apply consensus proposal: %w", err)
+	}
+
+	return response, nil
 }
 
 func (g *proposalGuard) preflightProposal(ctx context.Context, cmd *command.Command) error {
@@ -117,10 +135,12 @@ func (g *proposalGuard) preflightPublish(ctx context.Context, cmd *command.Comma
 	if err != nil {
 		return fmt.Errorf("read topic inventory before publish %q: %w", cmd.Target, err)
 	}
+
 	subscriptionCount, exists := inventory.SubscriptionCounts[cmd.Target]
 	if !exists {
 		return fmt.Errorf("preflight publish topic %q: %w", cmd.Target, pqerr.ErrNotFound)
 	}
+
 	if subscriptionCount < 0 {
 		return fmt.Errorf(
 			"preflight publish topic %q: negative subscription count %d",
@@ -161,13 +181,26 @@ func (g *proposalGuard) preflightDelete(ctx context.Context, cmd *command.Comman
 		if err := input.UnmarshalVT(cmd.Payload); err != nil {
 			return fmt.Errorf("decode delete queue proposal preflight: %w", err)
 		}
+
 		if err := g.preflight.PreflightDeleteQueue(ctx, input, g.deleteResultLimit); err != nil {
 			return fmt.Errorf("preflight delete queue %q: %w", input.GetQueueId(), err)
 		}
 
 		return nil
 
-	default:
+	case command.OpUnknown,
+		command.OpCreateQueue,
+		command.OpPurgeQueue,
+		command.OpSend,
+		command.OpReceive,
+		command.OpDelete,
+		command.OpCreateTopic,
+		command.OpSubscribe,
+		command.OpUnsubscribe,
+		command.OpPublish,
+		command.OpSweep:
 		return fmt.Errorf("preflight unsupported delete operation %q", cmd.Op)
 	}
+
+	return fmt.Errorf("preflight unsupported delete operation %q", cmd.Op)
 }

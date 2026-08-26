@@ -189,6 +189,7 @@ func (f *FSM) Restore(reader io.ReadCloser) error {
 		if err := f.reportReplicaFault(errors.New("replica snapshot restore is in progress")); err != nil {
 			return fmt.Errorf("quarantine replica before state restore: %w", err)
 		}
+
 		if err := f.storage.BeginRestore(ctx); err != nil {
 			return fmt.Errorf("begin state restore: %w", err)
 		}
@@ -223,6 +224,7 @@ func (f *FSM) Restore(reader io.ReadCloser) error {
 		if err := f.verifyTopicState(ctx); err != nil {
 			return fmt.Errorf("verify restored topic state: %w", err)
 		}
+
 		if err := f.reportReplicaRecovery(); err != nil {
 			return fmt.Errorf("recover replica health after verified snapshot: %w", err)
 		}

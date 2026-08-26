@@ -53,6 +53,7 @@ func Marshal(result any, limit int) ([]byte, error) {
 
 	encoded := protowire.AppendTag(nil, FieldNumber, protowire.BytesType)
 	encoded = protowire.AppendBytes(encoded, payload)
+
 	if len(encoded) > limit {
 		return nil, &CapacityError{EncodedBytes: int64(len(encoded)), Limit: int64(limit)}
 	}

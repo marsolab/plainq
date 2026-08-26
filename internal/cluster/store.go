@@ -223,6 +223,7 @@ func (s *Store) DescribeQueue(ctx context.Context, input *v1.DescribeQueueReques
 	if err != nil {
 		return nil, fmt.Errorf("describe queue on the local replica: %w", err)
 	}
+
 	if err := s.finishRead(token); err != nil {
 		return nil, err
 	}
@@ -241,6 +242,7 @@ func (s *Store) ListQueues(ctx context.Context, input *v1.ListQueuesRequest) (*v
 	if err != nil {
 		return nil, fmt.Errorf("list queues on the local replica: %w", err)
 	}
+
 	if err := s.finishRead(token); err != nil {
 		return nil, err
 	}
@@ -259,6 +261,7 @@ func (s *Store) Peek(ctx context.Context, input *queue.PeekRequest) (*queue.Peek
 	if err != nil {
 		return nil, fmt.Errorf("browse queue on the local replica: %w", err)
 	}
+
 	if err := s.finishRead(token); err != nil {
 		return nil, err
 	}
@@ -277,6 +280,7 @@ func (s *Store) ListTopics(ctx context.Context) (*queue.ListTopicsResponse, erro
 	if err != nil {
 		return nil, fmt.Errorf("list topics on the local replica: %w", err)
 	}
+
 	if err := s.finishRead(token); err != nil {
 		return nil, err
 	}
@@ -302,13 +306,16 @@ func (s *Store) TopicInventory(ctx context.Context) (queue.TopicInventory, error
 	if err != nil {
 		return queue.TopicInventory{}, err
 	}
+
 	inventory, err := s.local.TopicInventory(ctx)
 	if err != nil {
 		return queue.TopicInventory{}, fmt.Errorf("read topic inventory on the local replica: %w", err)
 	}
+
 	if err := s.finishRead(token); err != nil {
 		return queue.TopicInventory{}, err
 	}
+
 	return inventory, nil
 }
 
@@ -354,9 +361,11 @@ func (s *Store) Publish(
 	if err != nil {
 		return nil, err
 	}
+
 	if outcome == nil {
 		return nil, nil
 	}
+
 	if outcome.Partial {
 		return outcome.Response, &queue.PartialPublishError{Outcome: *outcome}
 	}
@@ -387,10 +396,12 @@ func (s *Store) countSubscribers(ctx context.Context, topicID string) (int, erro
 	if err != nil {
 		return 0, err
 	}
+
 	topics, err := s.local.ListTopics(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("count subscribers of topic %q: %w", topicID, err)
 	}
+
 	if err := s.finishRead(token); err != nil {
 		return 0, err
 	}
@@ -411,6 +422,7 @@ func (s *Store) readBarrier(ctx context.Context) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
+
 	if s.consistency != ConsistencyStrong {
 		return token, nil
 	}
@@ -424,6 +436,7 @@ func (s *Store) readBarrier(ctx context.Context) (uint64, error) {
 	if err := s.consensus.Barrier(ctx); err != nil {
 		return 0, fmt.Errorf("strong read barrier: %w", err)
 	}
+
 	if err := s.finishRead(token); err != nil {
 		return 0, err
 	}
@@ -435,6 +448,7 @@ func (s *Store) ensureServing() error {
 	if s.replicaHealth == nil {
 		return nil
 	}
+
 	return s.replicaHealth.Check()
 }
 
@@ -442,6 +456,7 @@ func (s *Store) servingToken() (uint64, error) {
 	if s.replicaHealth == nil {
 		return 0, nil
 	}
+
 	return s.replicaHealth.ServingToken()
 }
 
@@ -449,6 +464,7 @@ func (s *Store) finishRead(token uint64) error {
 	if s.replicaHealth == nil {
 		return nil
 	}
+
 	return s.replicaHealth.CheckServingToken(token)
 }
 
@@ -484,6 +500,7 @@ func (s *Store) apply(ctx context.Context, cmd *command.Command) (any, error) {
 		if encodeErr != nil {
 			return nil, fmt.Errorf("encode %s command: %w", cmd.Op, encodeErr)
 		}
+
 		if len(encoded) > command.MaxEncodedBytes {
 			return nil, fmt.Errorf(
 				"%w: encoded %s command is %d bytes; limit is %d bytes",
@@ -739,15 +756,18 @@ func deleteResultResponse[U any](response any, err error) (*U, error) {
 	if !ok {
 		return nil, fmt.Errorf("state machine returned %T, want *%T or an encoded delete response", response, *new(U))
 	}
+
 	if len(raw) == 0 {
 		return new(U), nil
 	}
 
 	out := new(U)
+
 	found, decodeErr := deletewire.Decode(raw, out)
 	if decodeErr != nil {
 		return nil, fmt.Errorf("decode forwarded delete response: %w", decodeErr)
 	}
+
 	if !found {
 		return nil, errors.New("decode forwarded delete response: non-empty response has no delete result")
 	}

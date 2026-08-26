@@ -32,6 +32,15 @@ type nodeOptions struct {
 	reconcileTopicState fsm.TopicStateReconciler
 }
 
+type preparedNode struct {
+	cfg         Config
+	logger      *slog.Logger
+	localHealth hc.HealthChecker
+	options     nodeOptions
+	health      *replicaHealth
+	tlsConfig   *tls.Config
+}
+
 // NodeOption configures callbacks that do not alter the node's safety wiring.
 type NodeOption func(*nodeOptions)
 
@@ -108,85 +117,53 @@ type Node struct {
 // NewNode assembles a cluster node around a local store. Nothing listens or
 // connects until Start is called.
 func NewNode(cfg Config, local queue.ReplicatedStorage, logger *slog.Logger, opts ...NodeOption) (*Node, error) {
-	if logger == nil {
-		logger = logkit.NewNop()
-	}
-
-	if err := cfg.Normalize(); err != nil {
+	prepared, err := prepareNode(cfg, local, logger, opts)
+	if err != nil {
 		return nil, err
 	}
 
-	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("cluster configuration: %w", err)
-	}
-
-	localHealth, ok := local.(hc.HealthChecker)
-	if !ok {
-		return nil, fmt.Errorf("cluster storage %T must implement health checking", local)
-	}
-
-	options := nodeOptions{}
-	for _, opt := range opts {
-		opt(&options)
-	}
-
-	var health *replicaHealth
-	if err := raftengine.WithStableStore(cfg.DataDir, func(stable hraft.StableStore) error {
-		initialized, err := newReplicaHealth(cfg.DataDir, stable)
-		if err != nil {
-			return err
-		}
-		health = initialized
-		return nil
-	}); err != nil {
-		return nil, fmt.Errorf("initialize replica health: %w", err)
-	}
-
-	tlsConfig, tlsErr := buildTLSConfig(cfg)
-	if tlsErr != nil {
-		return nil, tlsErr
-	}
-
 	mux, muxErr := transport.New(transport.Config{
-		BindAddr:      cfg.BindAddr,
-		AdvertiseAddr: cfg.AdvertiseAddr,
-		TLSConfig:     tlsConfig,
-		Logger:        logger,
+		BindAddr:      prepared.cfg.BindAddr,
+		AdvertiseAddr: prepared.cfg.AdvertiseAddr,
+		TLSConfig:     prepared.tlsConfig,
+		Logger:        prepared.logger,
 	})
 	if muxErr != nil {
 		return nil, fmt.Errorf("start cluster transport: %w", muxErr)
 	}
 
 	fatalApply := func(err error) {
-		persistErr := health.Fail(err)
-		logger.Error("Terminating after a replica apply guard failure",
+		persistErr := prepared.health.Fail(err)
+		prepared.logger.Error("Terminating after a replica apply guard failure",
 			slog.String("error", err.Error()),
 			slog.Any("quarantine_error", persistErr),
 		)
 		processExit(1)
 	}
+
 	fsmOptions := []fsm.Option{
-		fsm.WithReplicaFaultReporter(health.Fail),
-		fsm.WithReplicaRecoveryReporter(health.Recover),
+		fsm.WithReplicaFaultReporter(prepared.health.Fail),
+		fsm.WithReplicaRecoveryReporter(prepared.health.Recover),
 	}
-	if options.reconcileTopicState != nil {
-		fsmOptions = append(fsmOptions, fsm.WithTopicStateReconciler(options.reconcileTopicState))
+	if prepared.options.reconcileTopicState != nil {
+		fsmOptions = append(fsmOptions, fsm.WithTopicStateReconciler(prepared.options.reconcileTopicState))
 	}
-	stateMachine := fsm.New(local, logger, health, fatalApply, fsmOptions...)
+
+	stateMachine := fsm.New(local, prepared.logger, prepared.health, fatalApply, fsmOptions...)
 
 	engine, engineErr := raftengine.New(raftengine.Config{
-		NodeID:             cfg.NodeID,
-		DataDir:            cfg.DataDir,
+		NodeID:             prepared.cfg.NodeID,
+		DataDir:            prepared.cfg.DataDir,
 		FSM:                stateMachine,
 		Mux:                mux,
-		HeartbeatTimeout:   cfg.HeartbeatTimeout,
-		ElectionTimeout:    cfg.ElectionTimeout,
-		LeaderLeaseTimeout: cfg.LeaderLeaseTimeout,
-		CommitTimeout:      cfg.CommitTimeout,
-		SnapshotInterval:   cfg.SnapshotInterval,
-		SnapshotThreshold:  cfg.SnapshotThreshold,
-		TrailingLogs:       cfg.TrailingLogs,
-		Logger:             logger,
+		HeartbeatTimeout:   prepared.cfg.HeartbeatTimeout,
+		ElectionTimeout:    prepared.cfg.ElectionTimeout,
+		LeaderLeaseTimeout: prepared.cfg.LeaderLeaseTimeout,
+		CommitTimeout:      prepared.cfg.CommitTimeout,
+		SnapshotInterval:   prepared.cfg.SnapshotInterval,
+		SnapshotThreshold:  prepared.cfg.SnapshotThreshold,
+		TrailingLogs:       prepared.cfg.TrailingLogs,
+		Logger:             prepared.logger,
 	})
 	if engineErr != nil {
 		_ = mux.Close()
@@ -194,30 +171,31 @@ func NewNode(cfg Config, local queue.ReplicatedStorage, logger *slog.Logger, opt
 		return nil, fmt.Errorf("start consensus engine: %w", engineErr)
 	}
 
-	peerClient := peer.NewClient(mux, cfg.Secret)
+	peerClient := peer.NewClient(mux, prepared.cfg.Secret)
 
 	storeOpts := []StoreOption{
-		WithConsistency(cfg.Consistency),
-		WithStoreLogger(logger),
-		WithReplicaHealth(health),
+		WithConsistency(prepared.cfg.Consistency),
+		WithStoreLogger(prepared.logger),
+		WithReplicaHealth(prepared.health),
 	}
 
-	if cfg.ApplyTimeout > 0 {
-		storeOpts = append(storeOpts, WithApplyTimeout(cfg.ApplyTimeout))
+	if prepared.cfg.ApplyTimeout > 0 {
+		storeOpts = append(storeOpts, WithApplyTimeout(prepared.cfg.ApplyTimeout))
 	}
+
 	proposals := newProposalGuard(engine, local)
 
 	node := Node{
-		cfg:           cfg,
-		logger:        logger,
+		cfg:           prepared.cfg,
+		logger:        prepared.logger,
 		mux:           mux,
 		consensus:     proposals,
 		fsm:           stateMachine,
 		peerClient:    peerClient,
 		store:         NewStore(local, proposals, peerClient, storeOpts...),
 		local:         local,
-		localHealth:   localHealth,
-		replicaHealth: health,
+		localHealth:   prepared.localHealth,
+		replicaHealth: prepared.health,
 		lastSeen:      make(map[string]time.Time),
 		departed:      make(map[string]time.Time),
 		done:          make(chan struct{}),
@@ -229,12 +207,79 @@ func NewNode(cfg Config, local queue.ReplicatedStorage, logger *slog.Logger, opt
 	node.peerServer = peer.NewServer(peer.ServerConfig{
 		Applier:     proposals,
 		Membership:  &nodeMembership{node: &node},
-		ForwardGate: health.Check,
-		Secret:      cfg.Secret,
-		Logger:      logger,
+		ForwardGate: prepared.health.Check,
+		Secret:      prepared.cfg.Secret,
+		Logger:      prepared.logger,
 	})
 
 	return &node, nil
+}
+
+func prepareNode(
+	cfg Config,
+	local queue.ReplicatedStorage,
+	logger *slog.Logger,
+	opts []NodeOption,
+) (preparedNode, error) {
+	if logger == nil {
+		logger = logkit.NewNop()
+	}
+
+	if err := cfg.Normalize(); err != nil {
+		return preparedNode{}, err
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return preparedNode{}, fmt.Errorf("cluster configuration: %w", err)
+	}
+
+	localHealth, ok := local.(hc.HealthChecker)
+	if !ok {
+		return preparedNode{}, fmt.Errorf("cluster storage %T must implement health checking", local)
+	}
+
+	options := nodeOptions{}
+	for _, opt := range opts {
+		opt(&options)
+	}
+
+	health, err := openReplicaHealth(cfg.DataDir)
+	if err != nil {
+		return preparedNode{}, err
+	}
+
+	tlsConfig, err := buildTLSConfig(cfg)
+	if err != nil {
+		return preparedNode{}, err
+	}
+
+	return preparedNode{
+		cfg:         cfg,
+		logger:      logger,
+		localHealth: localHealth,
+		options:     options,
+		health:      health,
+		tlsConfig:   tlsConfig,
+	}, nil
+}
+
+func openReplicaHealth(dataDir string) (*replicaHealth, error) {
+	var health *replicaHealth
+
+	if err := raftengine.WithStableStore(dataDir, func(stable hraft.StableStore) error {
+		initialized, err := newReplicaHealth(dataDir, stable)
+		if err != nil {
+			return err
+		}
+
+		health = initialized
+
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("initialize replica health: %w", err)
+	}
+
+	return health, nil
 }
 
 // Store returns the queue.Storage the server should use. Every write through

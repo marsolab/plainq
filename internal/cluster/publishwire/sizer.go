@@ -56,6 +56,7 @@ func FitsCompactOutcome(subscriptions, messages, limit uint64) (uint64, bool) {
 	if !ok {
 		return math.MaxUint64, false
 	}
+
 	bound, ok = checkedAdd(bound, messageBytes)
 	if !ok {
 		return math.MaxUint64, false

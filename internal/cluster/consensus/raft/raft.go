@@ -109,9 +109,11 @@ func WithStableStore(dataDir string, callback func(hraft.StableStore) error) (re
 	if dataDir == "" {
 		return errors.New("raft: data directory is required")
 	}
+
 	if callback == nil {
 		return errors.New("raft: stable store callback is required")
 	}
+
 	if err := os.MkdirAll(dataDir, 0o750); err != nil {
 		return fmt.Errorf("create raft data directory %q: %w", dataDir, err)
 	}
@@ -279,6 +281,7 @@ func (e *Engine) Apply(ctx context.Context, data []byte) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	if e.raft.State() != hraft.Leader {
 		return nil, consensus.ErrNotLeader
 	}
@@ -435,6 +438,7 @@ func (e *Engine) Barrier(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+
 	if !e.IsLeader() {
 		return consensus.ErrNotLeader
 	}

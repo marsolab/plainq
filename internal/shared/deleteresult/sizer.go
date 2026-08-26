@@ -2,6 +2,7 @@ package deleteresult
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"time"
 	"unicode/utf8"
@@ -15,7 +16,7 @@ var invalidUTF8JSONBytes = func() int64 {
 		panic("marshal invalid UTF-8 probe: " + err.Error())
 	}
 
-	return int64(len(encoded) - 2) // exclude the surrounding quotes
+	return int64(len(encoded) - 2) // Exclude the surrounding quotes.
 }()
 
 const (
@@ -50,21 +51,24 @@ func (s *Sizer) AddSubscription(
 ) error {
 	createdAtJSON, err := createdAt.MarshalJSON()
 	if err != nil {
-		return err
+		return fmt.Errorf("marshal subscription creation time: %w", err)
 	}
 
 	if s.rows > 0 {
 		s.payloadBytes = saturatingAdd(s.payloadBytes, 1)
 	}
+
 	s.payloadBytes = saturatingAdd(s.payloadBytes, subscriptionFixedBytes)
 	s.payloadBytes = saturatingAdd(s.payloadBytes, jsonStringBytes(subscriptionID))
 	s.payloadBytes = saturatingAdd(s.payloadBytes, jsonStringBytes(topicID))
 	s.payloadBytes = saturatingAdd(s.payloadBytes, jsonStringBytes(queueID))
 	s.payloadBytes = saturatingAdd(s.payloadBytes, int64(len(createdAtJSON)))
+
 	if queueName != "" {
 		s.payloadBytes = saturatingAdd(s.payloadBytes, queueNameFixedBytes)
 		s.payloadBytes = saturatingAdd(s.payloadBytes, jsonStringBytes(queueName))
 	}
+
 	s.rows = saturatingAdd(s.rows, 1)
 
 	return nil
@@ -75,6 +79,7 @@ func (s *Sizer) AddSubscription(
 func (s *Sizer) EnvelopeBytes() int {
 	encodedBytes := envelopeBytes(s.payloadBytes)
 	maxInt := int64(^uint(0) >> 1)
+
 	if encodedBytes > maxInt {
 		return int(maxInt)
 	}
@@ -129,6 +134,7 @@ func envelopeBytes(payloadBytes int64) int64 {
 	}
 
 	bytes := saturatingAdd(int64(protowire.SizeTag(FieldNumber)), int64(protowire.SizeVarint(uint64(payloadBytes))))
+
 	return saturatingAdd(bytes, payloadBytes)
 }
 
@@ -151,39 +157,54 @@ func saturatingMul(left, right int64) int64 {
 // jsonStringBytes is the allocation-free size counterpart of encoding/json's
 // default appendString(..., escapeHTML=true).
 func jsonStringBytes(value string) int64 {
-	bytes := int64(2) // surrounding quotes
+	bytes := int64(2) // Surrounding quotes.
+
 	for i := 0; i < len(value); {
 		c := value[i]
 		if c < utf8.RuneSelf {
-			switch c {
-			case '\\', '"', '\b', '\f', '\n', '\r', '\t':
-				bytes += 2
-			case '<', '>', '&':
-				bytes += 6
-			default:
-				if c < 0x20 {
-					bytes += 6
-				} else {
-					bytes++
-				}
-			}
+			bytes += jsonASCIIBytes(c)
+
 			i++
 
 			continue
 		}
 
 		r, size := utf8.DecodeRuneInString(value[i:])
-		switch {
-		case r == utf8.RuneError && size == 1:
-			// Match the encoding/json implementation selected for this binary.
-			bytes += invalidUTF8JSONBytes
-		case r == '\u2028' || r == '\u2029':
-			bytes += 6
-		default:
-			bytes += int64(size)
-		}
+		bytes += jsonRuneBytes(r, size)
+
 		i += size
 	}
 
 	return bytes
+}
+
+func jsonASCIIBytes(value byte) int64 {
+	switch value {
+	case '\\', '"', '\b', '\f', '\n', '\r', '\t':
+		return 2
+
+	case '<', '>', '&':
+		return 6
+
+	default:
+		if value < 0x20 {
+			return 6
+		}
+
+		return 1
+	}
+}
+
+func jsonRuneBytes(value rune, size int) int64 {
+	switch {
+	case value == utf8.RuneError && size == 1:
+		// Match the encoding/json implementation selected for this binary.
+		return invalidUTF8JSONBytes
+
+	case value == '\u2028' || value == '\u2029':
+		return 6
+
+	default:
+		return int64(size)
+	}
 }

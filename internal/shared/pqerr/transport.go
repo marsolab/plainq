@@ -83,14 +83,15 @@ func (e partialFanoutTransportError) As(target any) bool {
 }
 
 func isServekitTransportSentinel(err error) bool {
-	switch err {
-	case errkit.ErrAlreadyExists,
-		errkit.ErrNotFound,
-		errkit.ErrUnauthenticated,
-		errkit.ErrUnauthorized,
-		errkit.ErrInvalidArgument,
-		errkit.ErrUnavailable:
+	switch {
+	case errors.Is(err, errkit.ErrAlreadyExists),
+		errors.Is(err, errkit.ErrNotFound),
+		errors.Is(err, errkit.ErrUnauthenticated),
+		errors.Is(err, errkit.ErrUnauthorized),
+		errors.Is(err, errkit.ErrInvalidArgument),
+		errors.Is(err, errkit.ErrUnavailable):
 		return true
+
 	default:
 		return false
 	}

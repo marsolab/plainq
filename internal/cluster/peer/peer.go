@@ -282,47 +282,36 @@ func (s *Server) forwardV2Handler(w http.ResponseWriter, r *http.Request) {
 
 // forwardHandler commits a command a follower could not commit itself.
 func (s *Server) forwardHandler(w http.ResponseWriter, r *http.Request, version forwardVersion) {
-	if s.forwardGate != nil {
-		if err := s.forwardGate(); err != nil {
-			s.writeApplyError(w, err)
-			return
-		}
+	if !s.forwardGateAllows(w) {
+		return
 	}
 
-	payload, oversized, readErr := readBounded(r.Body, maxRequestBytes)
+	payload, readErr := readBounded(r.Body, maxRequestBytes)
 	if readErr != nil {
 		http.Error(w, "read forwarded command: "+readErr.Error(), http.StatusBadRequest)
 
 		return
 	}
-	if oversized {
+
+	if payload.oversized {
 		s.writeApplyError(w, fmt.Errorf(
 			"%w: encoded command exceeds %d bytes",
 			pqerr.ErrCapacityExceeded, command.MaxEncodedBytes,
 		))
+
 		return
 	}
 
-	response, applyErr := s.applier.Apply(r.Context(), payload)
+	response, applyErr := s.applier.Apply(r.Context(), payload.data)
 	if applyErr != nil {
 		s.writeApplyError(w, applyErr)
 
 		return
 	}
-	if version == forwardLegacyV1 {
-		if outcome, ok := publishOutcome(response); ok {
-			if outcome.Partial {
-				// Legacy followers understand only the terminal class. They never
-				// learned the new outcome envelope, so do not send a body they could
-				// mistake for a successful PublishResponse.
-				w.Header().Set(errorHeader, "partial-fanout")
-				w.WriteHeader(http.StatusInternalServerError)
-				return
-			}
-			response = outcome.Response
-		}
-	} else if outcome, ok := publishOutcome(response); ok {
-		response = compactPublishOutcomeFrom(outcome)
+
+	response, writable := forwardResponseForVersion(w, response, version)
+	if !writable {
+		return
 	}
 
 	encoded, encodeErr := encodeResponse(response)
@@ -335,12 +324,15 @@ func (s *Server) forwardHandler(w http.ResponseWriter, r *http.Request, version 
 
 		return
 	}
+
 	responseLimit := s.responseLimit
 	if responseLimit <= 0 {
 		responseLimit = publishwire.MaxResponseBytes
 	}
+
 	if len(encoded) > responseLimit {
 		s.writeResponseTooLarge(w, len(encoded), responseLimit)
+
 		return
 	}
 
@@ -354,16 +346,59 @@ func (s *Server) forwardHandler(w http.ResponseWriter, r *http.Request, version 
 	}
 }
 
-func readBounded(reader io.Reader, limit int) ([]byte, bool, error) {
-	encoded, err := io.ReadAll(io.LimitReader(reader, int64(limit)+1))
-	if err != nil {
-		return nil, false, err
-	}
-	if len(encoded) > limit {
-		return nil, true, nil
+func (s *Server) forwardGateAllows(w http.ResponseWriter) bool {
+	if s.forwardGate == nil {
+		return true
 	}
 
-	return encoded, false, nil
+	if err := s.forwardGate(); err != nil {
+		s.writeApplyError(w, err)
+
+		return false
+	}
+
+	return true
+}
+
+func forwardResponseForVersion(w http.ResponseWriter, response any, version forwardVersion) (any, bool) {
+	outcome, ok := publishOutcome(response)
+	if !ok {
+		return response, true
+	}
+
+	if version != forwardLegacyV1 {
+		return compactPublishOutcomeFrom(outcome), true
+	}
+
+	if outcome.Partial {
+		// Legacy followers understand only the terminal class. They never
+		// learned the new outcome envelope, so do not send a body they could
+		// mistake for a successful PublishResponse.
+		w.Header().Set(errorHeader, "partial-fanout")
+		w.WriteHeader(http.StatusInternalServerError)
+
+		return nil, false
+	}
+
+	return outcome.Response, true
+}
+
+type boundedRead struct {
+	data      []byte
+	oversized bool
+}
+
+func readBounded(reader io.Reader, limit int) (boundedRead, error) {
+	encoded, err := io.ReadAll(io.LimitReader(reader, int64(limit)+1))
+	if err != nil {
+		return boundedRead{}, fmt.Errorf("read bounded payload: %w", err)
+	}
+
+	if len(encoded) > limit {
+		return boundedRead{oversized: true}, nil
+	}
+
+	return boundedRead{data: encoded}, nil
 }
 
 func publishOutcome(response any) (*queue.PublishOutcome, bool) {
@@ -411,44 +446,89 @@ func (s *Server) writeResponseTooLarge(w http.ResponseWriter, encodedBytes, limi
 // asked has to know to look up the leader again rather than treat the write as
 // failed.
 func (s *Server) writeApplyError(w http.ResponseWriter, err error) {
-	status := http.StatusInternalServerError
-	class := "internal"
+	response := applyErrorResponse(err)
 
-	switch {
-	case errors.Is(err, pqerr.ErrCapacityExceeded):
-		status, class = http.StatusRequestEntityTooLarge, "capacity"
+	w.Header().Set(errorHeader, response.class)
+	http.Error(w, err.Error(), response.status)
+}
 
-	case errors.Is(err, pqerr.ErrPartialFanout):
-		status, class = http.StatusInternalServerError, "partial-fanout"
+type errorResponse struct {
+	sentinels []error
+	status    int
+	class     string
+}
 
-	case errors.Is(err, consensus.ErrCommitUnknown):
-		status, class = http.StatusInternalServerError, "commit-unknown"
-
-	case errors.Is(err, consensus.ErrNotLeader), errors.Is(err, consensus.ErrNoLeader):
-		status, class = http.StatusServiceUnavailable, "not-leader"
-
-	case errors.Is(err, consensus.ErrShutdown):
-		status, class = http.StatusServiceUnavailable, "shutdown"
-
-	case errors.Is(err, pqerr.ErrNotFound), errors.Is(err, errkit.ErrNotFound):
-		status, class = http.StatusNotFound, "not-found"
-
-	case errors.Is(err, pqerr.ErrAlreadyExists), errors.Is(err, errkit.ErrAlreadyExists):
-		status, class = http.StatusConflict, "already-exists"
-
-	case errors.Is(err, pqerr.ErrFailedPrecondition):
-		status, class = http.StatusConflict, "failed-precondition"
-
-	case errors.Is(err, pqerr.ErrInvalidInput), errors.Is(err, pqerr.ErrInvalidID),
-		errors.Is(err, errkit.ErrInvalidArgument):
-		status, class = http.StatusBadRequest, "invalid-argument"
-
-	case errors.Is(err, pqerr.ErrUnavailable):
-		status, class = http.StatusServiceUnavailable, "unavailable"
+func applyErrorResponse(err error) errorResponse {
+	responses := []errorResponse{
+		{
+			sentinels: []error{pqerr.ErrCapacityExceeded},
+			status:    http.StatusRequestEntityTooLarge,
+			class:     "capacity",
+		},
+		{
+			sentinels: []error{pqerr.ErrPartialFanout},
+			status:    http.StatusInternalServerError,
+			class:     "partial-fanout",
+		},
+		{
+			sentinels: []error{consensus.ErrCommitUnknown},
+			status:    http.StatusInternalServerError,
+			class:     "commit-unknown",
+		},
+		{
+			sentinels: []error{consensus.ErrNotLeader, consensus.ErrNoLeader},
+			status:    http.StatusServiceUnavailable,
+			class:     "not-leader",
+		},
+		{
+			sentinels: []error{consensus.ErrShutdown},
+			status:    http.StatusServiceUnavailable,
+			class:     "shutdown",
+		},
+		{
+			sentinels: []error{pqerr.ErrNotFound, errkit.ErrNotFound},
+			status:    http.StatusNotFound,
+			class:     "not-found",
+		},
+		{
+			sentinels: []error{pqerr.ErrAlreadyExists, errkit.ErrAlreadyExists},
+			status:    http.StatusConflict,
+			class:     "already-exists",
+		},
+		{
+			sentinels: []error{pqerr.ErrFailedPrecondition},
+			status:    http.StatusConflict,
+			class:     "failed-precondition",
+		},
+		{
+			sentinels: []error{pqerr.ErrInvalidInput, pqerr.ErrInvalidID, errkit.ErrInvalidArgument},
+			status:    http.StatusBadRequest,
+			class:     "invalid-argument",
+		},
+		{
+			sentinels: []error{pqerr.ErrUnavailable},
+			status:    http.StatusServiceUnavailable,
+			class:     "unavailable",
+		},
 	}
 
-	w.Header().Set(errorHeader, class)
-	http.Error(w, err.Error(), status)
+	for _, response := range responses {
+		if errorMatchesAny(err, response.sentinels) {
+			return response
+		}
+	}
+
+	return errorResponse{status: http.StatusInternalServerError, class: "internal"}
+}
+
+func errorMatchesAny(err error, sentinels []error) bool {
+	for _, sentinel := range sentinels {
+		if errors.Is(err, sentinel) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // joinHandler admits a node to the cluster configuration.
@@ -547,10 +627,20 @@ func encodeResponse(response any) ([]byte, error) {
 
 	switch response := response.(type) {
 	case *queue.DeleteQueueResult:
-		return deletewire.Encode(response)
+		encoded, err := deletewire.Encode(response)
+		if err != nil {
+			return nil, fmt.Errorf("encode delete queue response: %w", err)
+		}
+
+		return encoded, nil
 
 	case *queue.DeleteTopicResult:
-		return deletewire.Encode(response)
+		encoded, err := deletewire.Encode(response)
+		if err != nil {
+			return nil, fmt.Errorf("encode delete topic response: %w", err)
+		}
+
+		return encoded, nil
 	}
 
 	if marshaler, ok := response.(interface{ MarshalVT() ([]byte, error) }); ok {
@@ -625,6 +715,10 @@ func (c *Client) Forward(ctx context.Context, addr string, payload []byte) ([]by
 		return nil, err
 	}
 
+	return c.forwardLegacy(ctx, addr, payload)
+}
+
+func (c *Client) forwardLegacy(ctx context.Context, addr string, payload []byte) ([]byte, error) {
 	// A bare 404 proves the v2 route did not exist and therefore no command
 	// reached Apply. Application NotFound responses carry a machine class and
 	// must never fall back, because applying again could duplicate a write.
@@ -632,31 +726,44 @@ func (c *Client) Forward(ctx context.Context, addr string, payload []byte) ([]by
 		ctx, http.MethodPost, addr, "/v1/forward", "application/octet-stream", bytes.NewReader(payload),
 	)
 	decoded, decodeErr := command.Decode(payload)
+
 	legacyPublish := decodeErr == nil && decoded.Op == command.OpPublish
 	if legacyErr != nil {
-		if legacyPublish && errors.Is(legacyErr, pqerr.ErrPartialFanout) {
-			return nil, &queue.PartialPublishError{
-				Outcome: queue.PublishOutcome{Partial: true},
-				Causes:  []error{legacyErr},
-			}
-		}
-		return nil, legacyErr
+		return legacyForwardError(legacyErr, legacyPublish)
 	}
+
 	if !legacyPublish {
 		return legacyBody, nil
 	}
 
+	return convertLegacyPublishResponse(addr, legacyBody)
+}
+
+func legacyForwardError(err error, publish bool) ([]byte, error) {
+	if publish && errors.Is(err, pqerr.ErrPartialFanout) {
+		return nil, &queue.PartialPublishError{
+			Outcome: queue.PublishOutcome{Partial: true},
+			Causes:  []error{err},
+		}
+	}
+
+	return nil, err
+}
+
+func convertLegacyPublishResponse(addr string, body []byte) ([]byte, error) {
 	var legacyResponse *queue.PublishResponse
-	if len(legacyBody) > 0 {
+	if len(body) > 0 {
 		legacyResponse = new(queue.PublishResponse)
-		if err := json.Unmarshal(legacyBody, legacyResponse); err != nil {
+		if err := json.Unmarshal(body, legacyResponse); err != nil {
 			return nil, fmt.Errorf("decode legacy publish response from %s: %w", addr, err)
 		}
 	}
+
 	outcome := &queue.PublishOutcome{Response: legacyResponse}
 	if legacyResponse != nil {
 		outcome.SelectedQueues = uint64(len(legacyResponse.QueueIDs))
 	}
+
 	converted, encodeErr := json.Marshal(compactPublishOutcomeFrom(outcome))
 	if encodeErr != nil {
 		return nil, fmt.Errorf("convert legacy publish response from %s: %w", addr, encodeErr)
@@ -744,11 +851,13 @@ func (c *Client) do(ctx context.Context, method, addr, path, contentType string,
 	if responseLimit <= 0 {
 		responseLimit = publishwire.MaxResponseBytes
 	}
-	responseBody, oversized, readErr := readBounded(resp.Body, responseLimit)
+
+	responseBody, readErr := readBounded(resp.Body, responseLimit)
 	if readErr != nil {
 		return nil, fmt.Errorf("read peer response from %s: %w", addr, readErr)
 	}
-	if oversized {
+
+	if responseBody.oversized {
 		return nil, fmt.Errorf(
 			"%w: response from %s exceeds %d bytes",
 			ErrResponseTooLarge, addr, responseLimit,
@@ -756,13 +865,13 @@ func (c *Client) do(ctx context.Context, method, addr, path, contentType string,
 	}
 
 	if resp.StatusCode == http.StatusOK {
-		return responseBody, nil
+		return responseBody.data, nil
 	}
 
 	return nil, &peerResponseError{
 		statusCode: resp.StatusCode,
 		class:      resp.Header.Get(errorHeader),
-		err:        peerError(addr, resp, responseBody),
+		err:        peerError(addr, resp, responseBody.data),
 	}
 }
 
@@ -792,41 +901,24 @@ func peerError(addr string, resp *http.Response, body []byte) error {
 
 	base := fmt.Errorf("peer %s: %s", addr, message)
 
-	switch resp.Header.Get(errorHeader) {
-	case "capacity":
-		return fmt.Errorf("%w: %w", pqerr.ErrCapacityExceeded, base)
+	sentinels := map[string]error{
+		"capacity":            pqerr.ErrCapacityExceeded,
+		"response-too-large":  ErrResponseTooLarge,
+		"not-leader":          consensus.ErrNotLeader,
+		"commit-unknown":      consensus.ErrCommitUnknown,
+		"partial-fanout":      pqerr.ErrPartialFanout,
+		"shutdown":            consensus.ErrShutdown,
+		"not-found":           pqerr.ErrNotFound,
+		"already-exists":      pqerr.ErrAlreadyExists,
+		"failed-precondition": pqerr.ErrFailedPrecondition,
+		"invalid-argument":    pqerr.ErrInvalidInput,
+		"unavailable":         pqerr.ErrUnavailable,
+	}
 
-	case "response-too-large":
-		return fmt.Errorf("%w: %w", ErrResponseTooLarge, base)
-
-	case "not-leader":
-		return fmt.Errorf("%w: %w", consensus.ErrNotLeader, base)
-
-	case "commit-unknown":
-		return fmt.Errorf("%w: %w", consensus.ErrCommitUnknown, base)
-
-	case "partial-fanout":
-		return fmt.Errorf("%w: %w", pqerr.ErrPartialFanout, base)
-
-	case "shutdown":
-		return fmt.Errorf("%w: %w", consensus.ErrShutdown, base)
-
-	case "not-found":
-		return fmt.Errorf("%w: %w", pqerr.ErrNotFound, base)
-
-	case "already-exists":
-		return fmt.Errorf("%w: %w", pqerr.ErrAlreadyExists, base)
-
-	case "failed-precondition":
-		return fmt.Errorf("%w: %w", pqerr.ErrFailedPrecondition, base)
-
-	case "invalid-argument":
-		return fmt.Errorf("%w: %w", pqerr.ErrInvalidInput, base)
-
-	case "unavailable":
-		return fmt.Errorf("%w: %w", pqerr.ErrUnavailable, base)
-
-	default:
+	sentinel, ok := sentinels[resp.Header.Get(errorHeader)]
+	if !ok {
 		return base
 	}
+
+	return fmt.Errorf("%w: %w", sentinel, base)
 }

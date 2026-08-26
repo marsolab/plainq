@@ -22,6 +22,7 @@ type leaveMembership interface {
 
 type nodeLeaveMembership struct{ node *Node }
 
+//nolint:nonamedreturns // Two bare strings need names; the interface names them too.
 func (m nodeLeaveMembership) Leader() (id, addr string, err error) {
 	id, addr, err = m.node.consensus.Leader()
 	if err != nil {
@@ -83,6 +84,7 @@ func removeNodeForLeave(ctx context.Context, nodeID string, membership leaveMemb
 		if err == nil {
 			return nil
 		}
+
 		if !errors.Is(err, consensus.ErrNoLeader) && !errors.Is(err, consensus.ErrNotLeader) {
 			return leaveRemovalError(nodeID, err)
 		}

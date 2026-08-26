@@ -36,9 +36,11 @@ func (n *Node) Health(ctx context.Context) error {
 	if err := n.replicaHealth.Check(); err != nil {
 		return err
 	}
+
 	if err := n.localHealth.Health(ctx); err != nil {
 		return fmt.Errorf("cluster replica storage: %w", err)
 	}
+
 	if !n.Status().Healthy {
 		return fmt.Errorf("%w: cluster has no reachable write quorum", pqerr.ErrUnavailable)
 	}
@@ -73,9 +75,11 @@ func newReplicaHealth(dataDir string, stable hraft.StableStore) (*replicaHealth,
 	if stable == nil {
 		return nil, errors.New("replica health: raft stable store is required")
 	}
+
 	if dataDir == "" {
 		return nil, errors.New("replica health: data directory is required")
 	}
+
 	if err := os.MkdirAll(dataDir, 0o750); err != nil {
 		return nil, fmt.Errorf("create replica health directory %q: %w", dataDir, err)
 	}
@@ -90,55 +94,119 @@ func newReplicaHealth(dataDir string, stable hraft.StableStore) (*replicaHealth,
 		syncDir:        syncReplicaDirectory,
 	}
 
-	version, err := stable.Get(replicaApplyGuardVersionKey)
-	if err != nil && !errors.Is(err, boltstore.ErrKeyNotFound) && err.Error() != boltstore.ErrKeyNotFound.Error() {
-		return nil, fmt.Errorf("read replica apply guard version: %w", err)
-	}
+	state, err := loadReplicaHealthState(h, stable)
 	if err != nil {
-		version = nil
+		return nil, err
+	}
+
+	if err := initializeReplicaHealth(h, stable, state); err != nil {
+		return nil, err
+	}
+
+	return h, nil
+}
+
+type replicaHealthState struct {
+	version     []byte
+	clean       bool
+	dirty       bool
+	quarantined bool
+}
+
+func loadReplicaHealthState(h *replicaHealth, stable hraft.StableStore) (replicaHealthState, error) {
+	version, err := replicaApplyGuardVersionFrom(stable)
+	if err != nil {
+		return replicaHealthState{}, err
 	}
 
 	clean, err := markerExists(h.cleanPath)
 	if err != nil {
-		return nil, err
+		return replicaHealthState{}, err
 	}
+
 	dirty, err := markerExists(h.dirtyPath)
 	if err != nil {
-		return nil, err
+		return replicaHealthState{}, err
 	}
+
 	quarantined, err := markerExists(h.quarantinePath)
 	if err != nil {
-		return nil, err
+		return replicaHealthState{}, err
 	}
 
-	switch string(version) {
+	return replicaHealthState{
+		version:     version,
+		clean:       clean,
+		dirty:       dirty,
+		quarantined: quarantined,
+	}, nil
+}
+
+func replicaApplyGuardVersionFrom(stable hraft.StableStore) ([]byte, error) {
+	version, err := stable.Get(replicaApplyGuardVersionKey)
+	if err == nil {
+		return version, nil
+	}
+
+	if errors.Is(err, boltstore.ErrKeyNotFound) {
+		return nil, nil
+	}
+
+	// raft-boltdb has returned distinct values with the same sentinel text
+	// across releases, so retain the compatibility check used during upgrades.
+	if err.Error() == boltstore.ErrKeyNotFound.Error() {
+		return nil, nil
+	}
+
+	return nil, fmt.Errorf("read replica apply guard version: %w", err)
+}
+
+func initializeReplicaHealth(
+	h *replicaHealth,
+	stable hraft.StableStore,
+	state replicaHealthState,
+) error {
+	switch string(state.version) {
 	case "":
-		// This is the only upgrade path from replicas created before the guard
-		// existed. A dirty or quarantine file proves this is not a fresh
-		// upgrade, even if the stable bit was not durably written yet.
-		if dirty || quarantined {
-			h.latch(errors.New("replica apply guard upgrade found an unsafe marker"))
-			return h, nil
-		}
-		if !clean {
-			if err := h.writeMarker(h.cleanPath, replicaMarkerContents); err != nil {
-				return nil, fmt.Errorf("initialize replica apply guard: %w", err)
-			}
-		}
-		if err := stable.Set(replicaApplyGuardVersionKey, []byte(replicaApplyGuardVersion)); err != nil {
-			return nil, fmt.Errorf("persist replica apply guard version: %w", err)
-		}
+		return initializeNewReplicaHealth(h, stable, state)
 
 	case replicaApplyGuardVersion:
-		if !clean || dirty || quarantined {
+		if !state.clean || state.dirty || state.quarantined {
 			h.latch(errors.New("replica apply guard is not clean"))
 		}
 
 	default:
-		return nil, fmt.Errorf("unsupported replica apply guard version %q", version)
+		return fmt.Errorf("unsupported replica apply guard version %q", state.version)
 	}
 
-	return h, nil
+	return nil
+}
+
+func initializeNewReplicaHealth(
+	h *replicaHealth,
+	stable hraft.StableStore,
+	state replicaHealthState,
+) error {
+	// This is the only upgrade path from replicas created before the guard
+	// existed. A dirty or quarantine file proves this is not a fresh upgrade,
+	// even if the stable bit was not durably written yet.
+	if state.dirty || state.quarantined {
+		h.latch(errors.New("replica apply guard upgrade found an unsafe marker"))
+
+		return nil
+	}
+
+	if !state.clean {
+		if err := h.writeMarker(h.cleanPath, replicaMarkerContents); err != nil {
+			return fmt.Errorf("initialize replica apply guard: %w", err)
+		}
+	}
+
+	if err := stable.Set(replicaApplyGuardVersionKey, []byte(replicaApplyGuardVersion)); err != nil {
+		return fmt.Errorf("persist replica apply guard version: %w", err)
+	}
+
+	return nil
 }
 
 // Check returns typed temporary unavailability after the first fault. It does
@@ -147,6 +215,7 @@ func (h *replicaHealth) Check() error {
 	if h == nil {
 		return fmt.Errorf("%w: replica health is not initialized", pqerr.ErrUnavailable)
 	}
+
 	if h.fault.Load() == nil {
 		return nil
 	}
@@ -165,6 +234,7 @@ func (h *replicaHealth) ServingToken() (uint64, error) {
 	if err := h.Check(); err != nil {
 		return 0, err
 	}
+
 	token := h.generation.Load()
 	if err := h.CheckServingToken(token); err != nil {
 		return 0, err
@@ -177,9 +247,11 @@ func (h *replicaHealth) CheckServingToken(token uint64) error {
 	if h == nil || h.generation.Load() != token {
 		return fmt.Errorf("%w: replica health changed while serving the request", pqerr.ErrUnavailable)
 	}
+
 	if err := h.Check(); err != nil {
 		return err
 	}
+
 	if h.generation.Load() != token {
 		return fmt.Errorf("%w: replica health changed while serving the request", pqerr.ErrUnavailable)
 	}
@@ -200,9 +272,11 @@ func (h *replicaHealth) BeginPublishApply() error {
 	if err := h.Check(); err != nil {
 		return err
 	}
+
 	if err := h.rename(h.cleanPath, h.dirtyPath); err != nil {
 		return fmt.Errorf("rename clean replica apply guard to dirty: %w", err)
 	}
+
 	if err := h.syncDir(filepath.Dir(h.cleanPath)); err != nil {
 		return fmt.Errorf("sync dirty replica apply guard directory: %w", err)
 	}
@@ -218,6 +292,7 @@ func (h *replicaHealth) FinishPublishApply() error {
 	if err := h.rename(h.dirtyPath, h.cleanPath); err != nil {
 		return fmt.Errorf("rename dirty replica apply guard to clean: %w", err)
 	}
+
 	if err := h.syncDir(filepath.Dir(h.cleanPath)); err != nil {
 		// Keep the restart state fail-closed if the clean transition itself
 		// could not be made durable.
@@ -225,6 +300,7 @@ func (h *replicaHealth) FinishPublishApply() error {
 		if rollbackErr == nil {
 			rollbackErr = h.syncDir(filepath.Dir(h.cleanPath))
 		}
+
 		return errors.Join(
 			fmt.Errorf("sync clean replica apply guard directory: %w", err),
 			wrapIfNonNil("restore dirty replica apply guard", rollbackErr),
@@ -241,9 +317,11 @@ func (h *replicaHealth) Fail(cause error) error {
 	if cause == nil {
 		cause = errors.New("replica state-machine result was non-deterministic")
 	}
+
 	if !h.fault.CompareAndSwap(nil, &replicaFault{err: cause}) {
 		return nil
 	}
+
 	h.generation.Add(1)
 
 	h.markerMu.Lock()
@@ -270,12 +348,15 @@ func (h *replicaHealth) Recover() error {
 	if err := h.writeMarker(h.cleanPath, replicaMarkerContents); err != nil {
 		return fmt.Errorf("write recovered replica apply guard: %w", err)
 	}
+
 	if err := removeReplicaMarker(h.remove, h.dirtyPath); err != nil {
 		return fmt.Errorf("remove dirty replica apply guard: %w", err)
 	}
+
 	if err := removeReplicaMarker(h.remove, h.quarantinePath); err != nil {
 		return fmt.Errorf("remove replica quarantine marker: %w", err)
 	}
+
 	if err := h.syncDir(filepath.Dir(h.cleanPath)); err != nil {
 		return errors.Join(
 			fmt.Errorf("sync recovered replica health directory: %w", err),
@@ -296,6 +377,7 @@ func (h *replicaHealth) Recover() error {
 // restart safety, and every diagnostic is returned to the caller.
 func (h *replicaHealth) requarantineFailedRecovery() error {
 	var rollbackErrs []error
+
 	dir := filepath.Dir(h.cleanPath)
 
 	if err := h.rename(h.cleanPath, h.dirtyPath); err != nil {
@@ -322,6 +404,7 @@ func markerExists(path string) (bool, error) {
 	if err == nil {
 		return true, nil
 	}
+
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
@@ -331,10 +414,12 @@ func markerExists(path string) (bool, error) {
 
 func writeReplicaMarker(path, contents string) (retErr error) {
 	dir := filepath.Dir(path)
+
 	temporary, err := os.CreateTemp(dir, ".replica-marker-*")
 	if err != nil {
 		return fmt.Errorf("create temporary marker for %q: %w", path, err)
 	}
+
 	temporaryName := temporary.Name()
 	defer func() {
 		if err := os.Remove(temporaryName); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -344,22 +429,30 @@ func writeReplicaMarker(path, contents string) (retErr error) {
 
 	if err := temporary.Chmod(0o600); err != nil {
 		_ = temporary.Close()
+
 		return fmt.Errorf("set marker permissions: %w", err)
 	}
+
 	if _, err := io.WriteString(temporary, contents); err != nil {
 		_ = temporary.Close()
+
 		return fmt.Errorf("write marker: %w", err)
 	}
+
 	if err := temporary.Sync(); err != nil {
 		_ = temporary.Close()
+
 		return fmt.Errorf("sync marker: %w", err)
 	}
+
 	if err := temporary.Close(); err != nil {
 		return fmt.Errorf("close marker: %w", err)
 	}
+
 	if err := os.Rename(temporaryName, path); err != nil {
 		return fmt.Errorf("install marker %q: %w", path, err)
 	}
+
 	if err := syncReplicaDirectory(dir); err != nil {
 		return fmt.Errorf("sync marker directory %q: %w", dir, err)
 	}
@@ -370,14 +463,20 @@ func writeReplicaMarker(path, contents string) (retErr error) {
 func syncReplicaDirectory(path string) error {
 	dir, err := os.Open(path)
 	if err != nil {
-		return err
-	}
-	if err := dir.Sync(); err != nil {
-		_ = dir.Close()
-		return err
+		return fmt.Errorf("open replica directory %q: %w", path, err)
 	}
 
-	return dir.Close()
+	if err := dir.Sync(); err != nil {
+		_ = dir.Close()
+
+		return fmt.Errorf("sync replica directory %q: %w", path, err)
+	}
+
+	if err := dir.Close(); err != nil {
+		return fmt.Errorf("close replica directory %q: %w", path, err)
+	}
+
+	return nil
 }
 
 func removeReplicaMarker(remove func(string) error, path string) error {
