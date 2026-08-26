@@ -105,6 +105,14 @@ func (c *Collector) initializeCoordinatorLocked(ctx context.Context, startupNow 
 			c.logger.Info("Telemetry raw collection interval reset",
 				slog.Int64("sample_interval_ms", intervalMS))
 		}
+
+		lastBoundary, exists, err := c.store.LatestCollectionBoundary(ctx, intervalMS)
+		if err != nil {
+			return fmt.Errorf("load latest raw collection boundary: %w", err)
+		}
+		if exists {
+			c.lastTopicBoundary = lastBoundary
+		}
 	}
 
 	c.lastRollup1m = minuteBound

@@ -1872,8 +1872,11 @@ func (s *recordingStore) SaveRateSnapshotAndMetric(context.Context, int64, strin
 	return nil
 }
 func (s *recordingStore) SaveCollectionBoundary(context.Context, CollectionBatch) error { return nil }
-func (s *recordingStore) Rollup(context.Context, Resolution, int64) error               { return nil }
-func (s *recordingStore) ResetRawInterval(context.Context, int64) (bool, error)         { return false, nil }
+func (s *recordingStore) LatestCollectionBoundary(context.Context, int64) (int64, bool, error) {
+	return 0, false, nil
+}
+func (s *recordingStore) Rollup(context.Context, Resolution, int64) error       { return nil }
+func (s *recordingStore) ResetRawInterval(context.Context, int64) (bool, error) { return false, nil }
 func (s *recordingStore) EnqueueTerminalState(context.Context, TerminalState, int) (bool, error) {
 	return false, nil
 }

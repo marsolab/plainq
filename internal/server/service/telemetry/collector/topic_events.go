@@ -1502,6 +1502,14 @@ func (c *Collector) assignTerminalStates(ctx context.Context, boundary int64) er
 	}
 
 	target := boundary - intervalMS
+	if target < c.lastRollup1m {
+		// Startup first catches the old raw grid up through lastRollup1m.
+		// Keep an unassigned zero pending until its target belongs to a minute
+		// the coordinator has not already closed, otherwise no later rollup can
+		// discover it.
+		return nil
+	}
+
 	for _, state := range c.terminalStatesDue(boundary) {
 		if state.TargetBucket != nil {
 			continue

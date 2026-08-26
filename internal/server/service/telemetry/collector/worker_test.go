@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	vm "github.com/VictoriaMetrics/metrics"
 	"github.com/marsolab/plainq/internal/server/service/telemetry"
 )
 
@@ -63,6 +64,28 @@ func TestFailedRateWriteDoesNotCommitBaseline(t *testing.T) {
 	requireCalculateRatesAt(t, c, time.UnixMilli(1_000))
 	requireCalculateRatesAt(t, c, time.UnixMilli(2_000))
 	assertRateSample(t, store.lastBatch(t), "queue-1", MetricSendRate, 5, 1_000)
+}
+
+func TestCalculateRatesRecordsFailureAndSuccessOutcomes(t *testing.T) {
+	errorCounter := vm.GetOrCreateCounter(`plainq_telemetry_collections_total{result="error"}`)
+	okCounter := vm.GetOrCreateCounter(`plainq_telemetry_collections_total{result="ok"}`)
+	errorBefore := errorCounter.Get()
+	okBefore := okCounter.Get()
+
+	c, store := newRateTestCollector(time.Second)
+	store.saveErrors = []error{errors.New("write failed")}
+	if err := c.calculateRatesAt(context.Background(), time.UnixMilli(1_000)); err == nil {
+		t.Fatal("failed collection returned nil")
+	}
+
+	requireCalculateRatesAt(t, c, time.UnixMilli(1_000))
+
+	if got := errorCounter.Get() - errorBefore; got != 1 {
+		t.Fatalf("collection error outcome delta = %d, want 1", got)
+	}
+	if got := okCounter.Get() - okBefore; got != 1 {
+		t.Fatalf("collection ok outcome delta = %d, want 1", got)
+	}
 }
 
 func TestSuccessfulRateWriteCommitsBaselineOnce(t *testing.T) {
@@ -502,6 +525,102 @@ func TestSameRawIntervalRestartPreservesGridAndHistory(t *testing.T) {
 	}
 	if intervalMS != 1_000 || legacyRows != 1 {
 		t.Fatalf("stable restart interval=%d legacyRows=%d, want 1000/1", intervalMS, legacyRows)
+	}
+}
+
+func TestSameGridRestartLoadsCommittedBoundaryBeforeFreezingNewState(t *testing.T) {
+	ctx := context.Background()
+	store, _ := newTelemetryTestStoreWithConn(t)
+	if reset, err := store.ResetRawInterval(ctx, 1_000); err != nil || !reset {
+		t.Fatalf("seed raw interval reset = %t, %v", reset, err)
+	}
+	seedLegacyCollectionBoundary(t, store)
+
+	clock := newTask9Clock(time.UnixMilli(1_500))
+	c := New(store, WithCollectionInterval(time.Second), WithClock(clock.Now))
+	c.RecordSend("queue-1", 5, 0)
+	c.RecordTopicRequest(telemetry.TopicOperationEvent{
+		Backend: "sqlite", Operation: "list_topics", Result: "ok", Duration: 25 * time.Millisecond,
+	})
+
+	clock.Set(time.UnixMilli(2_500))
+	requireCoordinatorPass(t, c, clock.Now())
+	clock.Set(time.UnixMilli(3_500))
+	requireCoordinatorPass(t, c, clock.Now())
+	c.RecordSend("queue-1", 3, 0)
+	clock.Set(time.UnixMilli(4_500))
+	requireCoordinatorPass(t, c, clock.Now())
+
+	rates := mustQuerySeries(t, store, SeriesQuery{
+		SubjectID: "queue-1", MetricName: MetricSendRate,
+		Kind: MetricKindRate, Resolution: ResolutionRaw, From: 2_000, To: 4_000,
+	})
+	if len(rates.DataPoints) != 1 || rates.DataPoints[0].Timestamp != 3_000 || rates.DataPoints[0].Value != 3 {
+		t.Fatalf("restart rates = %#v, want only first post-baseline 3/s point at 3000", rates.DataPoints)
+	}
+
+	events := mustQuerySeries(t, store, SeriesQuery{
+		MetricName: MetricTopicRequestDuration,
+		Labels:     canonicalDurationLabels("sqlite", "list_topics"),
+		Kind:       MetricKindEvent, Resolution: ResolutionRaw, From: 1_000, To: 2_000,
+	})
+	if len(events.DataPoints) != 1 || events.DataPoints[0].Timestamp != 1_500 || events.DataPoints[0].Value != 0.025 {
+		t.Fatalf("restart event history = %#v, want retained pre-pass event", events.DataPoints)
+	}
+}
+
+func TestStartupUnassignedTerminalWaitsForPostCheckpointBucketAndRollsUp(t *testing.T) {
+	ctx := context.Background()
+	store, _ := newTelemetryTestStoreWithConn(t)
+	if reset, err := store.ResetRawInterval(ctx, 1_000); err != nil || !reset {
+		t.Fatalf("seed raw interval reset = %t, %v", reset, err)
+	}
+	if err := store.SaveCollectionBoundary(ctx, CollectionBatch{
+		Boundary: 1_000, SampleIntervalMS: 1_000,
+		Samples: []MetricSample{{
+			Timestamp: 0, SubjectID: "legacy", MetricName: MetricMessagesSentTotal,
+			Kind: MetricKindCounter, Value: 1,
+		}},
+		Coverage: []CoverageBucket{{
+			Resolution: ResolutionRaw, BucketStart: 0, SubjectID: "legacy",
+			MetricName: MetricMessagesSentTotal, Kind: MetricKindCounter, SampleIntervalMS: 1_000,
+		}},
+	}); err != nil {
+		t.Fatalf("seed old raw bucket: %v", err)
+	}
+
+	accepted, err := store.EnqueueTerminalState(ctx, TerminalState{
+		SubjectID: "topic-1", Generation: 1, ObservedAt: 59_500,
+	}, defaultTerminalStateLimit)
+	if err != nil || !accepted {
+		t.Fatalf("enqueue unassigned terminal = %t, %v", accepted, err)
+	}
+
+	c := New(store, WithCollectionInterval(time.Second), WithClock(func() time.Time {
+		return time.UnixMilli(60_500)
+	}))
+	requireCoordinatorPass(t, c, time.UnixMilli(60_500))
+
+	pending, err := store.ListTerminalStates(ctx)
+	if err != nil {
+		t.Fatalf("list startup terminal: %v", err)
+	}
+	if len(pending) != 1 || pending[0].TargetBucket != nil {
+		t.Fatalf("startup terminal = %#v, want one unassigned row behind checkpoint", pending)
+	}
+
+	requireCoordinatorPass(t, c, time.UnixMilli(61_500))
+	if pending, err = store.ListTerminalStates(ctx); err != nil || len(pending) != 0 {
+		t.Fatalf("post-checkpoint terminal rows = %#v, %v; want completed", pending, err)
+	}
+	requireCoordinatorPass(t, c, time.UnixMilli(120_500))
+
+	rolled := mustQuerySeries(t, store, SeriesQuery{
+		SubjectID: "topic-1", MetricName: MetricTopicSubscriptionsCurrent,
+		Kind: MetricKindGauge, Resolution: Resolution1m, From: 0, To: 120_000,
+	})
+	if len(rolled.DataPoints) != 1 || rolled.DataPoints[0].Timestamp != 60_000 || rolled.DataPoints[0].Value != 0 {
+		t.Fatalf("rolled terminal zero = %#v, want one zero in post-checkpoint minute", rolled.DataPoints)
 	}
 }
 

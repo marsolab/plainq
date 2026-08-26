@@ -332,6 +332,7 @@ type Store interface {
 		sample MetricSample,
 	) error
 	SaveCollectionBoundary(ctx context.Context, batch CollectionBatch) error
+	LatestCollectionBoundary(ctx context.Context, sampleIntervalMS int64) (int64, bool, error)
 	Rollup(ctx context.Context, resolution Resolution, closedThrough int64) error
 	ResetRawInterval(ctx context.Context, sampleIntervalMS int64) (bool, error)
 	EnqueueTerminalState(ctx context.Context, state TerminalState, limit int) (bool, error)
@@ -724,9 +725,9 @@ func (c *Collector) GetAllQueueIDs() []string {
 
 // calculateRatesAt atomically persists queue, system, topic, event, and rate
 // history at one exact closed boundary.
-func (c *Collector) calculateRatesAt(ctx context.Context, boundary time.Time) error {
+func (c *Collector) calculateRatesAt(ctx context.Context, boundary time.Time) (collectionErr error) {
 	start := time.Now()
-	defer func() { c.observeCollection(start) }()
+	defer func() { c.observeCollection(start, collectionErr) }()
 
 	intervalMS := c.collectionInterval.Milliseconds()
 	if intervalMS <= 0 {

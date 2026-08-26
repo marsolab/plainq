@@ -49,8 +49,8 @@ func (c *Collector) persist(operation string, err error) {
 }
 
 // observeCollection records one rate-calculation pass.
-func (c *Collector) observeCollection(start time.Time) {
-	metrics.RecordTelemetryCollection(start, nil)
+func (c *Collector) observeCollection(start time.Time, err error) {
+	metrics.RecordTelemetryCollection(start, err)
 }
 
 // observeAggregation records one roll-up over a window.

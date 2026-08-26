@@ -302,6 +302,29 @@ WHERE timestamp = ? AND queue_id = ? AND metric_name = ? AND labels = ? AND metr
 	return nil
 }
 
+// LatestCollectionBoundary returns the newest durable completion-ledger entry
+// for one raw grid. A restarted collector uses it before freezing any new
+// in-memory state, so an idempotent row from the prior process cannot be
+// mistaken for acknowledgement of the new process's first observation.
+func (s *SQLiteStore) LatestCollectionBoundary(
+	ctx context.Context, sampleIntervalMS int64,
+) (int64, bool, error) {
+	if sampleIntervalMS <= 0 {
+		return 0, false, errors.New("latest collection boundary: positive sample interval is required")
+	}
+
+	var boundary sql.NullInt64
+	if err := s.db.QueryRowContext(ctx, `SELECT MAX(boundary)
+FROM telemetry_collection_commits WHERE sample_interval_ms = ?`, sampleIntervalMS).Scan(&boundary); err != nil {
+		return 0, false, fmt.Errorf("latest collection boundary: query: %w", err)
+	}
+	if !boundary.Valid {
+		return 0, false, nil
+	}
+
+	return boundary.Int64, true, nil
+}
+
 // ResetRawInterval clears the entire raw grid when its interval identity changes.
 //
 //nolint:cyclop // One transaction must explicitly guard state inspection, purge, and replacement.
