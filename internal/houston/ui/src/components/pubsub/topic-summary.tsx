@@ -30,7 +30,7 @@ function TelemetryNotice({
           <>
             Telemetry is disabled on this server, so publish and delivery readings stay
             unknown. Topic management works normally. Enable it with{" "}
-            <span className="font-mono text-[11px]">--telemetry</span> and restart.
+            <span className="font-mono text-[11px]">--telemetry.enable</span> and restart.
           </>
         ) : (
           <>
