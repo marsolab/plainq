@@ -10,6 +10,7 @@ import (
 
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
+	"github.com/marsolab/servekit/idkit"
 	"github.com/maxatome/go-testdeep/td"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -180,13 +181,15 @@ func TestServer_DescribeQueue(t *testing.T) {
 
 func TestServer_TopicRPCs(t *testing.T) {
 	createdAt := time.Unix(1_709_000_000, 0).UTC()
+	topicID := idkit.XID()
+	subscriptionID := idkit.XID()
 	topic := Topic{
-		TopicID:   "topic-1",
+		TopicID:   topicID,
 		TopicName: "platform.events",
 		CreatedAt: createdAt,
 		Subscriptions: []Subscription{{
-			SubscriptionID: "subscription-1",
-			TopicID:        "topic-1",
+			SubscriptionID: subscriptionID,
+			TopicID:        topicID,
 			QueueID:        "c5s8b4p9e8rg5u5fgq10",
 			QueueName:      "platform.events",
 			CreatedAt:      createdAt,
@@ -232,7 +235,7 @@ func TestServer_TopicRPCs(t *testing.T) {
 			}, nil
 		},
 	}
-	server := &Service{storage: storage}
+	server := newTestService(storage)
 	ctx := context.Background()
 
 	listed, err := server.ListTopics(ctx, &v1.ListTopicsRequest{})

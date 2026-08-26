@@ -52,6 +52,14 @@ func validateQueueID(queueID string) error {
 	return nil
 }
 
+func validatePubSubQueueID(queueID string) error {
+	if err := validateQueueID(queueID); err != nil {
+		return fmt.Errorf("%w: invalid queue id %q", pqerr.ErrInvalidID, queueID)
+	}
+
+	return nil
+}
+
 func validateTopicID(id string) error {
 	if err := idkit.ValidateXID(strings.ToLower(id)); err != nil {
 		return fmt.Errorf("%w: invalid topic id %q", pqerr.ErrInvalidID, id)
@@ -96,7 +104,7 @@ func validateSubscribeRequest(topicID string, input *SubscribeRequest) error {
 		return fmt.Errorf("%w: subscribe request is required", pqerr.ErrInvalidInput)
 	}
 
-	return validateQueueID(input.QueueID)
+	return validatePubSubQueueID(input.QueueID)
 }
 
 func validateUnsubscribeRequest(topicID, subscriptionID string) error {

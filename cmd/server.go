@@ -428,7 +428,12 @@ func serverCommand() *commandSpec {
 
 			// Wrapping here, after the cluster layer, means one seam measures
 			// every backend: SQLite, Postgres and the replicated store alike.
-			queueService := queue.NewService(&cfg, logger, queue.NewObservedStorage(queueStorage, observer))
+			queueService := queue.NewService(
+				&cfg,
+				logger,
+				queue.NewObservedStorage(queueStorage, observer),
+				observer,
+			)
 
 			accountStorage, accountStorageInitErr := initAccountStorage(&cfg, logger, backend)
 			if accountStorageInitErr != nil {

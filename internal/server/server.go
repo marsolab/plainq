@@ -93,7 +93,6 @@ func NewServer(
 	// Initialize metrics collector if telemetry database is provided.
 	if pq.metricsStore != nil {
 		pq.metricsCollector = collector.New(pq.metricsStore, collector.WithLogger(logger))
-		pq.queue.SetTopicMetricsRecorder(pq.metricsCollector)
 		pq.metricsHandler = NewMetricsHandler(pq.metricsCollector, pq.metricsStore)
 
 		// The storage observer already emits every queue event to Prometheus.

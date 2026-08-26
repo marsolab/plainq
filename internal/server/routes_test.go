@@ -4,12 +4,14 @@ import (
 	"context"
 	"testing"
 
+	"github.com/marsolab/plainq/internal/metrics"
 	"github.com/marsolab/plainq/internal/server/config"
 	"github.com/marsolab/plainq/internal/server/service/account"
 	"github.com/marsolab/plainq/internal/server/service/oauth"
 	"github.com/marsolab/plainq/internal/server/service/onboarding"
 	"github.com/marsolab/plainq/internal/server/service/queue"
 	"github.com/marsolab/plainq/internal/server/service/rbac"
+	"github.com/marsolab/plainq/internal/server/service/telemetry"
 	"github.com/marsolab/plainq/internal/server/service/telemetry/collector"
 	"github.com/marsolab/servekit/logkit"
 	"github.com/maxatome/go-testdeep/td"
@@ -64,6 +66,8 @@ func Test_NewServer_mountsRoutes(t *testing.T) {
 			}
 
 			logger := logkit.NewNop()
+			observer := telemetry.NewObserver(metrics.BackendSQLite)
+			queueStorage := queueStorageStub{}
 
 			opts := []Option{}
 			if withTelemetry {
@@ -77,7 +81,7 @@ func Test_NewServer_mountsRoutes(t *testing.T) {
 				logger,
 				healthCheckerStub{},
 				nil,
-				queue.NewService(&cfg, logger, queueStorageStub{}),
+				queue.NewService(&cfg, logger, queue.NewObservedStorage(queueStorage, observer), observer),
 				account.NewService(&cfg, logger, nil, nil, accountStorageStub{}),
 				onboarding.NewService(&cfg, logger, nil, nil, onboardingStorageStub{}),
 				rbac.NewService(&cfg, logger, rbacStorageStub{}),

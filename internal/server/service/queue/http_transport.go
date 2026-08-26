@@ -107,12 +107,6 @@ func (s *Service) describeQueueHandler(w http.ResponseWriter, r *http.Request) {
 func (s *Service) deleteQueueHandler(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
-	if err := validateQueueID(id); err != nil {
-		httpkit.ErrorHTTP(w, r, fmt.Errorf("validation error: %w", err))
-
-		return
-	}
-
 	force, parseErr := strconv.ParseBool(r.URL.Query().Get("force"))
 	if parseErr != nil {
 		force = false
@@ -123,19 +117,18 @@ func (s *Service) deleteQueueHandler(w http.ResponseWriter, r *http.Request) {
 		Force:   force,
 	}
 
-	_, deleteErr := s.storage.DeleteQueue(r.Context(), &input)
+	_, deleteErr := s.pubsub.deleteQueue(r.Context(), &input)
 	if deleteErr != nil {
 		if errors.Is(deleteErr, pqerr.ErrFailedPrecondition) {
 			httpkit.ErrorHTTP(w, r, deleteErr, httpkit.WithStatus(http.StatusConflict))
 
 			return
 		}
+
 		httpkit.ErrorHTTP(w, r, pqerr.AsTransport(deleteErr))
 
 		return
 	}
-
-	s.reconcileTopicSubscriptionCounts(r.Context())
 
 	httpkit.JSON(w, r, &v1.DeleteQueueResponse{}, httpkit.WithStatus(http.StatusOK))
 }

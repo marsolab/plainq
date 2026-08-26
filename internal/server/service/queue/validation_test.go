@@ -230,3 +230,27 @@ func TestValidatePublishRejectsEmptyBatch(t *testing.T) {
 		})
 	}
 }
+
+func TestPubSubQueueValidationNormalizesMalformedID(t *testing.T) {
+	topicID := idkit.XID()
+	tests := map[string]func() error{
+		"subscribe": func() error {
+			return validateSubscribeRequest(topicID, &SubscribeRequest{QueueID: "not-an-xid"})
+		},
+		"delete queue": func() error {
+			return validatePubSubQueueID("not-an-xid")
+		},
+	}
+
+	for name, validate := range tests {
+		t.Run(name, func(t *testing.T) {
+			err := validate()
+			if !errors.Is(err, pqerr.ErrInvalidID) {
+				t.Fatalf("validation error = %v, want %v", err, pqerr.ErrInvalidID)
+			}
+			if errors.Is(err, errkit.ErrInvalidID) {
+				t.Fatalf("validation error = %v leaked legacy %v", err, errkit.ErrInvalidID)
+			}
+		})
+	}
+}

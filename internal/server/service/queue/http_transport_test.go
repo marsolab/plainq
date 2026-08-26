@@ -8,7 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/marsolab/plainq/internal/metrics"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
+	"github.com/marsolab/plainq/internal/server/service/telemetry"
 	"github.com/marsolab/servekit/logkit"
 	"github.com/maxatome/go-testdeep/td"
 )
@@ -17,7 +19,9 @@ import (
 const validXID = "9m4e2mr0ui3e8a215n4g"
 
 func newTestService(storage Storage) *Service {
-	return NewService(nil, logkit.NewNop(), storage)
+	observer := telemetry.NewObserver(metrics.BackendSQLite)
+
+	return NewService(nil, logkit.NewNop(), NewObservedStorage(storage, observer), observer)
 }
 
 func doRequest(t *testing.T, svc *Service, method, target, body string) *httptest.ResponseRecorder {

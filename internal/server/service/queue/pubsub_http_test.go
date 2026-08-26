@@ -2,20 +2,25 @@ package queue
 
 import (
 	"context"
-	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/marsolab/plainq/internal/cluster/consensus"
-	"github.com/marsolab/plainq/internal/server/config"
+	"github.com/marsolab/plainq/internal/metrics"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
+	"github.com/marsolab/plainq/internal/server/service/telemetry"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
+	"github.com/marsolab/servekit/idkit"
 	"github.com/marsolab/servekit/logkit"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func TestPubSubHTTPMapsDomainErrors(t *testing.T) {
+	topicID := idkit.XID()
 	tests := map[string]struct {
 		storage *mockStorage
 		method  string
@@ -33,38 +38,36 @@ func TestPubSubHTTPMapsDomainErrors(t *testing.T) {
 			storage: &mockStorage{deleteTopicFunc: func(context.Context, string) (*DeleteTopicResult, error) {
 				return nil, pqerr.ErrNotFound
 			}},
-			method: http.MethodDelete, target: "/topics/missing", want: http.StatusNotFound,
+			method: http.MethodDelete, target: "/topics/" + topicID, want: http.StatusNotFound,
 		},
 		"temporarily unavailable": {
 			storage: &mockStorage{publishFunc: func(context.Context, string, *PublishRequest) (*PublishResponse, error) {
 				return nil, pqerr.ErrUnavailable
 			}},
-			method: http.MethodPost, target: "/topics/topic/publish", body: `{"messages":[{"body":"eA=="}]}`, want: http.StatusServiceUnavailable,
+			method: http.MethodPost, target: "/topics/" + topicID + "/publish", body: `{"messages":[{"body":"eA=="}]}`, want: http.StatusServiceUnavailable,
 		},
 		"non-empty queue needs force": {
 			storage: &mockStorage{deleteQueueFunc: func(context.Context, *v1.DeleteQueueRequest) (*DeleteQueueResult, error) {
 				return nil, pqerr.ErrFailedPrecondition
 			}},
-			method: http.MethodDelete, target: "/c5s8b4p9e8rg5u5fgq10", want: http.StatusConflict,
+			method: http.MethodDelete, target: "/" + validXID, want: http.StatusConflict,
 		},
 		"commit outcome unknown": {
 			storage: &mockStorage{deleteTopicFunc: func(context.Context, string) (*DeleteTopicResult, error) {
 				return nil, consensus.ErrCommitUnknown
 			}},
-			method: http.MethodDelete, target: "/topics/topic-1", want: http.StatusInternalServerError,
+			method: http.MethodDelete, target: "/topics/" + topicID, want: http.StatusInternalServerError,
 		},
 		"partial fanout": {
 			storage: &mockStorage{publishFunc: func(context.Context, string, *PublishRequest) (*PublishResponse, error) {
 				return nil, &PartialPublishError{Causes: []error{pqerr.ErrUnavailable}}
 			}},
-			method: http.MethodPost, target: "/topics/topic-1/publish", body: `{"messages":[{"body":"eA=="}]}`, want: http.StatusInternalServerError,
+			method: http.MethodPost, target: "/topics/" + topicID + "/publish", body: `{"messages":[{"body":"eA=="}]}`, want: http.StatusInternalServerError,
 		},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			req := httptest.NewRequest(tc.method, tc.target, strings.NewReader(tc.body))
-			rec := httptest.NewRecorder()
-			NewService(&config.Config{}, logkit.NewNop(), tc.storage).ServeHTTP(rec, req)
+			rec := doRequest(t, newTestService(tc.storage), tc.method, tc.target, tc.body)
 			if rec.Code != tc.want {
 				t.Fatalf("status = %d, want %d; body=%s", rec.Code, tc.want, rec.Body.String())
 			}
@@ -72,293 +75,123 @@ func TestPubSubHTTPMapsDomainErrors(t *testing.T) {
 	}
 }
 
-func TestPublishTopicRecordsTopicMetricsAfterSuccess(t *testing.T) {
+func TestPubSubHTTPPreservesSuccessStatusesAndShapes(t *testing.T) {
+	topicID := idkit.XID()
+	subscriptionID := idkit.XID()
 	storage := &mockStorage{
-		publishFunc: func(_ context.Context, topicID string, input *PublishRequest) (*PublishResponse, error) {
-			if topicID != "topic-1" {
-				t.Fatalf("topicID = %q, want topic-1", topicID)
-			}
-			return &PublishResponse{TopicID: topicID, DeliveredCount: 5}, nil
+		listTopicsFunc: func(context.Context) (*ListTopicsResponse, error) {
+			return &ListTopicsResponse{Topics: []Topic{}}, nil
 		},
-	}
-	recorder := &fakeTopicMetricsRecorder{}
-	svc := NewService(&config.Config{}, logkit.NewNop(), storage)
-	svc.SetTopicMetricsRecorder(recorder)
-
-	req := httptest.NewRequest(http.MethodPost, "/topics/topic-1/publish", strings.NewReader(`{"messages":[{"body":"aGVsbG8="},{"body":"d29ybGQ="}]}`))
-	rec := httptest.NewRecorder()
-
-	svc.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusAccepted)
-	}
-	if recorder.publishTopicID != "topic-1" {
-		t.Fatalf("publishTopicID = %q, want topic-1", recorder.publishTopicID)
-	}
-	if recorder.messagesPublished != 2 {
-		t.Fatalf("messagesPublished = %d, want 2", recorder.messagesPublished)
-	}
-	if recorder.deliveries != 5 {
-		t.Fatalf("deliveries = %d, want 5", recorder.deliveries)
-	}
-}
-
-func TestPublishTopicDoesNotRecordTopicMetricsOnFailure(t *testing.T) {
-	storage := &mockStorage{
+		createTopicFunc: func(context.Context, *CreateTopicRequest) (*CreateTopicResponse, error) {
+			return &CreateTopicResponse{TopicID: topicID}, nil
+		},
+		deleteTopicFunc: func(context.Context, string) (*DeleteTopicResult, error) {
+			return &DeleteTopicResult{}, nil
+		},
+		subscribeFunc: func(context.Context, string, *SubscribeRequest) (*SubscribeResponse, error) {
+			return &SubscribeResponse{SubscriptionID: subscriptionID}, nil
+		},
+		unsubscribeFunc: func(context.Context, string, string) error { return nil },
 		publishFunc: func(context.Context, string, *PublishRequest) (*PublishResponse, error) {
-			return nil, errors.New("publish failed")
+			return &PublishResponse{TopicID: topicID, QueueIDs: []string{}, MessageIDs: []string{}, DeliveredCount: 0}, nil
 		},
-	}
-	recorder := &fakeTopicMetricsRecorder{}
-	svc := NewService(&config.Config{}, logkit.NewNop(), storage)
-	svc.SetTopicMetricsRecorder(recorder)
-
-	req := httptest.NewRequest(http.MethodPost, "/topics/topic-1/publish", strings.NewReader(`{"messages":[{"body":"aGVsbG8="}]}`))
-	rec := httptest.NewRecorder()
-
-	svc.ServeHTTP(rec, req)
-
-	if rec.Code == http.StatusAccepted {
-		t.Fatalf("status = %d, want non-success publish status", rec.Code)
-	}
-	if recorder.publishTopicID != "" {
-		t.Fatalf("publishTopicID = %q, want empty", recorder.publishTopicID)
-	}
-	if recorder.messagesPublished != 0 {
-		t.Fatalf("messagesPublished = %d, want 0", recorder.messagesPublished)
-	}
-	if recorder.deliveries != 0 {
-		t.Fatalf("deliveries = %d, want 0", recorder.deliveries)
-	}
-}
-
-func TestSubscribeTopicRecordsCurrentSubscriptionCount(t *testing.T) {
-	storage := &mockStorage{
-		subscribeFunc: func(context.Context, string, *SubscribeRequest) (*SubscribeResponse, error) {
-			return &SubscribeResponse{SubscriptionID: "sub-1"}, nil
+		deleteQueueFunc: func(context.Context, *v1.DeleteQueueRequest) (*DeleteQueueResult, error) {
+			return &DeleteQueueResult{}, nil
 		},
 		topicInventoryFunc: func(context.Context) (TopicInventory, error) {
-			return TopicInventory{TopicsExist: 1, SubscriptionCounts: map[string]int64{"topic-1": 2}}, nil
+			return TopicInventory{TopicsExist: 1, SubscriptionCounts: map[string]int64{topicID: 0}}, nil
 		},
 	}
-	recorder := &fakeTopicMetricsRecorder{}
-	svc := NewService(&config.Config{}, logkit.NewNop(), storage)
-	svc.SetTopicMetricsRecorder(recorder)
-
-	req := httptest.NewRequest(http.MethodPost, "/topics/topic-1/subscriptions", strings.NewReader(`{"queueId":"c5s8b4p9e8rg5u5fgq10"}`))
-	rec := httptest.NewRecorder()
-
-	svc.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusCreated)
+	service := newTestService(storage)
+	tests := []struct {
+		name, method, target, body string
+		status                     int
+		wantBody                   string
+	}{
+		{name: "list", method: http.MethodGet, target: "/topics/", status: http.StatusOK, wantBody: `{"topics":[]}`},
+		{name: "create", method: http.MethodPost, target: "/topics/", body: `{"topicName":"events"}`, status: http.StatusCreated, wantBody: `{"topicId":"` + topicID + `"}`},
+		{name: "delete", method: http.MethodDelete, target: "/topics/" + topicID, status: http.StatusOK, wantBody: `{}`},
+		{name: "subscribe", method: http.MethodPost, target: "/topics/" + topicID + "/subscriptions", body: `{"queueId":"` + validXID + `"}`, status: http.StatusCreated, wantBody: `{"subscriptionId":"` + subscriptionID + `"}`},
+		{name: "unsubscribe", method: http.MethodDelete, target: "/topics/" + topicID + "/subscriptions/" + subscriptionID, status: http.StatusOK, wantBody: `{}`},
+		{name: "publish", method: http.MethodPost, target: "/topics/" + topicID + "/publish", body: `{"messages":[{"body":"eA=="}]}`, status: http.StatusAccepted, wantBody: `{"topicId":"` + topicID + `","queueIds":[],"messageIds":[],"deliveredCount":0}`},
+		{name: "delete queue", method: http.MethodDelete, target: "/" + validXID + "?force=true", status: http.StatusOK, wantBody: `{}`},
 	}
-	if recorder.createdTopicID != "topic-1" {
-		t.Fatalf("createdTopicID = %q, want topic-1", recorder.createdTopicID)
-	}
-	if recorder.createdCurrentCount != 2 {
-		t.Fatalf("createdCurrentCount = %d, want 2", recorder.createdCurrentCount)
-	}
-}
-
-func TestSubscribeTopicDoesNotRecordTopicMetricsOnFailure(t *testing.T) {
-	storage := &mockStorage{
-		subscribeFunc: func(context.Context, string, *SubscribeRequest) (*SubscribeResponse, error) {
-			return nil, errors.New("subscribe failed")
-		},
-	}
-	recorder := &fakeTopicMetricsRecorder{}
-	svc := NewService(&config.Config{}, logkit.NewNop(), storage)
-	svc.SetTopicMetricsRecorder(recorder)
-
-	req := httptest.NewRequest(http.MethodPost, "/topics/topic-1/subscriptions", strings.NewReader(`{"queueId":"c5s8b4p9e8rg5u5fgq10"}`))
-	rec := httptest.NewRecorder()
-
-	svc.ServeHTTP(rec, req)
-
-	if rec.Code == http.StatusCreated {
-		t.Fatalf("status = %d, want non-success subscribe status", rec.Code)
-	}
-	if recorder.createdTopicID != "" {
-		t.Fatalf("createdTopicID = %q, want empty", recorder.createdTopicID)
-	}
-	if recorder.createdCurrentCount != 0 {
-		t.Fatalf("createdCurrentCount = %d, want 0", recorder.createdCurrentCount)
-	}
-}
-
-func TestSetTopicMetricsRecorderReconcilesExistingTopicSubscriptions(t *testing.T) {
-	storage := &mockStorage{
-		topicInventoryFunc: func(context.Context) (TopicInventory, error) {
-			return TopicInventory{TopicsExist: 1, SubscriptionCounts: map[string]int64{"topic-1": 2}}, nil
-		},
-	}
-	recorder := &fakeTopicMetricsRecorder{}
-	svc := NewService(&config.Config{}, logkit.NewNop(), storage)
-
-	svc.SetTopicMetricsRecorder(recorder)
-
-	if got := recorder.reconciledCounts["topic-1"]; got != 2 {
-		t.Fatalf("reconciled topic-1 count = %d, want 2", got)
-	}
-}
-
-func TestDeleteTopicReconcilesTopicSubscriptionMetrics(t *testing.T) {
-	storage := &mockStorage{
-		deleteTopicFunc: func(_ context.Context, topicID string) (*DeleteTopicResult, error) {
-			if topicID != "topic-1" {
-				t.Fatalf("topicID = %q, want topic-1", topicID)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doRequest(t, service, tc.method, tc.target, tc.body)
+			if rec.Code != tc.status || strings.TrimSpace(rec.Body.String()) != tc.wantBody {
+				t.Fatalf("response = %d %s, want %d %s", rec.Code, strings.TrimSpace(rec.Body.String()), tc.status, tc.wantBody)
 			}
-			return &DeleteTopicResult{RemovedSubscriptions: []Subscription{{SubscriptionID: "internal-only"}}}, nil
-		},
-		topicInventoryFunc: func(context.Context) (TopicInventory, error) {
-			return TopicInventory{TopicsExist: 1, SubscriptionCounts: map[string]int64{"topic-2": 1}}, nil
-		},
-	}
-	recorder := &fakeTopicMetricsRecorder{}
-	svc := NewService(&config.Config{}, logkit.NewNop(), storage)
-	svc.SetTopicMetricsRecorder(recorder)
-
-	req := httptest.NewRequest(http.MethodDelete, "/topics/topic-1", nil)
-	rec := httptest.NewRecorder()
-
-	svc.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
-	}
-	if got := strings.TrimSpace(rec.Body.String()); got != `{}` {
-		t.Fatalf("delete topic body = %s, want {}", got)
-	}
-	if got := recorder.reconciledCounts["topic-2"]; got != 1 {
-		t.Fatalf("reconciled topic-2 count = %d, want 1", got)
-	}
-	if _, ok := recorder.reconciledCounts["topic-1"]; ok {
-		t.Fatalf("reconciled counts = %v, want deleted topic absent", recorder.reconciledCounts)
+		})
 	}
 }
 
-func TestDeleteQueueReconcilesTopicSubscriptionMetrics(t *testing.T) {
-	storage := &mockStorage{
-		deleteQueueFunc: func(_ context.Context, input *v1.DeleteQueueRequest) (*DeleteQueueResult, error) {
-			if input.QueueId != "c5s8b4p9e8rg5u5fgq10" {
-				t.Fatalf("QueueId = %q, want c5s8b4p9e8rg5u5fgq10", input.QueueId)
-			}
-			return &DeleteQueueResult{RemovedSubscriptions: []Subscription{{SubscriptionID: "internal-only"}}}, nil
-		},
-		topicInventoryFunc: func(context.Context) (TopicInventory, error) {
-			return TopicInventory{TopicsExist: 1, SubscriptionCounts: map[string]int64{"topic-1": 1}}, nil
-		},
-	}
-	recorder := &fakeTopicMetricsRecorder{}
-	svc := NewService(&config.Config{}, logkit.NewNop(), storage)
-	svc.SetTopicMetricsRecorder(recorder)
+func TestUndecodableHTTPBodyDoesNotRecordBusinessRequest(t *testing.T) {
+	recorder := &applicationRecorder{}
+	observer := telemetry.NewObserver(metrics.BackendSQLite)
+	observer.SetRecorder(recorder)
+	storage := &mockStorage{}
+	service := NewService(nil, logkit.NewNop(), NewObservedStorage(storage, observer), observer)
+	body := &trackedBody{Reader: strings.NewReader(`{"topicName":`)}
+	request := httptest.NewRequest(http.MethodPost, "/topics/", nil)
+	request.Body = body
+	response := httptest.NewRecorder()
 
-	req := httptest.NewRequest(http.MethodDelete, "/c5s8b4p9e8rg5u5fgq10?force=true", nil)
-	rec := httptest.NewRecorder()
+	service.ServeHTTP(response, request)
 
-	svc.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	if len(recorder.requests) != 0 || len(recorder.operations) != 0 {
+		t.Fatalf("events = requests %#v operations %#v, want none", recorder.requests, recorder.operations)
 	}
-	if got := strings.TrimSpace(rec.Body.String()); got != `{}` {
-		t.Fatalf("delete queue body = %s, want {}", got)
-	}
-	if got := recorder.reconciledCounts["topic-1"]; got != 1 {
-		t.Fatalf("reconciled topic-1 count = %d, want 1", got)
+	if !body.closed {
+		t.Fatal("malformed request body was not closed")
 	}
 }
 
-func TestUnsubscribeTopicRecordsCurrentSubscriptionCount(t *testing.T) {
-	storage := &mockStorage{
-		unsubscribeFunc: func(context.Context, string, string) error {
-			return nil
-		},
-		topicInventoryFunc: func(context.Context) (TopicInventory, error) {
-			return TopicInventory{TopicsExist: 1, SubscriptionCounts: map[string]int64{"topic-1": 1}}, nil
-		},
-	}
-	recorder := &fakeTopicMetricsRecorder{}
-	svc := NewService(&config.Config{}, logkit.NewNop(), storage)
-	svc.SetTopicMetricsRecorder(recorder)
+func TestPubSubHTTPAndGRPCHaveStatusParity(t *testing.T) {
+	topicID := idkit.XID()
 
-	req := httptest.NewRequest(http.MethodDelete, "/topics/topic-1/subscriptions/sub-1", nil)
-	rec := httptest.NewRecorder()
+	t.Run("invalid subscribe queue", func(t *testing.T) {
+		storage := &mockStorage{}
+		httpResponse := doRequest(t, newTestService(storage), http.MethodPost, "/topics/"+topicID+"/subscriptions", `{"queueId":"bad"}`)
+		_, grpcErr := newTestService(storage).Subscribe(context.Background(), &v1.SubscribeRequest{TopicId: topicID, QueueId: "bad"})
+		if httpResponse.Code != http.StatusBadRequest || status.Code(grpcErr) != codes.InvalidArgument {
+			t.Fatalf("HTTP/gRPC = %d/%v, want %d/%v", httpResponse.Code, status.Code(grpcErr), http.StatusBadRequest, codes.InvalidArgument)
+		}
+	})
 
-	svc.ServeHTTP(rec, req)
+	t.Run("missing topic", func(t *testing.T) {
+		storage := &mockStorage{deleteTopicFunc: func(context.Context, string) (*DeleteTopicResult, error) {
+			return nil, pqerr.ErrNotFound
+		}}
+		httpResponse := doRequest(t, newTestService(storage), http.MethodDelete, "/topics/"+topicID, "")
+		_, grpcErr := newTestService(storage).DeleteTopic(context.Background(), &v1.DeleteTopicRequest{TopicId: topicID})
+		if httpResponse.Code != http.StatusNotFound || status.Code(grpcErr) != codes.NotFound {
+			t.Fatalf("HTTP/gRPC = %d/%v, want %d/%v", httpResponse.Code, status.Code(grpcErr), http.StatusNotFound, codes.NotFound)
+		}
+	})
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
-	}
-	if recorder.deletedTopicID != "topic-1" {
-		t.Fatalf("deletedTopicID = %q, want topic-1", recorder.deletedTopicID)
-	}
-	if recorder.deletedCurrentCount != 1 {
-		t.Fatalf("deletedCurrentCount = %d, want 1", recorder.deletedCurrentCount)
-	}
+	t.Run("partial publish remains conservative", func(t *testing.T) {
+		partial := &PartialPublishError{Outcome: PublishOutcome{Response: &PublishResponse{TopicID: topicID}}, Causes: []error{pqerr.ErrUnavailable}}
+		storage := &mockStorage{publishFunc: func(context.Context, string, *PublishRequest) (*PublishResponse, error) {
+			return partial.Outcome.Response, partial
+		}}
+		httpResponse := doRequest(t, newTestService(storage), http.MethodPost, "/topics/"+topicID+"/publish", `{"messages":[{"body":"eA=="}]}`)
+		grpcResponse, grpcErr := newTestService(storage).Publish(context.Background(), &v1.PublishRequest{TopicId: topicID, Messages: []*v1.PublishMessage{{Body: []byte("x")}}})
+		if httpResponse.Code != http.StatusInternalServerError || status.Code(grpcErr) != codes.Internal || grpcResponse != nil {
+			t.Fatalf("HTTP/gRPC = %d/%v response=%#v, want %d/%v nil", httpResponse.Code, status.Code(grpcErr), grpcResponse, http.StatusInternalServerError, codes.Internal)
+		}
+	})
 }
 
-func TestUnsubscribeTopicDoesNotRecordTopicMetricsOnFailure(t *testing.T) {
-	storage := &mockStorage{
-		unsubscribeFunc: func(context.Context, string, string) error {
-			return errors.New("unsubscribe failed")
-		},
-	}
-	recorder := &fakeTopicMetricsRecorder{}
-	svc := NewService(&config.Config{}, logkit.NewNop(), storage)
-	svc.SetTopicMetricsRecorder(recorder)
-
-	req := httptest.NewRequest(http.MethodDelete, "/topics/topic-1/subscriptions/sub-1", nil)
-	rec := httptest.NewRecorder()
-
-	svc.ServeHTTP(rec, req)
-
-	if rec.Code == http.StatusOK {
-		t.Fatalf("status = %d, want non-success unsubscribe status", rec.Code)
-	}
-	if recorder.deletedTopicID != "" {
-		t.Fatalf("deletedTopicID = %q, want empty", recorder.deletedTopicID)
-	}
-	if recorder.deletedCurrentCount != 0 {
-		t.Fatalf("deletedCurrentCount = %d, want 0", recorder.deletedCurrentCount)
-	}
+type trackedBody struct {
+	io.Reader
+	closed bool
 }
 
-var _ TopicMetricsRecorder = (*fakeTopicMetricsRecorder)(nil)
+func (b *trackedBody) Close() error {
+	b.closed = true
 
-type fakeTopicMetricsRecorder struct {
-	publishTopicID    string
-	messagesPublished uint64
-	deliveries        uint64
-
-	createdTopicID      string
-	createdCurrentCount int64
-	deletedTopicID      string
-	deletedCurrentCount int64
-	reconciledCounts    map[string]int64
+	return nil
 }
 
-func (f *fakeTopicMetricsRecorder) RecordTopicPublish(topicID string, messagesPublished, deliveries uint64) {
-	f.publishTopicID = topicID
-	f.messagesPublished = messagesPublished
-	f.deliveries = deliveries
-}
-
-func (f *fakeTopicMetricsRecorder) RecordTopicSubscriptionCreated(topicID string, currentCount int64) {
-	f.createdTopicID = topicID
-	f.createdCurrentCount = currentCount
-}
-
-func (f *fakeTopicMetricsRecorder) RecordTopicSubscriptionDeleted(topicID string, currentCount int64) {
-	f.deletedTopicID = topicID
-	f.deletedCurrentCount = currentCount
-}
-
-func (f *fakeTopicMetricsRecorder) ReconcileTopicSubscriptionCounts(countsByTopic map[string]int64) {
-	f.reconciledCounts = make(map[string]int64, len(countsByTopic))
-	for topicID, count := range countsByTopic {
-		f.reconciledCounts[topicID] = count
-	}
-}
+var _ io.ReadCloser = (*trackedBody)(nil)

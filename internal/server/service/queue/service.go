@@ -8,6 +8,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/marsolab/plainq/internal/server/config"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
+	"github.com/marsolab/plainq/internal/server/service/telemetry"
 	vtgrpc "github.com/planetscale/vtprotobuf/codec/grpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/encoding"
@@ -58,26 +59,28 @@ type Storage interface {
 	TopicInventory(ctx context.Context) (TopicInventory, error)
 }
 
-type TopicMetricsRecorder interface {
-	RecordTopicPublish(topicID string, messagesPublished, deliveries uint64)
-	RecordTopicSubscriptionCreated(topicID string, currentCount int64)
-	RecordTopicSubscriptionDeleted(topicID string, currentCount int64)
-	ReconcileTopicSubscriptionCounts(countsByTopic map[string]int64)
-}
-
 // Service holds logic of interacting with a queue.
 type Service struct {
 	v1.UnimplementedPlainQServiceServer
 
-	cfg          *config.Config
-	logger       *slog.Logger
-	router       chi.Router
-	storage      Storage
-	topicMetrics TopicMetricsRecorder
+	cfg     *config.Config
+	logger  *slog.Logger
+	router  chi.Router
+	storage Storage
+	pubsub  *pubSubApplication
 }
 
 // NewService creates a new queue service.
-func NewService(cfg *config.Config, logger *slog.Logger, storage Storage) *Service {
+func NewService(
+	cfg *config.Config,
+	logger *slog.Logger,
+	storage Storage,
+	observer *telemetry.Observer,
+) *Service {
+	if observer == nil {
+		panic("queue: observer is required")
+	}
+
 	encoding.RegisterCodec(vtgrpc.Codec{})
 
 	s := Service{
@@ -85,6 +88,7 @@ func NewService(cfg *config.Config, logger *slog.Logger, storage Storage) *Servi
 		logger:  logger,
 		router:  chi.NewRouter(),
 		storage: storage,
+		pubsub:  newPubSubApplication(storage, observer, logger),
 	}
 
 	s.router.Route("/", func(r chi.Router) {
@@ -113,11 +117,6 @@ func NewService(cfg *config.Config, logger *slog.Logger, storage Storage) *Servi
 	})
 
 	return &s
-}
-
-func (s *Service) SetTopicMetricsRecorder(recorder TopicMetricsRecorder) {
-	s.topicMetrics = recorder
-	s.reconcileTopicSubscriptionCounts(context.Background())
 }
 
 func (s *Service) Mount(server *grpc.Server)                        { v1.RegisterPlainQServiceServer(server, s) }
