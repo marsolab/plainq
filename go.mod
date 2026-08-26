@@ -13,6 +13,7 @@ require (
 	github.com/cristalhq/jwt/v5 v5.4.0
 	github.com/go-chi/chi/v5 v5.3.1
 	github.com/go-chi/cors v1.2.2
+	github.com/google/btree v1.1.3
 	github.com/hashicorp/go-hclog v1.6.3
 	github.com/hashicorp/memberlist v0.6.0
 	github.com/hashicorp/raft v1.7.3
@@ -67,7 +68,6 @@ require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
 	github.com/fatih/color v1.19.0 // indirect
-	github.com/google/btree v1.1.3 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/hablullah/go-hijri v1.0.2 // indirect
 	github.com/hablullah/go-juliandays v1.0.0 // indirect

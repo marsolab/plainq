@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/btree"
 	"github.com/marsolab/servekit/logkit"
 )
 
@@ -41,6 +42,7 @@ const (
 	defaultTopicLimit         = 65_536
 	defaultEventBufferLimit   = 65_536
 	defaultTerminalStateLimit = 65_536
+	terminalOrderDegree       = 32
 
 	// Bucket sizes in milliseconds for time-series aggregation.
 	bucketSize1m = 60000    // 1 minute in ms.
@@ -253,6 +255,7 @@ type Collector struct {
 	terminalReservations   map[string]*terminalReservation
 	terminalEntries        map[terminalKey]*terminalReservation
 	terminalQueue          *list.List
+	terminalOrder          *btree.BTreeG[*terminalReservation]
 	terminalNextGeneration int64
 	terminalLoadFailed     bool
 	terminalPromoteMu      sync.Mutex
@@ -390,6 +393,9 @@ func New(store Store, opts ...Option) *Collector {
 		terminalQueue:        list.New(),
 		stop:                 make(chan struct{}),
 	}
+	c.terminalOrder = btree.NewG(terminalOrderDegree, func(left, right *terminalReservation) bool {
+		return c.terminalStateBefore(left.state, right.state)
+	})
 
 	for _, opt := range opts {
 		opt(c)

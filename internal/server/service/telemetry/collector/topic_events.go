@@ -1093,16 +1093,62 @@ func (c *Collector) loadDurableTerminalReservations() {
 		}
 
 		current, exists := c.terminalReservations[state.SubjectID]
-		if !exists || current.state.Generation < state.Generation {
-			if exists {
-				c.queueTerminalCancelLocked(current)
-			}
-
-			c.terminalReservations[state.SubjectID] = reservation
-		} else {
+		switch {
+		case !exists:
+			c.activateTerminalLocked(reservation)
+		case current.state.Generation < state.Generation:
+			c.deactivateTerminalLocked(current)
+			c.queueTerminalCancelLocked(current)
+			c.activateTerminalLocked(reservation)
+		default:
 			c.queueTerminalCancelLocked(reservation)
 		}
 	}
+}
+
+func (c *Collector) terminalStateBefore(left, right TerminalState) bool {
+	if c.terminalVisit != nil {
+		c.terminalVisit()
+	}
+
+	if left.ObservedAt != right.ObservedAt {
+		return left.ObservedAt < right.ObservedAt
+	}
+
+	if left.SubjectID != right.SubjectID {
+		return left.SubjectID < right.SubjectID
+	}
+
+	return left.Generation < right.Generation
+}
+
+func (c *Collector) activateTerminalLocked(reservation *terminalReservation) {
+	subjectID := reservation.state.SubjectID
+	if _, exists := c.terminalReservations[subjectID]; exists {
+		panic("collector: duplicate active terminal subject")
+	}
+
+	if _, replaced := c.terminalOrder.ReplaceOrInsert(reservation); replaced {
+		panic("collector: duplicate active terminal order key")
+	}
+
+	c.terminalReservations[subjectID] = reservation
+}
+
+func (c *Collector) deactivateTerminalLocked(reservation *terminalReservation) {
+	subjectID := reservation.state.SubjectID
+
+	current, exists := c.terminalReservations[subjectID]
+	if !exists || current != reservation {
+		return
+	}
+
+	removed, exists := c.terminalOrder.Delete(reservation)
+	if !exists || removed != reservation {
+		panic("collector: active terminal missing from order")
+	}
+
+	delete(c.terminalReservations, subjectID)
 }
 
 // reserveTerminalLocked runs with terminalMu and topicMu held.
@@ -1124,7 +1170,7 @@ func (c *Collector) reserveTerminalLocked(subjectID string, topic *TopicMetrics,
 		operation: terminalEnqueue,
 	}
 	reservation.element = c.terminalQueue.PushBack(reservation)
-	c.terminalReservations[subjectID] = reservation
+	c.activateTerminalLocked(reservation)
 	c.terminalEntries[terminalKey{subjectID: subjectID, generation: reservation.state.Generation}] = reservation
 	topic.terminalGeneration = reservation.state.Generation
 
@@ -1140,7 +1186,7 @@ func (c *Collector) cancelTerminalLocked(subjectID string) int64 {
 		return 0
 	}
 
-	delete(c.terminalReservations, subjectID)
+	c.deactivateTerminalLocked(reservation)
 	c.queueTerminalCancelLocked(reservation)
 
 	return reservation.state.Generation
@@ -1315,9 +1361,7 @@ func (c *Collector) removeTerminalEntryLocked(reservation *terminalReservation) 
 		delete(c.terminalEntries, key)
 	}
 
-	if current, exists := c.terminalReservations[reservation.state.SubjectID]; exists && current == reservation {
-		delete(c.terminalReservations, reservation.state.SubjectID)
-	}
+	c.deactivateTerminalLocked(reservation)
 }
 
 func (c *Collector) removeTerminalActionLocked(reservation *terminalReservation) {
@@ -1344,28 +1388,22 @@ func (c *Collector) terminalStatesDue(boundary int64) []TerminalState {
 	c.terminalMu.Lock()
 
 	states := make([]TerminalState, 0, len(c.terminalReservations))
-	for _, reservation := range c.terminalReservations {
+	c.terminalOrder.Ascend(func(reservation *terminalReservation) bool {
 		if c.terminalVisit != nil {
 			c.terminalVisit()
+		}
+
+		if reservation.state.ObservedAt >= boundary {
+			return false
 		}
 
 		if reservation.durable && !reservation.canceled && reservation.state.ObservedAt < boundary {
 			states = append(states, reservation.state)
 		}
-	}
-	c.terminalMu.Unlock()
 
-	sort.Slice(states, func(i, j int) bool {
-		if states[i].ObservedAt != states[j].ObservedAt {
-			return states[i].ObservedAt < states[j].ObservedAt
-		}
-
-		if states[i].SubjectID != states[j].SubjectID {
-			return states[i].SubjectID < states[j].SubjectID
-		}
-
-		return states[i].Generation < states[j].Generation
+		return true
 	})
+	c.terminalMu.Unlock()
 
 	return states
 }

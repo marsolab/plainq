@@ -545,6 +545,58 @@ func TestTerminalMaintenanceOrderingNeverHoldsCutoverAndVisitsLinearly(t *testin
 	}
 }
 
+func TestTerminalDueMaintenanceIsLinearAndDeterministic(t *testing.T) {
+	for _, backlog := range []int{64, 128} {
+		t.Run(fmt.Sprintf("backlog=%d", backlog), func(t *testing.T) {
+			c := New(nil)
+			c.terminalLimit = backlog
+
+			c.terminalMu.Lock()
+			c.topicMu.Lock()
+			for i := backlog - 1; i >= 0; i-- {
+				subjectID := fmt.Sprintf("topic-%03d", i)
+				observedAt := int64(100 + (i*37)%backlog)
+				if !c.reserveTerminalLocked(subjectID, &TopicMetrics{}, observedAt) {
+					t.Fatalf("reserve shuffled terminal %q", subjectID)
+				}
+				c.terminalReservations[subjectID].durable = true
+			}
+			c.topicMu.Unlock()
+			c.terminalMu.Unlock()
+
+			visits := 0
+			c.terminalVisit = func() { visits++ }
+			first := c.terminalStatesDue(1_000)
+			if visits != backlog {
+				t.Fatalf("due maintenance work = %d, want exactly one visit for each of %d states", visits, backlog)
+			}
+			assertTerminalStatesOrdered(t, first)
+
+			visits = 0
+			second := c.terminalStatesDue(1_000)
+			if visits != backlog {
+				t.Fatalf("repeat due maintenance work = %d, want exactly one visit for each of %d states", visits, backlog)
+			}
+			if !reflect.DeepEqual(second, first) {
+				t.Fatalf("repeat due order = %#v, want deterministic %#v", second, first)
+			}
+		})
+	}
+}
+
+func assertTerminalStatesOrdered(t *testing.T, states []TerminalState) {
+	t.Helper()
+	for i := 1; i < len(states); i++ {
+		previous, current := states[i-1], states[i]
+		if previous.ObservedAt > current.ObservedAt ||
+			(previous.ObservedAt == current.ObservedAt && previous.SubjectID > current.SubjectID) ||
+			(previous.ObservedAt == current.ObservedAt && previous.SubjectID == current.SubjectID &&
+				previous.Generation > current.Generation) {
+			t.Fatalf("terminal states out of order at %d: %#v before %#v", i, previous, current)
+		}
+	}
+}
+
 func assertTopicRequestCompletesWhileTerminalMaintenanceBlocked(t *testing.T, c *Collector) {
 	t.Helper()
 	done := make(chan struct{})
