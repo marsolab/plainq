@@ -52,6 +52,8 @@ const (
 	storageDriverSQLite   = "sqlite"
 	storageDriverPostgres = "postgres"
 	storageDriverTurso    = "turso"
+	journalModeDelete     = "delete"
+	journalModeWAL        = "wal"
 )
 
 func telemetryBackend(driver string) string {
@@ -82,12 +84,6 @@ func newQueueTelemetryWiring(driver string, clustered bool) queueTelemetryWiring
 		local:   local,
 		logical: telemetry.NewStateSuppressingObserver(metrics.BackendCluster),
 	}
-}
-
-func newTelemetryObservers(driver string, clustered bool) (*telemetry.Observer, *telemetry.Observer) {
-	wiring := newQueueTelemetryWiring(driver, clustered)
-
-	return wiring.local, wiring.logical
 }
 
 func (w queueTelemetryWiring) reconcileTopicState(inventory *queue.TopicInventory) {
@@ -124,8 +120,9 @@ func replayStartupTopicInventory(
 	err := observer.CaptureTopicState(func() (telemetry.TopicStateEvent, error) {
 		inventory, err := storage.TopicInventory(ctx)
 		if err != nil {
-			return telemetry.TopicStateEvent{}, err
+			return telemetry.TopicStateEvent{}, fmt.Errorf("load topic inventory: %w", err)
 		}
+
 		return telemetry.TopicStateEvent{
 			TopicsExist:   inventory.TopicsExist,
 			Subscriptions: inventory.SubscriptionCounts,
@@ -133,6 +130,7 @@ func replayStartupTopicInventory(
 	})
 	if err != nil {
 		observer.StorageError("topic_inventory")
+
 		return fmt.Errorf("read startup topic inventory: %w", err)
 	}
 
@@ -461,6 +459,7 @@ func serverCommand() *commandSpec {
 			}
 
 			var checker hc.HealthChecker = hc.NewNopChecker()
+
 			var healthServices *hc.MultiServiceChecker
 
 			if cfg.HealthEnable {
@@ -479,9 +478,9 @@ func serverCommand() *commandSpec {
 			if clusterCfg.Enabled {
 				switch strings.ToLower(cfg.StorageJournalMode) {
 				case "":
-					cfg.StorageJournalMode = "wal"
+					cfg.StorageJournalMode = journalModeWAL
 
-				case "wal":
+				case journalModeWAL:
 
 				default:
 					return fmt.Errorf(
@@ -515,6 +514,7 @@ func serverCommand() *commandSpec {
 			if queueStorageInitErr != nil {
 				return queueStorageInitErr
 			}
+
 			physicalQueueStorage := queueStorage
 
 			defer func() {
@@ -571,6 +571,7 @@ func serverCommand() *commandSpec {
 					if !ok {
 						return fmt.Errorf("queue storage %T must implement health checking", physicalQueueStorage)
 					}
+
 					healthServices.AddService("storage", physicalHealth)
 				}
 			}
@@ -799,7 +800,7 @@ func initSQLiteBackend(cfg *config.Config, logger *slog.Logger) (*litekit.Conn, 
 
 func sqliteJournalMode(value string) (litekit.JournalMode, error) {
 	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "delete":
+	case journalModeDelete:
 		return litekit.Delete, nil
 	case "truncate":
 		return litekit.Truncate, nil
@@ -807,7 +808,7 @@ func sqliteJournalMode(value string) (litekit.JournalMode, error) {
 		return litekit.Persist, nil
 	case "memory":
 		return litekit.Memory, nil
-	case "wal":
+	case journalModeWAL:
 		return litekit.WAL, nil
 	case "off":
 		return litekit.Off, nil

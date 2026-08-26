@@ -210,7 +210,7 @@ func newTopicDeleteCommand(deps topicCommandDeps) *commandSpec {
 	var flags topicFlags
 
 	return &commandSpec{
-		Name:   "delete",
+		Name:   commandDelete,
 		Short:  "Delete a topic and all subscriptions",
 		Effect: effectDestructive,
 		Long: "Deletes the topic and every subscription attached to it. Queues and messages\n" +
@@ -222,7 +222,7 @@ func newTopicDeleteCommand(deps topicCommandDeps) *commandSpec {
 		}},
 		SetFlags: flags.register,
 		Run: func(_ *scotty.Command, args []string) (err error) {
-			if arityErr := requireTopicArity("delete", args, 1); arityErr != nil {
+			if arityErr := requireTopicArity(commandDelete, args, 1); arityErr != nil {
 				return arityErr
 			}
 

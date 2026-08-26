@@ -145,6 +145,8 @@ func cliConventions() []string {
 	}
 }
 
+const commandDelete = "delete"
+
 // commandSpec declares one command: what it does, what it takes, what it
 // returns, and what it costs to run.
 type commandSpec struct {

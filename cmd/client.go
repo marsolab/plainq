@@ -405,7 +405,7 @@ func deleteQueueCommand() *commandSpec {
 	)
 
 	return &commandSpec{
-		Name:   "delete",
+		Name:   commandDelete,
 		Short:  "Delete a queue",
 		Effect: effectDestructive,
 		Long: "Deletes the queue itself. A queue that still holds messages is protected;\n" +
@@ -441,7 +441,7 @@ func deleteQueueCommand() *commandSpec {
 			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 			defer cancel()
 
-			id, idErr := queueIDArg("delete", args)
+			id, idErr := queueIDArg(commandDelete, args)
 			if idErr != nil {
 				return idErr
 			}

@@ -27,22 +27,24 @@ func TestTursoUsesTursoTelemetryBackend(t *testing.T) {
 	if got := telemetryBackend(storageDriverTurso); got != metrics.BackendTurso {
 		t.Fatalf("telemetryBackend(turso) = %q, want %q", got, metrics.BackendTurso)
 	}
-	local, logical := newTelemetryObservers(storageDriverTurso, false)
-	if local.Backend() != metrics.BackendTurso || logical != local {
-		t.Fatalf("standalone observers = %q/%p/%p, want one Turso observer", local.Backend(), local, logical)
+	wiring := newQueueTelemetryWiring(storageDriverTurso, false)
+	if wiring.local.Backend() != metrics.BackendTurso || wiring.logical != wiring.local {
+		t.Fatalf("standalone observers = %q/%p/%p, want one Turso observer",
+			wiring.local.Backend(), wiring.local, wiring.logical)
 	}
 }
 
 func TestClusterIngressUsesClusterBackend(t *testing.T) {
-	local, logical := newTelemetryObservers(storageDriverSQLite, true)
-	if local.Backend() != metrics.BackendSQLite {
-		t.Fatalf("local backend = %q, want sqlite", local.Backend())
+	wiring := newQueueTelemetryWiring(storageDriverSQLite, true)
+	if wiring.local.Backend() != metrics.BackendSQLite {
+		t.Fatalf("local backend = %q, want sqlite", wiring.local.Backend())
 	}
-	if logical == local || logical.Backend() != metrics.BackendCluster {
-		t.Fatalf("logical observer = %p backend %q, want distinct cluster observer", logical, logical.Backend())
+	if wiring.logical == wiring.local || wiring.logical.Backend() != metrics.BackendCluster {
+		t.Fatalf("logical observer = %p backend %q, want distinct cluster observer",
+			wiring.logical, wiring.logical.Backend())
 	}
 	captureCalled := false
-	if err := logical.CaptureTopicState(func() (telemetry.TopicStateEvent, error) {
+	if err := wiring.logical.CaptureTopicState(func() (telemetry.TopicStateEvent, error) {
 		captureCalled = true
 		return telemetry.TopicStateEvent{}, nil
 	}); err != nil {
