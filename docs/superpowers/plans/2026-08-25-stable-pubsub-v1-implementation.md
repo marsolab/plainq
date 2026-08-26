@@ -612,6 +612,9 @@ git commit -m "feat: define stable pubsub validation and fanout"
 - Modify: `internal/server/service/queue/http_transport_test.go`
 - Modify: `internal/server/service/queue/grpc_transport.go`
 - Modify: `internal/server/service/queue/grpc_transport_test.go`
+- Modify: `internal/server/service/queue/validation.go`
+- Modify: `internal/server/service/queue/validation_test.go`
+- Add: `internal/server/service/queue/grpc_delete_test.go`
 - Modify: `internal/cluster/store.go`
 - Add: `internal/cluster/store_test.go`
 - Modify: `internal/cluster/fsm/fsm.go`
@@ -772,8 +775,9 @@ git commit -m "feat: normalize pubsub storage semantics"
 - Add: `internal/server/service/telemetry/observer_test.go`
 - Modify: `internal/server/service/queue/observability.go`
 - Modify: `internal/server/service/queue/observability_test.go`
+- Modify: `docs/guides/observability.md`
 
-**Contract:** one elapsed duration and result feed both sinks; public-request and storage-operation metrics stay distinct; publish fan-out uses selected destinations, not successful deliveries.
+**Contract:** one elapsed duration and result feed both sinks; public-request and storage-operation metrics stay distinct; publish fan-out uses selected destinations, not successful deliveries. Backend labels are exactly `sqlite|turso|postgres|cluster`, operation labels are the six public topic operations, results are `ok|error`, and neither request nor storage families carry a topic label.
 
 - [ ] **Step 1: Add failing Prometheus and observer tests**
 
@@ -790,8 +794,20 @@ Add:
 - `TestObserverAcceptsQueueOnlyRecorder`
 - `TestObserverDoesNotReplayUnknownQueueState`
 - `TestObserverInvalidatesTopicStateWithoutChangingLifecycle`
+- `TestObserverCopiesReconciledAndReplayedTopicMaps`
+- `TestObserverRecorderAttachAndReplayIsLinearizedWithEvents`
+- `TestObserverUnavailableRetainsPriorMapForLaterRemoval`
+- `TestTopicMetricVocabularyRejectsUnknownValues`
+- `TestTopicRequestAndStorageDefinitionsHaveNoTopicLabel`
+- `Test_Catalog_isFullyDocumented`
 
-Scrape assertions must include `# HELP`, `# TYPE`, classic histogram `le` buckets, and the exact bounded labels.
+Scrape assertions must include the VictoriaMetrics name-only `# HELP <family>`
+line, `# TYPE`, classic histogram `le` buckets, and the exact bounded labels.
+VictoriaMetrics metadata enablement is process-global, so these scrape tests
+must be serial and restore its prior setting; do not call `t.Parallel` around
+registry or metadata assertions. The declaration prose is asserted through
+`Catalog()` and `docs/guides/observability.md`, not against the name-only HELP
+line emitted by the pinned writer.
 
 - [ ] **Step 2: Run and observe missing families**
 
@@ -836,6 +852,15 @@ func ResetTopic(topicID string)
 ```
 
 `RecordPublish` always observes `destinations`, including zero. Lifecycle counters no longer mutate gauges implicitly.
+
+Add exported backend constants `BackendSQLite`, `BackendTurso`,
+`BackendPostgres`, and `BackendCluster`, plus the six existing operation
+constants and the two result constants as the only accepted values at the
+Observer/metrics boundary. Unknown values are programming errors and fail a
+focused test instead of silently creating a new Prometheus label. The request
+definitions remain `{backend,operation,result}` and `{backend,operation}`; the
+storage definitions retain those same bounded dimensions. Do not add `topic` to
+either family.
 
 - [ ] **Step 4: Define observer event records and recorder methods**
 
@@ -891,7 +916,22 @@ func (o *Observer) ReconcileTopicState(TopicStateEvent)
 func (o *Observer) TopicStateUnavailable()
 ```
 
-The Observer owns a mutex-protected last exact topic state plus a `known` bit. Reconciliation sets zero for topics removed since the prior state, updates current gauges, updates `topics_exist`, and sends the exact state to the collector. `TopicStateUnavailable` clears only the known bit and tells an optional `TopicRecorder` to stop covering exact gauges; it never changes a Prometheus gauge or lifecycle counter. `SetRecorder` replays state only when known.
+The Observer owns exactly one mutex covering its recorder pointer, queue
+known/value state, topic known/map state, and recorder callback ordering. Every
+method takes that mutex, updates Prometheus and the current recorder in one
+linear order, and releases it only after the callback returns; recorder methods
+must not call back into the Observer. `SetRecorder` swaps the pointer and replays
+known queue/topic state before unlocking, so no event overtakes attachment and
+no post-swap event reaches the old recorder.
+
+Reconciliation defensively copies the caller's subscription map before storing
+it, sets zero for topics removed since the retained prior map, updates current
+gauges and `topics_exist`, and sends another defensive copy to the collector.
+`SetRecorder` also replays a fresh copy, never the Observer-owned map.
+`TopicStateUnavailable` clears only the known bit while retaining the prior map
+for a later exact removed-topic comparison, and tells an optional
+`TopicRecorder` to stop covering exact gauges; it never changes a Prometheus
+gauge or lifecycle counter and never replays the retained-but-unknown map.
 
 Add the same known-state rule to the existing queue count: `NewObserver` starts with `queuesKnown=false`, `SetQueues` stores the exact count and sets it true, and `SetRecorder` calls `SetQueuesExist` only when it is true. Queue mutations may update an already-known count but must not turn an unknown zero into an authoritative replay. This prevents a newly created logical cluster observer from overwriting the collector's known local queue count.
 
@@ -904,15 +944,18 @@ Pass topic IDs into `TopicOperation`. Successful create attributes storage to th
 Run the Step 2 command again, then:
 
 ```bash
-go test ./internal/metrics -run 'Test_exposition_carriesTypeMetadata|Test_Catalog_isCompleteAndConsistent' -count=1
+go test ./internal/metrics -run 'Test_exposition_carriesTypeMetadata|Test_Catalog_isCompleteAndConsistent|Test_Catalog_isFullyDocumented' -count=1
 ```
 
-Expected: PASS. `plainq_topic_requests_total` and `plainq_topic_operations_total` move independently, and all pub/sub families expose metadata.
+Expected: PASS. `plainq_topic_requests_total` and
+`plainq_topic_operations_total` move independently, every pub/sub family is in
+the runtime catalog and observability guide, and raw exposition has the pinned
+VictoriaMetrics HELP/TYPE form.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add internal/metrics internal/server/service/telemetry internal/server/service/queue/observability.go internal/server/service/queue/observability_test.go
+git add internal/metrics internal/server/service/telemetry internal/server/service/queue/observability.go internal/server/service/queue/observability_test.go docs/guides/observability.md
 git commit -m "feat: unify pubsub prometheus events"
 ```
 
@@ -936,7 +979,7 @@ git commit -m "feat: unify pubsub prometheus events"
 - Modify: `internal/server/server.go`
 - Modify: `internal/server/routes_test.go`
 
-**Contract:** successfully decoded transport requests enter one boundary before domain validation. The boundary records one request, makes one measured outer storage operation, may perform one unmeasured post-commit `TopicInventory` reconciliation read, records logical effects after commit, and returns transport-neutral domain errors.
+**Contract:** successfully decoded transport requests enter one boundary before domain validation. The boundary records one request, makes one measured outer storage operation, may perform one unmeasured post-commit `TopicInventory` reconciliation read, records logical effects only when the committed outcome is known, and returns transport-neutral domain errors. An indeterminate `ErrCommitUnknown` records request/storage error but no fabricated business or lifecycle event; later exact reconciliation heals gauges.
 
 - [ ] **Step 1: Add application and transport parity tests**
 
@@ -951,8 +994,12 @@ Add:
 - `TestPubSubHTTPAndGRPCHaveStatusParity`
 - `TestUndecodableHTTPBodyDoesNotRecordBusinessRequest`
 - `TestDeleteQueueRecordsSubscriptionCascadeWithoutTopicRequest`
+- `TestCommitUnknownDoesNotFabricatePublishOrLifecycleEffects`
+- `TestDeleteQueueForceFalseMapsToHTTP409AndGRPCFailedPrecondition`
+- `TestSubscribeAndDeleteQueueNormalizeMalformedQueueID`
+- `TestServiceRejectsNilObserver`
 
-The recorder spy must assert exact operation, topic attribution, result, duration presence, messages, bytes, selected destinations, successful deliveries, failed deliveries, lifecycle count, and final gauge state.
+The recorder spy must assert exact operation, topic attribution, result, duration presence, messages, bytes, selected destinations, successful deliveries, failed deliveries, lifecycle count, final gauge state, and exact public response shapes (including empty delete responses and partial publish errors).
 
 - [ ] **Step 2: Run the tests and observe duplicated transport logic**
 
@@ -995,6 +1042,15 @@ deleteQueue(context.Context, *v1.DeleteQueueRequest) (*DeleteQueueResult, error)
 
 Each of the six topic methods captures `started := time.Now()` first and defers exactly one `observer.TopicRequest`, using a local `attributedTopicID` initialized to empty. Validation runs before the first storage call. For delete/subscribe/unsubscribe/publish, validate the topic XID first and set `attributedTopicID=topicID` only after that succeeds; a malformed attacker-controlled ID records system request telemetry only. Later validation failures, such as a valid topic with an empty publish batch or invalid subscription/queue ID, remain attributable to that valid topic. Successful create sets attribution to the returned topic ID; failed create and list remain system-only. `deleteQueue` is not a seventh public topic method and never calls `TopicRequest`; it only preserves committed subscription-cascade effects for the existing queue request path.
 
+Make the validation order explicit in table tests. Normalize malformed queue IDs
+for both subscribe and delete-queue through `pqerr.ErrInvalidID` in
+`validation.go`; neither path may leak the raw XID parser error. DeleteQueue's
+`force=false` non-empty precondition is `pqerr.ErrFailedPrecondition`: HTTP must
+return 409, while gRPC must return `codes.FailedPrecondition`. Because the pinned
+Servekit mapper does not honor that status through the generic hook, install the
+explicit `ctxkit` gRPC error hook and cover it in `grpc_delete_test.go`; do not
+assume `pqerr.AsTransport` alone provides the gRPC code.
+
 - [ ] **Step 4: Reconcile gauges and emit committed lifecycle effects**
 
 Add:
@@ -1015,15 +1071,19 @@ func (a *pubSubApplication) reconcileTopicState(ctx context.Context) {
 }
 ```
 
-After a successful topic create, reconcile so `plainq_topics_exist` and its internal exact gauge advance. After a successful subscribe, emit one created lifecycle event and reconcile. After explicit unsubscribe, emit one deleted event and reconcile. After topic delete, emit one deleted event per `DeleteTopicResult.RemovedSubscriptions`, then reconcile.
+After a successful topic create, reconcile so `plainq_topics_exist` and its internal exact gauge advance. After a successful subscribe, emit one created lifecycle event and reconcile. After explicit unsubscribe, emit one deleted event and reconcile. After topic delete, emit one deleted event per `DeleteTopicResult.RemovedSubscriptions`, using each effect's exact `TopicID`, then reconcile exactly once.
 
-The typed `deleteQueue` application helper is shared by HTTP and gRPC. It emits no topic request metric, but after successful queue deletion it emits one deleted lifecycle event per `DeleteQueueResult.RemovedSubscriptions` and reconciles exact topic state. Both transports discard that internal result and return their unchanged public empty response.
+The typed `deleteQueue` application helper is shared by HTTP and gRPC. It emits no topic request metric, but after a successful, known queue deletion it emits one deleted lifecycle event per `DeleteQueueResult.RemovedSubscriptions`, attributed to each effect's exact `TopicID`, and reconciles exact topic state once. Both transports discard that internal result and return their unchanged public empty response. An indeterminate commit has no durable effect handoff in v1, so it emits no lifecycle event; exactly-once effect recovery is explicitly out of scope.
 
 Reconciliation errors are logged and increment existing Prometheus `plainq_storage_errors_total{operation="topic_inventory"}` through `Observer.StorageError`; they do not claim a telemetry-store write failure and never turn a successful customer mutation into an error. The last known internal gauge timestamp remains unchanged until a later exact reconciliation succeeds.
 
 - [ ] **Step 5: Record publish business outcomes once**
 
-After storage returns, inspect a non-nil response even when the error is partial. Compute body bytes once. For a non-nil fan-out outcome call:
+After storage returns, emit publish business data only for a definite success or
+a typed `*PartialPublishError`. For a partial with a nil direct response, fall
+back to `partial.Outcome.Response`. Never interpret an arbitrary non-nil response
+beside a generic error—and especially `ErrCommitUnknown`—as a known outcome.
+Compute body bytes once. For a definite fan-out outcome call:
 
 ```go
 a.observer.Published(telemetry.TopicPublishEvent{
@@ -1063,7 +1123,7 @@ func NewService(
 
 Store `pubsub *pubSubApplication` on `Service`. Remove `TopicMetricsRecorder`, `SetTopicMetricsRecorder`, transport-level record helpers, and post-mutation observed `ListTopics` scans.
 
-Update every constructor call in `cmd/server.go` and queue/server tests in this same step. Production passes the same existing observer to `NewObservedStorage` and `NewService` until Task 6 deliberately splits local and logical observers. Tests create an explicit observer rather than passing `nil`; no compatibility constructor or hidden global observer is added. Remove `internal/server/server.go`'s `SetTopicMetricsRecorder` call atomically with deleting that method.
+Update every constructor call in `cmd/server.go` and queue/server tests in this same step. Production passes the **same pointer** to `NewObservedStorage` and `NewService` until Task 6 deliberately splits local and logical observers. Audit every constructor/wiring call; `NewService` rejects a nil observer, tests create an explicit one, and no compatibility constructor or hidden global observer is added. Remove `internal/server/server.go`'s `SetTopicMetricsRecorder` call atomically with deleting that method.
 
 - [ ] **Step 7: Make transports adapters only**
 
@@ -1078,6 +1138,7 @@ Run:
 ```bash
 go test ./internal/server/service/queue \
   -run 'TestPubSubApplication|TestPubSubHTTPAndGRPC|TestUndecodableHTTP|TestDeleteQueueRecordsSubscriptionCascade|Test.*Topic.*Handler|Test.*Topic.*GRPC' -count=1
+go test ./internal/server/service/queue -count=1
 go test ./cmd ./internal/server -run 'Test.*Server|Test_NewServer_mountsRoutes' -count=1
 ```
 
@@ -1130,7 +1191,7 @@ git commit -m "feat: share stable pubsub application boundary"
 - Modify: `operator/internal/render/workload.go`
 - Modify: `operator/internal/render/render_test.go`
 
-**Contract:** a committed partial publish remains an apply success with an internal partial outcome; ingress reconstructs the public Internal error. Every replica reconciles exact gauges after state changes/restore, while only ingress records logical counters.
+**Contract:** a committed partial publish remains an apply success with an internal partial outcome; ingress reconstructs the public Internal error. Every typed partial quarantines the replica that observed it, the one durable health latch gates Store and peer data paths, and restart cannot clear it. Every replica reconciles exact gauges after state changes/restore, while only ingress records logical counters. `/live` is process liveness; `/health` is storage/quorum/quarantine readiness.
 
 - [ ] **Step 1: Add cluster regression tests**
 
@@ -1148,9 +1209,13 @@ Add:
 - `TestFollowerOnlyNotFoundPartialAlsoQuarantinesReplica`
 - `TestDifferentReplicaFailuresNeverServeDivergedState`
 - `TestQuarantinedStoreRejectsEveryPublicOperation`
+- `TestQuarantineRaceCannotReturnACompletedLocalRead`
 - `TestQuarantinedLeaderRejectsForwardedWrites`
+- `TestPeerForwardGateRunsBeforeApply`
+- `TestPeerForwardGatePreservesUnavailableClass`
 - `TestNodeHealthAndStatusFailWhileReplicaIsQuarantined`
 - `TestReplicaQuarantineHasDistinctPrometheusGauge`
+- `TestReplicaQuarantineMetricCatalogAndMetadata`
 - `TestReplicaQuarantineMarkerSurvivesRestart`
 - `TestReplicaApplyGuardMissingOnRestartQuarantines`
 - `TestExistingRaftGuardVersionWithAllSidecarsMissingQuarantines`
@@ -1164,7 +1229,7 @@ Add:
 - `TestHelmUsesSeparateLivenessAndReadinessRoutes`
 - `TestOperatorUsesSeparateLivenessAndReadinessRoutes`
 - `TestStartupInventoryReplaysBeforeCollectorAttachment`
-- `TestTursoUsesSQLiteTelemetryBackend`
+- `TestTursoUsesTursoTelemetryBackend`
 
 The follower test must use the peer encoder/decoder path, not call the leader store directly.
 
@@ -1174,7 +1239,7 @@ Run:
 
 ```bash
 go test ./internal/cluster/... ./internal/metrics ./cmd ./internal/server \
-  -run 'Test.*PartialPublish|Test.*ReconcileTopic|Test.*ClusterBackend|Test.*LogicalTopic|TestPeerPreservesUnavailable|Test.*Replica|Test.*Quarantined|Test.*NodeHealth|Test.*SnapshotRestore|Test.*Liveness|Test.*Helm|Test.*Operator|Test.*StartupInventory|TestTursoUsesSQLite' -count=1
+  -run 'Test.*PartialPublish|Test.*ReconcileTopic|Test.*ClusterBackend|Test.*LogicalTopic|TestPeerPreservesUnavailable|Test.*Replica|Test.*Quarantined|Test.*NodeHealth|Test.*SnapshotRestore|Test.*Liveness|Test.*Helm|Test.*Operator|Test.*StartupInventory|TestTursoUsesTurso' -count=1
 cd operator && go test ./internal/render -run 'Test.*Liveness|Test.*Readiness|TestServeArgs' -count=1
 ```
 
@@ -1219,7 +1284,7 @@ return nil, err
 
 This is a committed business partial outcome, not a failed state-machine apply. It therefore travels as HTTP 200 plus internal JSON across peer forwarding.
 
-Every `*queue.PartialPublishError` produced while applying a replicated command invokes `ReplicaFaultReporter` before returning its outcome. Do not whitelist nested domain sentinels: a follower-only `NotFound` inside a partial can mean that replica already lacks a subscribed queue even when every other node succeeds. Only a top-level `pqerr.ErrNotFound` returned before any destination mutation is contractually non-mutating and may restore the clean guard. Causes remain diagnostic, but any partial or unclassified replica-local result is proof that this state-machine application may not be deterministic on that node. Durably quarantine it, fail its public read/write readiness gate, and require a verified snapshot restore or explicit wipe/reseed before it serves again, while still returning the conservative partial outcome on the applying leader. A process restart alone never clears quarantine. Add leader/follower fault-injection cases for both different failed destinations and follower-only `NotFound`.
+Every `*queue.PartialPublishError` produced while applying a replicated command invokes `ReplicaFaultReporter` before returning its outcome. This is unconditional: do not inspect `FailedDeliveries`, whitelist a nested domain sentinel, or treat a leader's partial differently from a follower's. A follower-only `NotFound` inside a partial can mean that replica already lacks a subscribed queue even when every other node succeeds. Only a top-level `pqerr.ErrNotFound` returned before any destination mutation is contractually non-mutating and may restore the clean guard. Causes remain diagnostic, but any partial or unclassified replica-local result is proof that this state-machine application may not be deterministic on that node. Durably quarantine it, fail its public read/write readiness gate, and require a verified snapshot restore or explicit wipe/reseed before it serves again, while still returning the conservative partial outcome on the applying leader. A process restart alone never clears quarantine. Add leader/follower fault-injection cases for full and partial outcome shapes, different failed destinations, follower-only `NotFound`, and a partial whose nested cause is `Unavailable`.
 
 Add one shared quarantine in `internal/cluster/health.go`. Its in-memory latch closes the serving race immediately. A write-ahead clean/apply guard beside the Raft log, plus a diagnostic quarantine marker, makes the state survive even when writing the diagnostic marker itself fails:
 
@@ -1257,7 +1322,16 @@ Centralize this path as `f.abortApply(err)`: call the required callback and imme
 
 `NewNode` creates exactly one `replicaHealth` and shares it with the FSM, cluster `Store`, peer server, `Node.Health`, and `Node.Status`. The first fault wins until recovery. Add an internal `WithReplicaHealth(*replicaHealth)` store option and a small `ensureServing()` helper. Start `Store.readBarrier`, `Store.apply`, and `Store.countSubscribers` with `ensureServing`; make Task 3's `TopicInventory` use `readBarrier` too. After every local read (`DescribeQueue`, `ListQueues`, `Peek`, `ListTopics`, `TopicInventory`, and the subscriber-count read), call `ensureServing` again before returning/using the result so a concurrent fault cannot leak local state after the latch closes. This covers every public read, every local/forwarded write entry, publish's preliminary subscriber count, and the leader sweeper. A call already applying when the fault is discovered may return its conservative partial result; every call that begins after the latch closes returns typed `Unavailable`.
 
-The peer server bypasses `Store`, so add `ForwardGate func() error` to `peer.ServerConfig` and check it at the start of `/v1/forward` before invoking the consensus applier. `NewNode` supplies `replicaHealth.Check`. Join, leave, and status remain available for repair. A node that successfully applied while another replica failed may remain healthy; the invariant is that every replica which observed a local non-deterministic failure quarantines itself and cannot serve or lead new application writes.
+The peer server bypasses `Store`, so add `ForwardGate func() error` to
+`peer.ServerConfig` and check it at the start of `/v1/forward`, before decoding
+or invoking the consensus applier. `NewNode` supplies the same
+`replicaHealth.Check` used by Store. Join, leave, and status remain available
+for repair. A node that successfully applied while another replica failed may
+remain healthy; the invariant is that every replica which observed a local
+non-deterministic failure quarantines itself and cannot serve or lead new
+application writes. Tests race a read completion with `Fail`, exercise every
+Store entry point plus follower forwarding, and prove that no successful local
+result escapes after the latch closes.
 
 Change cluster `Store.Publish` to decode `queue.PublishOutcome`. When `FailedDeliveries > 0`, return `outcome.Response` plus a reconstructed `PartialPublishError` that matches `pqerr.ErrPartialFanout`; otherwise return the successful response.
 
@@ -1348,6 +1422,11 @@ plainq_cluster_replica_quarantined{node_id}
 
 as a gauge with help **1 when this replica is quarantined after a non-deterministic state-machine result and must not serve data; 0 otherwise.** Register it beside the existing cluster gauges and add it to the metric catalog/exposition tests. This avoids silently changing `plainq_cluster_healthy` semantics while making the safety state directly alertable.
 
+The exposition assertion follows the pinned VictoriaMetrics behavior from Task
+4: `# HELP plainq_cluster_replica_quarantined` is name-only, while the exact
+sentence above is asserted from `metrics.Catalog()` and the observability guide;
+`# TYPE ... gauge` and the `node_id` label are asserted from the scrape.
+
 - [ ] **Step 7: Split local and logical observers in server wiring**
 
 Map physical drivers into the fixed metric-label vocabulary:
@@ -1355,8 +1434,10 @@ Map physical drivers into the fixed metric-label vocabulary:
 ```go
 func telemetryBackend(driver string) string {
 	switch driver {
-	case storageDriverSQLite, storageDriverTurso:
+	case storageDriverSQLite:
 		return metrics.BackendSQLite
+	case storageDriverTurso:
+		return metrics.BackendTurso
 	case storageDriverPostgres:
 		return metrics.BackendPostgres
 	default:
@@ -1615,12 +1696,18 @@ Add:
 - `TestSeededVersion3NullableRollupIsNotCoalescedToZero`
 - `TestRollupIdentityIncludesMetricKindAfterUpgrade`
 - `TestRollupIdentityAllowsLegacyGaugeBesideNewTypedRow`
+- `TestTypedRollupIndexesIncludeMetricKind`
+- `TestCounterRollupCountsCrossChildIncreaseAndResetExactlyOnce`
+- `TestRateRollupWeightsDifferentWindowMS`
 - `TestQuerySeriesReadsPointsCoverageAndPriorFromOneSnapshot`
 - `TestQuerySubjectCoverageNeverReturnsSeriesCoverage`
 - `TestResetRawIntervalPurgesRowsAndCoverageAtomically`
 - `TestResetRawIntervalPurgesUncoveredLegacyRowsOnMetadataUpgrade`
 - `TestResetRawIntervalPurgesUncoveredRowsWhenGridChanges`
 - `TestSaveMetricAndCoverageRollsBackTogether`
+- `TestTerminalStateEnqueueIsDurableAndBounded`
+- `TestTerminalStateCompletionIsAtomicAndIdempotent`
+- `TestCollectorStoreInterfaceCompilesDuringTypedMigration`
 
 Counter reset fixtures are explicit: with a covered prior point `90` immediately before the bucket and in-bucket values `100, 3, 8`, complete increase is `18`; with no prior (or a prior lacking exact-series coverage) and in-bucket values `90, 100, 3, 8`, the visible increase is also `18` but counter coverage is incomplete because the leading delta is unknown. Neither case may produce `-82`, `8`, `100`, or an increase from implicit zero. Gauge fixture must have an average different from the final value and assert `Value == LastValue`.
 
@@ -1641,21 +1728,25 @@ Create `4_stable_pubsub_rollups.sql`:
 
 ```sql
 ALTER TABLE metrics_raw ADD COLUMN metric_kind TEXT NOT NULL DEFAULT 'gauge';
+ALTER TABLE metrics_raw ADD COLUMN window_ms INTEGER NOT NULL DEFAULT 0;
 
 ALTER TABLE metrics_1m ADD COLUMN metric_kind TEXT NOT NULL DEFAULT 'gauge';
 ALTER TABLE metrics_1m ADD COLUMN first_value REAL;
 ALTER TABLE metrics_1m ADD COLUMN last_value REAL;
 ALTER TABLE metrics_1m ADD COLUMN increase_value REAL;
+ALTER TABLE metrics_1m ADD COLUMN window_ms INTEGER NOT NULL DEFAULT 0;
 
 ALTER TABLE metrics_1h ADD COLUMN metric_kind TEXT NOT NULL DEFAULT 'gauge';
 ALTER TABLE metrics_1h ADD COLUMN first_value REAL;
 ALTER TABLE metrics_1h ADD COLUMN last_value REAL;
 ALTER TABLE metrics_1h ADD COLUMN increase_value REAL;
+ALTER TABLE metrics_1h ADD COLUMN window_ms INTEGER NOT NULL DEFAULT 0;
 
 ALTER TABLE metrics_1d ADD COLUMN metric_kind TEXT NOT NULL DEFAULT 'gauge';
 ALTER TABLE metrics_1d ADD COLUMN first_value REAL;
 ALTER TABLE metrics_1d ADD COLUMN last_value REAL;
 ALTER TABLE metrics_1d ADD COLUMN increase_value REAL;
+ALTER TABLE metrics_1d ADD COLUMN window_ms INTEGER NOT NULL DEFAULT 0;
 
 ALTER TABLE rate_snapshots ADD COLUMN window_ms INTEGER NOT NULL DEFAULT 1000;
 UPDATE rate_snapshots SET window_ms = window_seconds * 1000;
@@ -1663,12 +1754,24 @@ UPDATE rate_snapshots SET window_ms = window_seconds * 1000;
 DROP INDEX IF EXISTS idx_metrics_1m_unique;
 CREATE UNIQUE INDEX idx_metrics_1m_unique
     ON metrics_1m (bucket_start, queue_id, metric_name, labels, metric_kind);
+DROP INDEX IF EXISTS idx_metrics_1m_composite;
+CREATE INDEX idx_metrics_1m_composite
+    ON metrics_1m (metric_name, queue_id, labels, metric_kind, bucket_start);
 DROP INDEX IF EXISTS idx_metrics_1h_unique;
 CREATE UNIQUE INDEX idx_metrics_1h_unique
     ON metrics_1h (bucket_start, queue_id, metric_name, labels, metric_kind);
+DROP INDEX IF EXISTS idx_metrics_1h_composite;
+CREATE INDEX idx_metrics_1h_composite
+    ON metrics_1h (metric_name, queue_id, labels, metric_kind, bucket_start);
 DROP INDEX IF EXISTS idx_metrics_1d_unique;
 CREATE UNIQUE INDEX idx_metrics_1d_unique
     ON metrics_1d (bucket_start, queue_id, metric_name, labels, metric_kind);
+DROP INDEX IF EXISTS idx_metrics_1d_composite;
+CREATE INDEX idx_metrics_1d_composite
+    ON metrics_1d (metric_name, queue_id, labels, metric_kind, bucket_start);
+DROP INDEX IF EXISTS idx_metrics_raw_composite;
+CREATE INDEX idx_metrics_raw_composite
+    ON metrics_raw (metric_name, queue_id, labels, metric_kind, timestamp);
 
 CREATE TABLE IF NOT EXISTS telemetry_rollup_state (
     resolution TEXT PRIMARY KEY,
@@ -1686,12 +1789,20 @@ CREATE TABLE IF NOT EXISTS telemetry_coverage (
     subject_id TEXT NOT NULL DEFAULT '',
     metric_name TEXT NOT NULL DEFAULT '',
     labels TEXT NOT NULL DEFAULT '',
+    metric_kind TEXT NOT NULL DEFAULT '',
     sample_interval_ms INTEGER NOT NULL,
-    PRIMARY KEY (resolution, bucket_start, subject_id, metric_name, labels)
+    PRIMARY KEY (resolution, bucket_start, subject_id, metric_name, labels, metric_kind)
 );
 
 CREATE INDEX IF NOT EXISTS idx_telemetry_coverage_subject
-    ON telemetry_coverage (subject_id, metric_name, labels, resolution, bucket_start);
+    ON telemetry_coverage (subject_id, metric_name, labels, metric_kind, resolution, bucket_start);
+
+CREATE TABLE IF NOT EXISTS telemetry_terminal_state (
+    subject_id TEXT PRIMARY KEY,
+    observed_at INTEGER NOT NULL,
+    target_bucket INTEGER,
+    sample_interval_ms INTEGER
+);
 ```
 
 Do not drop or rewrite `metrics_5m`. The migration runner's version table makes the migration apply once; the repeat test must reopen/run migrations rather than execute raw `ALTER TABLE` twice.
@@ -1728,6 +1839,7 @@ type MetricSample struct {
 	Kind MetricKind
 	Value float64
 	Labels string
+	WindowMS int64
 }
 
 type DataPoint struct {
@@ -1742,6 +1854,7 @@ type DataPoint struct {
 	Last float64 `json:"last,omitempty"`
 	Increase float64 `json:"increase,omitempty"`
 	Source string `json:"source,omitempty"`
+	WindowMS int64 `json:"windowMs,omitempty"`
 }
 
 type CoverageBucket struct {
@@ -1750,6 +1863,7 @@ type CoverageBucket struct {
 	SubjectID string
 	MetricName string
 	Labels string
+	Kind MetricKind
 	SampleIntervalMS int64
 }
 
@@ -1777,11 +1891,25 @@ type SeriesResult struct {
 	Prior *DataPoint
 	PriorCoverage []CoverageBucket
 }
+
+type TerminalState struct {
+	SubjectID string
+	ObservedAt int64
+	TargetBucket *int64
+	SampleIntervalMS *int64
+}
 ```
 
 `Value` is selected from kind: raw=`metric_value`; aggregate gauge=`last_value`; aggregate counter=`increase_value`; aggregate rate/event=`avg_value`.
 
-Coverage is series-specific. A row with non-empty `MetricName` covers exactly `(subject_id, metric_name, labels)`; labels use the same canonical JSON string stored on the sample. A row with empty `MetricName` and empty `Labels` is subject-wide collector coverage and cannot by itself make any metric series complete.
+Coverage is series-specific. A row with non-empty `MetricName` covers exactly
+`(subject_id, metric_name, labels, metric_kind)`; labels use the same canonical
+JSON string stored on the sample. A row with empty `MetricName`, empty `Labels`,
+and empty `Kind` is subject-wide collector coverage and cannot by itself make
+any metric series complete. `WindowMS` is positive only for derived rate
+samples. Raw rate rows preserve the actual elapsed window; aggregate rate rows
+store the sum of child windows and use it as their averaging weight. Other
+metric kinds keep it zero.
 
 - [ ] **Step 5: Implement typed raw writes and half-open queries**
 
@@ -1794,19 +1922,71 @@ func (s *SQLiteStore) SaveMetricAndCoverage(context.Context, MetricSample, Cover
 func (s *SQLiteStore) QuerySeries(context.Context, SeriesQuery) (SeriesResult, error)
 func (s *SQLiteStore) QuerySubjectCoverage(context.Context, SubjectCoverageQuery) ([]CoverageBucket, error)
 func (s *SQLiteStore) SaveRateSnapshot(context.Context, int64, string, string, float64, int64) error
+func (s *SQLiteStore) SaveRateSnapshotAndMetric(context.Context, int64, string, string, float64, int64, MetricSample) error
 func (s *SQLiteStore) Rollup(context.Context, Resolution, int64) error
 func (s *SQLiteStore) ResetRawInterval(context.Context, int64) (bool, error)
+func (s *SQLiteStore) EnqueueTerminalState(context.Context, string, int64, int) (bool, error)
+func (s *SQLiteStore) ListTerminalStates(context.Context) ([]TerminalState, error)
+func (s *SQLiteStore) AssignTerminalBucket(context.Context, string, int64, int64) error
+func (s *SQLiteStore) CompleteTerminalState(context.Context, string, MetricSample, CoverageBucket) error
 ```
 
-The final `SaveRateSnapshot` argument is exact `windowMS`, replacing `windowSeconds int`; its insert populates `window_ms` and also writes `window_seconds = max(1, round(windowMS/1000))` as a compatibility approximation. Existing rows are backfilled from their actual legacy `window_seconds`, not blindly defaulted to one second. All new calculations and APIs read `window_ms`. Update the existing compatibility caller in `metrics.go` in this task to pass `1000` milliseconds and add a test that reads both `window_ms=1000` and `window_seconds=1`; leaving its old integer literal `1` would compile but silently mean one millisecond. Task 10 replaces that compatibility path with actual elapsed milliseconds.
+The final `SaveRateSnapshot` argument is exact `windowMS`, replacing
+`windowSeconds int`; reject non-positive values. Its insert populates
+`window_ms` and also writes
+`window_seconds = max(1, round(windowMS/1000))` as a compatibility
+approximation. Existing rows are backfilled from their actual legacy
+`window_seconds`, not blindly defaulted to one second. All new calculations and
+APIs read `window_ms`. The same exact value is stored on the corresponding
+typed raw rate sample, and rollups weight rate averages by summed `window_ms`
+rather than by the number of samples. Update the existing compatibility caller
+in `metrics.go` in this task to pass `1000` milliseconds and add tests for
+`window_ms=1000`/`window_seconds=1` plus a 1500ms window; leaving its old integer
+literal `1` would compile but silently mean one millisecond. Task 10 replaces
+that compatibility path with actual elapsed milliseconds.
 
-`Rollup` is the single typed entry point used by the later coordinator. Replace the three `Aggregate1m/1h/1d` methods in the collector `Store` interface only after their compatibility callers are migrated, and disable/remove the old aggregation workers before the typed coordinator starts; no compatibility writer may continue inserting default-gauge aggregates beside typed rows. Extend the interface with every method above and update every existing store fake, including `recordingStore` in `topic_test.go`, in this task before changing call sites. No package may contain both the old and moved `DataPoint` definitions.
+`SaveRateSnapshotAndMetric` validates that the rate, timestamp, subject,
+metric name, and positive `windowMS` agree with the typed `MetricKindRate`
+sample, then writes the compatibility snapshot and typed raw row in one
+transaction. Task 10 uses this method for every derived rate; a failure cannot
+leave the two histories disagreeing.
+
+`Rollup` is the typed entry point used by the later coordinator. In Task 8 add
+it and the new methods to the collector `Store` interface **without removing**
+`Aggregate1m/1h/1d`: the old worker still calls those methods until Task 10.
+Task 10 atomically migrates those callers, disables the old workers, and only
+then removes the three compatibility methods. This ordering keeps the package
+compiling at the end of Tasks 8 and 9 and prevents a compatibility writer from
+running beside the typed coordinator. Update every existing store fake,
+including `recordingStore` in `topic_test.go`, in this task. Move the existing
+`DataPoint` declaration—delete it from `collector.go` and add the extended
+definition to `series.go` in the same edit. Never redeclare a second
+package-level `DataPoint`.
 
 All SQL range predicates are `timestamp >= ? AND timestamp < ?` or `bucket_start >= ? AND bucket_start < ?`. Initialize returned slices to empty non-nil slices. `QuerySeries` opens one read-only transaction and reads in-range points, exact coverage, prior point, and prior coverage from that same SQLite snapshot; collection cannot slip a coverage row between two handler queries and falsely make a missing point complete. Scan nullable migrated `first_value`, `last_value`, and `increase_value` through `sql.NullFloat64`; skip an aggregate whose kind-selected value is null and never coalesce a legacy null to zero. When `CarryForward` is true, query one last covered, kind-valid value before `From` and return it separately as `Prior`; also return exact-series `PriorCoverage` from the prior point's bucket through `From`. API code decides whether that complete pre-range coverage permits carrying it.
 
-`QuerySeries` reads coverage only for the requested `(subject_id, metric_name, labels)`. `QuerySubjectCoverage` reads only empty-metric/empty-label rows for its subject and half-open range; it is for telemetry-health/overview use and never satisfies a series query.
+`QuerySeries` reads coverage only for the requested
+`(subject_id, metric_name, labels, metric_kind)`. `QuerySubjectCoverage` reads
+only empty-metric/empty-label/empty-kind rows for its subject and half-open
+range; it is for telemetry-health/overview use and never satisfies a series
+query. `QuerySeries` is added to the collector `Store` interface in this task,
+not first introduced by the HTTP handler, so Tasks 8–10 and their fakes compile
+against one storage boundary.
 
-`SaveMetricAndCoverage` validates that sample and coverage have the same subject, metric, labels, raw resolution, and bucket start, then inserts both in one write transaction. Any coverage failure rolls back the raw insert. Task 10 uses it for terminal gauge zeroes so retries cannot duplicate a row or land coverage after a dependent rollup checkpoint has already advanced.
+`SaveMetricAndCoverage` validates that sample and coverage have the same subject,
+metric, labels, kind, raw resolution, and bucket start, then inserts both in one
+write transaction. Any coverage failure rolls back the raw insert.
+
+`EnqueueTerminalState` uses one immediate transaction to deduplicate by subject,
+enforce the 65,536-row cap, and durably insert `observed_at`; it returns
+`accepted=false,nil` only for a new row over the cap. `AssignTerminalBucket`
+sets `target_bucket` and `sample_interval_ms` only when they are null and rejects
+a conflicting retry. `CompleteTerminalState` verifies that the sample/coverage
+match that stable assignment, then inserts the terminal zero and exact coverage
+and deletes the pending row in one transaction. If the row is already absent it
+is an idempotent success. A failed statement rolls back all three effects.
+Tasks 9–10 use this durable protocol so restart, commit acknowledgement loss, or
+coverage retry cannot forget, move, or duplicate a terminal zero.
 
 `ResetRawInterval(ctx, sampleIntervalMS)` runs in one write transaction and treats `telemetry_collection_state(singleton=1)` as the authoritative raw grid, independent of coverage success. Reset when the singleton is absent (first v4 startup), its interval differs, or any retained raw coverage row disagrees. A reset deletes **all** `metrics_raw` rows and raw `telemetry_coverage` rows, upserts the singleton to `sampleIntervalMS`, commits, and returns `true`; otherwise it changes nothing and returns `false`. This deliberately removes uncovered legacy/orphan raw rows too, preventing off-grid rows from entering a later covered rollup. It leaves completed rollup tiers/checkpoints and compatibility rate snapshots intact. Task 10 calls it only after startup rollup catch-up, making the interval-change boundary an explicit uncovered raw gap instead of mixing grids under one API `sampleIntervalMs`.
 
@@ -1827,6 +2007,8 @@ type aggregate struct {
 	Count int64
 	Increase float64
 	Previous *float64
+	WindowMS int64
+	WeightedRateSum float64
 }
 
 func (a *aggregate) Add(value float64) {
@@ -1860,9 +2042,26 @@ func (a *aggregate) Add(value float64) {
 
 For raw counter input, a baseline is valid only when the same `(subject_id, metric_name, labels)` has a kind-valid point in the **immediately preceding source bucket** and exact-series coverage is uninterrupted from that bucket through the target start. Do not use an arbitrary older covered point across a skipped/uncovered bucket; that would smear a multi-bucket delta into the target and falsely mark it complete. If no adjacent covered prior exists, compute only the reset-aware deltas visible inside the bucket and withhold series coverage for that counter aggregate because the leading delta is unknown. A covered adjacent prior `90` followed by in-bucket `100, 3, 8` stores complete increase `18`; no adjacent prior followed by in-bucket `90, 100, 3, 8` stores visible increase `18` without coverage. Add a regression with an older covered `90`, one intervening uncovered source bucket, and target `100, 3, 8`; it must not bridge the gap or write counter coverage. Never treat the first observed cumulative value as an increase.
 
-When the source is a rollup, combine `sum_value`/`count`, take chronological first/last, sum child `increase_value`, and compute `avg = total sum / total count`; do not average child averages or apply a second counter baseline. Child counter coverage must be complete before parent counter coverage is written.
+For counter sources, the transition from an immediately adjacent predecessor is
+owned by the later complete child. Raw-to-1m computes that leading transition
+from the covered prior raw point. A complete 1m/1h child therefore already
+includes its boundary delta: normal growth contributes `child.first -
+previous.last`, while a reset contributes `child.first`. When the source is a
+rollup, take chronological first/last and sum complete child
+`increase_value`; never add the boundary again at the parent. A fixture with
+prior `90`, child one `first=100,last=110,increase=20`, and child two reset to
+`first=3,last=8,increase=8` must produce `28`, not `18`, `31`, or a negative
+value. If any child or its required predecessor coverage is incomplete, retain
+the visible aggregate row for diagnostics but withhold parent counter coverage.
 
-`Rollup(ctx, resolution, closedThrough)` begins one transaction, reads the checkpoint, starts from the next target bucket or earliest retained source bucket, processes only target buckets whose end is `<= closedThrough`, and upserts complete aggregate rows. Enumerate the union of source sample identities and source coverage identities, so a fully covered event series with zero source rows propagates coverage without fabricating an aggregate point. Derive coverage independently for every `(subject_id, metric_name, labels)` only when every expected source-coverage bucket for that series exists; write subject-wide coverage only when all expected series for that subject are complete. Then advance the checkpoint to the last completed target bucket and commit. Re-running the same bound makes no changes.
+For non-counter rollup sources, combine `sum_value`/`count` and take
+chronological first/last and global min/max; never average child averages. Rate
+rows additionally sum child `window_ms` and
+`avg = sum(child.avg_value * child.window_ms) / sum(child.window_ms)`. Event
+rows use `sum(sum_value)/sum(count)`. Child counter coverage must be complete
+before parent counter coverage is written.
+
+`Rollup(ctx, resolution, closedThrough)` begins one transaction, reads the checkpoint, starts from the next target bucket or earliest retained source bucket, processes only target buckets whose end is `<= closedThrough`, and upserts complete aggregate rows. Enumerate the union of source sample identities and source coverage identities, so a fully covered event series with zero source rows propagates coverage without fabricating an aggregate point. Derive coverage independently for every `(subject_id, metric_name, labels, metric_kind)` only when every expected source-coverage bucket for that series exists; write subject-wide coverage only when all expected series for that subject are complete. Then advance the checkpoint to the last completed target bucket and commit. Re-running the same bound makes no changes. The recreated unique and query indexes include `metric_kind`; tests inspect `PRAGMA index_info` so a legacy gauge row cannot collide with or satisfy a typed counter/rate query.
 
 - [ ] **Step 7: Update test setup to run real migrations**
 
@@ -1916,6 +2115,9 @@ Add:
 - `TestTopicStateUnavailableWithholdsGaugeCoverage`
 - `TestTopicEventBufferReportsOverflow`
 - `TestTopicEventDirtyIntervalsStayBoundedAcrossManyBuckets`
+- `TestTopicEventAtCutoverBoundaryStaysForNextBucket`
+- `TestBlockedEnqueueCannotArriveBehindCoverage`
+- `TestTerminalStateSurvivesCollectorRestart`
 
 The recording store spy implements the typed Store methods from Task 8 and must retain metric kind, labels, timestamp, value, and event count. Assert canonical JSON label strings exactly.
 
@@ -1958,7 +2160,7 @@ plainq_telemetry_event_buffer_dropped_total
 plainq_telemetry_terminal_state_dropped_total
 ```
 
-Extend per-topic and system structs with cumulative counters, previous values for rate deltas, exact gauges/known bits, last-updated timestamps, and fixed-label operation counter maps. The only label vocabularies are three backends, six operations, and `ok|error`.
+Extend per-topic and system structs with cumulative counters, previous values for rate deltas, exact gauges/known bits, last-updated timestamps, and fixed-label operation counter maps. The only label vocabularies are four backends (`sqlite|turso|postgres|cluster`), six operations, and `ok|error`.
 
 - [ ] **Step 4: Implement the optional `TopicRecorder` capability**
 
@@ -1981,9 +2183,9 @@ type operationDurationLabels struct {
 
 - [ ] **Step 5: Add a bounded event queue**
 
-Use one FIFO capped at 65,536 `MetricSample` entries for duration and fan-out events. Its mutex is also the Task 10 boundary-cutover mutex. Enqueue captures the occurrence timestamp while holding that mutex and uses `timestamp = max(c.now().UnixMilli(), eventWatermark)`, where `eventWatermark` is the most recently closed boundary. At boundary `B`, collection takes the same mutex, advances `eventWatermark` to `B`, partitions samples with `timestamp < B` into the due batch, retains every sample with `timestamp >= B`, and unlocks. It never drains an open/future bucket.
+Use one FIFO capped at 65,536 `MetricSample` entries for duration and fan-out events. Its mutex is also the Task 10 boundary-cutover mutex. Enqueue reads the clock **after acquiring that mutex** and stamps `max(c.now().UnixMilli(), eventWatermark)`, where `eventWatermark` is the most recently closed boundary. At boundary `B`, collection takes the same mutex, advances `eventWatermark` to `B`, partitions samples with `timestamp < B` into the due batch, retains every sample with `timestamp >= B`, and unlocks. It never drains an open/future bucket. An enqueue already blocked on the cutover lock is therefore stamped at least `B` and cannot arrive behind coverage; a timestamp exactly equal to `B` belongs to the next bucket.
 
-Persist due entries separately, grouped by their captured raw bucket. A delayed pass may store event rows from older skipped buckets, but Task 10 writes event coverage only for the latest just-closed bucket; older skipped buckets remain honestly uncovered. On overflow, drop the newest event and extend a fixed per-metric dirty interval `{fromBucket,toBucket}` using min/max. Task 10 conservatively withholds that event family's coverage for every subject in every intersecting bucket. The map is keyed only by the fixed duration/fan-out metric names, never by bucket or topic, and each value is two integers. Also increment a new process-wide Prometheus collector-health family:
+Persist due entries separately, grouped by their captured raw bucket. A delayed pass may store event rows from older skipped buckets, but Task 10 writes event coverage only for the latest just-closed bucket; older skipped buckets remain honestly uncovered. On overflow, drop the newest event and extend a fixed per-metric dirty interval `{fromBucket,toBucket}` using min/max. Task 10 conservatively withholds that event family's exact and subject-wide coverage for every subject in every intersecting bucket. A persistence failure likewise withholds coverage for the failed series and its subject; an uncovered row may remain for diagnosis but Task 11 suppresses it from stable responses. The dirty map is keyed only by the fixed duration/fan-out metric names, never by bucket or topic, and each value is two integers. Also increment a new process-wide Prometheus collector-health family:
 
 ```text
 plainq_telemetry_event_buffer_dropped_total{metric}
@@ -1993,11 +2195,31 @@ This health counter and dirty-interval map remain fixed-size even if collection 
 
 - [ ] **Step 6: Preserve terminal topic state**
 
-Use a deduplicated FIFO/map capped at 65,536 pending terminal topic records. Each record holds only `topicID` and captured `observedAt` under the same cutover mutex used by event enqueue. When reconciliation removes a topic, enqueue one pending terminal transition and mark its current-state entry terminal so it is excluded from all later normal periodic gauge samples. At every closed-boundary pass where `observedAt < B`, target the latest just-closed `B-collectionInterval`; a delayed coordinator therefore leaves skipped buckets uncovered.
+Use Task 8's durable `telemetry_terminal_state` table, capped at 65,536
+deduplicated topic rows, as the source of pending terminal work. When exact
+reconciliation removes a topic, call `EnqueueTerminalState` with the occurrence
+time captured under the same cutover mutex **before** removing its current-state
+entry. A successful durable enqueue marks that entry terminal so normal
+periodic gauge sampling excludes it. A store failure is reported through
+collector health and keeps the in-memory entry terminal/pending for retry;
+telemetry failure never changes the customer mutation. `accepted=false` means
+the durable cap dropped a new transition: remove the stale current entry, write
+no zero or coverage, and increment the terminal-drop counter.
 
-Persist exactly one `plainq_topic_subscriptions_current=0` point at that target bucket start plus its exact-series coverage through Task 8's atomic `SaveMetricAndCoverage`. A failed transaction inserts neither and keeps the record pending; the next pass retargets the then-current just-closed bucket. A successful transaction occurs before the same-pass rollup, removes the pending/current record, and cannot be stranded behind an already-advanced rollup checkpoint. Tests inject a coverage-statement failure, including recovery after a minute boundary, and assert exactly one zero plus one coverage row reaches raw and coarse history.
+At the first closed boundary `B` with `observedAt < B`, assign the row the
+latest just-closed `target_bucket=B-collectionInterval` and the current interval
+exactly once. Persist exactly one
+`plainq_topic_subscriptions_current=0` point at that stable target plus its
+exact-series coverage and remove the pending row through
+`CompleteTerminalState`. A failed transaction inserts/deletes nothing and every
+retry, including after restart or a minute boundary, uses the same target. The
+ordered coordinator must stop before any dependent rollup can advance past an
+assigned terminal target. A successful transaction removes the retained current
+entry before the rollup proceeds. Tests restart between assignment and
+completion and inject a coverage-statement failure, then assert exactly one zero
+plus one coverage row reaches raw and coarse history at the original target.
 
-If a new terminal transition would exceed the cap, drop that newest transition, immediately remove its stale current-state entry, write neither its zero nor coverage, and increment the unlabeled process-wide Prometheus counter:
+If a new terminal transition would exceed the durable cap, drop that newest transition, immediately remove its stale current-state entry, write neither its zero nor coverage, and increment the unlabeled process-wide Prometheus counter:
 
 ```text
 plainq_telemetry_terminal_state_dropped_total
@@ -2048,6 +2270,8 @@ Add:
 - `TestCalculateRatesTreatsCounterResetAsNewEpoch`
 - `TestCalculateRatesRequiresKnownBaseline`
 - `TestCalculateRatesPreservesNonWholeSecondWindowMS`
+- `TestFailedRateWriteDoesNotCommitBaseline`
+- `TestSuccessfulRateWriteCommitsBaselineOnce`
 - `TestFailedRateWriteLeavesGapWithoutSmearingNextBucket`
 - `TestRateWritesSnapshotAndTypedRawHistoryTogether`
 - `TestCollectionAlignsToConfiguredWallClockBucket`
@@ -2067,8 +2291,11 @@ Add:
 - `TestDirtyEventIntervalAdvancesWithoutGrowingAcrossCutover`
 - `TestTerminalTopicPersistsZeroAndCoverageBeforeRemoval`
 - `TestTerminalTopicAtomicRetryDoesNotDuplicateZero`
-- `TestTerminalTopicFailureAcrossMinuteRetargetsBeforeRollup`
+- `TestTerminalTopicFailureAcrossMinuteDoesNotRetarget`
+- `TestTerminalTopicRetryKeepsOriginalBucketAcrossMinuteBoundary`
+- `TestAssignedTerminalFlushesBeforeStartupRollup`
 - `TestRawIntervalChangeCatchesUpThenCreatesExplicitGap`
+- `TestSameRawIntervalRestartPreservesGridAndHistory`
 - `TestCleanupUsesConfiguredIntervalAndTierCutoffs`
 - `TestCleanupRetainsOneCompletedSourceBucket`
 - `TestCleanupRetainsLegacyFiveMinuteCompatibilityWindow`
@@ -2134,9 +2361,27 @@ func rate(delta uint64, elapsed time.Duration) float64 {
 }
 ```
 
-`calculateRatesAt(ctx, now)` uses the real duration since the prior valid in-memory observation. It passes exact `elapsed.Milliseconds()` to the Task 8 `SaveRateSnapshot(..., windowMS int64)` API and writes the same rate to `metrics_raw` as `MetricKindRate`. It writes counter snapshots as `MetricKindCounter`, exact known state as `MetricKindGauge`, and queued duration/fan-out samples as `MetricKindEvent`.
+`calculateRatesAt(ctx, now)` uses the real duration since the last successfully
+committed baseline. It passes exact `elapsed.Milliseconds()` to Task 8's
+`SaveRateSnapshotAndMetric(..., windowMS, MetricSample)` transaction; the typed
+rate sample carries the same `WindowMS`. It writes counter snapshots as
+`MetricKindCounter`, exact known state as `MetricKindGauge`, and queued
+duration/fan-out samples as `MetricKindEvent`.
 
-Track a `known` bit and observation timestamp for every rate baseline. The first counter observation initializes that baseline but writes no derived rate sample or rate-series coverage; it still writes the cumulative counter snapshot. After every valid calculation, advance the in-memory baseline/timestamp regardless of persistence outcome. A failed write therefore leaves only that bucket uncovered, and the next point describes only the next interval rather than smearing two intervals into one covered bucket. After a process restart the same first-observation rule applies. A later counter decrease is a known reset and contributes the new value through `counterDelta`.
+Track a `known` bit, value, and observation timestamp for every rate baseline.
+The first counter observation writes the cumulative counter snapshot but no
+derived rate sample or rate-series coverage; commit it as a baseline only after
+that snapshot write succeeds. For later observations, advance the in-memory
+baseline/timestamp only after the snapshot+typed-rate transaction succeeds. On
+failure, keep the prior baseline and mark the whole elapsed rate interval dirty.
+The next successful sample therefore carries the honest longer `window_ms`; it
+is retained for diagnostics/latest-value compatibility but receives no exact
+coverage when its window spans a skipped/dirty bucket. After that successful
+commit, the following normal interval can become covered again. This avoids
+both silently losing a counter delta and smearing a multi-interval rate into one
+apparently complete bucket. After process restart the first-observation rule
+applies again. A later counter decrease is a known reset and contributes the new
+value through `counterDelta`.
 
 - [ ] **Step 5: Align collection and coverage**
 
@@ -2144,17 +2389,74 @@ The first timer fires at `now.Truncate(collectionInterval).Add(collectionInterva
 
 Use the Task 9 cutover mutex as a watermark protocol. While holding it, set `eventWatermark=B.UnixMilli()`, partition queued events and terminal transitions with captured timestamp `<B` into a due batch, and retain entries at or after `B`. Every enqueue under that mutex stamps `max(c.now().UnixMilli(), eventWatermark)`, so a fake/slow recorder cannot append an event behind already-written coverage. Persist due duration/fan-out rows grouped by their actual containing bucket. Only the latest `bucketStart=B-collectionInterval` is eligible for event-series coverage; rows from older skipped buckets remain uncovered under the delayed-coordinator rule. For each fixed metric dirty interval, withhold coverage when it intersects the latest bucket; after cutover clear it when `toBucket < B`, otherwise clamp `fromBucket` to at least `B` and retain it for future buckets. Never allocate a dirty entry per bucket or topic.
 
-For each scheduled counter, known gauge, or rate sample, write the sample first and then write raw coverage for that exact `(subject_id, metric_name, labels)`. An unknown topic gauge writes neither a point nor coverage. For duration and fan-out event series, persist every due entry for the latest closed bucket and then write exact series coverage even when the event count is zero; no events plus coverage means measured zero activity. If any write fails or the bounded family dirty marker is set, do not cover that series/bucket. Write the empty-metric subject-wide coverage row only after every expected series for that subject succeeds. Continue independent subjects/series and report every store error through collector health metrics.
+For each scheduled counter, known gauge, or rate sample, write the sample first
+and then write raw coverage for that exact
+`(subject_id, metric_name, labels, metric_kind)`. An unknown topic gauge writes
+neither a point nor coverage. A rate sample is coverable only when its positive
+`window_ms` equals the collection interval and its elapsed interval has no
+dirty/skipped bucket. For duration and fan-out event series, persist every due
+entry for the latest closed bucket and then write exact series coverage even
+when the event count is zero; no events plus coverage means measured zero
+activity. If any enqueue overflow or sample/snapshot/coverage write fails, or a
+bounded family dirty marker intersects the bucket, do not cover that exact
+series or its subject-wide row. An uncovered raw row is allowed for diagnosis
+but cannot enter stable APIs. Write the empty-metric subject-wide coverage row
+only after every expected series for that subject succeeds. Continue
+independent subjects/series and report every store error through collector
+health metrics.
 
-Exclude every terminal-pending topic from normal periodic active-subscription sampling. For every due attempt, pair one zero at the latest `bucketStart` with exact gauge coverage and call `SaveMetricAndCoverage`. On failure the transaction rolls back both rows, pending state remains, and the next pass retargets the new latest bucket. On success, delete pending/current state before running the same-pass rollups. This gives exactly one terminal point, prevents a sample/coverage split, and prevents a recovered retry from landing behind a minute checkpoint. An overflow-dropped terminal is absent from the expected matrix, writes no sample or coverage, and therefore remains an explicit gap.
+Exclude every terminal-pending topic from normal periodic active-subscription
+sampling. Load durable pending rows before each rollup chain. Assign each newly
+due row the latest `bucketStart` once; every retry calls
+`CompleteTerminalState` with that stored bucket/interval. On failure the
+transaction rolls back zero, coverage, and deletion, the coordinator stops
+before dependent rollups, and the same target remains durable across restart.
+On success, remove pending/current state before running the same-pass rollups.
+This gives exactly one terminal point and prevents a recovered retry from
+landing behind a minute checkpoint. An overflow-dropped terminal is absent from
+the expected matrix, writes no sample or coverage, and therefore remains an
+explicit gap.
 
 - [ ] **Step 6: Coordinate collection and dependent rollups in order**
 
-Replace the three independent aggregation workers and the independent cleanup worker with one coordinator that owns both the next collection boundary and next cleanup deadline. At startup, capture `startupNow := c.now().UTC()` and, inside the coordinator before any new collection, call `c.store.Rollup(ctx, Resolution1m, startupNow.Truncate(time.Minute).UnixMilli())`, then 1h, then 1d to catch up retained source tiers. Stop on the first error, report it through collector health, leave startup initialization due, arm a retry, and run **no** dependent tier, cleanup, raw reset, or new-grid collection until the entire chain succeeds.
+Replace the three independent aggregation workers and the independent cleanup
+worker with one coordinator that owns collection, durable terminal flush,
+1m/1h/1d rollups, raw-grid reset, and cleanup in that strict order. At startup,
+capture `startupNow := c.now().UTC()`. First flush every terminal row that
+already has an assigned old-grid target; stop on failure so no checkpoint can
+pass it. Then call `c.store.Rollup(ctx, Resolution1m,
+startupNow.Truncate(time.Minute).UnixMilli())`, 1h, and 1d to catch up retained
+source tiers. Stop on the first error, report it through collector health, leave
+startup initialization due, arm a retry, and run **no** dependent tier, cleanup,
+raw reset, or new-grid collection until the entire chain succeeds.
 
-Only after all three old-grid catch-up calls succeed, call `c.store.ResetRawInterval(ctx, c.collectionInterval.Milliseconds())`. If the independent collection-state singleton is absent/different or retained raw coverage disagrees, that single store transaction removes all raw rows/coverage—including uncovered rows—stores the new interval, and logs one structured reset notice; completed rollups remain. A failed reset likewise leaves initialization due and blocks collection until retry succeeds, so old/new grids can never mix. This is telemetry-only degradation: public pub/sub continues and Prometheus remains live while internal collector health exposes the failure. The first successful new-grid collection starts a fresh raw history, and the API exposes the boundary as `notRecorded` rather than advertising mixed samples under one `sampleIntervalMs`.
+Only after assigned terminals and all three old-grid catch-up calls succeed,
+call `c.store.ResetRawInterval(ctx, c.collectionInterval.Milliseconds())`. If
+the independent collection-state singleton is absent/different or retained raw
+coverage disagrees, that single store transaction removes all raw rows/coverage
+—including uncovered rows—stores the new interval, and logs one structured
+reset notice; completed rollups remain. An unchanged interval preserves the raw
+grid/history byte-for-byte. A failed reset likewise leaves initialization due
+and blocks collection until retry succeeds, so old/new grids can never mix.
+Unassigned terminal rows are assigned only after the active grid is known. This
+is telemetry-only degradation: public pub/sub continues and Prometheus remains
+live while internal collector health exposes the failure. The first successful
+new-grid collection starts fresh raw history, and the API exposes the boundary
+as `notRecorded` rather than advertising mixed sample grids under one
+`sampleIntervalMs`.
 
-On wake, advance a late collection deadline to the latest closed raw boundary `B` and collect once for `[B-collectionInterval,B)`. Do not fabricate points or coverage for skipped raw buckets; the rate uses actual elapsed time and only the latest closed bucket receives that point/coverage. Then run each due rollup strictly in 1m, 1h, 1d order. Each call receives that UTC-truncated bound as Unix milliseconds in `closedThrough`, and its persisted checkpoint performs database catch-up. Stop the chain on the first error: do not run dependent tiers or cleanup, do not mark that bound attempted, and keep the failed bound/deadline due for retry. Only after every due dependent tier succeeds may a due cleanup run; a cleanup failure also leaves its deadline due. Advance a deadline to its first future value only after its work succeeds.
+On wake, advance a late collection deadline to the latest closed raw boundary
+`B` and collect once for `[B-collectionInterval,B)`. Do not fabricate points or
+coverage for skipped raw buckets; the rate uses actual elapsed time and a
+long-window point stays uncovered. Complete/flush every due terminal at its
+stable bucket next. Then run each due rollup strictly in 1m, 1h, 1d order. Each
+call receives that UTC-truncated bound as Unix milliseconds in `closedThrough`,
+and its persisted checkpoint performs database catch-up. Stop the chain on the
+first collection, terminal, or rollup error: do not run dependent tiers or
+cleanup, do not mark that bound attempted, and keep the failed bound/deadline due
+for retry. Only after every due dependent tier succeeds may a due cleanup run;
+a cleanup failure also leaves its deadline due. Advance a deadline to its first
+future value only after its work succeeds.
 
 Failure must not create a past-deadline busy loop. Keep the logical work due but set `retryAt = now + min(30*time.Second, max(time.Second, collectionInterval))`; arm the context-aware timer for `min(retryAt, earliest future successful deadline)`. Reset the retry delay after a successful chain. There is no initial `time.Sleep`, extra interval before startup catch-up, or second goroutine that can delete a source tier between dependent rollups.
 
@@ -2468,9 +2770,21 @@ type MetricsStore interface {
 }
 ```
 
+Add shared signed-millisecond helpers `floorTo`, `ceilTo`,
+`canonicalEmptyRange`, `summarizeCounterIncrease`,
+`summarizeDistribution`, and `summarizeOperations`. Unit-test each helper at an
+aligned boundary, an unaligned boundary, an empty/future range, a counter reset,
+a coverage gap, and mixed raw/rollup input; handlers must not reimplement their
+math independently.
+
 The first three methods remain only for existing queue telemetry endpoints. Remove `GetTopicMetricsSummary` from `MetricsStore`; stable pub/sub handlers must not read the legacy snapshot/inclusive-range summary path.
 
-Store `cfg` on the handler; if `Now` is nil, default it to `time.Now`. Production `server.go` passes the collector's configured collection interval/retention and the real clock. Every constructor call in `metrics_handler_test.go` and `routes_test.go` passes a deterministic config.
+Store `cfg` on the handler; if `Now` is nil, default it to `time.Now`.
+Production `server.go` constructs `MetricsHandlerConfig` from
+`collector.CollectionInterval()` and `collector.RetentionPeriod()` and passes
+the real clock. Every constructor call in `metrics_handler_test.go` and
+`routes_test.go` passes a deterministic config; add a wiring test that changes
+both values and observes the resulting `sampleIntervalMs` and retention bound.
 
 `parseMetricsQuery` validates custom bounds, selects the resolution, computes:
 
@@ -2481,7 +2795,7 @@ effective.to   = min(floor(request.to / interval) * interval,
 expected       = (effective.to - effective.from) / interval
 ```
 
-Compute the normal candidates first. If `candidateTo <= candidateFrom`, return a canonical empty effective range with `from == to == max(request.from, min(request.to, closedThrough))` and `expected=0`; never subtract inverted bounds. `RetentionFrom` uses the selected public tier horizon, excluding the extra physical support bucket: raw=`generatedAt-min(1h,R)`, 1m=`generatedAt-min(24h,R)`, 1h=`generatedAt-min(30d,R)`, and 1d=`generatedAt-R`, each aligned up to its interval.
+Compute the normal candidates first. If `candidateTo <= candidateFrom`, return a canonical empty effective range with `from == to == max(request.from, min(request.to, closedThrough))` and `expected=0`; never subtract inverted bounds. Use the shared floor/ceil helpers rather than Go's truncating integer division. `RetentionFrom` uses the selected public tier horizon, excluding the extra physical support bucket: raw=`generatedAt-min(1h,R)`, 1m=`generatedAt-min(24h,R)`, 1h=`generatedAt-min(30d,R)`, and 1d=`generatedAt-R`, each aligned up to its interval.
 
 Return `400` when `from >= to`, the resolution is unknown/`5m`, or a requested override is finer than the automatic retained tier.
 
@@ -2489,7 +2803,7 @@ Return `400` when `from >= to`, the resolution is unknown/`5m`, or a requested o
 
 Query `metrics_raw`/rollups, never `rate_snapshots`, for history. Suppress any periodic or aggregate point whose exact series bucket lacks coverage; this prevents pre-migration rows with defaulted `metric_kind` from masquerading as typed pub/sub history. Also intersect returned points with `[RetentionFrom,effective.to)`: the physically retained support bucket is excluded from data/returned counts and remains `outsideRetention` even if its row and coverage exist. Convert covered in-horizon raw points to `source="observed"` with `count:1`; rollups to `source="aggregated"` with non-nil min/max/avg/sum/count even when zero. Select aggregate `value` by metric kind.
 
-Compare coverage for the exact `(subject_id, metric_name, labels)` against every expected bucket. The empty-metric subject-wide row is telemetry-health context only and never fills a series gap. Group consecutive gaps with the same reason. Buckets before the selected tier's `RetentionFrom` are `outsideRetention`; other absent coverage is `notRecorded`. Compute `complete = expectedPointCount > 0 && len(missingRanges) == 0`; a canonical empty effective range has zero expected/returned points, empty missing ranges, and `complete:false` exactly as the approved JSON examples require.
+Compare coverage for the exact `(subject_id, metric_name, labels, metric_kind)` against every expected bucket. The empty-metric subject-wide row is telemetry-health context only and never fills a series gap. Group consecutive gaps with the same reason. Buckets before the selected tier's `RetentionFrom` are `outsideRetention`; other absent coverage is `notRecorded`. Compute `complete = expectedPointCount > 0 && len(missingRanges) == 0`; a canonical empty effective range has zero expected/returned points, empty missing ranges, and `complete:false` exactly as the approved JSON examples require.
 
 For active subscriptions, query the prior gauge sample plus `PriorCoverage`. Emit `carriedForward` at effective start only when coverage for that exact gauge series from the prior sample's bucket through the start is uninterrupted **and no covered in-range point already exists at `effective.from`**. Never emit two points with the same timestamp or count a carry point in addition to an observed/aggregate start point. Never carry across a missing range. A counter increase or derived rate also remains incomplete until its own per-series baseline/coverage is present; subject-wide coverage cannot hide an initial missing baseline.
 
@@ -2514,7 +2828,14 @@ Topic summary bytes, delivery failures, lifecycle increases, fan-out average/max
 
 Use shared range helpers. Raw counter totals require a covered point immediately before the effective range, apply reset-aware deltas through the last covered in-range point, and return nil when baseline/coverage is missing. Aggregate counter totals sum covered `increase_value`. Normalize each covered raw event/rate point to `sum=value`, `count=1`, `min=value`, and `max=value`; aggregate rows use their stored sum/count/min/max. Duration, fan-out, and rate summaries then combine `sum(sum)/sum(count)`, max of child maxima, min of child minima, and summed counts across raw, rollup, or mixed support rows; never average bucket averages. Any relevant gap returns the nullable summary field/array as nil rather than using a partial range.
 
-For each of the two fields, operation summary ordering is backend `sqlite`, `postgres`, `cluster`, then operations `list_topics`, `create_topic`, `delete_topic`, `subscribe`, `unsubscribe`, `publish`. Complete coverage with no matching operations encodes `[]`; insufficient coverage for that family encodes `null` without forcing the other field to null. Tests query an arbitrary half-open range containing both a request event and its storage call, assert the two counts/durations land only in their respective fields, and cover topic-attributed plus system list/create ordering.
+For each of the two fields, operation summary ordering is backend `sqlite`,
+`turso`, `postgres`, `cluster`, then operations `list_topics`, `create_topic`,
+`delete_topic`, `subscribe`, `unsubscribe`, `publish`. Complete coverage with no
+matching operations encodes `[]`; insufficient coverage for that family encodes
+`null` without forcing the other field to null. Tests query an arbitrary
+half-open range containing both a request event and its storage call, assert the
+two counts/durations land only in their respective fields, and cover
+topic-attributed plus system list/create ordering.
 
 - [ ] **Step 8: Run handler and route tests**
 
@@ -2654,7 +2975,7 @@ export interface DurationSummary {
 }
 
 export interface OperationSummary {
-  backend: "sqlite" | "postgres" | "cluster";
+  backend: "sqlite" | "turso" | "postgres" | "cluster";
   operation: "list_topics" | "create_topic" | "delete_topic" | "subscribe" | "unsubscribe" | "publish";
   ok: number;
   error: number;

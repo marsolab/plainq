@@ -287,7 +287,21 @@ must not re-emit those logical counters. Every replica does reconcile
 after create, delete, subscribe, unsubscribe, queue cascade, snapshot restore,
 and catch-up. This keeps follower state gauges correct without multiplying one
 logical event by the replica count. The local SQLite observer remains distinct
-for genuinely local storage work and retains `backend="sqlite"`.
+for genuinely local storage work and retains the physical backend label:
+`sqlite`, `turso`, or `postgres`.
+
+One observer mutex defines the ordering boundary for recorder replacement,
+queue known-state, topic known-state, and every recorder callback. Attaching a
+recorder and replaying exact state is one linearized action: no event can be
+delivered to the new recorder before its known-state replay or to the old
+recorder afterwards. The observer owns defensive copies of subscription maps
+and passes fresh copies to recorders, so neither a storage caller nor a recorder
+can mutate retained state. An unavailable inventory clears only the topic
+`known` bit and retains the last map for later removed-topic reconciliation; it
+does not zero Prometheus gauges, emit lifecycle events, or replay stale state.
+Queue count starts unknown and becomes known only after an authoritative exact
+count. Incremental queue mutations may adjust an already-known count but never
+turn an unknown count into an authoritative zero or replay.
 
 The observer updates Prometheus and bounded in-memory collector state on the
 operation path; SQLite persistence and rollups remain background work. A
@@ -297,14 +311,18 @@ telemetry write failure never changes the pub/sub result. The existing
 families expose collector failures so a silent or stale dashboard is itself
 observable.
 
-Duration/fan-out events and deleted-topic terminal gauge state each use a
-65,536-entry bounded queue. Event overflow increments
+Duration/fan-out events use a 65,536-entry bounded queue. Deleted-topic terminal
+gauge state uses a 65,536-row durable, deduplicated pending table in the
+telemetry database, so a process restart cannot forget the zero that closes a
+topic's history. Event overflow increments
 `plainq_telemetry_event_buffer_dropped_total{metric}`; terminal-state overflow
 increments `plainq_telemetry_terminal_state_dropped_total`. The collector writes
 no coverage for a dropped value, so Houston reports `notRecorded` rather than a
-fabricated zero. A terminal zero is persisted exactly once with exact-series
-coverage before its retained topic state is removed; a coverage retry must not
-insert a duplicate raw zero.
+fabricated zero. The first eligible collection assigns a terminal transition a
+stable raw bucket. Retries keep that bucket and block a dependent rollup from
+passing it. One transaction persists exactly one zero with exact-series
+coverage and removes the pending record before retained topic state disappears;
+a restart or coverage retry cannot move the zero or insert a duplicate.
 
 HTTP, gRPC, CLI-over-gRPC, SQLite, PostgreSQL, and clustered storage therefore
 share the same business metric semantics. Transport handlers must not separately
@@ -332,20 +350,31 @@ internal current-state map.
 Clustered publish apply is additionally fail-closed. A permanent guard-version
 bit lives in the Raft stable store, so lost sidecars cannot look like a first
 upgrade. Before mutating replicated publish state, each replica durably changes
-a clean sidecar beside the Raft log to dirty. It restores clean only after deterministic full success or a
-known non-mutating precondition failure. A local partial/unknown result leaves
-the guard dirty, quarantines that replica, rejects later public reads/writes, and
-survives restart even if writing a secondary diagnostic marker fails. Verified
-snapshot restore or full replica wipe/reseed is required to recover. `/live`
-remains process liveness while `/health` reports storage, quorum, and quarantine
-readiness; orchestration must not erase quarantine by restarting a live process.
+a clean sidecar beside the Raft log to dirty. It restores clean only after
+deterministic full success or a known non-mutating precondition failure. Every
+typed partial result, regardless of its nested cause or which destination
+failed, and every unclassified replica-local result leaves the guard dirty and
+quarantines that replica. The same health latch gates cluster Store reads and
+writes, subscriber preflights, and peer-forwarded applies; successful calls
+recheck it before returning local state. The durable dirty guard is the safety
+record even if writing a secondary diagnostic quarantine marker fails, and a
+restart never clears it. Verified snapshot restore plus exact inventory, or a
+full replica wipe/reseed, is required to recover. `/live` remains process
+liveness and stays 200 for a quarantined process; `/health` is readiness and
+returns 503 for physical storage failure, lost write quorum, or quarantine.
+Cluster status and `plainq_cluster_healthy` retain their consensus meaning while
+the separate quarantine status/metric reports this fail-closed state.
 
-Every binding actually removed increments the subscription-deleted lifecycle
-counter, whether removal came from explicit unsubscribe, topic deletion, or the
-queue foreign-key cascade. The delete path reads affected bindings before the
-cascade so it can attribute each removal to its topic. Startup, restore, and
-repair reconciliation only rebase current gauges; they never fabricate created
-or deleted lifecycle events.
+Every binding removed by a commit whose outcome/effects are known to ingress
+increments the subscription-deleted lifecycle counter, whether removal came
+from explicit unsubscribe, topic deletion, or the queue foreign-key cascade.
+The delete path reads affected bindings before the cascade so it can attribute
+each removal to its topic. An indeterminate `ErrCommitUnknown` may have committed
+but has no durable v1 effect handoff, so ingress records request/storage error
+and emits no guessed business or lifecycle event. Later exact reconciliation
+heals gauges; exactly-once recovery of those lifecycle effects is out of scope.
+Startup, restore, and repair reconciliation only rebase current gauges; they
+never fabricate created or deleted lifecycle events.
 
 ### Coverage matrix
 
@@ -396,11 +425,21 @@ These health counters/gauges are intentionally not fed back into the internal
 collector, avoiding recursive telemetry about a collector that is already
 degraded.
 
-The process enables metric metadata so `/metrics` emits Prometheus-compatible
-`# HELP` and `# TYPE` lines. Histograms use classic `le` buckets. The runtime
-catalog at `/api/v1/metrics/catalog` is generated from the same declarations.
-Topic labels remain bounded by the registry's per-family series cap and overflow
-series. Route metrics use route patterns rather than raw resource paths.
+The metric label vocabulary is closed: `backend` is exactly `sqlite`, `turso`,
+`postgres`, or `cluster`; `operation` is exactly the six public operations below;
+and `result` is exactly `ok` or `error`. Request and storage counter/histogram
+families have no topic label. Topic attribution exists only in the bounded
+business families and the internal telemetry store.
+
+The process enables VictoriaMetrics metadata so `/metrics` emits
+Prometheus-compatible `# HELP` and `# TYPE` lines and classic histogram `le`
+buckets. The pinned VictoriaMetrics writer emits a name-only `# HELP <family>`
+line rather than the declaration's prose. Rich help text therefore lives in the
+runtime catalog at `/api/v1/metrics/catalog`, generated from the same
+declarations, and in `docs/guides/observability.md`; tests verify both surfaces
+without pretending the raw exposition contains that prose. Topic labels remain
+bounded by the registry's per-family series cap and overflow series. Route
+metrics use route patterns rather than raw resource paths.
 
 Publish accounting is defined as follows:
 
@@ -458,7 +497,7 @@ The internal types and dimensions are fixed as follows:
 
 The six `operation` values are `list_topics`, `create_topic`, `delete_topic`,
 `subscribe`, `unsubscribe`, and `publish`; `result` is `ok` or `error`;
-`backend` uses the existing bounded values `sqlite`, `postgres`, and `cluster`.
+`backend` uses the bounded values `sqlite`, `turso`, `postgres`, and `cluster`.
 System operation series are always written. A topic operation series is also
 written when the request contains a valid topic ID, or, for successful create,
 when the response provides the new ID. Failed create and list operations
@@ -466,7 +505,11 @@ therefore have no per-topic copy.
 
 Counter snapshots are cumulative within one process epoch. Their rollup stores
 a reset-aware increase: a lower value starts a new epoch and contributes its
-value rather than a negative delta. Duration samples store seconds. A duration
+value rather than a negative delta. Each complete counter child includes the
+transition from its immediately adjacent covered predecessor exactly once; a
+parent sums complete child increases and never recomputes that boundary. A
+reset between children therefore contributes the later child's first value,
+without a negative or double-counted delta. Duration samples store seconds. A duration
 rollup combines child buckets as `sum(sum) / sum(count)` and preserves the
 overall min, max, sum, and count. Labels are serialized in canonical key order
 and are part of a series identity.
@@ -515,7 +558,8 @@ rollups, the interval must be at least one millisecond, be an exact whole number
 of milliseconds, and divide one minute evenly. `--telemetry.sqlite.gc.timeout`
 sets the cleanup interval and must be positive.
 
-On restart with a changed collection interval, the collector first rolls all
+On restart with a changed collection interval, the collector first flushes any
+durable terminal transition already assigned to the old grid and rolls all
 complete old-grid raw buckets into retained coarse tiers, then transactionally
 removes retained raw rows and raw coverage before collecting on the new grid.
 An independent singleton collection-state row stores the active raw interval;
@@ -530,7 +574,9 @@ selector is honest. Cleanup retains raw for `min(1h, retention)`, one-minute dat
 for `min(24h, retention)`, hourly data for `min(30d, retention)`, and daily data
 for the configured retention, plus one completed source bucket at each boundary
 so aggregation and cleanup cannot punch a hole at the start of a supported
-range. The current 14-day default therefore retains the required 24-hour
+range. That support bucket is physical rollup input only: public range selection,
+coverage, returned points, and summaries treat it as outside retention. The
+current 14-day default therefore retains the required 24-hour
 one-minute history and hourly/daily history up to 14 days. `rate_snapshots`
 remains a latest-value cache and is not a historical chart source.
 
