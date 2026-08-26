@@ -1774,6 +1774,9 @@ Add:
 - `TestSaveMetricAndCoverageRollsBackTogether`
 - `TestTerminalStateEnqueueIsDurableAndBounded`
 - `TestTerminalStateCompletionIsAtomicAndIdempotent`
+- `TestSaveCollectionBoundaryRollsBackRowsCoverageAndLedgerTogether`
+- `TestSaveCollectionBoundaryRetryIsIdempotent`
+- `TestSaveCollectionBoundaryLostCommitAckDoesNotDuplicate`
 - `TestCollectorStoreInterfaceCompilesDuringTypedMigration`
 
 Counter reset fixtures are explicit: with a covered prior point `90` immediately before the bucket and in-bucket values `100, 3, 8`, complete increase is `18`; with no prior (or a prior lacking exact-series coverage) and in-bucket values `90, 100, 3, 8`, the visible increase is also `18` but counter coverage is incomplete because the leading delta is unknown. Neither case may produce `-82`, `8`, `100`, or an increase from implicit zero. Gauge fixture must have an average different from the final value and assert `Value == LastValue`.
@@ -1784,7 +1787,7 @@ Run:
 
 ```bash
 go test ./internal/server/mutations ./internal/server/service/telemetry/collector \
-  -run 'TestTelemetryMigration4|TestSaveAndQueryTyped|TestSaveMetricAndCoverage|Test.*Rollup|TestCoverage|TestLegacyFiveMinute|TestQuerySeries|TestQuerySubjectCoverage|TestResetRawInterval' -count=1
+  -run 'TestTelemetryMigration4|TestSaveAndQueryTyped|TestSaveMetricAndCoverage|TestSaveCollectionBoundary|TestTerminalState|TestCollectorStoreInterface|Test.*Rollup|TestCoverage|TestLegacyFiveMinute|TestQuerySeries|TestQuerySubjectCoverage|TestResetRawInterval' -count=1
 ```
 
 Expected: FAIL because the schema has no metric kind, coverage, checkpoint, or typed aggregate fields.
@@ -2049,6 +2052,11 @@ exists, retry is an idempotent success. A statement/commit failure exposes none
 of the batch; if commit succeeded but its acknowledgement was lost, the ledger
 makes the retry a no-op. Cleanup deletes ledger rows with the corresponding raw
 horizon. Task 10 uses this method instead of independent per-series writes.
+Storage tests inject failure after batch rows, after coverage, and at the final
+ledger/commit boundary and assert rows, snapshots, coverage, and ledger all roll
+back together. They then retry the identical batch twice and simulate a lost
+commit acknowledgement, proving every raw/event row appears once and the single
+completion row suppresses duplicate work.
 
 `Rollup` is the typed entry point used by the later coordinator. In Task 8 add
 it and the new methods to the collector `Store` interface **without removing**
@@ -2227,7 +2235,7 @@ Run:
 
 ```bash
 go test ./internal/server/service/telemetry/collector ./internal/metrics \
-  -run 'TestTopic|Test.*EventBuffer|TestTerminalStateBuffer|Test.*Telemetry.*Dropped' -count=1
+  -run 'TestTopic|Test.*EventBuffer|TestTerminalStateBuffer|TestTerminalEnqueue|Test.*Telemetry.*Dropped' -count=1
 ```
 
 Expected: FAIL because the collector only knows publish/delivery totals, two rates, and a subscription gauge.
@@ -2341,6 +2349,13 @@ The absent coverage makes the loss visible as `notRecorded`; no zero is fabricat
 
 Run the Step 2 command again.
 
+Then run the full packages so terminal promotion tests cannot be skipped by a
+regex drift:
+
+```bash
+go test ./internal/server/service/telemetry/collector ./internal/metrics -count=1
+```
+
 Expected: PASS; system and topic copies, canonical labels, terminal zero, overflow visibility, and dirty-bucket tracking are exact.
 
 - [ ] **Step 8: Commit**
@@ -2407,6 +2422,7 @@ Add:
 - `TestTerminalTopicFailureAcrossMinuteDoesNotRetarget`
 - `TestTerminalTopicRetryKeepsOriginalBucketAcrossMinuteBoundary`
 - `TestAssignedTerminalFlushesBeforeStartupRollup`
+- `TestPreDurableTerminalPromotionFailsThenRecoversInOrder`
 - `TestRawIntervalChangeCatchesUpThenCreatesExplicitGap`
 - `TestSameRawIntervalRestartPreservesGridAndHistory`
 - `TestCleanupUsesConfiguredIntervalAndTierCutoffs`
@@ -2432,7 +2448,7 @@ Run:
 
 ```bash
 go test ./internal/server/service/telemetry/collector ./cmd ./internal/server \
-  -run 'TestCalculateRates|TestFailedRateWrite|TestRateWrites|TestCollection|TestEventAtBoundary|TestCoverageWrites|TestAggregation|TestDirtyEvent|TestTerminalTopic|TestRawInterval|TestCleanup|TestDelayedCoordinator|TestPersistentCoordinator|TestWorkersStop|TestTelemetryListener|TestTelemetryDB|TestTelemetryConfig|TestServerPassesTelemetry' -count=1
+  -run 'TestCalculateRates|TestFailedRateWrite|TestRateWrites|TestCollection|TestEventAtBoundary|TestCoverageWrites|TestAggregation|TestDirtyEvent|TestTerminalTopic|TestPreDurable|TestAssignedTerminal|TestRawInterval|TestCleanup|TestDelayedCoordinator|TestPersistentCoordinator|TestWorkersStop|TestTelemetryListener|TestTelemetryDB|TestTelemetryConfig|TestServerPassesTelemetry' -count=1
 ```
 
 Expected: FAIL because rates assume one second, flags are not passed to the collector, cleanup is fixed at ten minutes, and startup uses a detached background context.
@@ -2519,7 +2535,14 @@ batch. Report the transaction error through collector health and retry the same
 boundary without advancing baselines, dirty state, or deadlines.
 
 Exclude every terminal-pending topic from normal periodic active-subscription
-sampling. Load durable pending rows before each rollup chain. Assign each newly
+sampling. Before loading durable rows or starting any rollup chain, call
+`promotePreDurableTerminals(ctx)`. It walks the bounded FIFO in insertion order
+and calls `EnqueueTerminalState` for each entry. On error, stop immediately and
+retain that entry plus the untouched tail for retry. On `accepted=true`, remove
+the FIFO entry while keeping its shared reservation as durable. On
+`accepted=false`, remove the FIFO/current-state entry, release its reservation,
+and increment `plainq_telemetry_terminal_state_dropped_total`, then continue.
+Only after promotion succeeds may the coordinator load durable pending rows. Assign each newly
 due row the latest `bucketStart` once; every retry calls
 `CompleteTerminalState` with that stored bucket/interval. On failure the
 transaction rolls back zero, coverage, and deletion, the coordinator stops
@@ -2533,9 +2556,11 @@ explicit gap.
 - [ ] **Step 6: Coordinate collection and dependent rollups in order**
 
 Replace the three independent aggregation workers and the independent cleanup
-worker with one coordinator that owns collection, durable terminal flush,
+worker with one coordinator that owns pre-durable promotion, collection, durable terminal flush,
 1m/1h/1d rollups, raw-grid reset, and cleanup in that strict order. At startup,
-capture `startupNow := c.now().UTC()`. First flush every terminal row that
+capture `startupNow := c.now().UTC()`. First call
+`promotePreDurableTerminals`; a failure leaves initialization due and runs no
+durable load, rollup, reset, or cleanup. Then flush every terminal row that
 already has an assigned old-grid target; stop on failure so no checkpoint can
 pass it. Then call `c.store.Rollup(ctx, Resolution1m,
 startupNow.Truncate(time.Minute).UnixMilli())`, 1h, and 1d to catch up retained
@@ -2558,7 +2583,13 @@ new-grid collection starts fresh raw history, and the API exposes the boundary
 as `notRecorded` rather than advertising mixed sample grids under one
 `sampleIntervalMs`.
 
-On wake, advance a late collection deadline to the latest closed raw boundary
+On every wake, promote the pre-durable FIFO before loading/assigning terminal
+rows or doing collection/rollup work. The fail-then-recover test injects an
+enqueue failure between two FIFO entries, asserts neither the failed entry nor
+its tail is lost/reordered and no rollup runs, then recovers and observes both
+promoted exactly once before the chain continues.
+
+After promotion, advance a late collection deadline to the latest closed raw boundary
 `B` and collect once for `[B-collectionInterval,B)`. Do not fabricate points or
 coverage for skipped raw buckets; the rate uses actual elapsed time and a
 long-window point stays uncovered. Complete/flush every due terminal at its
