@@ -7,14 +7,18 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	hraft "github.com/hashicorp/raft"
 	"github.com/marsolab/plainq/internal/cluster/command"
 	"github.com/marsolab/plainq/internal/cluster/consensus"
+	clusterfsm "github.com/marsolab/plainq/internal/cluster/fsm"
+	"github.com/marsolab/plainq/internal/cluster/publishwire"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/service/queue"
 	"github.com/marsolab/plainq/internal/shared/deleteresult"
@@ -539,8 +543,9 @@ func TestNewFollowerDoesNotFallbackOnApplicationNotFound(t *testing.T) {
 func TestPublishIdentifierWireFitsDerivedResponseCeiling(t *testing.T) {
 	queueID := "c5s8b4p9e8rg5u5fgq10"
 	messageID := queue.NewBatchIDs(time.Unix(1_700_000_000, 0).UTC())()
-	if len(queueID) != 20 || len(messageID) != 26 {
-		t.Fatalf("test XID/ULID lengths = %d/%d, want 20/26", len(queueID), len(messageID))
+	if len(queueID) != publishwire.QueueIDLength || len(messageID) != publishwire.MessageIDLength {
+		t.Fatalf("test XID/ULID lengths = %d/%d, want %d/%d",
+			len(queueID), len(messageID), publishwire.QueueIDLength, publishwire.MessageIDLength)
 	}
 
 	for _, count := range []int{1, 10, 10_000} {
@@ -560,9 +565,28 @@ func TestPublishIdentifierWireFitsDerivedResponseCeiling(t *testing.T) {
 			t.Fatalf("%d QueueID+MessageID JSON bytes = %d, want < 2x command ID bytes (%d)",
 				count, got, limit)
 		}
+
+		encodedOutcome, err := json.Marshal(compactPublishOutcomeFrom(&queue.PublishOutcome{
+			Response: &queue.PublishResponse{
+				TopicID:        queueID,
+				QueueIDs:       queueIDs,
+				MessageIDs:     messageIDs,
+				DeliveredCount: count,
+			},
+			Partial:            true,
+			SelectedQueues:     math.MaxUint64,
+			FailedDeliveries:   math.MaxUint64,
+			FailedDestinations: math.MaxUint64,
+		}))
+		td.Require(t).CmpNoError(err)
+		bound, fits := publishwire.FitsCompactOutcome(uint64(count), 1, publishwire.MaxResponseBytes)
+		if !fits || uint64(len(encodedOutcome)) > bound {
+			t.Fatalf("%d-destination compact outcome bytes/bound = %d/%d, fits=%t",
+				count, len(encodedOutcome), bound, fits)
+		}
 	}
-	if maxResponseBytes != 2*command.MaxEncodedBytes+publishResponseFramingBytes {
-		t.Fatalf("maxResponseBytes = %d, want derived ceiling", maxResponseBytes)
+	if publishwire.MaxResponseBytes != 2*command.MaxEncodedBytes+publishwire.FramingBytes {
+		t.Fatalf("MaxResponseBytes = %d, want derived ceiling", publishwire.MaxResponseBytes)
 	}
 }
 
@@ -601,8 +625,9 @@ func TestAuthenticatedFollowerCarriesKnownPublishOutcomeLargerThanCommandLimit(t
 	if err != nil {
 		t.Fatalf("Forward() large known outcome = %v", err)
 	}
-	if len(raw) <= command.MaxEncodedBytes || len(raw) > maxResponseBytes {
-		t.Fatalf("known response bytes = %d, want (%d, %d]", len(raw), command.MaxEncodedBytes, maxResponseBytes)
+	if len(raw) <= command.MaxEncodedBytes || len(raw) > publishwire.MaxResponseBytes {
+		t.Fatalf("known response bytes = %d, want (%d, %d]",
+			len(raw), command.MaxEncodedBytes, publishwire.MaxResponseBytes)
 	}
 	if !json.Valid(raw) {
 		t.Fatal("large known outcome was truncated or malformed")
@@ -654,6 +679,87 @@ func TestServerRejectsResponseOverflowBeforeWritingSuccessStatus(t *testing.T) {
 	}
 	if applier.calls != 1 {
 		t.Fatalf("response overflow Apply calls = %d, want 1 known committed outcome", applier.calls)
+	}
+}
+
+type authoritativePublishStorage struct {
+	queue.ReplicatedStorage
+	subscriptions int64
+	publishCalls  int
+}
+
+func (s *authoritativePublishStorage) TopicInventory(context.Context) (queue.TopicInventory, error) {
+	return queue.TopicInventory{
+		TopicsExist:        1,
+		SubscriptionCounts: map[string]int64{"topicone": s.subscriptions},
+	}, nil
+}
+
+func (s *authoritativePublishStorage) Publish(
+	context.Context,
+	string,
+	*queue.PublishRequest,
+) (*queue.PublishResponse, error) {
+	s.publishCalls++
+	return nil, errors.New("publish must not run after capacity rejection")
+}
+
+type authoritativePublishGuard struct {
+	beginCalls int
+}
+
+func (*authoritativePublishGuard) Check() error               { return nil }
+func (g *authoritativePublishGuard) BeginPublishApply() error { g.beginCalls++; return nil }
+func (*authoritativePublishGuard) FinishPublishApply() error  { return nil }
+
+type raftFSMForwardApplier struct {
+	machine *clusterfsm.FSM
+	index   uint64
+	calls   int
+}
+
+func (a *raftFSMForwardApplier) Apply(_ context.Context, data []byte) (any, error) {
+	a.calls++
+	a.index++
+	result := a.machine.Apply(&hraft.Log{Index: a.index, Type: hraft.LogCommand, Data: data})
+	if err, ok := result.(error); ok {
+		return nil, err
+	}
+	return result, nil
+}
+
+func TestForwardedStalePublishIsCapacityRejectedBeforeMutation(t *testing.T) {
+	payload, err := json.Marshal(queue.PublishRequest{
+		Messages: []queue.PublishMessage{{Body: []byte("x")}},
+	})
+	td.Require(t).CmpNoError(err)
+	encoded, err := (&command.Command{
+		Op:      command.OpPublish,
+		Target:  "topicone",
+		Payload: payload,
+		// A stale follower knew of no subscribers and assigned no IDs.
+	}).Encode()
+	td.Require(t).CmpNoError(err)
+
+	storage := &authoritativePublishStorage{subscriptions: 3_000_000}
+	guard := new(authoritativePublishGuard)
+	machine := clusterfsm.New(storage, nil, guard, func(fatalErr error) { panic(fatalErr) })
+	applier := &raftFSMForwardApplier{machine: machine}
+	server := newTestServer(t, applier, &stubMembership{}, "shared-secret")
+
+	resp := post(t, server, http.MethodPost, "/v2/forward", "shared-secret", string(encoded))
+	body, readErr := io.ReadAll(resp.Body)
+	td.Require(t).CmpNoError(readErr)
+	if resp.StatusCode != http.StatusRequestEntityTooLarge || resp.Header.Get(errorHeader) != "capacity" {
+		t.Fatalf("stale forwarded publish status/class = %d/%q, want 413/capacity: %s",
+			resp.StatusCode, resp.Header.Get(errorHeader), body)
+	}
+	if bytes.Contains(body, []byte("response exceeds safe limit")) {
+		t.Fatalf("stale forwarded publish failed after Apply with response overflow: %s", body)
+	}
+	if applier.calls != 1 || guard.beginCalls != 0 || storage.publishCalls != 0 {
+		t.Fatalf("Apply/guard begin/storage publish calls = %d/%d/%d, want 1/0/0",
+			applier.calls, guard.beginCalls, storage.publishCalls)
 	}
 }
 

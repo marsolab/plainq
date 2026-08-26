@@ -404,9 +404,15 @@ separate finite ceiling of `2 * 64 MiB + 4 KiB`. The v2 wire is compact and
 carries only `Response`, explicit `Partial`, `SelectedQueues`,
 `FailedDeliveries`, and `FailedDestinations`; unbounded local destination causes
 and failure lists never cross the peer hop. Fixed XID queue IDs and ULID message
-IDs make the two-times command bound sufficient for every valid non-empty
-publish result. A peer response outside that envelope is terminal and is never
-retried after the command may have applied.
+IDs give the shared overflow-safe bound `4 KiB + subscriptions * 23 +
+subscriptions * request-messages * 29`. Before the durable publish guard or
+storage mutation, every upgraded FSM reads its committed local `TopicInventory`
+and rejects a bound above the peer ceiling as stable capacity. It therefore
+does not trust a follower's possibly stale command-ID count; missing topics stay
+NotFound, while inventory read failures reject without mutation or quarantine.
+The peer's post-Apply response check remains a defensive invariant. A response
+outside that envelope is terminal and is never retried after the command may
+have applied.
 
 Rolling upgrades keep `/v1/forward` as the legacy protocol and add
 `/v2/forward` for the compact outcome. A new follower tries v2 and falls back

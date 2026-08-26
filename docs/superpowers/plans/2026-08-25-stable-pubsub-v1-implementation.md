@@ -1168,6 +1168,8 @@ git commit -m "feat: share stable pubsub application boundary"
 - Modify: `internal/cluster/fsm/fsm.go`
 - Modify: `internal/cluster/fsm/fsm_test.go`
 - Modify: `internal/cluster/fsm/snapshot.go`
+- Add: `internal/cluster/publishwire/sizer.go`
+- Add: `internal/cluster/publishwire/sizer_test.go`
 - Modify: `internal/cluster/peer/peer.go`
 - Modify: `internal/cluster/peer/peer_test.go`
 - Modify: `internal/cluster/node.go`
@@ -1265,6 +1267,13 @@ Add:
 - `TestV1ForwardPreservesLegacyPublishSemantics`
 - `TestNewFollowerFallsBackToLegacyLeaderExactlyOnce`
 - `TestNewFollowerDoesNotFallbackOnApplicationNotFound`
+- `TestCompactOutcomeLimitBoundaries`
+- `TestCompactOutcomeUpperBoundRejectsIntegerOverflow`
+- `TestFSMPublishCapacityPreflightUsesAuthoritativeTopicInventoryBeforeMutation`
+- `TestFSMPublishInventoryPreflightErrorsAreNonMutating`
+- `TestFSMPublishWithinBudgetMayUseDerivedIdentifiers`
+- `TestFSMPublishPresentZeroSubscriptionsIsNotMissing`
+- `TestForwardedStalePublishIsCapacityRejectedBeforeMutation`
 - `TestPublishIdentifierWireFitsDerivedResponseCeiling`
 - `TestAuthenticatedFollowerCarriesKnownPublishOutcomeLargerThanCommandLimit`
 - `TestBuggyPeerResponseOverflowIsFiniteAndTerminal`
@@ -1464,7 +1473,11 @@ type compactPublishOutcome struct {
 }
 ```
 
-Set the peer response ceiling to `2*command.MaxEncodedBytes + 4<<10`. For every non-empty publish, valid queue IDs are fixed 20-byte XIDs and message IDs are fixed 26-byte ULIDs; a proof test must show their JSON representation remains below twice the command's encoded ID section, with 4 KiB covering fixed fields, topic ID, counts, delimiters, and framing. Server encodes and checks this bound before writing success status. Client reads at most the bound plus one byte. An overflow from a buggy peer returns a finite `ErrResponseTooLarge`, is diagnostic, and is never retried because Apply may already have happened. A deterministic authenticated regression must carry a known successful outcome larger than 64 MiB but below this response ceiling with every ID intact.
+Set the peer response ceiling to `2*command.MaxEncodedBytes + 4<<10`. Valid queue IDs are fixed 20-byte XIDs and message IDs are fixed 26-byte ULIDs. Put the ceiling and an overflow-safe pure sizer in `internal/cluster/publishwire`; for authoritative subscription count `s` and request message count `m` (the request itself is non-empty), the conservative compact-wire bound is `4 KiB + s*23 + s*m*29`. The 23 and 29 byte terms cover each fixed identifier plus JSON quotes and a conservative comma; 4 KiB covers fixed fields, topic ID, maximum-width counts, delimiters, and framing. Boundary, integer-overflow, fixed-ID, and real compact-marshalling tests must pin this proof.
+
+Before `BeginPublishApply` or `storage.Publish`, the FSM reads authoritative committed local `TopicInventory`, distinguishes an absent topic from a present zero-subscription topic, validates the count, and applies the shared sizer against the same peer ceiling. Inventory read errors and missing topics remain deterministic non-mutating errors and do not quarantine; an arithmetic overflow or over-limit bound returns stable non-retryable capacity without touching the guard or storage. This preflight must use inventory rather than the command's potentially stale ID count because `queue.Determinism` can derive a shortfall after Apply. A stale zero-ID forwarded regression proves the peer returns 413 capacity with one consensus Apply, zero guard begins, zero storage publishes, and no post-Apply response-overflow error; a within-budget case proves derived IDs still succeed.
+
+Server encodes and checks the same bound before writing success status as a defensive invariant. Client reads at most the bound plus one byte. An overflow from a buggy peer returns a finite `ErrResponseTooLarge`, is diagnostic, and is never retried because Apply may already have happened. A deterministic authenticated regression must carry a known successful outcome larger than 64 MiB but below this response ceiling with every ID intact.
 
 Keep `/v1/forward` for old followers and add `/v2/forward` for the compact shape. New Client tries v2 first and falls back to v1 exactly once only when it receives an unclassified route-level 404: no machine error header proves the command never reached Apply. A classified application `NotFound` never falls back. A legacy full `PublishResponse` is converted to compact `PublishOutcome` bytes before cluster Store decoding. A legacy partial terminal error becomes `*queue.PartialPublishError{Outcome: {Partial: true}}` with conservative zero delivery/destination counts and is never retried. New Server preserves legacy v1 full-success response bytes and returns legacy partial-fanout class with no success body. Fixtures cover new follower to old leader and old follower to new leader, full and partial results, exactly one Apply, and nil-response gRPC handling.
 

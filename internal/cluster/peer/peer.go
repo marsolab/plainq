@@ -29,6 +29,7 @@ import (
 	"github.com/marsolab/plainq/internal/cluster/command"
 	"github.com/marsolab/plainq/internal/cluster/consensus"
 	"github.com/marsolab/plainq/internal/cluster/deletewire"
+	"github.com/marsolab/plainq/internal/cluster/publishwire"
 	"github.com/marsolab/plainq/internal/cluster/transport"
 	"github.com/marsolab/plainq/internal/metrics"
 	"github.com/marsolab/plainq/internal/server/service/queue"
@@ -50,23 +51,9 @@ const errorHeader = "X-Plainq-Cluster-Error"
 // a peer is a follower that has stopped answering its own clients.
 const requestTimeout = 30 * time.Second
 
-const (
-	// maxRequestBytes is kept as a local name for the peer protocol, but the
-	// command package owns the one cluster-wide encoded-command ceiling.
-	maxRequestBytes = command.MaxEncodedBytes
-
-	// publishResponseFramingBytes covers the fixed JSON field names, topic id,
-	// integer counts, brackets and future compatible framing. For a non-empty
-	// publish, every QueueID is a fixed 20-byte XID and every MessageID is a
-	// fixed 26-byte ULID. QueueIDs and MessageIDs together occupy less than
-	// twice the command's length-prefixed MessageID bytes; see the proof test.
-	publishResponseFramingBytes = 4 << 10
-
-	// maxResponseBytes is deliberately larger than maxRequestBytes. A valid
-	// publish result can list both destination and message identifiers even
-	// though the command lists only message identifiers.
-	maxResponseBytes = 2*command.MaxEncodedBytes + publishResponseFramingBytes
-)
+// maxRequestBytes is kept as a local name for the peer protocol, but the
+// command package owns the one cluster-wide encoded-command ceiling.
+const maxRequestBytes = command.MaxEncodedBytes
 
 // ErrResponseTooLarge means a peer produced a response outside the finite
 // protocol envelope. It is terminal: retrying the already-applied command
@@ -350,7 +337,7 @@ func (s *Server) forwardHandler(w http.ResponseWriter, r *http.Request, version 
 	}
 	responseLimit := s.responseLimit
 	if responseLimit <= 0 {
-		responseLimit = maxResponseBytes
+		responseLimit = publishwire.MaxResponseBytes
 	}
 	if len(encoded) > responseLimit {
 		s.writeResponseTooLarge(w, len(encoded), responseLimit)
@@ -755,7 +742,7 @@ func (c *Client) do(ctx context.Context, method, addr, path, contentType string,
 
 	responseLimit := c.responseLimit
 	if responseLimit <= 0 {
-		responseLimit = maxResponseBytes
+		responseLimit = publishwire.MaxResponseBytes
 	}
 	responseBody, oversized, readErr := readBounded(resp.Body, responseLimit)
 	if readErr != nil {
