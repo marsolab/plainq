@@ -1526,10 +1526,12 @@ git commit -m "feat: reconcile pubsub telemetry across cluster"
 - Modify: `cmd/output.go`
 - Modify: `cmd/output_test.go`
 - Modify: `cmd/grpcerror.go`
+- Modify: `cmd/grpcerror_test.go`
+- Modify: `cmd/cli.go`
 - Modify: `cmd/cli_test.go`
 - Modify: `cmd/args_test.go`
 
-**Contract:** one nested non-interactive command group exposes list/create/delete/subscribe/unsubscribe/publish with standard address/JSON behavior, exact text output, local usage failures, and topic-specific NotFound advice.
+**Contract:** one nested non-interactive command group exposes list/create/delete/subscribe/unsubscribe/publish in that schema order, validates every argument/body before dialing, closes an opened client exactly once on every path, emits exact text or raw protobuf JSON, and changes advice only for topic NotFound errors.
 
 - [ ] **Step 1: Add client and command-tree tests**
 
@@ -1537,23 +1539,39 @@ Add tests for:
 
 - six internal client wrappers invoking the matching RPC;
 - all six `topic` leaves in help and `schema -target=cli`;
-- effect classification and required positional arguments;
+- effect classification and exact positional arity before open: list 0;
+  create/delete/publish 1; subscribe/unsubscribe 2; missing or extra arguments
+  are usage exit 2;
 - flags before/after positionals with one or two dashes;
-- malformed topic/subscription/queue IDs exiting 2 before dialing;
-- empty publish input exiting 2;
-- exact text output and raw JSON output;
+- lowercased local topic/subscription XID validation plus `validateQueueID`, all
+  exiting 2 before dialing;
+- blank/whitespace-only topic names rejected while the original nonblank name is
+  sent unchanged;
+- zero publish messages and files containing only empty lines exiting 2, while
+  an explicit empty `-message=` is one valid message;
+- exact text output and raw response-pointer protobuf JSON shapes;
 - result-only stdout, with usage/runtime errors returned for the existing top-level stderr reporter;
-- `-h`/`-help` showing arguments, flags, effects, examples, and exit codes;
+- in-process `printUsage` tests plus subprocess tests for actual `-h`, `-help`,
+  and `--help` (Scotty calls `os.Exit`, so do not invoke those through an
+  in-process Exec);
 - repeatable message, file, stdin, and mixed publish input;
 - topic NotFound advice saying `plainq topic list`;
-- a 4 MiB line accepted and a larger line rejected.
+- exactly 4 MiB accepted and every larger line rejected for newline-terminated
+  and EOF-terminated input;
+- open failure, RPC failure, render failure, close-only failure, and joined
+  operation+close failure, with exactly one close after every successful open.
+
+Build a fresh `commandSpec` for every Exec test because the spec caches its
+Scotty command/FlagSet. Do not run Exec or process-global help tests in parallel.
+Add `normalizeArgs` cases for nested topic leaves, one/two-dash flags, `--`, and
+`-file -`. Document the existing limitation that group flags before the leaf are
+unsupported; leaf flags may appear before or after leaf positionals.
 
 - [ ] **Step 2: Run and observe the missing command group**
 
 Run:
 
 ```bash
-make houston
 go test ./internal/client ./cmd \
   -run 'Test.*Topic|TestSchemaCoversEveryCommand|TestNormalizeArgs|TestCollectMessageBodies' -count=1
 ```
@@ -1575,7 +1593,20 @@ Publish(context.Context, *v1.PublishRequest, ...grpc.CallOption) (*v1.PublishRes
 
 Each wrapper adds an operation-specific `%w` context and preserves gRPC status extraction.
 
-Also add `func (c *Client) Close() error` delegating to the owned gRPC connection, with a client test. Topic commands close every client they open; no leaf logs an error that it also returns.
+Repeat those exact six signatures in the command-side `topicClient` interface;
+do not weaken them to a generic call or omit `grpc.CallOption`.
+
+Also add `func (c *Client) Close() error` delegating to the owned gRPC
+connection, with a client test. Each leaf uses a named return and installs one
+defer immediately after successful open:
+
+```go
+defer func() { err = errors.Join(err, closer.Close()) }()
+```
+
+Validation failure and open failure do not close; success, RPC failure, render
+failure, and close-only failure close exactly once. No leaf logs an error it
+also returns.
 
 - [ ] **Step 4: Extract transport-neutral message input**
 
@@ -1586,7 +1617,14 @@ func collectMessageBodies(messages []string, file string, stdin io.Reader) ([][]
 func readMessageBodyLines(path string, stdin io.Reader) ([][]byte, error)
 ```
 
-Keep the 64 KiB initial scanner buffer, ignored empty lines, explicit `-file=-` stdin, no implicit stdin, and combined repeated flags/file behavior. Configure the scanner buffer above 4 MiB, then explicitly reject `len(line) > 4*1024*1024`; an exactly 4 MiB line is accepted. Queue send in `cmd/client.go` maps returned bodies to `v1.SendMessage`; topic publish maps them to `v1.PublishMessage`.
+Keep ignored **file** empty lines, explicit `-file=-` stdin, no implicit stdin,
+and combined repeated flags/file behavior. Repeated `-message` values are added
+verbatim, including an empty string. Implement bounded line reading that retains
+at most `4*1024*1024+1` bytes before returning a usage error; do not rely on a
+Scanner maximum whose delimiter/EOF accounting rejects an exact-limit token.
+Test exact/over-limit lines with newline and EOF. After combining both sources,
+zero bodies is a usage error. Queue send in `cmd/client.go` maps returned bodies
+to `v1.SendMessage`; topic publish maps them to `v1.PublishMessage`.
 
 - [ ] **Step 5: Add topic-specific gRPC error advice**
 
@@ -1596,7 +1634,7 @@ Refactor to:
 func grpcErrorWithListHint(addr, operation, listCommand string, err error) error
 ```
 
-Keep the existing `grpcError(addr, operation, err)` as a compatibility wrapper that calls `grpcErrorWithListHint(addr, operation, "plainq list", err)`, so unrelated queue/message callers do not need a mechanical rewrite. Topic leaves pass `plainq topic list`. `InvalidArgument` remains a usage error/exit 2. All server/runtime errors remain exit 1.
+Keep the existing `grpcError(addr, operation, err)` as a compatibility wrapper that calls `grpcErrorWithListHint(addr, operation, "plainq list", err)`, so unrelated queue/message callers do not need a mechanical rewrite. Topic leaves pass `plainq topic list`. The hint changes only `codes.NotFound`; it preserves the original status for `status.Code/errors.Is`. `InvalidArgument` remains a usage error/exit 2. All server/runtime errors remain exit 1.
 
 - [ ] **Step 6: Implement the command tree**
 
@@ -1624,6 +1662,12 @@ delivered\t<count>
 
 For `-json`, pass the unmodified protobuf response to `encodeJSON`.
 
+Before `deps.open`, enforce exact arity, validate/normalize every identifier,
+validate a create name with `strings.TrimSpace` while preserving the original
+nonblank value, collect every publish source, and enforce the size/count rules.
+Use a shared lowercasing XID helper for topic/subscription IDs and the existing
+`validateQueueID` for queue IDs. Extras are never ignored.
+
 Construct commands through an injectable seam used by deterministic tests:
 
 ```go
@@ -1636,7 +1680,7 @@ type topicCommandDeps struct {
 func newTopicCommand(deps topicCommandDeps) *commandSpec
 ```
 
-`topicCommand()` supplies the existing `internal/client.New` dialer, process streams, and a client closer; tests supply fakes and never dial or mutate global stdin/stdout. Each leaf uses `signal.NotifyContext` consistently with the existing client commands, writes only result data to `deps.stdout`, and returns usage/runtime errors to `main`'s existing `reportError` stderr/exit-code boundary. Join an operation error with `Close` using `errors.Join` so every close result is checked without duplicate logging. Keep all flags inside the leaf's `SetFlags`; no library package reads global flags or calls `os.Exit`.
+`topicCommand()` supplies the existing `internal/client.New` dialer, process streams, and a client closer; tests supply fakes and never dial or mutate global stdin/stdout. Each leaf uses `signal.NotifyContext` consistently with the existing client commands, writes only result data to `deps.stdout`, and returns usage/runtime errors to `main`'s existing `reportError` stderr/exit-code boundary. Keep all flags inside the leaf's `SetFlags`; no library package reads global flags or calls `os.Exit`. Scotty help exits, so actual help aliases are subprocess-tested while `commandSpec.printUsage` supplies deterministic in-process assertions.
 
 - [ ] **Step 7: Verify CLI discovery and request construction**
 
@@ -1647,6 +1691,13 @@ go run ./cmd schema -target=cli -json | jq '.cli.commands[] | select(.name == "t
 ```
 
 Expected JSON value: `["list","create","delete","subscribe","unsubscribe","publish"]` in command-tree order.
+
+Then run the full package and race gates:
+
+```bash
+go test ./internal/client ./cmd -count=1
+go test -race ./internal/client ./cmd -count=1
+```
 
 - [ ] **Step 8: Commit**
 
@@ -1803,6 +1854,12 @@ CREATE TABLE IF NOT EXISTS telemetry_terminal_state (
     target_bucket INTEGER,
     sample_interval_ms INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS telemetry_collection_commits (
+    boundary INTEGER NOT NULL,
+    sample_interval_ms INTEGER NOT NULL,
+    PRIMARY KEY (boundary, sample_interval_ms)
+);
 ```
 
 Do not drop or rewrite `metrics_5m`. The migration runner's version table makes the migration apply once; the repeat test must reopen/run migrations rather than execute raw `ALTER TABLE` twice.
@@ -1898,6 +1955,22 @@ type TerminalState struct {
 	TargetBucket *int64
 	SampleIntervalMS *int64
 }
+
+type RateSnapshot struct {
+	Timestamp int64
+	SubjectID string
+	MetricName string
+	Rate float64
+	WindowMS int64
+}
+
+type CollectionBatch struct {
+	Boundary int64
+	SampleIntervalMS int64
+	Samples []MetricSample
+	RateSnapshots []RateSnapshot
+	Coverage []CoverageBucket
+}
 ```
 
 `Value` is selected from kind: raw=`metric_value`; aggregate gauge=`last_value`; aggregate counter=`increase_value`; aggregate rate/event=`avg_value`.
@@ -1923,6 +1996,7 @@ func (s *SQLiteStore) QuerySeries(context.Context, SeriesQuery) (SeriesResult, e
 func (s *SQLiteStore) QuerySubjectCoverage(context.Context, SubjectCoverageQuery) ([]CoverageBucket, error)
 func (s *SQLiteStore) SaveRateSnapshot(context.Context, int64, string, string, float64, int64) error
 func (s *SQLiteStore) SaveRateSnapshotAndMetric(context.Context, int64, string, string, float64, int64, MetricSample) error
+func (s *SQLiteStore) SaveCollectionBoundary(context.Context, CollectionBatch) error
 func (s *SQLiteStore) Rollup(context.Context, Resolution, int64) error
 func (s *SQLiteStore) ResetRawInterval(context.Context, int64) (bool, error)
 func (s *SQLiteStore) EnqueueTerminalState(context.Context, string, int64, int) (bool, error)
@@ -1948,8 +2022,17 @@ that compatibility path with actual elapsed milliseconds.
 `SaveRateSnapshotAndMetric` validates that the rate, timestamp, subject,
 metric name, and positive `windowMS` agree with the typed `MetricKindRate`
 sample, then writes the compatibility snapshot and typed raw row in one
-transaction. Task 10 uses this method for every derived rate; a failure cannot
-leave the two histories disagreeing.
+transaction. It supports compatibility callers and focused storage tests; Task
+10 places the same pair in `SaveCollectionBoundary`. Neither path can leave the
+two histories disagreeing.
+
+`SaveCollectionBoundary` validates one closed boundary, then in one transaction
+writes/upserts its periodic samples, event rows, rate snapshots, exact and
+subject coverage, and finally its completion-ledger row. If that ledger already
+exists, retry is an idempotent success. A statement/commit failure exposes none
+of the batch; if commit succeeded but its acknowledgement was lost, the ledger
+makes the retry a no-op. Cleanup deletes ledger rows with the corresponding raw
+horizon. Task 10 uses this method instead of independent per-series writes.
 
 `Rollup` is the typed entry point used by the later coordinator. In Task 8 add
 it and the new methods to the collector `Store` interface **without removing**
@@ -2118,6 +2201,7 @@ Add:
 - `TestTopicEventAtCutoverBoundaryStaysForNextBucket`
 - `TestBlockedEnqueueCannotArriveBehindCoverage`
 - `TestTerminalStateSurvivesCollectorRestart`
+- `TestTerminalEnqueueFailureUsesBoundedPreDurableRetry`
 
 The recording store spy implements the typed Store methods from Task 8 and must retain metric kind, labels, timestamp, value, and event count. Assert canonical JSON label strings exactly.
 
@@ -2162,6 +2246,11 @@ plainq_telemetry_terminal_state_dropped_total
 
 Extend per-topic and system structs with cumulative counters, previous values for rate deltas, exact gauges/known bits, last-updated timestamps, and fixed-label operation counter maps. The only label vocabularies are four backends (`sqlite|turso|postgres|cluster`), six operations, and `ok|error`.
 
+Move the collector clock seam into this task because its enqueue/cutover tests
+use it here: add `now func() time.Time`, default it to `time.Now` in `New`, and
+add `WithClock(now func() time.Time) Option`. Task 10 reuses this option and must
+not redeclare the field, default, or function.
+
 - [ ] **Step 4: Implement the optional `TopicRecorder` capability**
 
 For request/storage events, always update the system subject (`""`) and additionally update the topic subject when `TopicID != ""`. The Task 5 application boundary guarantees that a non-empty request attribution is a validated XID; malformed decoded IDs arrive here as empty and can never become unbounded subject keys. Store counter snapshots cumulatively. Queue duration and fan-out as individual event samples. Publish updates per-topic and system messages, bytes, deliveries, failures, and one fan-out event. Lifecycle updates per-topic and system counters. Reconciliation updates gauges only. `RecordTopicStateUnavailable` clears the per-topic/system gauge-known bits without deleting counters; Task 10 then withholds gauge samples and exact-series coverage until a later reconciliation.
@@ -2199,10 +2288,15 @@ Use Task 8's durable `telemetry_terminal_state` table, capped at 65,536
 deduplicated topic rows, as the source of pending terminal work. When exact
 reconciliation removes a topic, call `EnqueueTerminalState` with the occurrence
 time captured under the same cutover mutex **before** removing its current-state
-entry. A successful durable enqueue marks that entry terminal so normal
-periodic gauge sampling excludes it. A store failure is reported through
-collector health and keeps the in-memory entry terminal/pending for retry;
-telemetry failure never changes the customer mutation. `accepted=false` means
+entry. Reserve one slot from a shared 65,536 terminal budget first; initialize
+that budget from durable rows at startup and count both durable rows and a
+bounded pre-durable FIFO/map. A successful enqueue moves the reservation from
+the FIFO to SQLite without changing the total. A store failure is reported and
+keeps the transition only in that bounded FIFO for background retry; if no slot
+can be reserved, take the same explicit drop path as durable overflow. Completion
+or explicit drop releases the reservation. Thus repeated SQLite failures cannot
+retain deleted topics without bound or create two independent 65,536 caps.
+Telemetry failure never changes the customer mutation. `accepted=false` means
 the durable cap dropped a new transition: remove the stale current entry, write
 no zero or coverage, and increment the terminal-drop counter.
 
@@ -2289,6 +2383,9 @@ Add:
 - `TestDelayedCoordinatorLeavesSkippedRawBucketsUncovered`
 - `TestDirtyEventBucketNeverGetsCoverage`
 - `TestDirtyEventIntervalAdvancesWithoutGrowingAcrossCutover`
+- `TestSameBoundaryRetryDoesNotDuplicateRawSeriesOrEvents`
+- `TestFailedBoundaryRetainsDirtyStateUntilCommit`
+- `TestLostBoundaryCommitAcknowledgementUsesCompletionLedger`
 - `TestTerminalTopicPersistsZeroAndCoverageBeforeRemoval`
 - `TestTerminalTopicAtomicRetryDoesNotDuplicateZero`
 - `TestTerminalTopicFailureAcrossMinuteDoesNotRetarget`
@@ -2332,13 +2429,12 @@ Keep the existing `WithCollectionInterval`; add/update the complete option set t
 func WithCollectionInterval(d time.Duration) Option
 func WithCleanupInterval(d time.Duration) Option
 func WithRetentionPeriod(d time.Duration) Option
-func WithClock(now func() time.Time) Option
 
 func (c *Collector) CollectionInterval() time.Duration
 func (c *Collector) RetentionPeriod() time.Duration
 ```
 
-Use the CLI defaults of 10 seconds collection, 10 minutes cleanup, and 14 days retention in production wiring. Remove the unused snapshot interval option unless a live worker consumes it.
+Reuse Task 9's `WithClock`; do not redeclare it here. Use the CLI defaults of 10 seconds collection, 10 minutes cleanup, and 14 days retention in production wiring. Remove the unused snapshot interval option unless a live worker consumes it.
 
 - [ ] **Step 4: Compute rates from actual elapsed time**
 
@@ -2362,17 +2458,16 @@ func rate(delta uint64, elapsed time.Duration) float64 {
 ```
 
 `calculateRatesAt(ctx, now)` uses the real duration since the last successfully
-committed baseline. It passes exact `elapsed.Milliseconds()` to Task 8's
-`SaveRateSnapshotAndMetric(..., windowMS, MetricSample)` transaction; the typed
-rate sample carries the same `WindowMS`. It writes counter snapshots as
+committed baseline. It puts exact `elapsed.Milliseconds()` in both the Task 8
+`RateSnapshot` and typed rate `MetricSample` inside the boundary batch. It writes counter snapshots as
 `MetricKindCounter`, exact known state as `MetricKindGauge`, and queued
 duration/fan-out samples as `MetricKindEvent`.
 
 Track a `known` bit, value, and observation timestamp for every rate baseline.
 The first counter observation writes the cumulative counter snapshot but no
 derived rate sample or rate-series coverage; commit it as a baseline only after
-that snapshot write succeeds. For later observations, advance the in-memory
-baseline/timestamp only after the snapshot+typed-rate transaction succeeds. On
+that boundary batch succeeds. For later observations, advance the in-memory
+baseline/timestamp only after `SaveCollectionBoundary` succeeds. On
 failure, keep the prior baseline and mark the whole elapsed rate interval dirty.
 The next successful sample therefore carries the honest longer `window_ms`; it
 is retained for diagnostics/latest-value compatibility but receives no exact
@@ -2387,23 +2482,25 @@ value through `counterDelta`.
 
 The first timer fires at `now.Truncate(collectionInterval).Add(collectionInterval)`. At boundary `B`, periodic counter/gauge/rate samples and coverage use `bucketStart := B.Add(-collectionInterval).UnixMilli()`, representing the just-closed `[B-collectionInterval,B)` bucket; no periodic point is stamped `B` before that bucket closes. Build the expected bounded series matrix for the system subject and every tracked topic, including fixed backend/operation/result label combinations.
 
-Use the Task 9 cutover mutex as a watermark protocol. While holding it, set `eventWatermark=B.UnixMilli()`, partition queued events and terminal transitions with captured timestamp `<B` into a due batch, and retain entries at or after `B`. Every enqueue under that mutex stamps `max(c.now().UnixMilli(), eventWatermark)`, so a fake/slow recorder cannot append an event behind already-written coverage. Persist due duration/fan-out rows grouped by their actual containing bucket. Only the latest `bucketStart=B-collectionInterval` is eligible for event-series coverage; rows from older skipped buckets remain uncovered under the delayed-coordinator rule. For each fixed metric dirty interval, withhold coverage when it intersects the latest bucket; after cutover clear it when `toBucket < B`, otherwise clamp `fromBucket` to at least `B` and retain it for future buckets. Never allocate a dirty entry per bucket or topic.
+Use the Task 9 cutover mutex as a watermark protocol. While holding it, set `eventWatermark=B.UnixMilli()`, partition queued events and terminal transitions with captured timestamp `<B` into a retry-stable due batch, and retain entries at or after `B`. Every enqueue under that mutex stamps `max(c.now().UnixMilli(), eventWatermark)`, so a fake/slow recorder cannot append an event behind already-written coverage. Persist due duration/fan-out rows grouped by their actual containing bucket. Only the latest `bucketStart=B-collectionInterval` is eligible for event-series coverage; rows from older skipped buckets remain uncovered under the delayed-coordinator rule. For each fixed metric dirty interval, withhold coverage when it intersects the latest bucket. Stage any clear/clamp update, but do not mutate the live dirty interval or discard the due batch until boundary `B` commits successfully and its deadline advances. A same-boundary retry reuses the identical batch and dirty snapshot. Never allocate a dirty entry per bucket or topic.
 
-For each scheduled counter, known gauge, or rate sample, write the sample first
-and then write raw coverage for that exact
+For each scheduled counter, known gauge, or rate sample, add the sample and raw coverage for that exact
 `(subject_id, metric_name, labels, metric_kind)`. An unknown topic gauge writes
 neither a point nor coverage. A rate sample is coverable only when its positive
 `window_ms` equals the collection interval and its elapsed interval has no
 dirty/skipped bucket. For duration and fan-out event series, persist every due
 entry for the latest closed bucket and then write exact series coverage even
 when the event count is zero; no events plus coverage means measured zero
-activity. If any enqueue overflow or sample/snapshot/coverage write fails, or a
+activity. Submit all periodic samples, due events, rate snapshots, and eligible
+coverage as one Task 8 `CollectionBatch`. `SaveCollectionBoundary` makes a
+same-boundary retry and lost commit acknowledgement idempotent; no retry can
+duplicate a raw series/event or split a snapshot from history. If any enqueue overflow or batch write fails, or a
 bounded family dirty marker intersects the bucket, do not cover that exact
 series or its subject-wide row. An uncovered raw row is allowed for diagnosis
 but cannot enter stable APIs. Write the empty-metric subject-wide coverage row
-only after every expected series for that subject succeeds. Continue
-independent subjects/series and report every store error through collector
-health metrics.
+only when every expected series for that subject is present in the successful
+batch. Report the transaction error through collector health and retry the same
+boundary without advancing baselines, dirty state, or deadlines.
 
 Exclude every terminal-pending topic from normal periodic active-subscription
 sampling. Load durable pending rows before each rollup chain. Assign each newly
@@ -2567,6 +2664,8 @@ Add tests for:
 - gauge carry-forward deduplication when the effective-start bucket already has a covered point;
 - incomplete summary values encoded `null`;
 - raw event/rate summary normalization and mixed raw/rollup weighted averages;
+- mixed raw/aggregate rate summaries with unequal `window_ms`, proving elapsed
+  weighting rather than point-count weighting;
 - reset-at-boundary counters, missing baselines, unequal-count weighted averages, and null-on-gap summaries;
 - empty slices encoded `[]`;
 - topic operation summaries ordered backend then fixed operation order;
@@ -2826,7 +2925,7 @@ Topic summary bytes, delivery failures, lifecycle increases, fan-out average/max
 
 `GetTopicMetrics` no longer calls `GetTopicMetricsSummary`. Construct the embedded `collector.TopicMetricsSummary` from the same typed `QuerySeries` results: reset-aware published/delivery counter increases, weighted publish/delivery rate averages, maxima, and the latest covered exact subscription gauge. Preserve the old field meaning exactly: `summary.From` and `summary.To` equal `MetricsQuery.TimeRange.From/To` (the requested bounds), while calculations and the additive `effectiveTimeRange` use only aligned closed bounds. Add an unaligned-request byte-for-byte JSON fixture pinning all four values. The preserved non-null numeric fields keep their compatibility zero when their calculation is unavailable; every new nullable field remains `null`, and tests pin this legacy fallback so it is never confused with a covered measured zero. Keep or deprecate the old store method only as a compatibility helper outside the stable handler; it may not appear in `MetricsStore` or any topic route call graph.
 
-Use shared range helpers. Raw counter totals require a covered point immediately before the effective range, apply reset-aware deltas through the last covered in-range point, and return nil when baseline/coverage is missing. Aggregate counter totals sum covered `increase_value`. Normalize each covered raw event/rate point to `sum=value`, `count=1`, `min=value`, and `max=value`; aggregate rows use their stored sum/count/min/max. Duration, fan-out, and rate summaries then combine `sum(sum)/sum(count)`, max of child maxima, min of child minima, and summed counts across raw, rollup, or mixed support rows; never average bucket averages. Any relevant gap returns the nullable summary field/array as nil rather than using a partial range.
+Use shared range helpers. Raw counter totals require a covered point immediately before the effective range, apply reset-aware deltas through the last covered in-range point, and return nil when baseline/coverage is missing. Aggregate counter totals sum covered `increase_value`. Normalize each covered raw **event** point to `sum=value`, `count=1`, `min=value`, and `max=value`; aggregate events use stored sum/count/min/max. For rates, require positive `WindowMS`: a raw contribution is `value*WindowMS` over `WindowMS`, and an aggregate contribution is `avg*WindowMS` over its summed `WindowMS`. Combine mixed rate rows as `sum(weightedValue)/sum(WindowMS)`, never as point-count `sum/count` or an average of bucket averages. Duration/fan-out retain weighted sum/count semantics. Any relevant gap or invalid rate window returns the nullable summary field/array as nil rather than using a partial range.
 
 For each of the two fields, operation summary ordering is backend `sqlite`,
 `turso`, `postgres`, `cluster`, then operations `list_topics`, `create_topic`,
