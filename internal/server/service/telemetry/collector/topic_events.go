@@ -1496,17 +1496,12 @@ func (c *Collector) terminalStatesDue(boundary int64) []TerminalState {
 
 // assignTerminalStates freezes the first eligible raw target without moving retries.
 func (c *Collector) assignTerminalStates(ctx context.Context, boundary int64) error {
-	intervalMS := c.collectionInterval.Milliseconds()
-	if intervalMS <= 0 || boundary%intervalMS != 0 {
-		return errors.New("assign terminal states: invalid boundary")
+	target, err := c.unassignedTerminalTarget(boundary)
+	if err != nil {
+		return err
 	}
 
-	target := boundary - intervalMS
-	if target < c.lastRollup1m {
-		// Startup first catches the old raw grid up through lastRollup1m.
-		// Keep an unassigned zero pending until its target belongs to a minute
-		// the coordinator has not already closed, otherwise no later rollup can
-		// discover it.
+	if !target.ready {
 		return nil
 	}
 
@@ -1520,7 +1515,7 @@ func (c *Collector) assignTerminalStates(ctx context.Context, boundary int64) er
 		}
 
 		if err := c.store.AssignTerminalBucket(
-			ctx, state.SubjectID, state.Generation, target, intervalMS,
+			ctx, state.SubjectID, state.Generation, target.bucket, target.interval,
 		); err != nil {
 			return fmt.Errorf("assign terminal state %q/%d: %w", state.SubjectID, state.Generation, err)
 		}
@@ -1528,7 +1523,7 @@ func (c *Collector) assignTerminalStates(ctx context.Context, boundary int64) er
 		c.terminalMu.Lock()
 		if current, exists := c.terminalReservations[state.SubjectID]; exists &&
 			current.state.Generation == state.Generation && !current.canceled {
-			targetCopy, intervalCopy := target, intervalMS
+			targetCopy, intervalCopy := target.bucket, target.interval
 			current.state.TargetBucket = &targetCopy
 			current.state.SampleIntervalMS = &intervalCopy
 		}
@@ -1536,6 +1531,30 @@ func (c *Collector) assignTerminalStates(ctx context.Context, boundary int64) er
 	}
 
 	return nil
+}
+
+type terminalTarget struct {
+	bucket   int64
+	interval int64
+	ready    bool
+}
+
+func (c *Collector) unassignedTerminalTarget(boundary int64) (terminalTarget, error) {
+	intervalMS := c.collectionInterval.Milliseconds()
+	if intervalMS <= 0 || boundary%intervalMS != 0 {
+		return terminalTarget{}, errors.New("assign terminal states: invalid boundary")
+	}
+
+	target := boundary - intervalMS
+	if target < c.lastRollup1m {
+		// Startup first catches the old raw grid up through lastRollup1m.
+		// Keep an unassigned zero pending until its target belongs to a minute
+		// the coordinator has not already closed, otherwise no later rollup can
+		// discover it.
+		return terminalTarget{}, nil
+	}
+
+	return terminalTarget{bucket: target, interval: intervalMS, ready: true}, nil
 }
 
 // completeTerminalState writes the durable zero and releases its reservation once.

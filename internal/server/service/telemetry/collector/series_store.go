@@ -308,21 +308,22 @@ WHERE timestamp = ? AND queue_id = ? AND metric_name = ? AND labels = ? AND metr
 // mistaken for acknowledgement of the new process's first observation.
 func (s *SQLiteStore) LatestCollectionBoundary(
 	ctx context.Context, sampleIntervalMS int64,
-) (int64, bool, error) {
+) (CollectionBoundaryState, error) {
 	if sampleIntervalMS <= 0 {
-		return 0, false, errors.New("latest collection boundary: positive sample interval is required")
+		return CollectionBoundaryState{}, errors.New("latest collection boundary: positive sample interval is required")
 	}
 
-	var boundary sql.NullInt64
+	var latest sql.NullInt64
 	if err := s.db.QueryRowContext(ctx, `SELECT MAX(boundary)
-FROM telemetry_collection_commits WHERE sample_interval_ms = ?`, sampleIntervalMS).Scan(&boundary); err != nil {
-		return 0, false, fmt.Errorf("latest collection boundary: query: %w", err)
-	}
-	if !boundary.Valid {
-		return 0, false, nil
+FROM telemetry_collection_commits WHERE sample_interval_ms = ?`, sampleIntervalMS).Scan(&latest); err != nil {
+		return CollectionBoundaryState{}, fmt.Errorf("latest collection boundary: query: %w", err)
 	}
 
-	return boundary.Int64, true, nil
+	if !latest.Valid {
+		return CollectionBoundaryState{}, nil
+	}
+
+	return CollectionBoundaryState{Boundary: latest.Int64, Exists: true}, nil
 }
 
 // ResetRawInterval clears the entire raw grid when its interval identity changes.

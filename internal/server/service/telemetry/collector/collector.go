@@ -332,7 +332,7 @@ type Store interface {
 		sample MetricSample,
 	) error
 	SaveCollectionBoundary(ctx context.Context, batch CollectionBatch) error
-	LatestCollectionBoundary(ctx context.Context, sampleIntervalMS int64) (int64, bool, error)
+	LatestCollectionBoundary(ctx context.Context, sampleIntervalMS int64) (CollectionBoundaryState, error)
 	Rollup(ctx context.Context, resolution Resolution, closedThrough int64) error
 	ResetRawInterval(ctx context.Context, sampleIntervalMS int64) (bool, error)
 	EnqueueTerminalState(ctx context.Context, state TerminalState, limit int) (bool, error)
@@ -371,6 +371,13 @@ type Store interface {
 
 	// GetQueueStats retrieves queue statistics.
 	GetQueueStats(ctx context.Context, queueID string, from, to int64) ([]QueueStatsPoint, error)
+}
+
+// CollectionBoundaryState identifies the newest durable raw collection
+// boundary for one sample grid.
+type CollectionBoundaryState struct {
+	Boundary int64
+	Exists   bool
 }
 
 // QueueStatsPoint represents queue statistics at a point in time.

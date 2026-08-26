@@ -106,12 +106,13 @@ func (c *Collector) initializeCoordinatorLocked(ctx context.Context, startupNow 
 				slog.Int64("sample_interval_ms", intervalMS))
 		}
 
-		lastBoundary, exists, err := c.store.LatestCollectionBoundary(ctx, intervalMS)
+		latestBoundary, err := c.store.LatestCollectionBoundary(ctx, intervalMS)
 		if err != nil {
 			return fmt.Errorf("load latest raw collection boundary: %w", err)
 		}
-		if exists {
-			c.lastTopicBoundary = lastBoundary
+
+		if latestBoundary.Exists {
+			c.lastTopicBoundary = latestBoundary.Boundary
 		}
 	}
 
