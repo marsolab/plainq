@@ -7,7 +7,7 @@ import {
   transformTopicSeries,
 } from "./metrics";
 import type { MetricsChartResponse, TopicSeriesResponse } from "./types";
-import { api } from "./api-client";
+import { api, ApiRequestError } from "./api-client";
 
 describe("formatMetricNumber", () => {
   test("formats compact values", () => {
@@ -199,15 +199,14 @@ describe("transformTopicSeries", () => {
 });
 
 describe("isTelemetryUnavailableError", () => {
-  test("matches disabled telemetry errors with the apiFetch status prefix", () => {
-    expect(isTelemetryUnavailableError(new Error("404: not found"))).toBe(true);
-    expect(isTelemetryUnavailableError(new Error("503: telemetry unavailable"))).toBe(true);
+  test("matches only typed 404 and 503 API failures", () => {
+    expect(isTelemetryUnavailableError(new ApiRequestError(404, "not found"))).toBe(true);
     expect(
-      isTelemetryUnavailableError(
-        new Error("request failed after retrying 404: telemetry unavailable"),
-      ),
-    ).toBe(false);
-    expect(isTelemetryUnavailableError(new Error("503 telemetry unavailable"))).toBe(false);
+      isTelemetryUnavailableError(new ApiRequestError(503, "telemetry unavailable")),
+    ).toBe(true);
+    expect(isTelemetryUnavailableError(new ApiRequestError(500, "server failed"))).toBe(false);
+    expect(isTelemetryUnavailableError(new Error("404: not found"))).toBe(false);
+    expect(isTelemetryUnavailableError(new Error("503: telemetry unavailable"))).toBe(false);
     expect(isTelemetryUnavailableError(new Error("network failed"))).toBe(false);
   });
 });

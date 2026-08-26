@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { Topic, TopicMetricsOverview } from "@/lib/types";
+import { ApiRequestError } from "@/lib/api-client";
 import {
   buildTopicSelectorOptions,
   loadTopicMetricsOverviewState,
@@ -70,7 +71,7 @@ describe("loadTopicMetricsOverviewState", () => {
   test("returns unavailable when telemetry storage is unavailable", async () => {
     const result = await loadTopicMetricsOverviewState({
       topicOverview: async () => {
-        throw new Error("503: telemetry storage unavailable");
+        throw new ApiRequestError(503, "503: telemetry storage unavailable");
       },
     });
 

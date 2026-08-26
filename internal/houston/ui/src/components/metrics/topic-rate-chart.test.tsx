@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { act, create } from "react-test-renderer";
-import type { MultiMetricsChartResponse } from "@/lib/types";
+import { ApiRequestError } from "@/lib/api-client";
+import type { TopicSeriesResponse } from "@/lib/types";
 import { loadTopicRateChartState, TopicRateChart } from "./topic-rate-chart";
 
 declare global {
@@ -10,12 +11,20 @@ declare global {
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
-const rates: MultiMetricsChartResponse = {
+const rates: TopicSeriesResponse = {
+  topicId: "topic-1",
   metrics: [],
   timeRange: {
     from: 1_700_000_000_000,
     to: 1_700_000_360_000,
   },
+  effectiveTimeRange: {
+    from: 1_700_000_000_000,
+    to: 1_700_000_360_000,
+  },
+  resolution: "raw",
+  sampleIntervalMs: 10_000,
+  generatedAt: 1_700_000_360_000,
 };
 
 describe("loadTopicRateChartState", () => {
@@ -44,7 +53,7 @@ describe("loadTopicRateChartState", () => {
     const result = await loadTopicRateChartState(
       {
         topicRates: async () => {
-          throw new Error("503: telemetry storage unavailable");
+          throw new ApiRequestError(503, "503: telemetry storage unavailable");
         },
       },
       "topic-1",

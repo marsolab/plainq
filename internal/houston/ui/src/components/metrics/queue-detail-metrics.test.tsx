@@ -6,6 +6,7 @@ import type {
   QueueMetricsSummary,
 } from "@/lib/types";
 import { formatCount } from "@/lib/format";
+import { ApiRequestError } from "@/lib/api-client";
 import { formatRateFigure } from "./format-metrics";
 import {
   loadQueueMetricsState,
@@ -80,7 +81,10 @@ describe("loadQueueMetricsState", () => {
   });
 
   test("returns unavailable when telemetry storage is unavailable", async () => {
-    const telemetryUnavailable = new Error("503: telemetry storage unavailable");
+    const telemetryUnavailable = new ApiRequestError(
+      503,
+      "503: telemetry storage unavailable",
+    );
 
     const result = await loadQueueMetricsState(
       {

@@ -1,3 +1,4 @@
+import { ApiRequestError } from "./api-client";
 import type { ChartRow, MetricsChartResponse, TopicSeriesResponse } from "./types";
 
 export interface RateChartRow {
@@ -102,6 +103,8 @@ export function formatMetricTimestamp(timestamp: number): string {
 }
 
 export function isTelemetryUnavailableError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  return /^(404|503):/.test(error.message);
+  return (
+    error instanceof ApiRequestError &&
+    (error.status === 404 || error.status === 503)
+  );
 }
