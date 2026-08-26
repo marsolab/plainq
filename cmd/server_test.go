@@ -11,15 +11,16 @@ import (
 	"time"
 
 	hraft "github.com/hashicorp/raft"
+	"github.com/marsolab/plainq/internal/cluster"
 	"github.com/marsolab/plainq/internal/cluster/command"
 	clusterfsm "github.com/marsolab/plainq/internal/cluster/fsm"
 	"github.com/marsolab/plainq/internal/metrics"
-	"github.com/marsolab/plainq/internal/server/mutations"
+	"github.com/marsolab/plainq/internal/server/config"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/service/queue"
-	"github.com/marsolab/plainq/internal/server/service/queue/litestore"
 	"github.com/marsolab/plainq/internal/server/service/telemetry"
 	"github.com/marsolab/servekit/dbkit/litekit"
+	"github.com/marsolab/servekit/logkit"
 )
 
 func TestTursoUsesTursoTelemetryBackend(t *testing.T) {
@@ -49,6 +50,27 @@ func TestClusterIngressUsesClusterBackend(t *testing.T) {
 	}
 	if captureCalled {
 		t.Fatal("cluster ingress observer captured exact topic state")
+	}
+}
+
+func TestSQLiteJournalModeParsingIsCaseInsensitive(t *testing.T) {
+	for input, want := range map[string]litekit.JournalMode{
+		"delete":   litekit.Delete,
+		"Truncate": litekit.Truncate,
+		"PERSIST":  litekit.Persist,
+		"memory":   litekit.Memory,
+		"WaL":      litekit.WAL,
+		"OFF":      litekit.Off,
+	} {
+		t.Run(input, func(t *testing.T) {
+			got, err := sqliteJournalMode(input)
+			if err != nil || got != want {
+				t.Fatalf("sqliteJournalMode(%q) = %v, %v; want %v, nil", input, got, err, want)
+			}
+		})
+	}
+	if _, err := sqliteJournalMode("not-a-mode"); err == nil {
+		t.Fatal("sqliteJournalMode(invalid) succeeded")
 	}
 }
 
@@ -121,47 +143,41 @@ func (testReplicaApplyGuard) FinishPublishApply() error { return nil }
 func (testReplicaApplyGuard) Check() error              { return nil }
 
 func TestFollowerApplyDoesNotDuplicateLogicalTopicCounters(t *testing.T) {
-	localObserver, logicalObserver := newTelemetryObservers(storageDriverSQLite, true)
+	wiring := newQueueTelemetryWiring(storageDriverSQLite, true)
 	localRecorder := new(inventoryRecorder)
 	logicalRecorder := new(inventoryRecorder)
-	localObserver.SetRecorder(localRecorder)
-	logicalObserver.SetRecorder(logicalRecorder)
+	wiring.local.SetRecorder(localRecorder)
+	wiring.logical.SetRecorder(logicalRecorder)
 
-	db, err := litekit.New(filepath.Join(t.TempDir(), "follower.db"), litekit.WithJournalMode(litekit.WAL))
-	if err != nil {
-		t.Fatalf("open follower database: %v", err)
+	cfg := config.Config{
+		StorageDriver:      storageDriverSQLite,
+		StorageDBPath:      filepath.Join(t.TempDir(), "follower.db"),
+		StorageJournalMode: "wal",
 	}
-	t.Cleanup(func() { _ = db.Close() })
+	clusterCfg := cluster.Config{Enabled: true}
+	logger := logkit.NewNop()
+	backend, err := initStorageBackend(&cfg, logger)
+	if err != nil {
+		t.Fatalf("initialize follower backend: %v", err)
+	}
+	t.Cleanup(func() { _ = backend.Close() })
 
-	evolver, err := litekit.NewEvolver(db, mutations.SqliteStorageMutations())
+	storage, closeStorage, err := wiring.initPhysicalQueueStorage(&cfg, &clusterCfg, logger, backend)
 	if err != nil {
-		t.Fatalf("create follower evolver: %v", err)
+		t.Fatalf("initialize follower storage: %v", err)
 	}
-	if err := evolver.MutateSchema(); err != nil {
-		t.Fatalf("migrate follower database: %v", err)
+	t.Cleanup(func() { _ = closeStorage() })
+	replicated, ok := storage.(queue.ReplicatedStorage)
+	if !ok {
+		t.Fatalf("production follower storage = %T, want replicated storage", storage)
 	}
-
-	storage, err := litestore.New(db, litestore.WithoutGC(), litestore.WithObserver(localObserver))
-	if err != nil {
-		t.Fatalf("create follower storage: %v", err)
-	}
-	t.Cleanup(func() { _ = storage.Close() })
 
 	machine := clusterfsm.New(
-		storage,
+		replicated,
 		nil,
 		testReplicaApplyGuard{},
 		func(fatalErr error) { panic(fatalErr) },
-		clusterfsm.WithTopicStateReconciler(func(inventory *queue.TopicInventory) {
-			if inventory == nil {
-				localObserver.TopicStateUnavailable()
-				return
-			}
-			localObserver.ReconcileTopicState(telemetry.TopicStateEvent{
-				TopicsExist:   inventory.TopicsExist,
-				Subscriptions: inventory.SubscriptionCounts,
-			})
-		}),
+		clusterfsm.WithTopicStateReconciler(wiring.reconcileTopicState),
 	)
 
 	apply := func(index uint64, cmd *command.Command) {
@@ -203,6 +219,16 @@ func TestFollowerApplyDoesNotDuplicateLogicalTopicCounters(t *testing.T) {
 	if localRecorder.state == nil || localRecorder.state.TopicsExist != 1 || localRecorder.state.Subscriptions["topicone"] != 1 {
 		t.Fatalf("follower exact state = %#v, want one topic with one subscription", localRecorder.state)
 	}
+
+	apply(5, &command.Command{
+		Op: command.OpUnsubscribe, Timestamp: time.Now().UnixNano(), Target: "topicone", IDs: []string{"subone"},
+	})
+	apply(6, jsonCommand(command.OpSubscribe, "topicone", &queue.SubscribeRequest{QueueID: "queueone"}, "subtwo"))
+	apply(7, &command.Command{Op: command.OpDeleteTopic, Timestamp: time.Now().UnixNano(), Target: "topicone"})
+	if localRecorder.state == nil || localRecorder.state.TopicsExist != 0 || len(localRecorder.state.Subscriptions) != 0 {
+		t.Fatalf("follower exact state after deletion = %#v, want no topics or subscriptions", localRecorder.state)
+	}
+
 	if localRecorder.topicRequests != 0 || localRecorder.topicOperations != 0 || localRecorder.topicPublishes != 0 ||
 		localRecorder.subscriptionsCreated != 0 || localRecorder.subscriptionsDeleted != 0 {
 		t.Fatalf(

@@ -66,13 +66,53 @@ func telemetryBackend(driver string) string {
 	}
 }
 
-func newTelemetryObservers(driver string, clustered bool) (*telemetry.Observer, *telemetry.Observer) {
+type queueTelemetryWiring struct {
+	local   *telemetry.Observer
+	logical *telemetry.Observer
+}
+
+func newQueueTelemetryWiring(driver string, clustered bool) queueTelemetryWiring {
 	local := telemetry.NewObserver(telemetryBackend(driver))
 	if !clustered {
-		return local, local
+		return queueTelemetryWiring{local: local, logical: local}
 	}
 
-	return local, telemetry.NewStateSuppressingObserver(metrics.BackendCluster)
+	return queueTelemetryWiring{
+		local:   local,
+		logical: telemetry.NewStateSuppressingObserver(metrics.BackendCluster),
+	}
+}
+
+func newTelemetryObservers(driver string, clustered bool) (*telemetry.Observer, *telemetry.Observer) {
+	wiring := newQueueTelemetryWiring(driver, clustered)
+
+	return wiring.local, wiring.logical
+}
+
+func (w queueTelemetryWiring) reconcileTopicState(inventory *queue.TopicInventory) {
+	if inventory == nil {
+		w.local.TopicStateUnavailable()
+
+		return
+	}
+
+	w.local.ReconcileTopicState(telemetry.TopicStateEvent{
+		TopicsExist:   inventory.TopicsExist,
+		Subscriptions: inventory.SubscriptionCounts,
+	})
+}
+
+func (w queueTelemetryWiring) observePublicStorage(storage queue.Storage) queue.Storage {
+	return queue.NewObservedStorage(storage, w.logical)
+}
+
+func (w queueTelemetryWiring) initPhysicalQueueStorage(
+	cfg *config.Config,
+	clusterCfg *cluster.Config,
+	logger *slog.Logger,
+	backend *storageBackend,
+) (queue.Storage, func() error, error) {
+	return initQueueStorage(cfg, clusterCfg, logger, backend, w.local)
 }
 
 func replayStartupTopicInventory(
@@ -422,7 +462,7 @@ func serverCommand() *commandSpec {
 				return backendErr
 			}
 
-			localObserver, logicalObserver := newTelemetryObservers(backend.driver, clusterCfg.Enabled)
+			telemetryWiring := newQueueTelemetryWiring(backend.driver, clusterCfg.Enabled)
 
 			registerRuntimeMetrics(backend)
 
@@ -434,8 +474,8 @@ func serverCommand() *commandSpec {
 				}
 			}()
 
-			queueStorage, queueClose, queueStorageInitErr := initQueueStorage(
-				&cfg, &clusterCfg, logger, backend, localObserver,
+			queueStorage, queueClose, queueStorageInitErr := telemetryWiring.initPhysicalQueueStorage(
+				&cfg, &clusterCfg, logger, backend,
 			)
 			if queueStorageInitErr != nil {
 				return queueStorageInitErr
@@ -462,16 +502,7 @@ func serverCommand() *commandSpec {
 					clusterDiscovery,
 					logger,
 					queueStorage,
-					func(inventory *queue.TopicInventory) {
-						if inventory == nil {
-							localObserver.TopicStateUnavailable()
-							return
-						}
-						localObserver.ReconcileTopicState(telemetry.TopicStateEvent{
-							TopicsExist:   inventory.TopicsExist,
-							Subscriptions: inventory.SubscriptionCounts,
-						})
-					},
+					telemetryWiring,
 				)
 				if nodeErr != nil {
 					return nodeErr
@@ -493,7 +524,7 @@ func serverCommand() *commandSpec {
 				}
 			}
 
-			if err := replayStartupTopicInventory(ctx, physicalQueueStorage, localObserver); err != nil {
+			if err := replayStartupTopicInventory(ctx, physicalQueueStorage, telemetryWiring.local); err != nil {
 				return err
 			}
 
@@ -514,8 +545,8 @@ func serverCommand() *commandSpec {
 			queueService := queue.NewService(
 				&cfg,
 				logger,
-				queue.NewObservedStorage(queueStorage, logicalObserver),
-				logicalObserver,
+				telemetryWiring.observePublicStorage(queueStorage),
+				telemetryWiring.logical,
 			)
 
 			accountStorage, accountStorageInitErr := initAccountStorage(&cfg, logger, backend)
@@ -556,7 +587,7 @@ func serverCommand() *commandSpec {
 			// Initialize telemetry database if enabled.
 			var serverOpts []server.Option
 
-			serverOpts = append(serverOpts, server.WithTelemetryObservers(localObserver, logicalObserver))
+			serverOpts = append(serverOpts, server.WithTelemetryObservers(telemetryWiring.local, telemetryWiring.logical))
 
 			if clusterNode != nil {
 				serverOpts = append(serverOpts, server.WithClusterNode(clusterNode))
@@ -683,7 +714,7 @@ func initSQLiteBackend(cfg *config.Config, logger *slog.Logger) (*litekit.Conn, 
 	}
 
 	if cfg.StorageJournalMode != "" {
-		mode, err := litekit.JournalModeFromString(cfg.StorageJournalMode)
+		mode, err := sqliteJournalMode(cfg.StorageJournalMode)
 		if err != nil {
 			return nil, fmt.Errorf("parse storage journal mode: %w", err)
 		}
@@ -714,6 +745,25 @@ func initSQLiteBackend(cfg *config.Config, logger *slog.Logger) (*litekit.Conn, 
 	)
 
 	return conn, nil
+}
+
+func sqliteJournalMode(value string) (litekit.JournalMode, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "delete":
+		return litekit.Delete, nil
+	case "truncate":
+		return litekit.Truncate, nil
+	case "persist":
+		return litekit.Persist, nil
+	case "memory":
+		return litekit.Memory, nil
+	case "wal":
+		return litekit.WAL, nil
+	case "off":
+		return litekit.Off, nil
+	default:
+		return litekit.Delete, fmt.Errorf("unsupported journal mode: %q", value)
+	}
 }
 
 // tursoMaxIdleConns caps the pooled libSQL connections kept warm between
@@ -910,7 +960,7 @@ func initClusterNode(
 	discovery string,
 	logger *slog.Logger,
 	local queue.Storage,
-	reconcile func(*queue.TopicInventory),
+	telemetryWiring queueTelemetryWiring,
 ) (*cluster.Node, error) {
 	replicated, ok := local.(queue.ReplicatedStorage)
 	if !ok {
@@ -931,7 +981,12 @@ func initClusterNode(
 		clusterCfg.Version = Commit
 	}
 
-	node, err := cluster.NewNode(*clusterCfg, replicated, logger, cluster.WithTopicStateReconciler(reconcile))
+	node, err := cluster.NewNode(
+		*clusterCfg,
+		replicated,
+		logger,
+		cluster.WithTopicStateReconciler(telemetryWiring.reconcileTopicState),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("create cluster node: %w", err)
 	}
