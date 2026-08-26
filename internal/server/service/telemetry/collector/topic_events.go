@@ -1473,9 +1473,7 @@ func (c *Collector) completeTerminalState(ctx context.Context, state TerminalSta
 		return fmt.Errorf("complete terminal state %q/%d: %w", state.SubjectID, state.Generation, err)
 	}
 
-	if c.releaseCompletedTerminal(state) {
-		c.deleteTerminalTopic(state)
-	}
+	c.releaseCompletedTerminal(state)
 
 	return nil
 }
@@ -1496,7 +1494,43 @@ func (c *Collector) releaseCompletedTerminal(state TerminalState) bool {
 		return false
 	}
 
+	// Completion performs SQLite work before taking callback locks. Linearize
+	// reservation release with the final in-memory disposition so a callback
+	// either dirties the retained accumulator or recreates it after deletion.
+	c.cutoverMu.Lock()
+	defer c.cutoverMu.Unlock()
+
+	c.topicMu.Lock()
+	defer c.topicMu.Unlock()
+
 	c.removeTerminalEntryLocked(current)
+
+	topic, exists := c.topicMetrics[state.SubjectID]
+	if !exists || !topic.terminalPending || topic.terminalGeneration != state.Generation {
+		return true
+	}
+
+	if topic.revision == topic.committedRevision {
+		c.deleteTopicLocked(state.SubjectID)
+
+		return true
+	}
+
+	// A post-cutover callback owns data that was not part of the durable final
+	// boundary. Keep it as bounded attribution-only state until collection
+	// commits it; membership gauges remain suppressed without authoritative
+	// reconciliation.
+	topic.authoritative = false
+	topic.subscriptionsKnown = false
+
+	topic.terminalPending = false
+	topic.terminalGeneration = 0
+
+	if topic.cacheElement == nil {
+		topic.cacheElement = c.topicCache.attributed.PushBack(state.SubjectID)
+	} else {
+		c.topicCache.attributed.MoveToBack(topic.cacheElement)
+	}
 
 	return true
 }

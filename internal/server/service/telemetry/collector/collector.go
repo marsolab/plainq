@@ -237,7 +237,8 @@ type Collector struct {
 	topicSystem TopicSystemMetrics
 
 	// cutoverMu orders every topic callback with closed-boundary snapshots.
-	// The only nested lock order is cutoverMu then topicMu.
+	// Nested locks follow terminalMu, cutoverMu, then topicMu; ordinary callbacks
+	// acquire only the latter two.
 	cutoverMu sync.Mutex
 	now       func() time.Time
 

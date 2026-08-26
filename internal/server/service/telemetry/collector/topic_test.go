@@ -281,6 +281,80 @@ func TestTerminalPendingProductionOrderPersistsFinalMetricsThroughZeroAndRollup(
 		MetricKindEvent, 0, 60_000, 0.02, -1)
 }
 
+func TestTerminalCompletionPreservesPostCutoverAccumulator(t *testing.T) {
+	ctx := context.Background()
+	completeStarted := make(chan struct{})
+	completeRelease := make(chan struct{})
+	store := newTask9Store()
+	store.completeStarted = completeStarted
+	store.completeRelease = completeRelease
+	clock := newTask9Clock(time.UnixMilli(1_100))
+	c := New(store, WithCollectionInterval(time.Second), WithClock(clock.Now))
+	c.RecordTopicState(telemetry.TopicStateEvent{
+		TopicsExist: 1, Subscriptions: map[string]int64{"topic-1": 1},
+	})
+	requireCollectTopicBoundary(t, c, 2_000)
+
+	clock.Set(time.UnixMilli(2_500))
+	c.RecordTopicState(telemetry.TopicStateEvent{TopicsExist: 0, Subscriptions: map[string]int64{}})
+	if err := c.promoteTerminalStates(ctx); err != nil {
+		t.Fatalf("promote terminal state: %v", err)
+	}
+	requireCollectTopicBoundary(t, c, 3_000)
+	if err := c.assignTerminalStates(ctx, 3_000); err != nil {
+		t.Fatalf("assign terminal state: %v", err)
+	}
+	due := c.terminalStatesDue(3_000)
+	if len(due) != 1 {
+		t.Fatalf("terminal due = %#v, want one assigned state", due)
+	}
+
+	completionDone := make(chan error, 1)
+	go func() { completionDone <- c.completeTerminalState(ctx, due[0]) }()
+	<-completeStarted
+
+	clock.Set(time.UnixMilli(3_100))
+	requestDone := make(chan struct{})
+	go func() {
+		c.RecordTopicRequest(telemetry.TopicOperationEvent{
+			Backend: metrics.BackendSQLite, Operation: metrics.OpDeleteTopic,
+			Result: metrics.ResultOK, TopicID: "topic-1", Duration: 25 * time.Millisecond,
+		})
+		close(requestDone)
+	}()
+	select {
+	case <-requestDone:
+	case <-time.After(time.Second):
+		t.Fatal("same-ID request blocked behind terminal SQLite completion")
+	}
+
+	close(completeRelease)
+	if err := <-completionDone; err != nil {
+		t.Fatalf("complete terminal state: %v", err)
+	}
+	if got := c.terminalReservationCount(); got != 0 {
+		t.Fatalf("terminal reservations after completion = %d, want zero", got)
+	}
+
+	c.topicMu.RLock()
+	retained, exists := c.topicMetrics["topic-1"]
+	if !exists || retained.authoritative || retained.subscriptionsKnown || retained.terminalPending ||
+		retained.terminalGeneration != 0 || retained.cacheElement == nil {
+		c.topicMu.RUnlock()
+		t.Fatalf("retained attribution-only topic = %#v, exists=%t", retained, exists)
+	}
+	c.topicMu.RUnlock()
+
+	requireCollectTopicBoundary(t, c, 4_000)
+	batch := store.lastBatch(t)
+	assertTask9MetricValue(t, batch.Samples, "topic-1", MetricTopicRequestsTotal, 1)
+	assertTask9MetricValue(t, batch.Samples, "topic-1", MetricTopicRequestDuration, 0.025)
+	assertTask9Coverage(t, batch.Coverage, "topic-1", MetricTopicRequestsTotal, MetricKindCounter)
+	assertTask9Coverage(t, batch.Coverage, "topic-1", MetricTopicRequestDuration, MetricKindEvent)
+	assertTask9MetricAbsent(t, batch.Samples, "topic-1", MetricTopicSubscriptionsCurrent)
+	assertTask9CoverageAbsent(t, batch.Coverage, "topic-1", MetricTopicSubscriptionsCurrent)
+}
+
 func recordTerminalPendingDeleteProductionOrder(clock *task9Clock, c *Collector, bucketStart int64) {
 	clock.Set(time.UnixMilli(bucketStart + 100))
 	c.RecordTopicOperation(telemetry.TopicOperationEvent{
@@ -1246,6 +1320,9 @@ type task9Store struct {
 	listErr         error
 	terminalSamples []MetricSample
 	onEnqueue       func()
+	completeStarted chan struct{}
+	completeRelease chan struct{}
+	completeOnce    sync.Once
 }
 
 func newTask9Store() *task9Store {
@@ -1375,6 +1452,13 @@ func (s *task9Store) AssignTerminalBucket(
 func (s *task9Store) CompleteTerminalState(
 	_ context.Context, subjectID string, generation int64, sample MetricSample, _ CoverageBucket,
 ) error {
+	s.completeOnce.Do(func() {
+		if s.completeStarted != nil {
+			close(s.completeStarted)
+			<-s.completeRelease
+		}
+	})
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key := terminalKey{subjectID: subjectID, generation: generation}
