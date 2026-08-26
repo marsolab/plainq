@@ -167,7 +167,7 @@ func (s *recordingStore) SaveRawMetric(_ context.Context, _ int64, queueID, metr
 	return nil
 }
 
-func (s *recordingStore) SaveRateSnapshot(_ context.Context, _ int64, queueID, metricName string, ratePerSecond float64, _ int) error {
+func (s *recordingStore) SaveRateSnapshot(_ context.Context, _ int64, queueID, metricName string, ratePerSecond float64, _ int64) error {
 	s.rates = append(s.rates, recordedMetric{scope: queueID, name: metricName, value: ratePerSecond})
 	return nil
 }
@@ -177,9 +177,38 @@ func (s *recordingStore) SaveQueueStats(context.Context, int64, string, int64, i
 }
 
 func (s *recordingStore) UpdateInFlightCount(context.Context, string, int64) error { return nil }
-func (s *recordingStore) Aggregate1m(context.Context, int64, int64) error          { return nil }
-func (s *recordingStore) Aggregate1h(context.Context, int64, int64) error          { return nil }
-func (s *recordingStore) Aggregate1d(context.Context, int64, int64) error          { return nil }
+func (s *recordingStore) SaveMetric(context.Context, MetricSample) error           { return nil }
+func (s *recordingStore) SaveCoverage(context.Context, CoverageBucket) error       { return nil }
+func (s *recordingStore) SaveMetricAndCoverage(context.Context, MetricSample, CoverageBucket) error {
+	return nil
+}
+func (s *recordingStore) QuerySeries(context.Context, SeriesQuery) (SeriesResult, error) {
+	return SeriesResult{}, nil
+}
+func (s *recordingStore) QuerySubjectCoverage(context.Context, SubjectCoverageQuery) ([]CoverageBucket, error) {
+	return nil, nil
+}
+func (s *recordingStore) SaveRateSnapshotAndMetric(context.Context, int64, string, string, float64, int64, MetricSample) error {
+	return nil
+}
+func (s *recordingStore) SaveCollectionBoundary(context.Context, CollectionBatch) error { return nil }
+func (s *recordingStore) Rollup(context.Context, Resolution, int64) error               { return nil }
+func (s *recordingStore) ResetRawInterval(context.Context, int64) (bool, error)         { return false, nil }
+func (s *recordingStore) EnqueueTerminalState(context.Context, string, int64, int) (bool, error) {
+	return false, nil
+}
+func (s *recordingStore) ListTerminalStates(context.Context) ([]TerminalState, error) {
+	return nil, nil
+}
+func (s *recordingStore) AssignTerminalBucket(context.Context, string, int64, int64) error {
+	return nil
+}
+func (s *recordingStore) CompleteTerminalState(context.Context, string, MetricSample, CoverageBucket) error {
+	return nil
+}
+func (s *recordingStore) Aggregate1m(context.Context, int64, int64) error { return nil }
+func (s *recordingStore) Aggregate1h(context.Context, int64, int64) error { return nil }
+func (s *recordingStore) Aggregate1d(context.Context, int64, int64) error { return nil }
 func (s *recordingStore) CleanupOldMetrics(context.Context, int64, int64, int64, int64, int64) error {
 	return nil
 }

@@ -35,9 +35,8 @@ const (
 	retention1h  = 30 * 24 * time.Hour
 	retention1d  = 365 * 24 * time.Hour
 
-	// rateWindowSeconds is the window a persisted rate snapshot covers. Rates
-	// are computed per collection tick, which is one second.
-	rateWindowSeconds = 1
+	// rateWindowMS is the exact compatibility collection window in milliseconds.
+	rateWindowMS int64 = 1000
 
 	// Bucket sizes in milliseconds for time-series aggregation.
 	bucketSize1m = 60000    // 1 minute in ms.
@@ -252,7 +251,30 @@ type Store interface {
 	SaveRawMetric(ctx context.Context, timestamp int64, queueID, metricName string, value float64, labels string) error
 
 	// SaveRateSnapshot saves rate calculation results.
-	SaveRateSnapshot(ctx context.Context, timestamp int64, queueID, metricName string, ratePerSecond float64, windowSeconds int) error
+	SaveRateSnapshot(ctx context.Context, timestamp int64, queueID, metricName string, ratePerSecond float64, windowMS int64) error
+
+	SaveMetric(ctx context.Context, sample MetricSample) error
+	SaveCoverage(ctx context.Context, coverage CoverageBucket) error
+	SaveMetricAndCoverage(ctx context.Context, sample MetricSample, coverage CoverageBucket) error
+	QuerySeries(ctx context.Context, query SeriesQuery) (SeriesResult, error)
+	QuerySubjectCoverage(ctx context.Context, query SubjectCoverageQuery) ([]CoverageBucket, error)
+	SaveRateSnapshotAndMetric(
+		ctx context.Context,
+		timestamp int64,
+		subjectID, metricName string,
+		rate float64,
+		windowMS int64,
+		sample MetricSample,
+	) error
+	SaveCollectionBoundary(ctx context.Context, batch CollectionBatch) error
+	Rollup(ctx context.Context, resolution Resolution, closedThrough int64) error
+	ResetRawInterval(ctx context.Context, sampleIntervalMS int64) (bool, error)
+	EnqueueTerminalState(ctx context.Context, subjectID string, observedAt int64, limit int) (bool, error)
+	ListTerminalStates(ctx context.Context) ([]TerminalState, error)
+	AssignTerminalBucket(ctx context.Context, subjectID string, targetBucket, sampleIntervalMS int64) error
+	CompleteTerminalState(
+		ctx context.Context, subjectID string, sample MetricSample, coverage CoverageBucket,
+	) error
 
 	// SaveQueueStats saves queue statistics snapshot.
 	SaveQueueStats(ctx context.Context, timestamp int64, queueID string, depth, visible, invisible int64, oldestAge, avgAge float64) error
@@ -280,17 +302,6 @@ type Store interface {
 
 	// GetQueueStats retrieves queue statistics.
 	GetQueueStats(ctx context.Context, queueID string, from, to int64) ([]QueueStatsPoint, error)
-}
-
-// DataPoint represents a single metric data point.
-type DataPoint struct {
-	Timestamp int64   `json:"timestamp"`
-	Value     float64 `json:"value"`
-	Min       float64 `json:"min,omitempty"`
-	Max       float64 `json:"max,omitempty"`
-	Avg       float64 `json:"avg,omitempty"`
-	Sum       float64 `json:"sum,omitempty"`
-	Count     int64   `json:"count,omitempty"`
 }
 
 // QueueStatsPoint represents queue statistics at a point in time.

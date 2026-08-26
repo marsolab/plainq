@@ -3,6 +3,7 @@ package collector
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -14,12 +15,13 @@ const errScanRow = "scan row: %w"
 
 // SQLiteStore implements the Store interface using SQLite.
 type SQLiteStore struct {
-	db pqlite.DB
+	db     pqlite.DB
+	commit func(transaction) error
 }
 
 // NewSQLiteStore creates a new SQLite-backed metrics store.
 func NewSQLiteStore(db pqlite.DB) *SQLiteStore {
-	return &SQLiteStore{db: db}
+	return &SQLiteStore{db: db, commit: defaultCommit}
 }
 
 // SaveRawMetric saves a raw metric data point.
@@ -40,10 +42,18 @@ func (s *SQLiteStore) SaveRawMetric(
 //
 //nolint:revive // argument-limit: signature matches Store interface
 func (s *SQLiteStore) SaveRateSnapshot(
-	ctx context.Context, timestamp int64, queueID, metricName string, ratePerSecond float64, windowSeconds int,
+	ctx context.Context, timestamp int64, queueID, metricName string, ratePerSecond float64, windowMS int64,
 ) error {
-	query := `INSERT INTO rate_snapshots (timestamp, queue_id, metric_name, rate_per_second, window_seconds) VALUES (?, ?, ?, ?, ?)`
-	if _, err := s.db.ExecContext(ctx, query, timestamp, queueID, metricName, ratePerSecond, windowSeconds); err != nil {
+	if metricName == "" || windowMS <= 0 {
+		return errors.New("save rate snapshot: metric name and positive window_ms are required")
+	}
+
+	query := `INSERT INTO rate_snapshots
+		(timestamp, queue_id, metric_name, rate_per_second, window_seconds, window_ms)
+		VALUES (?, ?, ?, ?, ?, ?)`
+	if _, err := s.db.ExecContext(
+		ctx, query, timestamp, queueID, metricName, ratePerSecond, compatibilityWindowSeconds(windowMS), windowMS,
+	); err != nil {
 		return fmt.Errorf("save rate snapshot: %w", err)
 	}
 

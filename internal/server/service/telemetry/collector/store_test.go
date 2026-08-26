@@ -2,10 +2,10 @@ package collector
 
 import (
 	"context"
-	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/marsolab/plainq/internal/server/mutations"
 	"github.com/marsolab/servekit/dbkit/litekit"
 )
 
@@ -152,13 +152,12 @@ func newTelemetryTestStoreWithConn(t *testing.T) (*SQLiteStore, *litekit.Conn) {
 		t.Fatalf("open litekit connection: %v", err)
 	}
 
-	schema, err := os.ReadFile(filepath.Join("..", "..", "..", "mutations", "telemetry", "3_metrics_enhanced.sql"))
+	evolver, err := litekit.NewEvolver(conn, mutations.TelemetryMutation())
 	if err != nil {
-		t.Fatalf("read telemetry schema: %v", err)
+		t.Fatalf("new telemetry evolver: %v", err)
 	}
-
-	if _, err := conn.ExecContext(context.Background(), string(schema)); err != nil {
-		t.Fatalf("apply telemetry schema: %v", err)
+	if err := evolver.MutateSchema(); err != nil {
+		t.Fatalf("apply telemetry mutations: %v", err)
 	}
 
 	t.Cleanup(func() {

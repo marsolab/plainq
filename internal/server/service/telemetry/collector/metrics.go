@@ -65,7 +65,7 @@ func (c *Collector) saveRate(ctx context.Context, now int64, id, metric string, 
 		return
 	}
 
-	c.persist(metrics.TelemetryOpSaveRate, c.store.SaveRateSnapshot(ctx, now, id, metric, rate, rateWindowSeconds))
+	c.persist(metrics.TelemetryOpSaveRate, c.store.SaveRateSnapshot(ctx, now, id, metric, rate, rateWindowMS))
 }
 
 // observeCollection records one rate-calculation pass.
