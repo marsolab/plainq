@@ -99,8 +99,10 @@ func (s *Service) publishTopicHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if errors.Is(err, pqerr.ErrCapacityExceeded) {
 			httpkit.ErrorHTTP(w, r, err, httpkit.WithStatus(http.StatusRequestEntityTooLarge))
+
 			return
 		}
+
 		httpkit.ErrorHTTP(w, r, pqerr.AsTransport(err))
 
 		return

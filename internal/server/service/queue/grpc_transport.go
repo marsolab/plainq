@@ -3,6 +3,7 @@ package queue
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
@@ -190,14 +191,16 @@ func (s *Service) Publish(ctx context.Context, r *v1.PublishRequest) (*v1.Publis
 				messages = append(messages, PublishMessage{Body: message.GetBody()})
 			}
 		}
+
 		input = &PublishRequest{Messages: messages}
 	}
 
 	output, err := s.pubsub.publish(ctx, r.GetTopicId(), input)
 	if err != nil {
 		if errors.Is(err, pqerr.ErrCapacityExceeded) {
-			return nil, status.Error(codes.ResourceExhausted, err.Error())
+			return nil, fmt.Errorf("publish capacity exceeded: %w", status.Error(codes.ResourceExhausted, err.Error()))
 		}
+
 		return grpckit.ErrorGRPC[*v1.PublishResponse](ctx, pqerr.AsTransport(err))
 	}
 
