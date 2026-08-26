@@ -18,7 +18,6 @@ import (
 
 	hraft "github.com/hashicorp/raft"
 	"github.com/marsolab/plainq/internal/cluster/command"
-	"github.com/marsolab/plainq/internal/cluster/publishwire"
 	"github.com/marsolab/plainq/internal/metrics"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/service/queue"
@@ -316,10 +315,6 @@ func (f *FSM) dispatch(ctx context.Context, cmd *command.Command) (any, error) {
 }
 
 func (f *FSM) publish(ctx context.Context, topicID string, request *queue.PublishRequest) (any, error) {
-	if err := f.preflightPublishOutcome(ctx, topicID, len(request.Messages)); err != nil {
-		return nil, err
-	}
-
 	if err := f.applyGuard.BeginPublishApply(); err != nil {
 		f.abortApply(fmt.Errorf("begin publish apply guard: %w", err))
 	}
@@ -355,47 +350,6 @@ func (f *FSM) publish(ctx context.Context, topicID string, request *queue.Publis
 	f.reportFault(err)
 	return nil, err
 }
-
-// preflightPublishOutcome uses committed replica state rather than the
-// command's possibly stale identifier count. This is the final point before
-// the durable apply guard and storage mutation, so rejecting here guarantees a
-// known publish result cannot exceed the finite peer response envelope.
-func (f *FSM) preflightPublishOutcome(ctx context.Context, topicID string, messageCount int) error {
-	inventory, err := f.storage.TopicInventory(ctx)
-	if err != nil {
-		return fmt.Errorf("read topic inventory before publishing to %q: %w", topicID, err)
-	}
-
-	subscriptionCount, exists := inventory.SubscriptionCounts[topicID]
-	if !exists {
-		return fmt.Errorf("publish to topic %q: %w", topicID, pqerr.ErrNotFound)
-	}
-	if subscriptionCount < 0 {
-		return fmt.Errorf(
-			"read topic inventory before publishing to %q: negative subscription count %d",
-			topicID,
-			subscriptionCount,
-		)
-	}
-
-	bound, fits := publishwire.FitsCompactOutcome(
-		uint64(subscriptionCount),
-		uint64(messageCount),
-		uint64(publishwire.MaxResponseBytes),
-	)
-	if !fits {
-		return fmt.Errorf(
-			"%w: compact publish outcome for topic %q is bounded at %d bytes; limit is %d bytes",
-			pqerr.ErrCapacityExceeded,
-			topicID,
-			bound,
-			publishwire.MaxResponseBytes,
-		)
-	}
-
-	return nil
-}
-
 func (f *FSM) reportFault(err error) {
 	if reportErr := f.reportReplicaFault(err); reportErr != nil {
 		f.logger.Error("Failed to persist replica quarantine diagnostic",

@@ -418,69 +418,35 @@ type recordingApplyGuard struct {
 	checkErr    error
 }
 
-func TestFSMPublishCapacityPreflightUsesAuthoritativeTopicInventoryBeforeMutation(t *testing.T) {
-	storage := &publishOnlyStorage{inventory: queue.TopicInventory{
-		TopicsExist:        1,
-		SubscriptionCounts: map[string]int64{"topicone": 3_000_000},
-	}}
-	guard := new(recordingApplyGuard)
-	faultCalls := 0
-	machine := New(storage, nil, guard, panicFatalApply, WithReplicaFaultReporter(func(error) error {
-		faultCalls++
-		return nil
-	}))
-
-	result := apply(t, machine, 1, jsonCommand(t, command.OpPublish, "topicone",
-		queue.PublishRequest{Messages: []queue.PublishMessage{{Body: []byte("x")}}}))
-	err, ok := result.(error)
-	if !ok || !errors.Is(err, pqerr.ErrCapacityExceeded) {
-		t.Fatalf("oversized derived publish result = %T %v, want capacity error", result, result)
-	}
-	if storage.inventoryCalls != 1 || storage.publishCalls != 0 || guard.beginCalls != 0 || guard.finishCalls != 0 {
-		t.Fatalf("inventory/publish/guard begin/finish calls = %d/%d/%d/%d, want 1/0/0/0",
-			storage.inventoryCalls, storage.publishCalls, guard.beginCalls, guard.finishCalls)
-	}
-	if faultCalls != 0 {
-		t.Fatalf("capacity preflight fault reports = %d, want 0", faultCalls)
-	}
-}
-
-func TestFSMPublishInventoryPreflightErrorsAreNonMutating(t *testing.T) {
-	inventoryErr := errors.New("inventory read failed")
-	tests := map[string]struct {
-		storage *publishOnlyStorage
-		target  error
-	}{
-		"missing topic remains not found": {
-			storage: &publishOnlyStorage{inventory: queue.TopicInventory{SubscriptionCounts: map[string]int64{}}},
-			target:  pqerr.ErrNotFound,
+func TestFSMCommittedPublishNeverRunsVersionDependentAdmission(t *testing.T) {
+	tests := map[string]*publishOnlyStorage{
+		"oversized local inventory": {
+			inventory: queue.TopicInventory{
+				TopicsExist:        1,
+				SubscriptionCounts: map[string]int64{"topicone": 3_000_000},
+			},
+			response: &queue.PublishResponse{TopicID: "topicone"},
 		},
-		"inventory read error is preserved": {
-			storage: &publishOnlyStorage{inventoryErr: inventoryErr},
-			target:  inventoryErr,
+		"replica-local inventory failure": {
+			inventoryErr: errors.New("inventory read failed"),
+			response:     &queue.PublishResponse{TopicID: "topicone"},
 		},
 	}
 
-	for name, test := range tests {
+	for name, storage := range tests {
 		t.Run(name, func(t *testing.T) {
 			guard := new(recordingApplyGuard)
-			faultCalls := 0
-			machine := New(test.storage, nil, guard, panicFatalApply, WithReplicaFaultReporter(func(error) error {
-				faultCalls++
-				return nil
-			}))
+			machine := New(storage, nil, guard, panicFatalApply)
 
 			result := apply(t, machine, 1, jsonCommand(t, command.OpPublish, "topicone",
 				queue.PublishRequest{Messages: []queue.PublishMessage{{Body: []byte("x")}}}))
-			err, ok := result.(error)
-			if !ok || !errors.Is(err, test.target) {
-				t.Fatalf("publish preflight result = %T %v, want %v", result, result, test.target)
+			if outcome, ok := result.(*queue.PublishOutcome); !ok || outcome.Response == nil {
+				t.Fatalf("committed publish result = %T %#v, want successful outcome", result, result)
 			}
-			if test.storage.inventoryCalls != 1 || test.storage.publishCalls != 0 ||
-				guard.beginCalls != 0 || guard.finishCalls != 0 || faultCalls != 0 {
-				t.Fatalf("inventory/publish/guard begin/finish/fault calls = %d/%d/%d/%d/%d, want 1/0/0/0/0",
-					test.storage.inventoryCalls, test.storage.publishCalls,
-					guard.beginCalls, guard.finishCalls, faultCalls)
+			if storage.inventoryCalls != 0 || storage.publishCalls != 1 ||
+				guard.beginCalls != 1 || guard.finishCalls != 1 {
+				t.Fatalf("inventory/publish/guard begin/finish calls = %d/%d/%d/%d, want 0/1/1/1",
+					storage.inventoryCalls, storage.publishCalls, guard.beginCalls, guard.finishCalls)
 			}
 		})
 	}
@@ -515,30 +481,8 @@ func TestFSMPublishWithinBudgetMayUseDerivedIdentifiers(t *testing.T) {
 			t.Fatalf("derived message ID %q length = %d, want %d", messageID, len(messageID), publishwire.MessageIDLength)
 		}
 	}
-	if storage.inventoryCalls != 1 || storage.publishCalls != 1 || guard.beginCalls != 1 || guard.finishCalls != 1 {
-		t.Fatalf("inventory/publish/guard begin/finish calls = %d/%d/%d/%d, want 1/1/1/1",
-			storage.inventoryCalls, storage.publishCalls, guard.beginCalls, guard.finishCalls)
-	}
-}
-
-func TestFSMPublishPresentZeroSubscriptionsIsNotMissing(t *testing.T) {
-	storage := &publishOnlyStorage{
-		inventory: queue.TopicInventory{
-			TopicsExist:        1,
-			SubscriptionCounts: map[string]int64{"topicone": 0},
-		},
-		response: &queue.PublishResponse{TopicID: "topicone"},
-	}
-	guard := new(recordingApplyGuard)
-	machine := New(storage, nil, guard, panicFatalApply)
-
-	result := apply(t, machine, 1, jsonCommand(t, command.OpPublish, "topicone",
-		queue.PublishRequest{Messages: []queue.PublishMessage{{Body: []byte("x")}}}))
-	if outcome, ok := result.(*queue.PublishOutcome); !ok || outcome.Response == nil {
-		t.Fatalf("zero-subscription publish result = %T %#v, want successful outcome", result, result)
-	}
-	if storage.inventoryCalls != 1 || storage.publishCalls != 1 || guard.beginCalls != 1 || guard.finishCalls != 1 {
-		t.Fatalf("inventory/publish/guard begin/finish calls = %d/%d/%d/%d, want 1/1/1/1",
+	if storage.inventoryCalls != 0 || storage.publishCalls != 1 || guard.beginCalls != 1 || guard.finishCalls != 1 {
+		t.Fatalf("inventory/publish/guard begin/finish calls = %d/%d/%d/%d, want 0/1/1/1",
 			storage.inventoryCalls, storage.publishCalls, guard.beginCalls, guard.finishCalls)
 	}
 }

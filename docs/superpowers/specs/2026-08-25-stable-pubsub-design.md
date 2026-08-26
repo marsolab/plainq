@@ -405,14 +405,18 @@ carries only `Response`, explicit `Partial`, `SelectedQueues`,
 `FailedDeliveries`, and `FailedDestinations`; unbounded local destination causes
 and failure lists never cross the peer hop. Fixed XID queue IDs and ULID message
 IDs give the shared overflow-safe bound `4 KiB + subscriptions * 23 +
-subscriptions * request-messages * 29`. Before the durable publish guard or
-storage mutation, every upgraded FSM reads its committed local `TopicInventory`
-and rejects a bound above the peer ceiling as stable capacity. It therefore
-does not trust a follower's possibly stale command-ID count; missing topics stay
-NotFound, while inventory read failures reject without mutation or quarantine.
-The peer's post-Apply response check remains a defensive invariant. A response
-outside that envelope is terminal and is never retried after the command may
-have applied.
+subscriptions * request-messages * 29`. The leader-local proposal guard shared
+by Store and peer forwarding gives publish the same full exclusive admission as
+delete: earlier proposals drain, then a barrier and authoritative
+`TopicInventory` preflight run, and no later proposal can enter until Apply
+returns. This covers create-topic, subscribe, unsubscribe, topic delete, and
+queue-delete races without trusting a follower's possibly stale command-ID
+count. Missing topics stay NotFound; inventory failures, invalid counts, and
+over-capacity results reject before consensus. The replicated FSM never makes
+this version-dependent admission decision, so every version applies an already
+committed command with the same mutation semantics. The peer's post-Apply
+response check remains a defensive invariant. A response outside that envelope
+is terminal and is never retried after the command may have applied.
 
 Rolling upgrades keep `/v1/forward` as the legacy protocol and add
 `/v2/forward` for the compact outcome. A new follower tries v2 and falls back

@@ -1168,6 +1168,8 @@ git commit -m "feat: share stable pubsub application boundary"
 - Modify: `internal/cluster/fsm/fsm.go`
 - Modify: `internal/cluster/fsm/fsm_test.go`
 - Modify: `internal/cluster/fsm/snapshot.go`
+- Modify: `internal/cluster/proposal_guard.go`
+- Modify: `internal/cluster/proposal_guard_test.go`
 - Add: `internal/cluster/publishwire/sizer.go`
 - Add: `internal/cluster/publishwire/sizer_test.go`
 - Modify: `internal/cluster/peer/peer.go`
@@ -1213,7 +1215,7 @@ git commit -m "feat: share stable pubsub application boundary"
 - Modify: `operator/internal/render/workload.go`
 - Modify: `operator/internal/render/render_test.go`
 
-**Contract:** a committed partial publish remains an apply success with an internal partial outcome; ingress reconstructs the public Internal error. Every typed partial quarantines the replica that observed it, the one durable health latch gates Store, peer, and sweeper data paths, and restart cannot clear it. Every replica reconciles exact gauges through one ordered local-observer seam, while ingress records logical counters without touching exact Prometheus or collector state. Encoded cluster commands have one non-retryable 64 MiB ceiling and finite, versioned peer responses remain rolling-upgrade compatible. `/live` is process liveness; `/health` is storage/quorum/quarantine readiness.
+**Contract:** a committed partial publish remains an apply success with an internal partial outcome; ingress reconstructs the public Internal error. Every typed partial quarantines the replica that observed it, the one durable health latch gates Store, peer, and sweeper data paths, and restart cannot clear it. Every replica reconciles exact gauges through one ordered local-observer seam, while ingress records logical counters without touching exact Prometheus or collector state. Encoded cluster commands have one non-retryable 64 MiB ceiling; publish-result admission is leader-local, exclusive, and shared by Store and peer, while replicated FSM semantics remain version-independent and finite peer responses remain rolling-upgrade compatible. `/live` is process liveness; `/health` is storage/quorum/quarantine readiness.
 
 - [ ] **Step 1: Add cluster regression tests**
 
@@ -1269,11 +1271,14 @@ Add:
 - `TestNewFollowerDoesNotFallbackOnApplicationNotFound`
 - `TestCompactOutcomeLimitBoundaries`
 - `TestCompactOutcomeUpperBoundRejectsIntegerOverflow`
-- `TestFSMPublishCapacityPreflightUsesAuthoritativeTopicInventoryBeforeMutation`
-- `TestFSMPublishInventoryPreflightErrorsAreNonMutating`
+- `TestFSMCommittedPublishNeverRunsVersionDependentAdmission`
 - `TestFSMPublishWithinBudgetMayUseDerivedIdentifiers`
-- `TestFSMPublishPresentZeroSubscriptionsIsNotMissing`
-- `TestForwardedStalePublishIsCapacityRejectedBeforeMutation`
+- `TestProposalGuardOrdersPublishBarrierPreflightAndApply`
+- `TestProposalGuardRejectsOversizedPublishBeforeConsensusApply`
+- `TestProposalGuardPublishAdmissionErrorsStopBeforeApply`
+- `TestProposalGuardPublishWaitsForPriorProposalBeforeBarrier`
+- `TestProposalGuardPublishBlocksLaterSubscriberSetMutations`
+- `TestStoreAndPeerUseSamePublishProposalGuard`
 - `TestPublishIdentifierWireFitsDerivedResponseCeiling`
 - `TestAuthenticatedFollowerCarriesKnownPublishOutcomeLargerThanCommandLimit`
 - `TestBuggyPeerResponseOverflowIsFiniteAndTerminal`
@@ -1295,11 +1300,11 @@ Run:
 
 ```bash
 go test ./internal/cluster/... ./internal/metrics ./cmd ./internal/server \
-  -run 'Test.*PartialPublish|Test.*ReconcileTopic|Test.*ClusterBackend|Test.*LogicalTopic|TestPeerPreservesUnavailable|Test.*Replica|Test.*Quarantined|Test.*NodeHealth|Test.*SnapshotRestore|Test.*Liveness|Test.*Helm|Test.*Operator|Test.*StartupInventory|TestTursoUsesTurso' -count=1
+  -run 'Test.*PartialPublish|Test.*ReconcileTopic|Test.*ClusterBackend|Test.*LogicalTopic|TestPeerPreservesUnavailable|Test.*Replica|Test.*Quarantined|Test.*NodeHealth|Test.*SnapshotRestore|Test.*ProposalGuard|Test.*VersionDependentAdmission|TestStoreAndPeerUseSamePublish|Test.*Liveness|Test.*Helm|Test.*Operator|Test.*StartupInventory|TestTursoUsesTurso' -count=1
 cd operator && go test ./internal/render -run 'Test.*Liveness|Test.*Readiness|TestServeArgs' -count=1
 ```
 
-Expected: FAIL because the FSM returns only a partial error, forwarded responses lose the outcome, and the process has one backend-labelled observer.
+Expected: FAIL because the FSM returns only a partial error, forwarded responses lose the outcome, publish admission is not yet leader-local/exclusive, and the process has one backend-labelled observer.
 
 - [ ] **Step 3: Encode publish outcomes as successful Raft responses**
 
@@ -1475,7 +1480,9 @@ type compactPublishOutcome struct {
 
 Set the peer response ceiling to `2*command.MaxEncodedBytes + 4<<10`. Valid queue IDs are fixed 20-byte XIDs and message IDs are fixed 26-byte ULIDs. Put the ceiling and an overflow-safe pure sizer in `internal/cluster/publishwire`; for authoritative subscription count `s` and request message count `m` (the request itself is non-empty), the conservative compact-wire bound is `4 KiB + s*23 + s*m*29`. The 23 and 29 byte terms cover each fixed identifier plus JSON quotes and a conservative comma; 4 KiB covers fixed fields, topic ID, maximum-width counts, delimiters, and framing. Boundary, integer-overflow, fixed-ID, and real compact-marshalling tests must pin this proof.
 
-Before `BeginPublishApply` or `storage.Publish`, the FSM reads authoritative committed local `TopicInventory`, distinguishes an absent topic from a present zero-subscription topic, validates the count, and applies the shared sizer against the same peer ceiling. Inventory read errors and missing topics remain deterministic non-mutating errors and do not quarantine; an arithmetic overflow or over-limit bound returns stable non-retryable capacity without touching the guard or storage. This preflight must use inventory rather than the command's potentially stale ID count because `queue.Determinism` can derive a shortfall after Apply. A stale zero-ID forwarded regression proves the peer returns 413 capacity with one consensus Apply, zero guard begins, zero storage publishes, and no post-Apply response-overflow error; a within-budget case proves derived IDs still succeed.
+Put publish admission in the leader-local `proposalGuard` shared by Store and peer forwarding, never in the replicated FSM. Publish acquires the same full fair semaphore weight as delete. A proposal already inside the ordinary one-unit gate drains before publish can run its barrier; after the barrier, no create-topic, subscribe, unsubscribe, topic-delete, queue-delete, or other proposal can enter until publish's underlying Apply returns. This makes the authoritative subscriber count stable from preflight through log ordering while preserving overlap among ordinary proposals when no exclusive admission is waiting.
+
+Inside that exclusive window, confirm leadership, run `Barrier`, decode the publish request, read authoritative local `TopicInventory`, distinguish an absent topic from a present zero-subscription topic, validate the count, and apply the shared sizer against the peer ceiling. Inventory failures, invalid counts, missing topics, arithmetic overflow, and over-limit bounds all return before consensus Apply and therefore need no replica quarantine. Capacity keeps the stable non-retryable class. The FSM does not read inventory or perform outcome-capacity admission: an already-committed command always reaches the existing durable publish guard and storage mutation semantics on old and new replicas alike. `queue.Determinism` may still derive a stale command-ID shortfall, but the exclusive leader preflight proves that known compact outcome fits before the command is proposed. Tests pin order, prior-drain and later-blocking behavior, Store/peer shared wiring, zero underlying Apply on rejection, and identical committed-command FSM semantics.
 
 Server encodes and checks the same bound before writing success status as a defensive invariant. Client reads at most the bound plus one byte. An overflow from a buggy peer returns a finite `ErrResponseTooLarge`, is diagnostic, and is never retried because Apply may already have happened. A deterministic authenticated regression must carry a known successful outcome larger than 64 MiB but below this response ceiling with every ID intact.
 
