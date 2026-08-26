@@ -224,11 +224,10 @@ type Collector struct {
 	queueMu      sync.RWMutex
 
 	// Per-topic metrics.
-	topicMetrics      map[string]*TopicMetrics
-	topicMu           sync.RWMutex
-	topicCache        *topicCache
-	topicLimit        int
-	lastEnsureEvicted bool
+	topicMetrics map[string]*TopicMetrics
+	topicMu      sync.RWMutex
+	topicCache   *topicCache
+	topicLimit   int
 
 	// System-wide metrics.
 	system      SystemMetrics
@@ -239,12 +238,14 @@ type Collector struct {
 	cutoverMu sync.Mutex
 	now       func() time.Time
 
-	eventWatermark    int64
-	eventQueue        []MetricSample
-	eventBufferLimit  int
-	eventDirty        map[string]dirtyInterval
-	frozenBoundary    *frozenTopicBoundary
-	lastTopicBoundary int64
+	eventWatermark     int64
+	eventQueue         []MetricSample
+	eventBufferLimit   int
+	eventDirty         map[string]dirtyInterval
+	topicDirty         map[string]map[string]dirtyInterval
+	topicDirtyOverflow map[string]dirtyInterval
+	frozenBoundary     *frozenTopicBoundary
+	lastTopicBoundary  int64
 
 	terminalLimit        int
 	terminalReservations map[string]*terminalReservation
@@ -374,6 +375,8 @@ func New(store Store, opts ...Option) *Collector {
 		now:                  time.Now,
 		eventBufferLimit:     defaultEventBufferLimit,
 		eventDirty:           make(map[string]dirtyInterval, 3),
+		topicDirty:           make(map[string]map[string]dirtyInterval),
+		topicDirtyOverflow:   make(map[string]dirtyInterval),
 		terminalLimit:        defaultTerminalStateLimit,
 		terminalReservations: make(map[string]*terminalReservation),
 		preDurableTerminals:  make(map[string]*terminalReservation),

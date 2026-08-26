@@ -45,6 +45,9 @@ type topicAccumulator struct {
 
 	baseline topicBaseline
 	rates    TopicRates
+
+	revision          uint64
+	committedRevision uint64
 }
 
 type TopicMetrics struct {
@@ -75,6 +78,7 @@ type topicBaseline struct {
 	deliveryFailures     uint64
 	subscriptionsCreated uint64
 	subscriptionsDeleted uint64
+	revision             uint64
 }
 
 type topicCache struct {
@@ -94,6 +98,7 @@ type frozenTopicBoundary struct {
 	eventCount     int
 	baselines      map[string]topicBaseline
 	rates          map[string]TopicRates
+	accumulators   map[string]*topicAccumulator
 	systemBaseline topicBaseline
 	systemRates    TopicRates
 }
@@ -160,8 +165,6 @@ func (c *Collector) recordTopicOperationEvent(event telemetry.TopicOperationEven
 	var topicTracked bool
 
 	if event.TopicID != "" {
-		var evicted bool
-
 		m, ok := c.ensureTopicLocked(event.TopicID, false)
 
 		topicTracked = ok
@@ -172,12 +175,12 @@ func (c *Collector) recordTopicOperationEvent(event telemetry.TopicOperationEven
 				m.requests = incrementOperationCounter(m.requests, key)
 			}
 
+			m.revision++
 			m.lastUpdated = now
-		}
-
-		evicted = c.lastEnsureEvicted
-		if evicted || !ok {
-			dropped = append(dropped, metricName)
+		} else {
+			c.markTopicDirtyLocked(event.TopicID, metricName, now)
+			c.markTopicDirtyLocked(event.TopicID, durationName, now)
+			dropped = append(dropped, metricName, durationName)
 		}
 	}
 	c.topicMu.Unlock()
@@ -206,11 +209,19 @@ func (c *Collector) RecordTopicPublish(event telemetry.TopicPublishEvent) {
 		topicTracked = ok
 		if ok {
 			addPublish(&m.topicAccumulator, event)
+			m.revision++
 			m.lastUpdated = now
-		}
-
-		if c.lastEnsureEvicted || !ok {
-			dropped = append(dropped, MetricTopicMessagesPublishedTotal)
+		} else {
+			for _, metricName := range []string{
+				MetricTopicMessagesPublishedTotal,
+				MetricTopicPublishedBytesTotal,
+				MetricTopicDeliveriesTotal,
+				MetricTopicDeliveryFailuresTotal,
+				MetricTopicFanout,
+			} {
+				c.markTopicDirtyLocked(event.TopicID, metricName, now)
+				dropped = append(dropped, metricName)
+			}
 		}
 	}
 	c.topicMu.Unlock()
@@ -240,42 +251,46 @@ func (c *Collector) RecordTopicSubscriptionDeleted(topicID string) {
 }
 
 func (c *Collector) recordTopicLifecycle(topicID string, created bool) {
-	var dropped bool
+	metricName := MetricTopicSubscriptionsDeletedTotal
+	if created {
+		metricName = MetricTopicSubscriptionsCreatedTotal
+	}
 
 	c.cutoverMu.Lock()
 	now := c.stampedNowLocked()
 	c.topicMu.Lock()
-	if created {
-		c.topicSystem.subscriptionsCreated++
-	} else {
-		c.topicSystem.subscriptionsDeleted++
-	}
+	incrementTopicLifecycle(&c.topicSystem.topicAccumulator, created)
+
+	var dropped bool
 
 	if topicID != "" {
 		m, ok := c.ensureTopicLocked(topicID, false)
 		if ok {
-			if created {
-				m.subscriptionsCreated++
-			} else {
-				m.subscriptionsDeleted++
-			}
-
+			incrementTopicLifecycle(&m.topicAccumulator, created)
+			m.revision++
 			m.lastUpdated = now
+		} else {
+			c.markTopicDirtyLocked(topicID, metricName, now)
 		}
 
-		dropped = c.lastEnsureEvicted || !ok
+		dropped = !ok
 	}
 	c.topicMu.Unlock()
 	c.cutoverMu.Unlock()
 
 	if dropped {
-		metricName := MetricTopicSubscriptionsDeletedTotal
-		if created {
-			metricName = MetricTopicSubscriptionsCreatedTotal
-		}
-
 		metrics.RecordTelemetryEventBufferDropped(metricName)
 	}
+}
+
+func incrementTopicLifecycle(accumulator *topicAccumulator, created bool) {
+	if created {
+		accumulator.subscriptionsCreated++
+
+		return
+	}
+
+	accumulator.subscriptionsDeleted++
 }
 
 // RecordTopicState installs authoritative gauge state and reserves terminal work for removals.
@@ -332,10 +347,6 @@ func (c *Collector) RecordTopicState(event telemetry.TopicStateEvent) {
 		}
 
 		m.lastUpdated = now
-
-		if c.lastEnsureEvicted {
-			stateDrops++
-		}
 	}
 
 	c.topicSystem.topicsExist = event.TopicsExist
@@ -371,12 +382,8 @@ func (c *Collector) RecordTopicStateUnavailable() {
 	c.cutoverMu.Unlock()
 }
 
-// lastEnsureEvicted is only read while cutoverMu and topicMu are held.
-// It avoids a tuple-heavy hot-path helper while keeping eviction reporting explicit.
-//
-//nolint:cyclop // Admission, LRU promotion, and bounded eviction are one cache invariant.
+//nolint:cyclop // Admission, LRU promotion, and bounded safe eviction are one cache invariant.
 func (c *Collector) ensureTopicLocked(topicID string, authoritative bool) (*TopicMetrics, bool) {
-	c.lastEnsureEvicted = false
 	if current, exists := c.topicMetrics[topicID]; exists {
 		if authoritative && !current.authoritative {
 			c.topicCache.attributed.Remove(current.cacheElement)
@@ -404,8 +411,16 @@ func (c *Collector) ensureTopicLocked(topicID string, authoritative bool) (*Topi
 			panic("collector: non-string topic cache key")
 		}
 
+		oldestMetrics, exists := c.topicMetrics[oldestTopicID]
+		if !exists {
+			panic("collector: topic cache key missing from metrics map")
+		}
+
+		if oldestMetrics.revision != oldestMetrics.committedRevision {
+			return nil, false
+		}
+
 		c.deleteTopicLocked(oldestTopicID)
-		c.lastEnsureEvicted = true
 	}
 
 	current := &TopicMetrics{authoritative: authoritative}
@@ -520,16 +535,44 @@ func (c *Collector) enqueueAttributedEventLocked(
 }
 
 func (c *Collector) markEventDirtyLocked(metricName string, timestamp int64) {
+	extendDirtyInterval(c.eventDirty, metricName, c.topicBucket(timestamp))
+}
+
+func (c *Collector) markTopicDirtyLocked(subjectID, metricName string, timestamp int64) {
+	if subjectID == "" {
+		return
+	}
+
+	bucket := c.topicBucket(timestamp)
+
+	metricsByName, exists := c.topicDirty[subjectID]
+	if !exists {
+		if c.topicLimit <= 0 || len(c.topicDirty) >= c.topicLimit {
+			extendDirtyInterval(c.topicDirtyOverflow, metricName, bucket)
+
+			return
+		}
+
+		metricsByName = make(map[string]dirtyInterval)
+		c.topicDirty[subjectID] = metricsByName
+	}
+
+	extendDirtyInterval(metricsByName, metricName, bucket)
+}
+
+func (c *Collector) topicBucket(timestamp int64) int64 {
 	intervalMS := c.collectionInterval.Milliseconds()
 	if intervalMS <= 0 {
 		intervalMS = rateWindowMS
 	}
 
-	bucket := timestamp - timestamp%intervalMS
+	return timestamp - timestamp%intervalMS
+}
 
-	current, exists := c.eventDirty[metricName]
+func extendDirtyInterval(intervals map[string]dirtyInterval, metricName string, bucket int64) {
+	current, exists := intervals[metricName]
 	if !exists {
-		c.eventDirty[metricName] = dirtyInterval{fromBucket: bucket, toBucket: bucket}
+		intervals[metricName] = dirtyInterval{fromBucket: bucket, toBucket: bucket}
 
 		return
 	}
@@ -542,7 +585,7 @@ func (c *Collector) markEventDirtyLocked(metricName string, timestamp int64) {
 		current.toBucket = bucket
 	}
 
-	c.eventDirty[metricName] = current
+	intervals[metricName] = current
 }
 
 func (c *Collector) recordEventDrops(metricNames []string) {
@@ -633,9 +676,10 @@ func (c *Collector) freezeTopicBoundaryLocked(boundary, intervalMS int64) *froze
 			Boundary: boundary, SampleIntervalMS: intervalMS,
 			Samples: append([]MetricSample(nil), due...),
 		},
-		eventCount: len(due),
-		baselines:  make(map[string]topicBaseline, len(c.topicMetrics)),
-		rates:      make(map[string]TopicRates, len(c.topicMetrics)),
+		eventCount:   len(due),
+		baselines:    make(map[string]topicBaseline, len(c.topicMetrics)),
+		rates:        make(map[string]TopicRates, len(c.topicMetrics)),
+		accumulators: make(map[string]*topicAccumulator, len(c.topicMetrics)),
 	}
 
 	c.appendSubjectBoundaryLocked(frozen, "", &c.topicSystem.topicAccumulator,
@@ -653,6 +697,7 @@ func (c *Collector) freezeTopicBoundaryLocked(boundary, intervalMS int64) *froze
 
 	for _, topicID := range topicIDs {
 		current := c.topicMetrics[topicID]
+		frozen.accumulators[topicID] = &current.topicAccumulator
 		c.appendSubjectBoundaryLocked(frozen, topicID, &current.topicAccumulator,
 			current.subscriptionsCurrent, current.subscriptionsKnown,
 			current.authoritative, 0, false, bucketStart, intervalMS)
@@ -677,7 +722,7 @@ func (c *Collector) appendSubjectBoundaryLocked(
 		appendPeriodicSample(&frozen.batch, MetricSample{
 			Timestamp: bucketStart, SubjectID: subjectID, MetricName: metricName,
 			Kind: MetricKindCounter, Value: float64(value), Labels: labels,
-		}, intervalMS, true)
+		}, intervalMS, !c.topicDirtyAtLocked(subjectID, metricName, bucketStart))
 	}
 
 	for _, backend := range topicBackends {
@@ -718,7 +763,8 @@ func (c *Collector) appendSubjectBoundaryLocked(
 		subjectID, accumulator.baseline, currentBaseline, bucketStart,
 	)
 	for _, sample := range rateSamples {
-		covered := accumulator.baseline.boundary == bucketStart
+		covered := accumulator.baseline.boundary == bucketStart &&
+			!c.topicDirtyAtLocked(subjectID, rateSourceCounter(sample.MetricName), bucketStart)
 		appendPeriodicSample(&frozen.batch, sample, intervalMS, covered)
 		frozen.batch.RateSnapshots = append(frozen.batch.RateSnapshots, RateSnapshot{
 			Timestamp: sample.Timestamp, SubjectID: sample.SubjectID, MetricName: sample.MetricName,
@@ -743,7 +789,8 @@ func (c *Collector) appendSubjectBoundaryLocked(
 
 	completeSubject = completeSubject && accumulator.baseline.boundary == bucketStart
 
-	if completeSubject && !c.anyEventDirtyAtLocked(bucketStart) {
+	if completeSubject && !c.anyEventDirtyAtLocked(bucketStart) &&
+		!c.anyTopicDirtyAtLocked(subjectID, bucketStart) {
 		frozen.batch.Coverage = append(frozen.batch.Coverage, CoverageBucket{
 			Resolution: ResolutionRaw, BucketStart: bucketStart,
 			SubjectID: subjectID, SampleIntervalMS: intervalMS,
@@ -769,6 +816,26 @@ func baselineFor(accumulator *topicAccumulator, boundary int64) topicBaseline {
 		deliveries: accumulator.deliveries, deliveryFailures: accumulator.deliveryFailures,
 		subscriptionsCreated: accumulator.subscriptionsCreated,
 		subscriptionsDeleted: accumulator.subscriptionsDeleted,
+		revision:             accumulator.revision,
+	}
+}
+
+func rateSourceCounter(metricName string) string {
+	switch metricName {
+	case MetricTopicPublishRate:
+		return MetricTopicMessagesPublishedTotal
+	case MetricTopicDeliveryRate:
+		return MetricTopicDeliveriesTotal
+	case MetricTopicDeliveryFailureRate:
+		return MetricTopicDeliveryFailuresTotal
+	case MetricTopicPublishedBytesRate:
+		return MetricTopicPublishedBytesTotal
+	case MetricTopicSubscriptionsCreatedRate:
+		return MetricTopicSubscriptionsCreatedTotal
+	case MetricTopicSubscriptionsDeletedRate:
+		return MetricTopicSubscriptionsDeletedTotal
+	default:
+		panic("collector: rate metric has no source counter")
 	}
 }
 
@@ -832,7 +899,8 @@ func (c *Collector) appendEventCoverageLocked(
 	batch *CollectionBatch, subjectID string, bucketStart, intervalMS int64,
 ) {
 	appendCoverage := func(metricName, labels string) {
-		if c.eventDirtyAtLocked(metricName, bucketStart) {
+		if c.eventDirtyAtLocked(metricName, bucketStart) ||
+			c.topicDirtyAtLocked(subjectID, metricName, bucketStart) {
 			return
 		}
 
@@ -872,29 +940,84 @@ func (c *Collector) anyEventDirtyAtLocked(bucketStart int64) bool {
 	return false
 }
 
+func (c *Collector) topicDirtyAtLocked(subjectID, metricName string, bucketStart int64) bool {
+	if subjectID == "" {
+		return false
+	}
+
+	if interval, exists := c.topicDirtyOverflow[metricName]; exists &&
+		interval.fromBucket <= bucketStart && bucketStart <= interval.toBucket {
+		return true
+	}
+
+	metricsByName, exists := c.topicDirty[subjectID]
+	if !exists {
+		return false
+	}
+
+	interval, exists := metricsByName[metricName]
+
+	return exists && interval.fromBucket <= bucketStart && bucketStart <= interval.toBucket
+}
+
+func (c *Collector) anyTopicDirtyAtLocked(subjectID string, bucketStart int64) bool {
+	if subjectID == "" {
+		return false
+	}
+
+	for _, interval := range c.topicDirtyOverflow {
+		if interval.fromBucket <= bucketStart && bucketStart <= interval.toBucket {
+			return true
+		}
+	}
+
+	for _, interval := range c.topicDirty[subjectID] {
+		if interval.fromBucket <= bucketStart && bucketStart <= interval.toBucket {
+			return true
+		}
+	}
+
+	return false
+}
+
 func (c *Collector) finalizeTopicBoundaryLocked(frozen *frozenTopicBoundary) {
 	c.topicSystem.baseline = frozen.systemBaseline
 
 	c.topicSystem.rates = frozen.systemRates
 	for topicID, baseline := range frozen.baselines {
-		if current, exists := c.topicMetrics[topicID]; exists {
+		if current, exists := c.topicMetrics[topicID]; exists &&
+			&current.topicAccumulator == frozen.accumulators[topicID] {
 			current.baseline = baseline
+			current.committedRevision = baseline.revision
 			current.rates = frozen.rates[topicID]
 		}
 	}
 }
 
 func (c *Collector) advanceDirtyAfterBoundaryLocked(boundary int64) {
-	for metricName, interval := range c.eventDirty {
+	advanceDirtyIntervals(c.eventDirty, boundary)
+	advanceDirtyIntervals(c.topicDirtyOverflow, boundary)
+
+	for subjectID, metricsByName := range c.topicDirty {
+		advanceDirtyIntervals(metricsByName, boundary)
+
+		if len(metricsByName) == 0 {
+			delete(c.topicDirty, subjectID)
+		}
+	}
+}
+
+func advanceDirtyIntervals(intervals map[string]dirtyInterval, boundary int64) {
+	for metricName, interval := range intervals {
 		if interval.toBucket < boundary {
-			delete(c.eventDirty, metricName)
+			delete(intervals, metricName)
 
 			continue
 		}
 
 		if interval.fromBucket < boundary {
 			interval.fromBucket = boundary
-			c.eventDirty[metricName] = interval
+			intervals[metricName] = interval
 		}
 	}
 }
@@ -957,6 +1080,11 @@ func (c *Collector) terminalReservationCount() int {
 func (c *Collector) promoteTerminalStates(ctx context.Context) error {
 	c.terminalPromoteMu.Lock()
 	defer c.terminalPromoteMu.Unlock()
+	defer func() {
+		c.cutoverMu.Lock()
+		c.compactPreDurableOrderLocked()
+		c.cutoverMu.Unlock()
+	}()
 
 	c.cutoverMu.Lock()
 	order := append([]string(nil), c.preDurableOrder...)
@@ -998,7 +1126,6 @@ func (c *Collector) promoteTerminalStates(ctx context.Context) error {
 			current.durable = true
 
 			delete(c.preDurableTerminals, subjectID)
-			c.compactPreDurableOrderLocked()
 		}
 		c.cutoverMu.Unlock()
 	}
@@ -1010,7 +1137,6 @@ func (c *Collector) dropTerminalReservation(subjectID string) {
 	c.cutoverMu.Lock()
 	delete(c.preDurableTerminals, subjectID)
 	delete(c.terminalReservations, subjectID)
-	c.compactPreDurableOrderLocked()
 	c.topicMu.Lock()
 	if current, exists := c.topicMetrics[subjectID]; exists && current.terminalPending {
 		c.deleteTopicLocked(subjectID)
@@ -1110,7 +1236,6 @@ func (c *Collector) completeTerminalState(ctx context.Context, state TerminalSta
 	if _, exists := c.terminalReservations[state.SubjectID]; exists {
 		delete(c.terminalReservations, state.SubjectID)
 		delete(c.preDurableTerminals, state.SubjectID)
-		c.compactPreDurableOrderLocked()
 		c.topicMu.Lock()
 		if current, ok := c.topicMetrics[state.SubjectID]; ok && current.terminalPending {
 			c.deleteTopicLocked(state.SubjectID)

@@ -3,6 +3,7 @@ package collector
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"slices"
 	"sync"
@@ -325,7 +326,13 @@ func TestTopicOwnedStateStaysBoundedForRandomAttributedIDs(t *testing.T) {
 	)
 	before := dropped.Get()
 
-	for _, topicID := range []string{"c9q00000000000000001", "c9q00000000000000002", "c9q00000000000000003"} {
+	for _, topicID := range []string{
+		"c9q00000000000000001",
+		"c9q00000000000000002",
+		"c9q00000000000000003",
+		"c9q00000000000000004",
+		"c9q00000000000000005",
+	} {
 		c.RecordTopicRequest(telemetry.TopicOperationEvent{
 			Backend: metrics.BackendSQLite, Operation: metrics.OpDeleteTopic,
 			Result: metrics.ResultError, TopicID: topicID, Duration: time.Millisecond,
@@ -338,8 +345,181 @@ func TestTopicOwnedStateStaysBoundedForRandomAttributedIDs(t *testing.T) {
 	if got != 2 {
 		t.Fatalf("tracked topic count = %d, want bounded 2", got)
 	}
-	if got := dropped.Get() - before; got != 1 {
-		t.Fatalf("Prometheus attribution-loss delta = %d, want 1", got)
+	if got := len(c.topicDirty); got > c.topicLimit {
+		t.Fatalf("topic dirty subject count = %d, want <= %d", got, c.topicLimit)
+	}
+	if got := len(c.topicDirtyOverflow); got != 2 {
+		t.Fatalf("fixed overflow dirty metric count = %d, want request counter and duration", got)
+	}
+	if got := dropped.Get() - before; got != 3 {
+		t.Fatalf("Prometheus attribution-loss delta = %d, want 3", got)
+	}
+}
+
+func TestTopicAccumulatorCapPreservesUncommittedCountersAndExactCoverage(t *testing.T) {
+	clock := newTask9Clock(time.UnixMilli(1_100))
+	store := newTelemetryTestStore(t)
+	c := New(store, WithCollectionInterval(time.Second), WithClock(clock.Now))
+	c.topicLimit = 1
+
+	recordAllTopicCounters := func(topicID string, messages uint64) {
+		c.RecordTopicRequest(telemetry.TopicOperationEvent{
+			Backend: metrics.BackendSQLite, Operation: metrics.OpPublish,
+			Result: metrics.ResultOK, TopicID: topicID, Duration: time.Millisecond,
+		})
+		c.RecordTopicPublish(telemetry.TopicPublishEvent{
+			TopicID: topicID, Messages: messages, Bytes: messages * 10,
+			Destinations: 1, Delivered: messages,
+		})
+		c.RecordTopicSubscriptionCreated(topicID)
+	}
+
+	recordAllTopicCounters("topic-a", 2)
+	recordAllTopicCounters("topic-b", 7)
+	recordAllTopicCounters("topic-a", 3)
+	requireCollectTopicBoundary(t, c, 2_000)
+
+	clock.Set(time.UnixMilli(2_100))
+	recordAllTopicCounters("topic-a", 4)
+	requireCollectTopicBoundary(t, c, 3_000)
+
+	// A successful boundary makes topic-a safe to replace. Topic-b can then be
+	// admitted and, after its own commit, topic-a can be admitted again as a
+	// deliberate reset rather than losing an uncommitted cumulative value.
+	clock.Set(time.UnixMilli(3_100))
+	recordAllTopicCounters("topic-b", 5)
+	requireCollectTopicBoundary(t, c, 4_000)
+	clock.Set(time.UnixMilli(4_100))
+	recordAllTopicCounters("topic-a", 6)
+	requireCollectTopicBoundary(t, c, 5_000)
+
+	requestLabels := `{"backend":"sqlite","operation":"publish","result":"ok"}`
+	assertTask9CounterSeries(t, store, SeriesQuery{
+		MetricName: MetricTopicRequestsTotal, SubjectID: "topic-a", Labels: requestLabels,
+		Kind: MetricKindCounter, Resolution: ResolutionRaw, From: 1_000, To: 5_000,
+	}, []float64{2, 3, 1}, []float64{1, 1})
+	assertTask9CounterSeries(t, store, SeriesQuery{
+		MetricName: MetricTopicMessagesPublishedTotal, SubjectID: "topic-a",
+		Kind: MetricKindCounter, Resolution: ResolutionRaw, From: 1_000, To: 5_000,
+	}, []float64{5, 9, 6}, []float64{4, 6})
+	assertTask9CounterSeries(t, store, SeriesQuery{
+		MetricName: MetricTopicSubscriptionsCreatedTotal, SubjectID: "topic-a",
+		Kind: MetricKindCounter, Resolution: ResolutionRaw, From: 1_000, To: 5_000,
+	}, []float64{2, 3, 1}, []float64{1, 1})
+
+	bDropped := mustQueryTask9Series(t, store, SeriesQuery{
+		MetricName: MetricTopicRequestDuration, SubjectID: "topic-b",
+		Labels: `{"backend":"sqlite","operation":"publish"}`,
+		Kind:   MetricKindEvent, Resolution: ResolutionRaw, From: 1_000, To: 3_000,
+	})
+	if len(bDropped.DataPoints) != 0 || len(bDropped.Coverage) != 0 {
+		t.Fatalf("dropped topic-b attribution = %#v, want no row or exact coverage", bDropped)
+	}
+
+	bReadmitted := mustQueryTask9Series(t, store, SeriesQuery{
+		MetricName: MetricTopicMessagesPublishedTotal, SubjectID: "topic-b",
+		Kind: MetricKindCounter, Resolution: ResolutionRaw, From: 3_000, To: 4_000,
+	})
+	if len(bReadmitted.DataPoints) != 1 || bReadmitted.DataPoints[0].Value != 5 ||
+		len(bReadmitted.Coverage) != 1 {
+		t.Fatalf("re-admitted topic-b series = %#v, want value 5 with exact coverage", bReadmitted)
+	}
+}
+
+func TestTopicBoundaryCommitCannotMarkReadmittedAccumulatorDurable(t *testing.T) {
+	clock := newTask9Clock(time.UnixMilli(1_100))
+	store := newTask9Store()
+	c := New(store, WithCollectionInterval(time.Second), WithClock(clock.Now))
+	c.topicLimit = 1
+	recordRequest := func(topicID string) {
+		c.RecordTopicRequest(telemetry.TopicOperationEvent{
+			Backend: metrics.BackendSQLite, Operation: metrics.OpPublish,
+			Result: metrics.ResultOK, TopicID: topicID, Duration: time.Millisecond,
+		})
+	}
+
+	recordRequest("topic-a")
+	requireCollectTopicBoundary(t, c, 2_000)
+
+	store.saveStarted = make(chan struct{})
+	store.saveRelease = make(chan struct{})
+	boundaryDone := make(chan error, 1)
+	go func() { boundaryDone <- c.collectTopicBoundary(context.Background(), 3_000) }()
+	<-store.saveStarted
+
+	clock.Set(time.UnixMilli(3_100))
+	recordRequest("topic-b")
+	c.RecordTopicState(telemetry.TopicStateEvent{
+		TopicsExist: 1, Subscriptions: map[string]int64{"topic-b": 0},
+	})
+	c.RecordTopicState(telemetry.TopicStateEvent{TopicsExist: 0, Subscriptions: map[string]int64{}})
+	store.rejectTerminal = true
+	if err := c.promoteTerminalStates(context.Background()); err != nil {
+		t.Fatalf("drop topic-b terminal reservation: %v", err)
+	}
+
+	callbackDone := make(chan struct{})
+	go func() {
+		recordRequest("topic-a")
+		close(callbackDone)
+	}()
+	<-callbackDone
+
+	close(store.saveRelease)
+	if err := <-boundaryDone; err != nil {
+		t.Fatalf("finish blocked boundary: %v", err)
+	}
+
+	// The completed boundary held an older topic-a accumulator. It must not
+	// make the newly admitted topic-a safe to evict before that new value commits.
+	recordRequest("topic-c")
+	requireCollectTopicBoundary(t, c, 4_000)
+	requestLabels := `{"backend":"sqlite","operation":"publish","result":"ok"}`
+	batch := store.lastBatch(t)
+	assertTask9Sample(t, batch.Samples, MetricSample{
+		Timestamp: 3_000, SubjectID: "topic-a", MetricName: MetricTopicRequestsTotal,
+		Kind: MetricKindCounter, Value: 1, Labels: requestLabels,
+	})
+	assertTask9MetricAbsent(t, batch.Samples, "topic-c", MetricTopicRequestsTotal)
+}
+
+func TestTerminalEnqueuePromotionQueueRewriteWorkStaysLinear(t *testing.T) {
+	const backlog = 32
+
+	store := newTask9Store()
+	clock := newTask9Clock(time.UnixMilli(1_100))
+	c := New(store, WithClock(clock.Now))
+	c.terminalLimit = backlog
+
+	subscriptions := make(map[string]int64, backlog)
+	for i := range backlog {
+		subscriptions[fmt.Sprintf("topic-%02d", i)] = 1
+	}
+	c.RecordTopicState(telemetry.TopicStateEvent{TopicsExist: backlog, Subscriptions: subscriptions})
+	c.RecordTopicState(telemetry.TopicStateEvent{TopicsExist: 0, Subscriptions: map[string]int64{}})
+
+	var (
+		previousQueue []string
+		rewriteWork   int
+	)
+	store.onEnqueue = func() {
+		c.cutoverMu.Lock()
+		currentQueue := append([]string(nil), c.preDurableOrder...)
+		c.cutoverMu.Unlock()
+		if previousQueue != nil {
+			rewriteWork += task9QueueRewriteDistance(previousQueue, currentQueue)
+		}
+		previousQueue = currentQueue
+	}
+
+	if err := c.promoteTerminalStates(context.Background()); err != nil {
+		t.Fatalf("promote terminal backlog: %v", err)
+	}
+	if rewriteWork > backlog {
+		t.Fatalf("observed queue rewrite work = %d, want linear bound <= %d", rewriteWork, backlog)
+	}
+	if got := len(c.preDurableOrder); got != 0 {
+		t.Fatalf("pre-durable order length after promotion = %d, want 0", got)
 	}
 }
 
@@ -674,6 +854,7 @@ type task9Store struct {
 	rejectTerminal  bool
 	listErr         error
 	terminalSamples []MetricSample
+	onEnqueue       func()
 }
 
 func newTask9Store() *task9Store {
@@ -702,6 +883,9 @@ func (s *task9Store) SaveCollectionBoundary(_ context.Context, batch CollectionB
 func (s *task9Store) EnqueueTerminalState(
 	_ context.Context, subjectID string, observedAt int64, limit int,
 ) (bool, error) {
+	if s.onEnqueue != nil {
+		s.onEnqueue()
+	}
 	if s.enqueueStarted != nil {
 		close(s.enqueueStarted)
 		<-s.enqueueRelease
@@ -882,6 +1066,60 @@ func assertTask9CoverageAbsent(t *testing.T, coverage []CoverageBucket, subject,
 			t.Fatalf("coverage %q/%q unexpectedly present as %#v", subject, metric, bucket)
 		}
 	}
+}
+
+func mustQueryTask9Series(t *testing.T, store Store, query SeriesQuery) SeriesResult {
+	t.Helper()
+	result, err := store.QuerySeries(context.Background(), query)
+	if err != nil {
+		t.Fatalf("query %s/%s: %v", query.SubjectID, query.MetricName, err)
+	}
+
+	return result
+}
+
+func assertTask9CounterSeries(
+	t *testing.T, store Store, query SeriesQuery, wantValues, wantDeltas []float64,
+) {
+	t.Helper()
+	result := mustQueryTask9Series(t, store, query)
+	if len(result.DataPoints) != len(wantValues) {
+		t.Fatalf("%s/%s points = %#v, want values %v", query.SubjectID, query.MetricName, result, wantValues)
+	}
+	if len(result.Coverage) != len(wantValues) {
+		t.Fatalf("%s/%s coverage = %#v, want %d buckets", query.SubjectID, query.MetricName, result.Coverage, len(wantValues))
+	}
+	for i, want := range wantValues {
+		if got := result.DataPoints[i].Value; got != want {
+			t.Fatalf("%s/%s value[%d] = %v, want %v", query.SubjectID, query.MetricName, i, got, want)
+		}
+	}
+	if len(wantDeltas) != len(wantValues)-1 {
+		t.Fatalf("invalid test fixture: %d deltas for %d values", len(wantDeltas), len(wantValues))
+	}
+	for i, want := range wantDeltas {
+		previous := result.DataPoints[i].Value
+		current := result.DataPoints[i+1].Value
+		got := current - previous
+		if current < previous {
+			got = current
+		}
+		if got != want {
+			t.Fatalf("%s/%s delta[%d] = %v, want %v", query.SubjectID, query.MetricName, i, got, want)
+		}
+	}
+}
+
+func task9QueueRewriteDistance(previous, current []string) int {
+	maximum := max(len(previous), len(current))
+	distance := 0
+	for i := range maximum {
+		if i >= len(previous) || i >= len(current) || previous[i] != current[i] {
+			distance++
+		}
+	}
+
+	return distance
 }
 
 func TestTopicMetricsRecordPublishAndRates(t *testing.T) {
