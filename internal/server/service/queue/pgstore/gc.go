@@ -11,6 +11,7 @@ import (
 	"github.com/marsolab/plainq/internal/metrics"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/service/queue/pgstore/sqlcgen"
+	"github.com/marsolab/plainq/internal/shared/pqerr"
 )
 
 type sweepResult struct {
@@ -47,10 +48,9 @@ func (s *Storage) gc(ctx context.Context) {
 	}
 }
 
-// collect runs one full sweep and records how it went. It mirrors the SQLite
-// backend: the failure paths still panic, but the outcome is recorded on the
-// way out, so the error result is reachable for exactly the failures an
-// operator needs to see.
+// collect runs one full sweep and records how it went. A queue may disappear
+// after queuesForGC takes its snapshot, and one failed queue must not stop the
+// background routine from maintaining the remaining queues or trying again.
 func (s *Storage) collect(ctx context.Context) {
 	var (
 		start = time.Now()
@@ -62,8 +62,11 @@ func (s *Storage) collect(ctx context.Context) {
 	queues, queuesErr := s.queuesForGC(ctx)
 	if queuesErr != nil {
 		cErr = queuesErr
+		s.logger.Error("Get queue IDs for garbage collection",
+			slog.Any("error", queuesErr),
+		)
 
-		panic(fmt.Sprintf("get queue IDs for GC: %v", queuesErr))
+		return
 	}
 
 	for _, queueID := range queues {
@@ -73,9 +76,14 @@ func (s *Storage) collect(ctx context.Context) {
 
 		result, sweepErr := s.sweep(ctx, queueID)
 		if sweepErr != nil {
-			cErr = sweepErr
+			wrapped := fmt.Errorf("sweep queue (id: %q): %w", queueID, sweepErr)
+			cErr = errors.Join(cErr, wrapped)
+			s.logger.Error("Garbage collection failed for queue",
+				slog.String("queue_id", queueID),
+				slog.Any("error", sweepErr),
+			)
 
-			panic(fmt.Errorf("sweep queue (id: %q): %s", queueID, sweepErr.Error()))
+			continue
 		}
 
 		// A sweep is the one moment the store already knows a queue changed
@@ -152,15 +160,23 @@ func (s *Storage) sweep(ctx context.Context, queueID string) (_ *sweepResult, sE
 
 	props, ok := s.cache.getByID(queueID)
 	if !ok {
-		return nil, fmt.Errorf("queue props (id: %q) not cached", queueID)
+		return nil, fmt.Errorf("queue props (id: %q) not cached: %w", queueID, pqerr.ErrNotFound)
 	}
 
 	tx, txErr := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if txErr != nil {
-		panic(fmt.Errorf("begin transaction: %w", txErr))
+		return nil, fmt.Errorf("begin transaction: %w", txErr)
 	}
 
 	defer func() { sErr = errors.Join(sErr, rollback(ctx, tx)) }()
+
+	// DeleteQueue takes this same parent row before it requests ACCESS
+	// EXCLUSIVE on the queue table. Updating gc_at first gives every sweep the
+	// same parent-first order; rollback restores the timestamp on any policy
+	// failure.
+	if err := s.updateQueuePropsAfterGC(ctx, queueID, tx); err != nil {
+		return nil, fmt.Errorf("lock queue (id: %q) props for GC: %w", queueID, err)
+	}
 
 	var messagesDropped uint64
 
@@ -183,10 +199,6 @@ func (s *Storage) sweep(ctx context.Context, queueID string) (_ *sweepResult, sE
 
 	default:
 		return nil, fmt.Errorf("queue props (id: %q) contains unsupported drop policy: %d", queueID, props.EvictionPolicy)
-	}
-
-	if err := s.updateQueuePropsAfterGC(ctx, queueID, tx); err != nil {
-		return nil, fmt.Errorf("update queue (id: %q) props record: %w", queueID, err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -219,6 +231,10 @@ func dropMessages(ctx context.Context, tx pgx.Tx, props QueueProps) (uint64, err
 }
 
 func moveMessagesToDLQ(ctx context.Context, tx pgx.Tx, props QueueProps) (uint64, error) {
+	if props.DeadLetterQueueID == "" {
+		return 0, fmt.Errorf("queue (id: %q) has the dead-letter policy but no dead-letter queue", props.ID)
+	}
+
 	rows, execErr := tx.Query(ctx, querySelectMoveToDLQ(props.ID),
 		int32(props.MaxReceiveAttempts),     //nolint:gosec // max receive attempts is bounded by validation.
 		int32(props.RetentionPeriodSeconds), //nolint:gosec // retention seconds is bounded by validation.
@@ -228,8 +244,9 @@ func moveMessagesToDLQ(ctx context.Context, tx pgx.Tx, props QueueProps) (uint64
 	}
 
 	type msg struct {
-		ID   string
-		Body []byte
+		ID        string
+		Body      []byte
+		CreatedAt time.Time
 	}
 
 	var msgs []msg
@@ -237,7 +254,7 @@ func moveMessagesToDLQ(ctx context.Context, tx pgx.Tx, props QueueProps) (uint64
 	for rows.Next() {
 		var m msg
 
-		if err := rows.Scan(&m.ID, &m.Body); err != nil {
+		if err := rows.Scan(&m.ID, &m.Body, &m.CreatedAt); err != nil {
 			rows.Close()
 
 			return 0, fmt.Errorf("scan message record: %w", err)
@@ -252,12 +269,27 @@ func moveMessagesToDLQ(ctx context.Context, tx pgx.Tx, props QueueProps) (uint64
 		return 0, fmt.Errorf("iterate rows: %w", err)
 	}
 
-	insertSQL := queryInsertMessages(props.DeadLetterQueueID)
+	if len(msgs) == 0 {
+		return 0, nil
+	}
+
+	insertSQL := queryInsertDeadLetterMessage(props.DeadLetterQueueID)
+	ids := make([]string, 0, len(msgs))
 
 	for _, m := range msgs {
-		if _, err := tx.Exec(ctx, insertSQL, m.ID, m.Body); err != nil {
+		if _, err := tx.Exec(ctx, insertSQL, m.ID, m.Body, m.CreatedAt); err != nil {
 			return 0, fmt.Errorf("insert into DLQ: %w", err)
 		}
+
+		ids = append(ids, m.ID)
+	}
+
+	tag, err := tx.Exec(ctx, queryDeleteMessagesNoReturning(props.ID), ids)
+	if err != nil {
+		return 0, fmt.Errorf("remove dead-lettered messages: %w", err)
+	}
+	if tag.RowsAffected() != int64(len(ids)) {
+		return 0, fmt.Errorf("remove dead-lettered messages: deleted %d rows, want %d", tag.RowsAffected(), len(ids))
 	}
 
 	return uint64(len(msgs)), nil
@@ -270,7 +302,7 @@ func (s *Storage) updateQueuePropsAfterGC(ctx context.Context, queueID string, t
 	}
 
 	if rows == 0 {
-		return errors.New("no affected rows")
+		return fmt.Errorf("queue (id: %q): %w", queueID, pqerr.ErrNotFound)
 	}
 
 	return nil
