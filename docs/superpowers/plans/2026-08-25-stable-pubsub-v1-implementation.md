@@ -1526,7 +1526,7 @@ git commit -m "feat: reconcile pubsub telemetry across cluster"
 - Modify: `cmd/output.go`
 - Modify: `cmd/output_test.go`
 - Modify: `cmd/grpcerror.go`
-- Modify: `cmd/grpcerror_test.go`
+- Add: `cmd/grpcerror_test.go`
 - Modify: `cmd/cli.go`
 - Modify: `cmd/cli_test.go`
 - Modify: `cmd/args_test.go`
@@ -1537,14 +1537,19 @@ git commit -m "feat: reconcile pubsub telemetry across cluster"
 
 Add tests for:
 
-- six internal client wrappers invoking the matching RPC;
+- six internal client wrappers invoking the matching RPC with the exact request
+  pointer/value; each passes a non-empty `grpc.CallOption`, proves it reaches
+  the generated fake, and proves a wrapped RPC error retains its gRPC code;
 - all six `topic` leaves in help and `schema -target=cli`;
 - effect classification and exact positional arity before open: list 0;
   create/delete/publish 1; subscribe/unsubscribe 2; missing or extra arguments
   are usage exit 2;
 - flags before/after positionals with one or two dashes;
-- lowercased local topic/subscription XID validation plus `validateQueueID`, all
-  exiting 2 before dialing;
+- local topic/subscription XID validation against `strings.ToLower(id)` plus
+  `validateQueueID`, while preserving the original argument for requests and
+  text output; malformed IDs exit 2 before dialing;
+- uppercase valid-ID request construction proving validation does not rewrite
+  the request or echoed ID;
 - blank/whitespace-only topic names rejected while the original nonblank name is
   sent unchanged;
 - zero publish messages and files containing only empty lines exiting 2, while
@@ -1591,7 +1596,11 @@ Unsubscribe(context.Context, *v1.UnsubscribeRequest, ...grpc.CallOption) (*v1.Un
 Publish(context.Context, *v1.PublishRequest, ...grpc.CallOption) (*v1.PublishResponse, error)
 ```
 
-Each wrapper adds an operation-specific `%w` context and preserves gRPC status extraction.
+Each wrapper forwards the exact request pointer and every `grpc.CallOption` to
+the generated client, adds operation-specific `%w` context, and preserves gRPC
+status extraction. Tests use a non-empty option and a generated-client fake that
+records it; they compare the exact request pointer/value and assert
+`status.Code(wrapped) == status.Code(original)`.
 
 Repeat those exact six signatures in the command-side `topicClient` interface;
 do not weaken them to a generic call or omit `grpc.CallOption`.
@@ -1601,7 +1610,11 @@ connection, with a client test. Each leaf uses a named return and installs one
 defer immediately after successful open:
 
 ```go
-defer func() { err = errors.Join(err, closer.Close()) }()
+defer func() {
+	if closeErr := closer.Close(); closeErr != nil {
+		err = errors.Join(err, fmt.Errorf("close topic client: %w", closeErr))
+	}
+}()
 ```
 
 Validation failure and open failure do not close; success, RPC failure, render
@@ -1662,11 +1675,14 @@ delivered\t<count>
 
 For `-json`, pass the unmodified protobuf response to `encodeJSON`.
 
-Before `deps.open`, enforce exact arity, validate/normalize every identifier,
+Before `deps.open`, enforce exact arity, validate every identifier against its
+lowercased form without replacing the original argument,
 validate a create name with `strings.TrimSpace` while preserving the original
 nonblank value, collect every publish source, and enforce the size/count rules.
-Use a shared lowercasing XID helper for topic/subscription IDs and the existing
-`validateQueueID` for queue IDs. Extras are never ignored.
+Use a shared helper that calls the XID parser on `strings.ToLower(id)` but
+returns the original topic/subscription ID; use `validateQueueID` as a check
+without rewriting the queue ID. Requests and echoed text retain the original
+spelling. Extras are never ignored.
 
 Construct commands through an injectable seam used by deterministic tests:
 
