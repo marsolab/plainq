@@ -316,6 +316,93 @@ export interface MultiMetricsChartResponse {
   timeRange: TimeRange;
 }
 
+export type MetricSource = "observed" | "aggregated" | "carriedForward";
+export type MetricInterpolation = "linear" | "stepAfter";
+export type MetricKind = "counter" | "gauge" | "rate" | "event";
+
+export interface MissingRange {
+  from: number;
+  to: number;
+  reason: "notRecorded" | "outsideRetention";
+}
+
+export interface TopicMetricDataPoint {
+  timestamp: number;
+  value: number;
+  source: MetricSource;
+  min?: number;
+  max?: number;
+  avg?: number;
+  sum?: number;
+  count?: number;
+}
+
+export interface MetricSeriesResponse {
+  metricName: string;
+  topicId: string;
+  kind: MetricKind;
+  unit: string;
+  interpolation: MetricInterpolation;
+  timeRange: TimeRange;
+  resolution: "raw" | "1m" | "1h" | "1d";
+  samples: {
+    expectedPointCount: number;
+    returnedPointCount: number;
+    firstSampleAt: number | null;
+    lastSampleAt: number | null;
+    complete: boolean;
+    missingRanges: MissingRange[];
+  };
+  dataPoints: TopicMetricDataPoint[];
+}
+
+export interface TopicSeriesResponse {
+  topicId: string;
+  metrics: MetricSeriesResponse[];
+  timeRange: TimeRange;
+  effectiveTimeRange: TimeRange;
+  resolution: "raw" | "1m" | "1h" | "1d";
+  sampleIntervalMs: number;
+  generatedAt: number;
+}
+
+export interface TopicSubscriptionSummary {
+  subscriptionsCurrent: number | null;
+  createdDuringWindow: number | null;
+  removedDuringWindow: number | null;
+  avgCreateRate: number | null;
+  avgRemoveRate: number | null;
+  maxCreateRate: number | null;
+  maxRemoveRate: number | null;
+  updatedAt: number | null;
+}
+
+export interface TopicSubscriptionsResponse extends TopicSeriesResponse {
+  summary: TopicSubscriptionSummary;
+}
+
+export interface DurationSummary {
+  min: number;
+  max: number;
+  avg: number;
+  sum: number;
+  count: number;
+}
+
+export interface OperationSummary {
+  backend: "sqlite" | "turso" | "postgres" | "cluster";
+  operation:
+    | "list_topics"
+    | "create_topic"
+    | "delete_topic"
+    | "subscribe"
+    | "unsubscribe"
+    | "publish";
+  ok: number;
+  error: number;
+  durationSeconds: DurationSummary;
+}
+
 export interface QueueMetricsSummary {
   queueId: string;
   totalSent: number;
@@ -336,6 +423,8 @@ export interface QueueMetricsSummary {
 
 export interface TopicMetricsSummary {
   topicId: string;
+  from: number;
+  to: number;
   totalPublished: number;
   totalDeliveries: number;
   avgPublishRate: number;
@@ -346,6 +435,17 @@ export interface TopicMetricsSummary {
   currentPublishRate: number;
   currentDeliveryRate: number;
   timeRange: TimeRange;
+  totalPublishedBytes: number | null;
+  totalDeliveryFailures: number | null;
+  averageFanout: number | null;
+  maxFanout: number | null;
+  subscriptionsCreatedDuringWindow: number | null;
+  subscriptionsRemovedDuringWindow: number | null;
+  effectiveTimeRange: TimeRange;
+  resolution: "raw" | "1m" | "1h" | "1d";
+  generatedAt: number;
+  operationSummaries: OperationSummary[] | null;
+  storageOperationSummaries: OperationSummary[] | null;
 }
 
 export interface TopicMetricsRow {
@@ -365,15 +465,24 @@ export interface TopicMetricsOverview {
     publishRate: number;
     deliveryRate: number;
     messagesPublished: number;
+    publishedBytes: number;
     deliveries: number;
+    deliveryFailures: number;
     subscriptionsCurrent: number | null;
     subscriptionsCreated: number;
     subscriptionsDeleted: number;
+    topicsExist: number;
+    operationSummaries: OperationSummary[] | null;
+    storageOperationSummaries: OperationSummary[] | null;
   };
   topicMetrics: TopicMetricsRow[];
   timeRange: TimeRange;
+  effectiveTimeRange: TimeRange;
+  resolution: "raw" | "1m" | "1h" | "1d";
   updatedAt: number;
 }
+
+export type ChartRow = { t: number } & Record<string, number | null>;
 
 export interface InFlightMetricsResponse {
   current: number;

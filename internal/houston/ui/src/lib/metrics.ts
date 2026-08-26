@@ -1,4 +1,4 @@
-import type { MetricsChartResponse } from "./types";
+import type { ChartRow, MetricsChartResponse, TopicSeriesResponse } from "./types";
 
 export interface RateChartRow {
   timestamp: number;
@@ -35,6 +35,47 @@ export function transformRateMetrics(
   }
 
   return Array.from(rows.values()).sort((a, b) => a.timestamp - b.timestamp);
+}
+
+export function transformTopicSeries(
+  response: TopicSeriesResponse,
+  keys: Readonly<Record<string, string>>,
+): ChartRow[] {
+  const rows = new Map<number, ChartRow>();
+  const rowAt = (timestamp: number) => {
+    const existing = rows.get(timestamp);
+    if (existing) return existing;
+
+    const row: ChartRow = { t: timestamp };
+    rows.set(timestamp, row);
+    return row;
+  };
+
+  for (const metric of response.metrics) {
+    const key = keys[metric.metricName];
+    if (!key) continue;
+
+    for (const point of metric.dataPoints) {
+      rowAt(point.timestamp)[key] = point.value;
+    }
+  }
+
+  for (const metric of response.metrics) {
+    const key = keys[metric.metricName];
+    if (!key) continue;
+
+    for (const range of metric.samples.missingRanges) {
+      for (
+        let timestamp = range.from;
+        timestamp < range.to;
+        timestamp += response.sampleIntervalMs
+      ) {
+        rowAt(timestamp)[key] = null;
+      }
+    }
+  }
+
+  return Array.from(rows.values()).sort((a, b) => a.t - b.t);
 }
 
 export function formatMetricNumber(value?: number | null): string {

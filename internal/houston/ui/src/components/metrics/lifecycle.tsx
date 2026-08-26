@@ -1,5 +1,6 @@
 import * as React from "react";
 
+import type { MetricInterpolation } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import type { ChartTokens } from "./chart-tokens";
 
@@ -49,6 +50,7 @@ export interface SeriesSpec {
   key: string;
   label: string;
   tone: LifecycleTone;
+  interpolation?: MetricInterpolation;
   /** Dashed so the series survives grayscale and colour-blind rendering. */
   dashed?: boolean;
 }

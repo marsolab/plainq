@@ -20,12 +20,13 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { formatClock } from "@/lib/format";
+import type { ChartRow } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useChartTokens, type ChartTokens } from "./chart-tokens";
 import { formatAxisTime } from "./format-metrics";
 import { SeriesSwatch, toneColor, type SeriesSpec } from "./lifecycle";
 
-export type ChartRow = { t: number } & Record<string, number>;
+export type { ChartRow } from "@/lib/types";
 
 interface SeriesChartProps {
   data: ReadonlyArray<ChartRow>;
@@ -87,7 +88,8 @@ export function SeriesChart({
           {series.map((entry) => (
             <Line
               key={entry.key}
-              type="linear"
+              type={entry.interpolation ?? "linear"}
+              connectNulls={false}
               dataKey={entry.key}
               name={entry.label}
               stroke={toneColor(tokens, entry.tone)}
@@ -115,13 +117,18 @@ function axisTick(tokens: ChartTokens) {
 interface SeriesTooltipProps {
   active?: boolean;
   label?: string | number;
-  payload?: ReadonlyArray<{ dataKey?: string | number; value?: number | string }>;
+  payload?: ReadonlyArray<{
+    dataKey?: string | number;
+    value?: number | string | null;
+  }>;
   series: readonly SeriesSpec[];
   formatValue: (value: number) => string;
 }
 
 function SeriesTooltip({ active, label, payload, series, formatValue }: SeriesTooltipProps) {
-  if (!active || !payload || payload.length === 0) return null;
+  if (!active) return null;
+
+  const readings = payload ?? [];
 
   return (
     <div className="border border-border bg-surface px-2.5 py-2">
@@ -130,15 +137,16 @@ function SeriesTooltip({ active, label, payload, series, formatValue }: SeriesTo
       </div>
       <div className="mt-1.5 flex flex-col gap-1">
         {series.map((entry) => {
-          const point = payload.find((item) => item.dataKey === entry.key);
-          if (!point || typeof point.value !== "number") return null;
+          const point = readings.find((item) => item.dataKey === entry.key);
 
           return (
             <div key={entry.key} className="flex items-center gap-2 text-xs">
               <SeriesSwatch tone={entry.tone} />
               <span>{entry.label}</span>
               <span className="ml-auto pl-4 font-mono text-xs tabular">
-                {formatValue(point.value)}
+                {typeof point?.value === "number"
+                  ? formatValue(point.value)
+                  : "Unavailable"}
               </span>
             </div>
           );
@@ -180,11 +188,15 @@ export function SeriesTable({
           {data.map((row) => (
             <TableRow key={row.t}>
               <TableCell className="font-mono text-xs tabular">{formatClock(row.t)}</TableCell>
-              {series.map((entry) => (
-                <TableCell key={entry.key} numeric>
-                  {formatValue(row[entry.key] ?? 0)}
-                </TableCell>
-              ))}
+              {series.map((entry) => {
+                const value = row[entry.key];
+
+                return (
+                  <TableCell key={entry.key} numeric>
+                    {typeof value === "number" ? formatValue(value) : "Unavailable"}
+                  </TableCell>
+                );
+              })}
             </TableRow>
           ))}
         </TableBody>
@@ -207,9 +219,13 @@ export function describeSeries(
   if (data.length === 0) return `${windowLabel} window · no samples`;
 
   const parts = series.map((entry) => {
-    const values = data.map((row) => row[entry.key] ?? 0);
+    const values = data
+      .map((row) => row[entry.key])
+      .filter((value): value is number => typeof value === "number");
+    if (values.length === 0) return `${entry.label.toLowerCase()} unavailable`;
+
     const average = values.reduce((sum, value) => sum + value, 0) / values.length;
-    const peak = values.reduce((max, value) => Math.max(max, value), 0);
+    const peak = values.reduce((max, value) => Math.max(max, value));
     return `${entry.label.toLowerCase()} avg ${formatValue(average)}, peak ${formatValue(peak)}`;
   });
 

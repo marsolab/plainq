@@ -14,10 +14,15 @@ const overview: TopicMetricsOverview = {
     publishRate: 12.345,
     deliveryRate: 67.89,
     messagesPublished: 3210,
+    publishedBytes: 12_345,
     deliveries: 6540,
+    deliveryFailures: 3,
     subscriptionsCurrent: 5,
     subscriptionsCreated: 7,
     subscriptionsDeleted: 2,
+    topicsExist: 1,
+    operationSummaries: null,
+    storageOperationSummaries: null,
   },
   topicMetrics: [
     {
@@ -36,6 +41,11 @@ const overview: TopicMetricsOverview = {
     from: 1_700_000_000_000,
     to: 1_700_000_360_000,
   },
+  effectiveTimeRange: {
+    from: 1_700_000_000_000,
+    to: 1_700_000_360_000,
+  },
+  resolution: "raw",
   updatedAt: 1_700_000_360_000,
 };
 

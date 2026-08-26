@@ -4,7 +4,9 @@ import {
   formatMetricRate,
   isTelemetryUnavailableError,
   transformRateMetrics,
+  transformTopicSeries,
 } from "./metrics";
+import type { MetricsChartResponse, TopicSeriesResponse } from "./types";
 import { api } from "./api-client";
 
 describe("formatMetricNumber", () => {
@@ -43,6 +45,90 @@ describe("transformRateMetrics", () => {
         publish: 2,
         delivery: 4,
       },
+    ]);
+  });
+
+  test("keeps the legacy queue response contract free of topic sample metadata", () => {
+    const response: MetricsChartResponse = {
+      metricName: "plainq_send_rate",
+      queueId: "queue-1",
+      dataPoints: [{ timestamp: 1000, value: 2 }],
+    };
+
+    expect(transformRateMetrics([response])).toEqual([{ timestamp: 1000, send: 2 }]);
+  });
+});
+
+describe("transformTopicSeries", () => {
+  test("accepts every topic sample source and preserves declared missing buckets", () => {
+    const timeRange = { from: 1000, to: 5000 };
+    const response: TopicSeriesResponse = {
+      topicId: "topic-1",
+      metrics: [
+        {
+          metricName: "plainq_topic_publish_rate",
+          topicId: "topic-1",
+          kind: "rate",
+          unit: "messages/s",
+          interpolation: "linear",
+          timeRange,
+          resolution: "raw",
+          samples: {
+            expectedPointCount: 4,
+            returnedPointCount: 3,
+            firstSampleAt: 1000,
+            lastSampleAt: 3000,
+            complete: false,
+            missingRanges: [{ from: 3000, to: 5000, reason: "notRecorded" }],
+          },
+          dataPoints: [
+            { timestamp: 1000, value: 4, source: "observed" },
+            { timestamp: 2000, value: 0, source: "aggregated" },
+            { timestamp: 3000, value: 8, source: "observed" },
+          ],
+        },
+        {
+          metricName: "plainq_topic_subscriptions_current",
+          topicId: "topic-1",
+          kind: "gauge",
+          unit: "subscriptions",
+          interpolation: "stepAfter",
+          timeRange,
+          resolution: "raw",
+          samples: {
+            expectedPointCount: 4,
+            returnedPointCount: 2,
+            firstSampleAt: 1000,
+            lastSampleAt: 3000,
+            complete: false,
+            missingRanges: [{ from: 2000, to: 3000, reason: "outsideRetention" }],
+          },
+          dataPoints: [
+            { timestamp: 1000, value: 2, source: "carriedForward" },
+            { timestamp: 3000, value: 3, source: "observed" },
+          ],
+        },
+      ],
+      timeRange,
+      effectiveTimeRange: timeRange,
+      resolution: "raw",
+      sampleIntervalMs: 1000,
+      generatedAt: 5000,
+    };
+
+    expect(
+      response.metrics.flatMap((metric) => metric.dataPoints.map((point) => point.source)),
+    ).toEqual(["observed", "aggregated", "observed", "carriedForward", "observed"]);
+    expect(
+      transformTopicSeries(response, {
+        plainq_topic_publish_rate: "publish",
+        plainq_topic_subscriptions_current: "active",
+      }),
+    ).toEqual([
+      { t: 1000, publish: 4, active: 2 },
+      { t: 2000, publish: 0, active: null },
+      { t: 3000, publish: null, active: 3 },
+      { t: 4000, publish: null },
     ]);
   });
 });
