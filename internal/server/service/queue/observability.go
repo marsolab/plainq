@@ -207,11 +207,7 @@ func (s *ObservedStorage) ListTopics(ctx context.Context) (*ListTopicsResponse, 
 
 	out, err := s.inner.ListTopics(ctx)
 
-	s.observer.TopicOperation(metrics.OpListTopics, start, err)
-
-	if err == nil {
-		metrics.SetTopicsExist(int64(len(out.Topics)))
-	}
+	s.observer.TopicOperation(metrics.OpListTopics, "", start, err)
 
 	return out, err
 }
@@ -222,7 +218,12 @@ func (s *ObservedStorage) CreateTopic(ctx context.Context, input *CreateTopicReq
 
 	out, err := s.inner.CreateTopic(ctx, input)
 
-	s.observer.TopicOperation(metrics.OpCreateTopic, start, err)
+	var topicID string
+	if err == nil && out != nil {
+		topicID = out.TopicID
+	}
+
+	s.observer.TopicOperation(metrics.OpCreateTopic, topicID, start, err)
 
 	return out, err
 }
@@ -233,11 +234,7 @@ func (s *ObservedStorage) DeleteTopic(ctx context.Context, topicID string) (*Del
 
 	out, err := s.inner.DeleteTopic(ctx, topicID)
 
-	s.observer.TopicOperation(metrics.OpDeleteTopic, start, err)
-
-	if err == nil {
-		metrics.ResetTopic(topicID)
-	}
+	s.observer.TopicOperation(metrics.OpDeleteTopic, topicID, start, err)
 
 	return out, err
 }
@@ -254,7 +251,7 @@ func (s *ObservedStorage) Subscribe(ctx context.Context, topicID string, input *
 
 	out, err := s.inner.Subscribe(ctx, topicID, input)
 
-	s.observer.TopicOperation(metrics.OpSubscribe, start, err)
+	s.observer.TopicOperation(metrics.OpSubscribe, topicID, start, err)
 
 	return out, err
 }
@@ -265,7 +262,7 @@ func (s *ObservedStorage) Unsubscribe(ctx context.Context, topicID, subscription
 
 	err := s.inner.Unsubscribe(ctx, topicID, subscriptionID)
 
-	s.observer.TopicOperation(metrics.OpUnsubscribe, start, err)
+	s.observer.TopicOperation(metrics.OpUnsubscribe, topicID, start, err)
 
 	return err
 }
@@ -276,30 +273,7 @@ func (s *ObservedStorage) Publish(ctx context.Context, topicID string, input *Pu
 
 	out, err := s.inner.Publish(ctx, topicID, input)
 
-	s.observer.TopicOperation(metrics.OpPublish, start, err)
-
-	if err != nil {
-		return out, err
-	}
-
-	var bytes uint64
-
-	for _, message := range input.Messages {
-		bytes += uint64(len(message.Body))
-	}
-
-	// A publish reports success once it is accepted, so a subscriber that
-	// could not be written to leaves no other trace. The difference between
-	// the subscribers a topic has and the deliveries it managed is that trace.
-	delivered := uint64(max(out.DeliveredCount, 0))
-
-	var failed uint64
-
-	if expected := uint64(len(out.QueueIDs)) * uint64(len(input.Messages)); expected > delivered {
-		failed = expected - delivered
-	}
-
-	s.observer.Published(topicID, uint64(len(input.Messages)), bytes, delivered, failed)
+	s.observer.TopicOperation(metrics.OpPublish, topicID, start, err)
 
 	return out, err
 }

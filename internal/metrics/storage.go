@@ -6,6 +6,7 @@ import "time"
 // is attributed to the store that ran it.
 const (
 	BackendSQLite   = "sqlite"
+	BackendTurso    = "turso"
 	BackendPostgres = "postgres"
 	BackendCluster  = "cluster"
 )

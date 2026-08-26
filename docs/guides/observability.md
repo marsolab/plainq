@@ -72,9 +72,11 @@ histogram_quantile(0.99, sum by (le, route) (rate(plainq_http_request_duration_s
 
 ### The metric catalog
 
-The exposition format carries a metric's *type* but has nowhere to put its
-description, so the descriptions live in an API endpoint that is generated
-from the same declarations the metrics themselves come from:
+The exposition format carries `# TYPE` metadata and a name-only
+`# HELP <family>` line. The pinned VictoriaMetrics writer does not include the
+declaration's prose in that HELP line, so the full descriptions live in an API
+endpoint generated from the same declarations the metrics themselves come
+from:
 
 ```shell
 curl -s localhost:8081/api/v1/metrics/catalog | jq '.[] | select(.name | startswith("plainq_cluster"))'
@@ -114,15 +116,25 @@ first failure rather than after it.
 | ------ | ---- | ------ | ------- |
 | `plainq_topic_deliveries_total` | counter | `topic` | Individual deliveries to subscriber queues. One publish to three subscribers is three deliveries. |
 | `plainq_topic_delivery_failures_total` | counter | `topic` | Deliveries that failed to reach a subscriber queue. Publishing is best-effort per subscriber, so this is the only place a lost fan-out shows up. |
-| `plainq_topic_fanout` | histogram | `topic` | Distribution of how many subscribers a single publish reached. |
+| `plainq_topic_fanout` | histogram | `topic` | Distribution of how many subscriber destinations a single publish selected. |
 | `plainq_topic_messages_published_total` | counter | `topic` | Messages published to a topic, counted once per publish regardless of fan-out. |
 | `plainq_topic_operation_duration_seconds` | histogram | `backend`, `operation` | How long a topic operation took inside the storage layer. |
 | `plainq_topic_operations_total` | counter | `backend`, `operation`, `result` | Topic operations by outcome. |
 | `plainq_topic_published_bytes_total` | counter | `topic` | Message body bytes published to a topic. |
+| `plainq_topic_request_duration_seconds` | histogram | `backend`, `operation` | How long a decoded topic request took at the application boundary. |
+| `plainq_topic_requests_total` | counter | `backend`, `operation`, `result` | Decoded topic requests by outcome. |
 | `plainq_topic_subscriptions` | gauge | `topic` | Subscriptions currently attached to a topic. |
 | `plainq_topic_subscriptions_created_total` | counter | `topic` | Subscriptions created on a topic. |
 | `plainq_topic_subscriptions_deleted_total` | counter | `topic` | Subscriptions removed from a topic. |
 | `plainq_topics_exist` | gauge | — | Topics that currently exist. |
+
+Request and storage-operation families are intentionally separate: a decoded
+request can fail validation before storage is called. Their label vocabulary is
+closed. `backend` is exactly `sqlite`, `turso`, `postgres`, or `cluster`;
+`operation` is exactly `create_topic`, `delete_topic`, `list_topics`, `publish`,
+`subscribe`, or `unsubscribe`; and `result` is exactly `ok` or `error`. Neither
+request nor storage-operation families use a `topic` label. Topic IDs appear
+only on the bounded business and current-state families.
 
 ### HTTP and gRPC
 

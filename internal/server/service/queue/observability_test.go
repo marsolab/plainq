@@ -92,6 +92,9 @@ func (*recorderSpy) RecordDLQ(string, uint64)        {}
 type fakeStorage struct {
 	Storage
 
+	listTopicsResp  *ListTopicsResponse
+	createTopicResp *CreateTopicResponse
+	subscribeResp   *SubscribeResponse
 	sendResp        *v1.SendResponse
 	receiveResp     *v1.ReceiveResponse
 	deleteResp      *v1.DeleteResponse
@@ -101,6 +104,20 @@ type fakeStorage struct {
 	inventory       TopicInventory
 	err             error
 }
+
+func (f *fakeStorage) ListTopics(context.Context) (*ListTopicsResponse, error) {
+	return f.listTopicsResp, f.err
+}
+
+func (f *fakeStorage) CreateTopic(context.Context, *CreateTopicRequest) (*CreateTopicResponse, error) {
+	return f.createTopicResp, f.err
+}
+
+func (f *fakeStorage) Subscribe(context.Context, string, *SubscribeRequest) (*SubscribeResponse, error) {
+	return f.subscribeResp, f.err
+}
+
+func (f *fakeStorage) Unsubscribe(context.Context, string, string) error { return f.err }
 
 func (f *fakeStorage) Send(context.Context, *v1.SendRequest) (*v1.SendResponse, error) {
 	return f.sendResp, f.err
@@ -253,11 +270,10 @@ func Test_ObservedStorage_doesNotCountFailedOperations(t *testing.T) {
 	)
 }
 
-// Test_ObservedStorage_recordsUndeliveredFanout proves the one thing a
-// publish response cannot say for itself: a publish reports success once it is
-// accepted, so a subscriber that could not be written to leaves no other trace.
-func Test_ObservedStorage_recordsUndeliveredFanout(t *testing.T) {
+func TestObservedStorageDoesNotEmitPublishBusinessEvent(t *testing.T) {
 	observer := telemetry.NewObserver(metrics.BackendSQLite)
+	recorder := newTopicRecorderSpy()
+	observer.SetRecorder(recorder)
 
 	store := NewObservedStorage(&fakeStorage{
 		publishResp: &PublishResponse{
@@ -272,13 +288,123 @@ func Test_ObservedStorage_recordsUndeliveredFanout(t *testing.T) {
 	})
 	td.Require(t).CmpNoError(err)
 
-	// Three subscribers, one message, two deliveries: one delivery is missing
-	// and only the metric says so.
-	out := scrapeMetrics()
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
 
-	td.Cmp(t, strings.Contains(out, `plainq_topic_deliveries_total{topic="T1"} 2`), true)
-	td.Cmp(t, strings.Contains(out, `plainq_topic_delivery_failures_total{topic="T1"} 1`), true)
+	td.Cmp(t, recorder.publishes, []telemetry.TopicPublishEvent(nil),
+		"the application boundary, not storage, owns publish business outcomes",
+	)
 }
+
+func TestObservedStorageAttributesTopicOperations(t *testing.T) {
+	recorder := newTopicRecorderSpy()
+	observer := telemetry.NewObserver(metrics.BackendSQLite)
+	observer.SetRecorder(recorder)
+	store := NewObservedStorage(&fakeStorage{
+		listTopicsResp:  &ListTopicsResponse{},
+		createTopicResp: &CreateTopicResponse{TopicID: "TCREATED"},
+		subscribeResp:   &SubscribeResponse{SubscriptionID: "SCREATED"},
+		publishResp:     &PublishResponse{TopicID: "TPUBLISH"},
+	}, observer)
+	ctx := context.Background()
+
+	_, err := store.ListTopics(ctx)
+	td.Require(t).CmpNoError(err)
+	_, err = store.CreateTopic(ctx, &CreateTopicRequest{TopicName: "created"})
+	td.Require(t).CmpNoError(err)
+	_, err = store.DeleteTopic(ctx, "TDELETE")
+	td.Require(t).CmpNoError(err)
+	_, err = store.Subscribe(ctx, "TSUBSCRIBE", &SubscribeRequest{QueueID: "Q1"})
+	td.Require(t).CmpNoError(err)
+	td.Require(t).CmpNoError(store.Unsubscribe(ctx, "TUNSUBSCRIBE", "S1"))
+	_, err = store.Publish(ctx, "TPUBLISH", &PublishRequest{Messages: []PublishMessage{{Body: []byte("body")}}})
+	td.Require(t).CmpNoError(err)
+
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+
+	type operationAttribution struct {
+		Backend   string
+		Operation string
+		Result    string
+		TopicID   string
+	}
+
+	got := make([]operationAttribution, 0, len(recorder.operations))
+	for _, event := range recorder.operations {
+		td.Cmp(t, event.Duration >= 0, true)
+		got = append(got, operationAttribution{
+			Backend: event.Backend, Operation: event.Operation, Result: event.Result, TopicID: event.TopicID,
+		})
+	}
+
+	td.Cmp(t, got, []operationAttribution{
+		{Backend: metrics.BackendSQLite, Operation: metrics.OpListTopics, Result: metrics.ResultOK, TopicID: ""},
+		{Backend: metrics.BackendSQLite, Operation: metrics.OpCreateTopic, Result: metrics.ResultOK, TopicID: "TCREATED"},
+		{Backend: metrics.BackendSQLite, Operation: metrics.OpDeleteTopic, Result: metrics.ResultOK, TopicID: "TDELETE"},
+		{Backend: metrics.BackendSQLite, Operation: metrics.OpSubscribe, Result: metrics.ResultOK, TopicID: "TSUBSCRIBE"},
+		{Backend: metrics.BackendSQLite, Operation: metrics.OpUnsubscribe, Result: metrics.ResultOK, TopicID: "TUNSUBSCRIBE"},
+		{Backend: metrics.BackendSQLite, Operation: metrics.OpPublish, Result: metrics.ResultOK, TopicID: "TPUBLISH"},
+	})
+}
+
+func TestObservedStorageFailedAndNilCreateHaveNoTopicAttribution(t *testing.T) {
+	recorder := newTopicRecorderSpy()
+	observer := telemetry.NewObserver(metrics.BackendSQLite)
+	observer.SetRecorder(recorder)
+	ctx := context.Background()
+
+	failed := NewObservedStorage(&fakeStorage{err: errors.New("storage failed")}, observer)
+	_, err := failed.ListTopics(ctx)
+	td.CmpError(t, err)
+	_, err = failed.CreateTopic(ctx, &CreateTopicRequest{TopicName: "failed"})
+	td.CmpError(t, err)
+
+	nilSuccess := NewObservedStorage(&fakeStorage{}, observer)
+	_, err = nilSuccess.CreateTopic(ctx, &CreateTopicRequest{TopicName: "nil"})
+	td.CmpNoError(t, err)
+
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+
+	td.Require(t).Cmp(recorder.operations, td.Len(3))
+	for _, event := range recorder.operations {
+		td.Cmp(t, event.TopicID, "")
+	}
+}
+
+type topicRecorderSpy struct {
+	*recorderSpy
+
+	mu         sync.Mutex
+	operations []telemetry.TopicOperationEvent
+	publishes  []telemetry.TopicPublishEvent
+}
+
+func newTopicRecorderSpy() *topicRecorderSpy {
+	return &topicRecorderSpy{recorderSpy: &recorderSpy{}}
+}
+
+func (*topicRecorderSpy) RecordTopicRequest(telemetry.TopicOperationEvent) {}
+
+func (r *topicRecorderSpy) RecordTopicOperation(event telemetry.TopicOperationEvent) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.operations = append(r.operations, event)
+}
+
+func (r *topicRecorderSpy) RecordTopicPublish(event telemetry.TopicPublishEvent) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.publishes = append(r.publishes, event)
+}
+
+func (*topicRecorderSpy) RecordTopicSubscriptionCreated(string)      {}
+func (*topicRecorderSpy) RecordTopicSubscriptionDeleted(string)      {}
+func (*topicRecorderSpy) RecordTopicState(telemetry.TopicStateEvent) {}
+func (*topicRecorderSpy) RecordTopicStateUnavailable()               {}
 
 // Test_Observer_worksWithoutACollector checks the single-node path: with
 // telemetry disabled there is no collector, and nothing may depend on one.

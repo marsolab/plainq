@@ -219,11 +219,187 @@ func Test_RecordOperation_labelsTheOutcome(t *testing.T) {
 	)
 }
 
+func TestRecordTopicRequestIsSeparateFromStorageOperation(t *testing.T) {
+	request := topicRequests.With(BackendCluster, OpCreateTopic, ResultOK)
+	storage := topicOperations.With(BackendCluster, OpCreateTopic, ResultOK)
+	requestBefore := request.Get()
+	storageBefore := storage.Get()
+
+	RecordTopicRequest(BackendCluster, OpCreateTopic, ResultOK, 2*time.Millisecond)
+
+	td.Cmp(t, request.Get(), requestBefore+1)
+	td.Cmp(t, storage.Get(), storageBefore,
+		"a decoded request is not itself a storage operation",
+	)
+
+	RecordTopicOperation(BackendCluster, OpCreateTopic, ResultOK, 3*time.Millisecond)
+
+	td.Cmp(t, request.Get(), requestBefore+1,
+		"recording storage work must not duplicate the public request",
+	)
+	td.Cmp(t, storage.Get(), storageBefore+1)
+}
+
+func TestRecordTopicRequestExportsClassicDurationHistogram(t *testing.T) {
+	exposeMetadataForTest(t)
+
+	RecordTopicRequest(BackendTurso, OpListTopics, ResultOK, 5*time.Millisecond)
+
+	out := scrape()
+	for _, want := range []string{
+		"# HELP plainq_topic_requests_total\n",
+		"# TYPE plainq_topic_requests_total counter\n",
+		"# HELP plainq_topic_request_duration_seconds\n",
+		"# TYPE plainq_topic_request_duration_seconds histogram\n",
+		`plainq_topic_request_duration_seconds_bucket{backend="turso",operation="list_topics",le="`,
+		`plainq_topic_requests_total{backend="turso",operation="list_topics",result="ok"}`,
+	} {
+		td.Cmp(t, strings.Contains(out, want), true, "scrape should contain "+want)
+	}
+}
+
+func TestRecordPublishUsesSelectedDestinationWidth(t *testing.T) {
+	const topicID = "TMETRICFANOUTSELECTED"
+
+	topicFanout.With(topicID).Reset()
+
+	// Two message deliveries succeeded and two failed, but the publish selected
+	// three subscriber queues. Fan-out is queue width, not delivery arithmetic.
+	RecordPublish(topicID, 2, 14, 3, 2, 2)
+
+	td.Cmp(t, strings.Contains(scrape(),
+		`plainq_topic_fanout_sum{topic="`+topicID+`"} 3`), true,
+	)
+}
+
+func TestRecordPublishObservesZeroFanout(t *testing.T) {
+	const topicID = "TMETRICFANOUTZERO"
+
+	topicFanout.With(topicID).Reset()
+
+	RecordPublish(topicID, 1, 7, 0, 0, 0)
+
+	out := scrape()
+	td.Cmp(t, strings.Contains(out,
+		`plainq_topic_fanout_count{topic="`+topicID+`"} 1`), true,
+		"a publish with no subscribers is still a fan-out observation",
+	)
+	td.Cmp(t, strings.Contains(out,
+		`plainq_topic_fanout_sum{topic="`+topicID+`"} 0`), true,
+	)
+}
+
+func TestSubscriptionLifecycleDoesNotImplicitlyMutateGauge(t *testing.T) {
+	const topicID = "TMETRICLIFECYCLEGAUGE"
+
+	SetTopicSubscriptions(topicID, 7)
+
+	RecordSubscriptionCreated(topicID)
+	RecordSubscriptionDeleted(topicID)
+
+	td.Cmp(t, topicSubscriptions.With(topicID).Get(), float64(7),
+		"lifecycle totals and exact current state have separate owners",
+	)
+}
+
+func TestTopicMetricVocabularyRejectsUnknownValues(t *testing.T) {
+	td.Cmp(t, []string{BackendSQLite, BackendTurso, BackendPostgres, BackendCluster},
+		[]string{"sqlite", "turso", "postgres", "cluster"},
+	)
+	td.Cmp(t, []string{OpCreateTopic, OpDeleteTopic, OpListTopics, OpPublish, OpSubscribe, OpUnsubscribe},
+		[]string{"create_topic", "delete_topic", "list_topics", "publish", "subscribe", "unsubscribe"},
+	)
+	td.Cmp(t, []string{ResultOK, ResultError}, []string{"ok", "error"})
+
+	tests := map[string]func(){
+		"unknown backend": func() {
+			RecordTopicRequest("other", OpListTopics, ResultOK, time.Millisecond)
+		},
+		"unknown request operation": func() {
+			RecordTopicRequest(BackendSQLite, "other", ResultOK, time.Millisecond)
+		},
+		"unknown request result": func() {
+			RecordTopicRequest(BackendSQLite, OpListTopics, "other", time.Millisecond)
+		},
+		"unknown storage backend": func() {
+			RecordTopicOperation("other", OpListTopics, ResultOK, time.Millisecond)
+		},
+		"unknown storage operation": func() {
+			RecordTopicOperation(BackendSQLite, "other", ResultOK, time.Millisecond)
+		},
+		"unknown storage result": func() {
+			RecordTopicOperation(BackendSQLite, OpListTopics, "other", time.Millisecond)
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				td.Cmp(t, recover() != nil, true, "unknown vocabulary must panic")
+			}()
+
+			test()
+		})
+	}
+}
+
+func TestTopicRequestAndStorageDefinitionsHaveNoTopicLabel(t *testing.T) {
+	tests := map[string]struct {
+		labels []string
+		help   string
+	}{
+		Namespace + "_topic_requests_total": {
+			labels: []string{labelBackend, labelOperation, labelResult},
+			help:   "Decoded topic requests by outcome.",
+		},
+		Namespace + "_topic_request_duration_seconds": {
+			labels: []string{labelBackend, labelOperation},
+			help:   "How long a decoded topic request took at the application boundary.",
+		},
+		Namespace + "_topic_operations_total": {
+			labels: []string{labelBackend, labelOperation, labelResult},
+			help:   "Topic operations by outcome.",
+		},
+		Namespace + "_topic_operation_duration_seconds": {
+			labels: []string{labelBackend, labelOperation},
+			help:   "How long a topic operation took inside the storage layer.",
+		},
+	}
+
+	definitions := make(map[string]Definition)
+	for _, def := range Catalog() {
+		definitions[def.Name] = def
+	}
+
+	for name, want := range tests {
+		t.Run(name, func(t *testing.T) {
+			got, ok := definitions[name]
+			td.Require(t).Cmp(ok, true, "metric must be declared")
+			td.Cmp(t, got.Labels, want.labels)
+			td.Cmp(t, got.Help, want.help)
+			td.Cmp(t, strings.Contains(strings.Join(got.Labels, ","), labelTopic), false)
+		})
+	}
+}
+
+// exposeMetadataForTest serially enables VictoriaMetrics metadata and restores
+// the process-global setting that was in effect when the test started.
+func exposeMetadataForTest(t *testing.T) {
+	t.Helper()
+
+	const probe = "plainq_test_metadata_state_total"
+
+	vm.GetOrCreateCounter(probe)
+	wasEnabled := strings.Contains(scrape(), "# TYPE "+probe+" counter")
+
+	ExposeMetadata(true)
+	t.Cleanup(func() { ExposeMetadata(wasEnabled) })
+}
+
 // Test_exposition_carriesTypeMetadata checks that a human pointing a browser
 // at /metrics can tell a counter from a gauge.
 func Test_exposition_carriesTypeMetadata(t *testing.T) {
-	ExposeMetadata(true)
-	defer ExposeMetadata(false)
+	exposeMetadataForTest(t)
 
 	RecordSend("QTESTMETADATA", 1, 1)
 
@@ -329,6 +505,13 @@ func Test_Catalog_isFullyDocumented(t *testing.T) {
 		td.Cmp(t, strings.Contains(documented, "`"+def.Name+"`"), true,
 			def.Name+" is exposed but missing from "+guide,
 		)
+
+		if def.Name == Namespace+"_topic_requests_total" ||
+			def.Name == Namespace+"_topic_request_duration_seconds" {
+			td.Cmp(t, strings.Contains(documented, def.Help), true,
+				def.Name+" declaration prose is missing from "+guide,
+			)
+		}
 	}
 }
 
