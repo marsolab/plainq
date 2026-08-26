@@ -41,10 +41,6 @@ func queryCreateQueueTable(queueID string) string {
 	)
 }
 
-func queryInsertMessages(queueID string) string {
-	return fmt.Sprintf(`INSERT INTO %s (msg_id, msg_body) VALUES ($1, $2);`, quoteIdent(queueID))
-}
-
 func queryInsertDeadLetterMessage(queueID string) string {
 	return fmt.Sprintf(
 		`INSERT INTO %s (msg_id, msg_body, created_at, visible_at) VALUES ($1, $2, $3, now());`,

@@ -15,6 +15,12 @@ import (
 )
 
 const (
+	topicInventoryQuery = `SELECT t.topic_id, COUNT(s.subscription_id)
+	FROM topic_properties t
+	LEFT JOIN topic_subscriptions s ON s.topic_id = t.topic_id
+	GROUP BY t.topic_id
+	ORDER BY t.topic_id;`
+
 	listTopicSubscriptionsQuery = `SELECT s.subscription_id, s.topic_id, s.queue_id, COALESCE(q.queue_name, ''), s.created_at
 FROM topic_subscriptions s
 LEFT JOIN queue_properties q ON q.queue_id = s.queue_id
@@ -46,20 +52,26 @@ func (s *Storage) ListTopics(ctx context.Context) (*queue.ListTopicsResponse, er
 	defer rows.Close()
 
 	out := &queue.ListTopicsResponse{Topics: []queue.Topic{}}
+
 	for rows.Next() {
 		var topic queue.Topic
+
 		if err := rows.Scan(&topic.TopicID, &topic.TopicName, &topic.CreatedAt); err != nil {
 			return nil, fmt.Errorf("scan topic: %w", normalizePubSubError(err, pubSubListTopics))
 		}
+
 		topic.Subscriptions, err = listSubscriptions(ctx, s.pool, topic.TopicID, pubSubListTopics)
 		if err != nil {
 			return nil, fmt.Errorf("list subscriptions for topic %q: %w", topic.TopicID, err)
 		}
+
 		out.Topics = append(out.Topics, topic)
 	}
+
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate topics: %w", normalizePubSubError(err, pubSubListTopics))
 	}
+
 	return out, nil
 }
 
@@ -67,23 +79,35 @@ func (s *Storage) CreateTopic(ctx context.Context, input *queue.CreateTopicReque
 	if input == nil || strings.TrimSpace(input.TopicName) == "" {
 		return nil, fmt.Errorf("%w: topic name is empty", pqerr.ErrInvalidInput)
 	}
+
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("begin create topic: %w", normalizePubSubError(err, pubSubCreateTopic))
 	}
+
 	defer func() { sErr = joinPostgresRollback(ctx, sErr, tx, pubSubCreateTopic, "create topic") }()
 
 	id := queue.NextID(ctx, idkit.XID)
-	tag, err := tx.Exec(ctx, `INSERT INTO topic_properties (topic_id, topic_name, created_at) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING;`, id, input.TopicName, queue.WriteTime(ctx))
+
+	tag, err := tx.Exec(
+		ctx,
+		`INSERT INTO topic_properties (topic_id, topic_name, created_at) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING;`,
+		id,
+		input.TopicName,
+		queue.WriteTime(ctx),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("create topic: %w", normalizePubSubError(err, pubSubCreateTopic))
 	}
+
 	if tag.RowsAffected() == 0 {
 		return nil, fmt.Errorf("create topic: %w", pqerr.ErrAlreadyExists)
 	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit create topic: %w", normalizePubSubError(err, pubSubCreateTopic))
 	}
+
 	return &queue.CreateTopicResponse{TopicID: id}, nil
 }
 
@@ -92,26 +116,33 @@ func (s *Storage) DeleteTopic(ctx context.Context, topicID string) (_ *queue.Del
 	if err != nil {
 		return nil, fmt.Errorf("begin delete topic: %w", normalizePubSubError(err, pubSubDeleteTopic))
 	}
+
 	defer func() { sErr = joinPostgresRollback(ctx, sErr, tx, pubSubDeleteTopic, "delete topic") }()
 
 	if err := lockTopicForDelete(ctx, tx, topicID); err != nil {
 		return nil, err
 	}
+
 	removed, err := querySubscriptions(ctx, tx, captureTopicSubscriptionsQuery, topicID, pubSubDeleteTopic)
 	if err != nil {
 		return nil, fmt.Errorf("capture topic subscriptions: %w", err)
 	}
+
 	deleteResult := &queue.DeleteTopicResult{RemovedSubscriptions: removed}
+
 	tag, err := tx.Exec(ctx, `DELETE FROM topic_properties WHERE topic_id = $1;`, topicID)
 	if err != nil {
 		return nil, fmt.Errorf("delete topic: %w", normalizePubSubError(err, pubSubDeleteTopic))
 	}
+
 	if tag.RowsAffected() == 0 {
 		return nil, fmt.Errorf("delete topic: %w", pqerr.ErrNotFound)
 	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit delete topic: %w", normalizePubSubError(err, pubSubDeleteTopic))
 	}
+
 	return deleteResult, nil
 }
 
@@ -119,46 +150,78 @@ func (s *Storage) Subscribe(ctx context.Context, topicID string, input *queue.Su
 	if input == nil {
 		return nil, fmt.Errorf("subscribe queue: %w", pqerr.ErrInvalidInput)
 	}
+
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("begin subscribe: %w", normalizePubSubError(err, pubSubSubscribe))
 	}
+
 	defer func() { sErr = joinPostgresRollback(ctx, sErr, tx, pubSubSubscribe, "subscribe") }()
 
-	topicExists, err := pgExists(ctx, tx, `SELECT EXISTS(SELECT 1 FROM topic_properties WHERE topic_id = $1);`, topicID)
+	topicExists, err := pgExists(
+		ctx,
+		tx,
+		`SELECT EXISTS(SELECT 1 FROM topic_properties WHERE topic_id = $1);`,
+		topicID,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("check subscription topic: %w", normalizePubSubError(err, pubSubSubscribe))
 	}
-	queueExists, err := pgExists(ctx, tx, `SELECT EXISTS(SELECT 1 FROM queue_properties WHERE queue_id = $1);`, input.QueueID)
+
+	queueExists, err := pgExists(
+		ctx,
+		tx,
+		`SELECT EXISTS(SELECT 1 FROM queue_properties WHERE queue_id = $1);`,
+		input.QueueID,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("check subscription queue: %w", normalizePubSubError(err, pubSubSubscribe))
 	}
+
 	if !topicExists || !queueExists {
 		return nil, fmt.Errorf("subscribe queue: %w", pqerr.ErrNotFound)
 	}
 
 	id := queue.NextID(ctx, idkit.XID)
-	tag, err := tx.Exec(ctx, `INSERT INTO topic_subscriptions (subscription_id, topic_id, queue_id, created_at) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING;`, id, topicID, input.QueueID, queue.WriteTime(ctx))
+
+	tag, err := tx.Exec(
+		ctx,
+		`INSERT INTO topic_subscriptions (subscription_id, topic_id, queue_id, created_at) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING;`,
+		id,
+		topicID,
+		input.QueueID,
+		queue.WriteTime(ctx),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("subscribe queue: %w", normalizePubSubError(err, pubSubSubscribe))
 	}
+
 	if tag.RowsAffected() == 0 {
 		return nil, fmt.Errorf("subscribe queue: %w", pqerr.ErrAlreadyExists)
 	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit subscribe: %w", normalizePubSubError(err, pubSubSubscribe))
 	}
+
 	return &queue.SubscribeResponse{SubscriptionID: id}, nil
 }
 
 func (s *Storage) Unsubscribe(ctx context.Context, topicID, subscriptionID string) error {
-	tag, err := s.pool.Exec(ctx, `DELETE FROM topic_subscriptions WHERE topic_id = $1 AND subscription_id = $2;`, topicID, subscriptionID)
+	tag, err := s.pool.Exec(
+		ctx,
+		`DELETE FROM topic_subscriptions WHERE topic_id = $1 AND subscription_id = $2;`,
+		topicID,
+		subscriptionID,
+	)
 	if err != nil {
 		return fmt.Errorf("unsubscribe queue: %w", normalizePubSubError(err, pubSubUnsubscribe))
 	}
+
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("unsubscribe queue: %w", pqerr.ErrNotFound)
 	}
+
 	return nil
 }
 
@@ -166,55 +229,74 @@ func (s *Storage) Publish(ctx context.Context, topicID string, input *queue.Publ
 	if input == nil || len(input.Messages) == 0 {
 		return nil, fmt.Errorf("%w: messages are empty", pqerr.ErrInvalidInput)
 	}
+
 	if err := s.ensureTopicExists(ctx, topicID); err != nil {
 		return nil, err
 	}
+
 	subscriptions, err := listSubscriptions(ctx, s.pool, topicID, pubSubPublish)
 	if err != nil {
 		return nil, err
 	}
 
 	bytes := publishedMessageBytes(input.Messages)
-	return queue.FanOut(ctx, topicID, subscriptions, input.Messages, func(ctx context.Context, request *v1.SendRequest) (*v1.SendResponse, error) {
+	send := func(ctx context.Context, request *v1.SendRequest) (*v1.SendResponse, error) {
 		sent, err := s.Send(ctx, request)
 		if err != nil {
 			return sent, normalizePubSubError(err, pubSubPublish)
 		}
+
 		s.observer.Sent(request.GetQueueId(), uint64(len(sent.GetMessageIds())), bytes)
+
 		return sent, nil
-	})
+	}
+
+	response, err := queue.FanOut(ctx, topicID, subscriptions, input.Messages, send)
+	if err != nil {
+		return response, fmt.Errorf("fan out topic %q: %w", topicID, err)
+	}
+
+	return response, nil
 }
 
 func (s *Storage) TopicInventory(ctx context.Context) (queue.TopicInventory, error) {
-	rows, err := s.pool.Query(ctx, `SELECT t.topic_id, COUNT(s.subscription_id) FROM topic_properties t LEFT JOIN topic_subscriptions s ON s.topic_id = t.topic_id GROUP BY t.topic_id ORDER BY t.topic_id;`)
+	rows, err := s.pool.Query(ctx, topicInventoryQuery)
 	if err != nil {
 		return queue.TopicInventory{}, fmt.Errorf("topic inventory: %w", normalizePubSubError(err, pubSubInventory))
 	}
 	defer rows.Close()
+
 	inventory := queue.TopicInventory{SubscriptionCounts: map[string]int64{}}
+
 	for rows.Next() {
-		var topicID string
-		var count int64
+		var (
+			topicID string
+			count   int64
+		)
+
 		if err := rows.Scan(&topicID, &count); err != nil {
 			return queue.TopicInventory{}, fmt.Errorf("scan topic inventory: %w", normalizePubSubError(err, pubSubInventory))
 		}
+
 		inventory.TopicsExist++
 		inventory.SubscriptionCounts[topicID] = count
 	}
+
 	if err := rows.Err(); err != nil {
 		return queue.TopicInventory{}, fmt.Errorf("iterate topic inventory: %w", normalizePubSubError(err, pubSubInventory))
 	}
+
 	return inventory, nil
 }
 
 type pgQueryRunner interface {
-	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
-	Query(context.Context, string, ...any) (pgx.Rows, error)
-	QueryRow(context.Context, string, ...any) pgx.Row
+	Exec(ctx context.Context, query string, args ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, query string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, query string, args ...any) pgx.Row
 }
 
 type pgQueryRower interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
+	QueryRow(ctx context.Context, query string, args ...any) pgx.Row
 }
 
 func lockTopicForDelete(ctx context.Context, db pgQueryRower, topicID string) error {
@@ -260,8 +342,10 @@ func lockParentForDelete(
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("lock %s for delete: %w", parentName, pqerr.ErrNotFound)
 		}
+
 		return fmt.Errorf("lock %s for delete: %w", parentName, normalizePubSubError(err, operation))
 	}
+
 	return nil
 }
 
@@ -270,23 +354,30 @@ func (s *Storage) ensureTopicExists(ctx context.Context, topicID string) error {
 	if err != nil {
 		return fmt.Errorf("check topic exists: %w", normalizePubSubError(err, pubSubPublish))
 	}
+
 	if !ok {
 		return fmt.Errorf("check topic exists: %w", pqerr.ErrNotFound)
 	}
+
 	return nil
 }
 
 func pgExists(ctx context.Context, db pgQueryRunner, query string, arg any) (bool, error) {
 	var ok bool
-	err := db.QueryRow(ctx, query, arg).Scan(&ok)
-	return ok, err
+
+	if err := db.QueryRow(ctx, query, arg).Scan(&ok); err != nil {
+		return false, fmt.Errorf("scan existence query: %w", err)
+	}
+
+	return ok, nil
 }
 
-func (s *Storage) listSubscriptions(ctx context.Context, topicID string) ([]queue.Subscription, error) {
-	return listSubscriptions(ctx, s.pool, topicID, pubSubListTopics)
-}
-
-func listSubscriptions(ctx context.Context, db pgQueryRunner, topicID string, operation pubSubErrorContext) ([]queue.Subscription, error) {
+func listSubscriptions(
+	ctx context.Context,
+	db pgQueryRunner,
+	topicID string,
+	operation pubSubErrorContext,
+) ([]queue.Subscription, error) {
 	return querySubscriptions(ctx, db, listTopicSubscriptionsQuery, topicID, operation)
 }
 
@@ -302,17 +393,29 @@ func querySubscriptions(
 		return nil, fmt.Errorf("list subscriptions: %w", normalizePubSubError(err, operation))
 	}
 	defer rows.Close()
+
 	subscriptions := []queue.Subscription{}
+
 	for rows.Next() {
 		var subscription queue.Subscription
-		if err := rows.Scan(&subscription.SubscriptionID, &subscription.TopicID, &subscription.QueueID, &subscription.QueueName, &subscription.CreatedAt); err != nil {
+
+		if err := rows.Scan(
+			&subscription.SubscriptionID,
+			&subscription.TopicID,
+			&subscription.QueueID,
+			&subscription.QueueName,
+			&subscription.CreatedAt,
+		); err != nil {
 			return nil, fmt.Errorf("scan subscription: %w", normalizePubSubError(err, operation))
 		}
+
 		subscriptions = append(subscriptions, subscription)
 	}
+
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate subscriptions: %w", normalizePubSubError(err, operation))
 	}
+
 	return subscriptions, nil
 }
 
@@ -322,17 +425,29 @@ func listSubscriptionsByQueue(ctx context.Context, tx pgx.Tx, queueID string) ([
 		return nil, fmt.Errorf("list queue subscriptions: %w", normalizePubSubError(err, pubSubDeleteQueue))
 	}
 	defer rows.Close()
+
 	subscriptions := []queue.Subscription{}
+
 	for rows.Next() {
 		var subscription queue.Subscription
-		if err := rows.Scan(&subscription.SubscriptionID, &subscription.TopicID, &subscription.QueueID, &subscription.QueueName, &subscription.CreatedAt); err != nil {
+
+		if err := rows.Scan(
+			&subscription.SubscriptionID,
+			&subscription.TopicID,
+			&subscription.QueueID,
+			&subscription.QueueName,
+			&subscription.CreatedAt,
+		); err != nil {
 			return nil, fmt.Errorf("scan queue subscription: %w", normalizePubSubError(err, pubSubDeleteQueue))
 		}
+
 		subscriptions = append(subscriptions, subscription)
 	}
+
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate queue subscriptions: %w", normalizePubSubError(err, pubSubDeleteQueue))
 	}
+
 	return subscriptions, nil
 }
 
@@ -340,6 +455,7 @@ func joinPostgresRollback(ctx context.Context, current error, tx pgx.Tx, operati
 	if err := tx.Rollback(ctx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
 		return errors.Join(current, fmt.Errorf("rollback %s: %w", label, normalizePubSubError(err, operation)))
 	}
+
 	return current
 }
 
@@ -348,5 +464,6 @@ func publishedMessageBytes(messages []queue.PublishMessage) uint64 {
 	for _, message := range messages {
 		total += uint64(len(message.Body))
 	}
+
 	return total
 }

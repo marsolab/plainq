@@ -194,6 +194,129 @@ func TestValidateCreateTopicRejectsBlankName(t *testing.T) {
 	}
 }
 
+func TestValidateListTopicsRequest(t *testing.T) {
+	tests := map[string]struct {
+		input   *ListTopicsRequest
+		wantErr error
+	}{
+		"nil": {
+			wantErr: pqerr.ErrInvalidInput,
+		},
+		"valid": {
+			input: &ListTopicsRequest{},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			err := validateListTopicsRequest(tc.input)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("validateListTopicsRequest(%#v) error = %v, want %v", tc.input, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateDeleteTopicRequest(t *testing.T) {
+	tests := map[string]struct {
+		topicID string
+		wantErr error
+	}{
+		"malformed topic": {
+			topicID: "not-a-topic-id",
+			wantErr: pqerr.ErrInvalidID,
+		},
+		"valid": {
+			topicID: idkit.XID(),
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			err := validateDeleteTopicRequest(tc.topicID)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("validateDeleteTopicRequest(%q) error = %v, want %v", tc.topicID, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateSubscribeRequest(t *testing.T) {
+	validTopicID := idkit.XID()
+	tests := map[string]struct {
+		topicID string
+		input   *SubscribeRequest
+		wantErr error
+	}{
+		"malformed topic": {
+			topicID: "not-a-topic-id",
+			input:   &SubscribeRequest{QueueID: idkit.XID()},
+			wantErr: pqerr.ErrInvalidID,
+		},
+		"nil request": {
+			topicID: validTopicID,
+			wantErr: pqerr.ErrInvalidInput,
+		},
+		"malformed queue": {
+			topicID: validTopicID,
+			input:   &SubscribeRequest{QueueID: "not-a-queue-id"},
+			wantErr: pqerr.ErrInvalidID,
+		},
+		"valid": {
+			topicID: validTopicID,
+			input:   &SubscribeRequest{QueueID: idkit.XID()},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			err := validateSubscribeRequest(tc.topicID, tc.input)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("validateSubscribeRequest(%q, %#v) error = %v, want %v", tc.topicID, tc.input, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateUnsubscribeRequest(t *testing.T) {
+	validTopicID := idkit.XID()
+	tests := map[string]struct {
+		topicID        string
+		subscriptionID string
+		wantErr        error
+	}{
+		"malformed topic": {
+			topicID:        "not-a-topic-id",
+			subscriptionID: idkit.XID(),
+			wantErr:        pqerr.ErrInvalidID,
+		},
+		"malformed subscription": {
+			topicID:        validTopicID,
+			subscriptionID: "not-a-subscription-id",
+			wantErr:        pqerr.ErrInvalidID,
+		},
+		"valid": {
+			topicID:        validTopicID,
+			subscriptionID: idkit.XID(),
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			err := validateUnsubscribeRequest(tc.topicID, tc.subscriptionID)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf(
+					"validateUnsubscribeRequest(%q, %q) error = %v, want %v",
+					tc.topicID,
+					tc.subscriptionID,
+					err,
+					tc.wantErr,
+				)
+			}
+		})
+	}
+}
+
 func TestValidatePublishRejectsEmptyBatch(t *testing.T) {
 	topicID := idkit.XID()
 	tests := map[string]struct {

@@ -35,12 +35,12 @@ type Recorder interface {
 // Queue-only recorders remain valid while the stable pub/sub collector is
 // introduced incrementally.
 type TopicRecorder interface {
-	RecordTopicRequest(TopicOperationEvent)
-	RecordTopicOperation(TopicOperationEvent)
-	RecordTopicPublish(TopicPublishEvent)
+	RecordTopicRequest(event TopicOperationEvent)
+	RecordTopicOperation(event TopicOperationEvent)
+	RecordTopicPublish(event TopicPublishEvent)
 	RecordTopicSubscriptionCreated(topicID string)
 	RecordTopicSubscriptionDeleted(topicID string)
-	RecordTopicState(TopicStateEvent)
+	RecordTopicState(event TopicStateEvent)
 	RecordTopicStateUnavailable()
 }
 
@@ -82,6 +82,7 @@ func NewStateSuppressingRecorder(inner Recorder) Recorder {
 	if inner == nil {
 		return nil
 	}
+
 	return &stateSuppressingRecorder{inner: inner}
 }
 
@@ -108,7 +109,11 @@ func (*stateSuppressingRecorder) DecrementQueues()     {}
 func (*stateSuppressingRecorder) SetQueuesExist(int64) {}
 
 func (r *stateSuppressingRecorder) topic() TopicRecorder {
-	topic, _ := r.inner.(TopicRecorder)
+	topic, ok := r.inner.(TopicRecorder)
+	if !ok {
+		return nil
+	}
+
 	return topic
 }
 
@@ -234,6 +239,7 @@ func (o *Observer) QueueCreated() {
 	}
 
 	metrics.AddQueuesExist(1)
+
 	o.queues++
 
 	if o.sink != nil {
@@ -254,6 +260,7 @@ func (o *Observer) QueueDeleted(queueID string) {
 	}
 
 	metrics.AddQueuesExist(-1)
+
 	o.queues--
 
 	if o.sink != nil {
@@ -271,6 +278,7 @@ func (o *Observer) SetQueues(count uint64) {
 	exact := int64(count)
 
 	metrics.SetQueuesExist(exact)
+
 	o.queues = count
 	o.queuesKnown = true
 
@@ -409,6 +417,7 @@ func (o *Observer) TopicRequest(operation, topicID string, started time.Time, er
 	defer o.mu.Unlock()
 
 	metrics.RecordTopicRequest(event.Backend, event.Operation, event.Result, event.Duration)
+
 	if sink, ok := o.sink.(TopicRecorder); ok {
 		sink.RecordTopicRequest(event)
 	}
@@ -428,6 +437,7 @@ func (o *Observer) TopicOperation(operation, topicID string, started time.Time, 
 	defer o.mu.Unlock()
 
 	metrics.RecordTopicOperation(event.Backend, event.Operation, event.Result, event.Duration)
+
 	if sink, ok := o.sink.(TopicRecorder); ok {
 		sink.RecordTopicOperation(event)
 	}
@@ -458,6 +468,7 @@ func (o *Observer) TopicSubscriptionCreated(topicID string) {
 	defer o.mu.Unlock()
 
 	metrics.RecordSubscriptionCreated(topicID)
+
 	if sink, ok := o.sink.(TopicRecorder); ok {
 		sink.RecordTopicSubscriptionCreated(topicID)
 	}
@@ -469,6 +480,7 @@ func (o *Observer) TopicSubscriptionDeleted(topicID string) {
 	defer o.mu.Unlock()
 
 	metrics.RecordSubscriptionDeleted(topicID)
+
 	if sink, ok := o.sink.(TopicRecorder); ok {
 		sink.RecordTopicSubscriptionDeleted(topicID)
 	}
@@ -481,14 +493,17 @@ func (o *Observer) CaptureTopicState(capture func() (TopicStateEvent, error)) er
 	if !o.exactTopicState {
 		return nil
 	}
+
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
 	event, err := capture()
 	if err != nil {
 		o.topicStateUnavailableLocked()
+
 		return err
 	}
+
 	o.reconcileTopicStateLocked(event)
 
 	return nil
@@ -503,6 +518,7 @@ func (o *Observer) ReconcileTopicState(event TopicStateEvent) {
 
 	o.mu.Lock()
 	defer o.mu.Unlock()
+
 	o.reconcileTopicStateLocked(event)
 }
 
@@ -542,6 +558,7 @@ func (o *Observer) TopicStateUnavailable() {
 
 	o.mu.Lock()
 	defer o.mu.Unlock()
+
 	o.topicStateUnavailableLocked()
 }
 
@@ -570,10 +587,10 @@ func (o *Observer) GC(scope string, start time.Time, err error) {
 }
 
 func cloneSubscriptions(input map[string]int64) map[string]int64 {
-	copy := make(map[string]int64, len(input))
+	cloned := make(map[string]int64, len(input))
 	for topicID, count := range input {
-		copy[topicID] = count
+		cloned[topicID] = count
 	}
 
-	return copy
+	return cloned
 }

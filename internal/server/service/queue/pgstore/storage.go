@@ -307,7 +307,7 @@ func (s *Storage) PurgeQueue(ctx context.Context, input *v1.PurgeQueueRequest) (
 	return &v1.PurgeQueueResponse{MessagesCount: count}, nil
 }
 
-func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest) (_ *queue.DeleteQueueResult, sErr error) {
+func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest) (*queue.DeleteQueueResult, error) {
 	queueID := input.GetQueueId()
 
 	props, ok := s.cache.getByID(queueID)
@@ -315,11 +315,27 @@ func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest)
 		return nil, fmt.Errorf("queue props (id: %q): %w", queueID, pqerr.ErrNotFound)
 	}
 
+	deleteResult, err := s.deleteQueueTransaction(ctx, input, queueID)
+	if err != nil {
+		return nil, err
+	}
+
+	s.cache.delete(props.ID, props.Name)
+	s.observer.QueueDeleted(queueID)
+
+	return deleteResult, nil
+}
+
+func (s *Storage) deleteQueueTransaction(
+	ctx context.Context,
+	input *v1.DeleteQueueRequest,
+	queueID string,
+) (_ *queue.DeleteQueueResult, sErr error) {
 	// READ COMMITTED gives the message count a fresh statement snapshot after
 	// the dynamic-table lock has drained any writer that started first.
-	tx, txErr := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
-	if txErr != nil {
-		return nil, fmt.Errorf(fmtBeginTxError, normalizePubSubError(txErr, pubSubDeleteQueue))
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return nil, fmt.Errorf(fmtBeginTxError, normalizePubSubError(err, pubSubDeleteQueue))
 	}
 
 	defer func() { sErr = joinPostgresRollback(ctx, sErr, tx, pubSubDeleteQueue, "delete queue") }()
@@ -327,25 +343,56 @@ func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest)
 	if err := lockQueueForDelete(ctx, tx, queueID); err != nil {
 		return nil, err
 	}
+
 	if err := lockQueueTableForDelete(ctx, tx, queueID); err != nil {
 		return nil, err
 	}
+
+	if err := validateQueueDelete(ctx, tx, input, queueID); err != nil {
+		return nil, err
+	}
+
+	deleteResult, err := s.deleteQueueRecords(ctx, tx, queueID)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit transaction: %w", normalizePubSubError(err, pubSubDeleteQueue))
+	}
+
+	return deleteResult, nil
+}
+
+func validateQueueDelete(ctx context.Context, tx pgx.Tx, input *v1.DeleteQueueRequest, queueID string) error {
 	var messageCount uint64
+
 	if err := tx.QueryRow(ctx, queryCountMessages(queueID)).Scan(&messageCount); err != nil {
-		return nil, fmt.Errorf("count queue %q messages before delete: %w", queueID, normalizePubSubError(err, pubSubDeleteQueue))
+		return fmt.Errorf("count queue %q messages before delete: %w", queueID, normalizePubSubError(err, pubSubDeleteQueue))
 	}
+
 	if messageCount > 0 && !input.GetForce() {
-		return nil, fmt.Errorf("delete non-empty queue %q: %w", queueID, pqerr.ErrFailedPrecondition)
+		return fmt.Errorf("delete non-empty queue %q: %w", queueID, pqerr.ErrFailedPrecondition)
 	}
-	removedSubscriptions, captureErr := listSubscriptionsByQueue(ctx, tx, queueID)
-	if captureErr != nil {
-		return nil, fmt.Errorf("capture queue %q subscriptions: %w", queueID, captureErr)
+
+	return nil
+}
+
+func (s *Storage) deleteQueueRecords(
+	ctx context.Context,
+	tx pgx.Tx,
+	queueID string,
+) (*queue.DeleteQueueResult, error) {
+	removedSubscriptions, err := listSubscriptionsByQueue(ctx, tx, queueID)
+	if err != nil {
+		return nil, fmt.Errorf("capture queue %q subscriptions: %w", queueID, err)
 	}
+
 	deleteResult := &queue.DeleteQueueResult{RemovedSubscriptions: removedSubscriptions}
 
-	rows, delErr := s.queries.WithTx(tx).DeleteQueueProperties(ctx, queueID)
-	if delErr != nil {
-		return nil, fmt.Errorf("delete queue %q info record: %w", queueID, normalizePubSubError(delErr, pubSubDeleteQueue))
+	rows, err := s.queries.WithTx(tx).DeleteQueueProperties(ctx, queueID)
+	if err != nil {
+		return nil, fmt.Errorf("delete queue %q info record: %w", queueID, normalizePubSubError(err, pubSubDeleteQueue))
 	}
 
 	if rows < 1 {
@@ -355,14 +402,6 @@ func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest)
 	if _, err := tx.Exec(ctx, queryDeleteQueueTable(queueID)); err != nil {
 		return nil, fmt.Errorf("drop queue %q table: %w", queueID, normalizePubSubError(err, pubSubDeleteQueue))
 	}
-
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit transaction: %w", normalizePubSubError(err, pubSubDeleteQueue))
-	}
-
-	s.cache.delete(props.ID, props.Name)
-
-	s.observer.QueueDeleted(queueID)
 
 	return deleteResult, nil
 }

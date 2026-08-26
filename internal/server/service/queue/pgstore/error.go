@@ -41,44 +41,92 @@ func normalizePubSubError(err error, operation pubSubErrorContext) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) ||
-		errors.Is(err, pgconn.ErrConnClosed) || pgconn.Timeout(err) || pgconn.SafeToRetry(err) {
-		return errors.Join(pqerr.ErrUnavailable, err)
-	}
-	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Timeout() {
-		return errors.Join(pqerr.ErrUnavailable, err)
-	}
-	var temporaryErr interface{ Temporary() bool }
-	if errors.As(err, &temporaryErr) && temporaryErr.Temporary() {
+
+	if isUnavailableError(err) {
 		return errors.Join(pqerr.ErrUnavailable, err)
 	}
 
 	var pgErr *pgconn.PgError
+
 	if !errors.As(err, &pgErr) {
 		return err
 	}
+
+	return normalizePostgresError(err, pgErr, operation)
+}
+
+func isUnavailableError(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+
+	if errors.Is(err, pgconn.ErrConnClosed) || pgconn.Timeout(err) || pgconn.SafeToRetry(err) {
+		return true
+	}
+
+	var netErr net.Error
+
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+
+	var temporaryErr interface{ Temporary() bool }
+
+	return errors.As(err, &temporaryErr) && temporaryErr.Temporary()
+}
+
+func normalizePostgresError(err error, pgErr *pgconn.PgError, operation pubSubErrorContext) error {
 	if strings.HasPrefix(pgErr.Code, "08") || pgErr.Code == "57P01" || pgErr.Code == "57P02" || pgErr.Code == "57P03" {
 		return errors.Join(pqerr.ErrUnavailable, err)
 	}
-	if pgErr.Code == "40001" || pgErr.Code == "40P01" {
+
+	switch pgErr.Code {
+	case "40001", "40P01":
 		return errors.Join(pqerr.ErrUnavailable, err)
+	case "23505":
+		return normalizeUniqueViolation(err, pgErr.ConstraintName, operation)
+	case "23503":
+		return normalizeForeignKeyViolation(err, pgErr.ConstraintName, operation)
+	default:
+		return err
 	}
-	if pgErr.Code == "23505" {
-		switch operation {
-		case pubSubCreateTopic:
-			if pgErr.ConstraintName == "topic_name_uindex" || pgErr.ConstraintName == "topic_id_uindex" || pgErr.ConstraintName == "topic_pk" {
-				return errors.Join(pqerr.ErrAlreadyExists, err)
-			}
-		case pubSubSubscribe:
-			if pgErr.ConstraintName == "topic_subscriptions_topic_queue_uindex" || pgErr.ConstraintName == "topic_subscription_pk" {
-				return errors.Join(pqerr.ErrAlreadyExists, err)
-			}
+}
+
+func normalizeUniqueViolation(err error, constraint string, operation pubSubErrorContext) error {
+	switch operation {
+	case pubSubCreateTopic:
+		switch constraint {
+		case "topic_name_uindex", "topic_id_uindex", "topic_pk":
+			return errors.Join(pqerr.ErrAlreadyExists, err)
 		}
+	case pubSubSubscribe:
+		switch constraint {
+		case "topic_subscriptions_topic_queue_uindex", "topic_subscription_pk":
+			return errors.Join(pqerr.ErrAlreadyExists, err)
+		}
+	case pubSubListTopics,
+		pubSubDeleteQueue,
+		pubSubDeleteTopic,
+		pubSubUnsubscribe,
+		pubSubPublish,
+		pubSubInventory:
+		return err
+	default:
+		return err
 	}
-	if pgErr.Code == "23503" && operation == pubSubSubscribe &&
-		(pgErr.ConstraintName == "topic_subscription_topic_fk" || pgErr.ConstraintName == "topic_subscription_queue_fk") {
-		return errors.Join(pqerr.ErrNotFound, err)
-	}
+
 	return err
+}
+
+func normalizeForeignKeyViolation(err error, constraint string, operation pubSubErrorContext) error {
+	if operation != pubSubSubscribe {
+		return err
+	}
+
+	switch constraint {
+	case "topic_subscription_topic_fk", "topic_subscription_queue_fk":
+		return errors.Join(pqerr.ErrNotFound, err)
+	default:
+		return err
+	}
 }

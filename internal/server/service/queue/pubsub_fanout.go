@@ -28,6 +28,7 @@ func FanOut(
 	}
 
 	failures := make([]PublishDeliveryFailure, 0)
+
 	causes := make([]error, 0)
 	for _, subscription := range subscriptions {
 		batch := make([]*v1.SendMessage, 0, len(messages))

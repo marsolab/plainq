@@ -35,14 +35,20 @@ func TestFanOutSucceedsWithNoSubscriptions(t *testing.T) {
 
 func TestFanOutAttemptsEverySelectedDestination(t *testing.T) {
 	var calls []string
+	batches := make(map[string][][]byte)
 	response, err := FanOut(
 		context.Background(),
 		"topic-1",
 		[]Subscription{{QueueID: "queue-a"}, {QueueID: "queue-b"}, {QueueID: "queue-c"}},
 		[]PublishMessage{{Body: []byte("first")}, {Body: []byte("second")}},
 		func(_ context.Context, input *v1.SendRequest) (*v1.SendResponse, error) {
-			calls = append(calls, input.GetQueueId())
-			switch input.GetQueueId() {
+			queueID := input.GetQueueId()
+			calls = append(calls, queueID)
+			for _, message := range input.GetMessages() {
+				batches[queueID] = append(batches[queueID], append([]byte(nil), message.GetBody()...))
+			}
+
+			switch queueID {
 			case "queue-a":
 				return &v1.SendResponse{MessageIds: []string{"a-1", "a-2"}}, nil
 			case "queue-b":
@@ -58,6 +64,14 @@ func TestFanOutAttemptsEverySelectedDestination(t *testing.T) {
 
 	if !reflect.DeepEqual(calls, []string{"queue-a", "queue-b", "queue-c"}) {
 		t.Fatalf("FanOut() call order = %v, want [queue-a queue-b queue-c]", calls)
+	}
+	wantBatches := map[string][][]byte{
+		"queue-a": {[]byte("first"), []byte("second")},
+		"queue-b": {[]byte("first"), []byte("second")},
+		"queue-c": {[]byte("first"), []byte("second")},
+	}
+	if !reflect.DeepEqual(batches, wantBatches) {
+		t.Fatalf("FanOut() batches = %#v, want %#v", batches, wantBatches)
 	}
 	if response.DeliveredCount != 4 {
 		t.Fatalf("FanOut() delivered count = %d, want 4", response.DeliveredCount)

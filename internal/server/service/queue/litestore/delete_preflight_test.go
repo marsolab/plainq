@@ -23,7 +23,7 @@ func TestDeletePreflightMatchesCanonicalTopicAndQueueEnvelopeBoundaries(t *testi
 	if _, err := storage.Subscribe(ctx, topic.TopicID, &queue.SubscribeRequest{QueueID: queueID}); err != nil {
 		t.Fatalf("subscribe queue: %v", err)
 	}
-	subscriptions, err := storage.listSubscriptions(ctx, topic.TopicID)
+	subscriptions, err := listSubscriptions(ctx, storage.db, topic.TopicID, pubSubListTopics)
 	if err != nil {
 		t.Fatalf("list canonical subscriptions: %v", err)
 	}

@@ -100,6 +100,7 @@ func validateSubscribeRequest(topicID string, input *SubscribeRequest) error {
 	if err := validateTopicID(topicID); err != nil {
 		return err
 	}
+
 	if input == nil {
 		return fmt.Errorf("%w: subscribe request is required", pqerr.ErrInvalidInput)
 	}
@@ -119,6 +120,7 @@ func validatePublishRequest(topicID string, input *PublishRequest) error {
 	if err := validateTopicID(topicID); err != nil {
 		return err
 	}
+
 	if input == nil || len(input.Messages) == 0 {
 		return fmt.Errorf("%w: at least one publish message is required", pqerr.ErrInvalidInput)
 	}

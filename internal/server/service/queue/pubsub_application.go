@@ -56,6 +56,7 @@ func (a *pubSubApplication) createTopic(ctx context.Context, input *CreateTopicR
 	}
 
 	output, storageErr := a.storage.CreateTopic(ctx, input)
+
 	err = storageErr
 	if storageErr != nil {
 		return output, storageErr
@@ -76,7 +77,7 @@ func (a *pubSubApplication) deleteTopic(ctx context.Context, topicID string) (er
 
 	defer func() { a.observer.TopicRequest(metrics.OpDeleteTopic, attributedTopicID, started, err) }()
 
-	validationErr := validateTopicID(topicID)
+	validationErr := validateDeleteTopicRequest(topicID)
 	if validationErr != nil {
 		err = validationErr
 
@@ -86,6 +87,7 @@ func (a *pubSubApplication) deleteTopic(ctx context.Context, topicID string) (er
 	attributedTopicID = topicID
 
 	output, storageErr := a.storage.DeleteTopic(ctx, topicID)
+
 	err = storageErr
 	if storageErr != nil {
 		return storageErr
@@ -121,13 +123,7 @@ func (a *pubSubApplication) subscribe(
 
 	attributedTopicID = topicID
 
-	if input == nil {
-		err = fmt.Errorf("%w: subscribe request is required", pqerr.ErrInvalidInput)
-
-		return nil, err
-	}
-
-	validationErr = validatePubSubQueueID(input.QueueID)
+	validationErr = validateSubscribeRequest(topicID, input)
 	if validationErr != nil {
 		err = validationErr
 
@@ -136,6 +132,7 @@ func (a *pubSubApplication) subscribe(
 
 	output, storageErr := a.storage.Subscribe(ctx, topicID, input)
 	err = storageErr
+
 	if storageErr != nil {
 		return output, storageErr
 	}
@@ -161,7 +158,7 @@ func (a *pubSubApplication) unsubscribe(ctx context.Context, topicID, subscripti
 
 	attributedTopicID = topicID
 
-	validationErr = validateSubscriptionID(subscriptionID)
+	validationErr = validateUnsubscribeRequest(topicID, subscriptionID)
 	if validationErr != nil {
 		err = validationErr
 
@@ -169,6 +166,7 @@ func (a *pubSubApplication) unsubscribe(ctx context.Context, topicID, subscripti
 	}
 
 	storageErr := a.storage.Unsubscribe(ctx, topicID, subscriptionID)
+
 	err = storageErr
 	if storageErr != nil {
 		return storageErr
@@ -199,13 +197,15 @@ func (a *pubSubApplication) publish(
 
 	attributedTopicID = topicID
 
-	if input == nil || len(input.Messages) == 0 {
-		err = fmt.Errorf("%w: at least one publish message is required", pqerr.ErrInvalidInput)
+	validationErr = validatePublishRequest(topicID, input)
+	if validationErr != nil {
+		err = validationErr
 
-		return nil, err
+		return nil, validationErr
 	}
 
 	output, storageErr := a.storage.Publish(ctx, topicID, input)
+
 	err = storageErr
 	if errors.Is(storageErr, consensus.ErrCommitUnknown) {
 		return output, storageErr
@@ -222,6 +222,7 @@ func (a *pubSubApplication) publish(
 			knownOutput = partial.Outcome.Response
 		}
 	}
+
 	if knownOutcome {
 		a.observer.Published(telemetry.TopicPublishEvent{
 			TopicID:      topicID,
@@ -244,6 +245,7 @@ func (a *pubSubApplication) deleteQueue(
 	if input == nil {
 		return nil, fmt.Errorf("%w: delete queue request is required", pqerr.ErrInvalidID)
 	}
+
 	if err := validatePubSubQueueID(input.GetQueueId()); err != nil {
 		return nil, err
 	}
@@ -252,6 +254,7 @@ func (a *pubSubApplication) deleteQueue(
 	if err != nil {
 		return output, err
 	}
+
 	if output != nil {
 		for _, subscription := range output.RemovedSubscriptions {
 			a.observer.TopicSubscriptionDeleted(subscription.TopicID)
@@ -269,6 +272,7 @@ func (a *pubSubApplication) reconcileTopicState(ctx context.Context) {
 		if err != nil {
 			return telemetry.TopicStateEvent{}, err
 		}
+
 		return telemetry.TopicStateEvent{
 			TopicsExist:   state.TopicsExist,
 			Subscriptions: state.SubscriptionCounts,
@@ -287,6 +291,7 @@ func selectedDestinations(output *PublishResponse, err error) uint64 {
 	if errors.As(err, &partial) {
 		return partial.Outcome.SelectedQueues
 	}
+
 	if output == nil {
 		return 0
 	}

@@ -31,6 +31,7 @@ func normalizePubSubError(err error, operation pubSubErrorContext) error {
 	if err == nil {
 		return nil
 	}
+
 	if errors.Is(err, driver.ErrBadConn) || errors.Is(err, sql.ErrConnDone) ||
 		errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
 		return errors.Join(pqerr.ErrUnavailable, err)

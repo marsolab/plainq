@@ -415,7 +415,7 @@ func (s *Storage) PurgeQueue(ctx context.Context, input *v1.PurgeQueueRequest) (
 	return &output, nil
 }
 
-func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest) (_ *queue.DeleteQueueResult, sErr error) {
+func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest) (*queue.DeleteQueueResult, error) {
 	queueID := input.GetQueueId()
 
 	props, ok := s.cache.getByID(queueID)
@@ -423,57 +423,113 @@ func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest)
 		return nil, fmt.Errorf("queue props (id: %q): %w", queueID, pqerr.ErrNotFound)
 	}
 
-	tx, txErr := pqlite.BeginTx(ctx, s.db)
-	if txErr != nil {
-		return nil, fmt.Errorf("begin transaction: %w", normalizePubSubError(txErr, pubSubDeleteQueue))
+	deleteResult, err := s.deleteQueueTransaction(ctx, input, queueID)
+	if err != nil {
+		return nil, err
+	}
+
+	s.cache.delete(props.ID, props.Name)
+	s.observer.QueueDeleted(queueID)
+
+	return deleteResult, nil
+}
+
+func (s *Storage) deleteQueueTransaction(
+	ctx context.Context,
+	input *v1.DeleteQueueRequest,
+	queueID string,
+) (_ *queue.DeleteQueueResult, sErr error) {
+	tx, err := pqlite.BeginTx(ctx, s.db)
+	if err != nil {
+		return nil, fmt.Errorf("begin transaction: %w", normalizePubSubError(err, pubSubDeleteQueue))
 	}
 
 	defer func() {
-		if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
-			sErr = errors.Join(sErr, fmt.Errorf("rollback transaction: %w", normalizePubSubError(err, pubSubDeleteQueue)))
-		}
+		sErr = joinSQLiteRollback(sErr, tx, pubSubDeleteQueue, "transaction")
 	}()
 
+	if err := lockQueueForDelete(ctx, tx, queueID); err != nil {
+		return nil, err
+	}
+
+	if err := validateQueueDelete(ctx, tx, input, queueID); err != nil {
+		return nil, err
+	}
+
+	deleteResult, err := s.deleteQueueRecords(ctx, tx, queueID)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit transaction: %w", normalizePubSubError(err, pubSubDeleteQueue))
+	}
+
+	return deleteResult, nil
+}
+
+func lockQueueForDelete(ctx context.Context, tx *sql.Tx, queueID string) error {
 	// Claim the parent row with a no-op write before inspecting the dynamic
 	// queue table. SQLite has no SELECT FOR UPDATE; this acquires writer
 	// ownership without changing replicated state.
-	lockResult, lockErr := tx.ExecContext(ctx,
-		`UPDATE queue_properties SET queue_id = queue_id WHERE queue_id = ?;`, queueID)
-	if lockErr != nil {
-		return nil, fmt.Errorf("lock queue %q for delete: %w", queueID, normalizePubSubError(lockErr, pubSubDeleteQueue))
-	}
-	lockedRows, lockRowsErr := lockResult.RowsAffected()
-	if lockRowsErr != nil {
-		return nil, fmt.Errorf("lock queue %q for delete rows: %w", queueID, normalizePubSubError(lockRowsErr, pubSubDeleteQueue))
-	}
-	if lockedRows < 1 {
-		return nil, fmt.Errorf("lock queue %q for delete: %w", queueID, pqerr.ErrNotFound)
+	lockResult, err := tx.ExecContext(
+		ctx,
+		`UPDATE queue_properties SET queue_id = queue_id WHERE queue_id = ?;`,
+		queueID,
+	)
+	if err != nil {
+		return fmt.Errorf("lock queue %q for delete: %w", queueID, normalizePubSubError(err, pubSubDeleteQueue))
 	}
 
-	var messageCount uint64
-	if err := tx.QueryRowContext(ctx, queryCountMessages(queueID)).Scan(&messageCount); err != nil {
-		return nil, fmt.Errorf("count queue %q messages before delete: %w", queueID, normalizePubSubError(err, pubSubDeleteQueue))
+	lockedRows, err := lockResult.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("lock queue %q for delete rows: %w", queueID, normalizePubSubError(err, pubSubDeleteQueue))
 	}
+
+	if lockedRows < 1 {
+		return fmt.Errorf("lock queue %q for delete: %w", queueID, pqerr.ErrNotFound)
+	}
+
+	return nil
+}
+
+func validateQueueDelete(ctx context.Context, tx *sql.Tx, input *v1.DeleteQueueRequest, queueID string) error {
+	var messageCount uint64
+
+	if err := tx.QueryRowContext(ctx, queryCountMessages(queueID)).Scan(&messageCount); err != nil {
+		return fmt.Errorf("count queue %q messages before delete: %w", queueID, normalizePubSubError(err, pubSubDeleteQueue))
+	}
+
 	// A committed legacy leader may have proposed Force=false before this
 	// invariant existed. Every follower must still apply that log entry; only
 	// standalone calls enforce here. New clustered calls are rejected by the
 	// leader's proposal preflight before they can enter the log.
 	if messageCount > 0 && !input.GetForce() && !queue.Replicated(ctx) {
-		return nil, fmt.Errorf("delete non-empty queue %q: %w", queueID, pqerr.ErrFailedPrecondition)
+		return fmt.Errorf("delete non-empty queue %q: %w", queueID, pqerr.ErrFailedPrecondition)
 	}
 
-	removedSubscriptions, captureErr := listSubscriptionsByQueue(ctx, tx, queueID)
-	if captureErr != nil {
-		return nil, fmt.Errorf("capture queue %q subscriptions: %w", queueID, captureErr)
+	return nil
+}
+
+func (s *Storage) deleteQueueRecords(
+	ctx context.Context,
+	tx *sql.Tx,
+	queueID string,
+) (*queue.DeleteQueueResult, error) {
+	removedSubscriptions, err := listSubscriptionsByQueue(ctx, tx, queueID)
+	if err != nil {
+		return nil, fmt.Errorf("capture queue %q subscriptions: %w", queueID, err)
 	}
+
 	deleteResult := &queue.DeleteQueueResult{RemovedSubscriptions: removedSubscriptions}
+
 	if _, err := tx.ExecContext(ctx, `DELETE FROM topic_subscriptions WHERE queue_id = ?;`, queueID); err != nil {
 		return nil, fmt.Errorf("delete queue %q subscriptions: %w", queueID, normalizePubSubError(err, pubSubDeleteQueue))
 	}
 
-	rows, queueHeaderErr := s.queries.WithTx(tx).DeleteQueueProperties(ctx, queueID)
-	if queueHeaderErr != nil {
-		return nil, fmt.Errorf("delete queue %q info record: %w", queueID, normalizePubSubError(queueHeaderErr, pubSubDeleteQueue))
+	rows, err := s.queries.WithTx(tx).DeleteQueueProperties(ctx, queueID)
+	if err != nil {
+		return nil, fmt.Errorf("delete queue %q info record: %w", queueID, normalizePubSubError(err, pubSubDeleteQueue))
 	}
 
 	if rows < 1 {
@@ -483,14 +539,6 @@ func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest)
 	if _, err := tx.ExecContext(ctx, queryDeleteQueueTable(queueID)); err != nil {
 		return nil, fmt.Errorf("drop queue %q table: %w", queueID, normalizePubSubError(err, pubSubDeleteQueue))
 	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit transaction: %w", normalizePubSubError(err, pubSubDeleteQueue))
-	}
-
-	s.cache.delete(props.ID, props.Name)
-
-	s.observer.QueueDeleted(queueID)
 
 	return deleteResult, nil
 }

@@ -78,6 +78,7 @@ func (s *Storage) collect(ctx context.Context) {
 		if sweepErr != nil {
 			wrapped := fmt.Errorf("sweep queue (id: %q): %w", queueID, sweepErr)
 			cErr = errors.Join(cErr, wrapped)
+
 			s.logger.Error("Garbage collection failed for queue",
 				slog.String("queue_id", queueID),
 				slog.Any("error", sweepErr),
@@ -243,30 +244,9 @@ func moveMessagesToDLQ(ctx context.Context, tx pgx.Tx, props QueueProps) (uint64
 		return 0, fmt.Errorf("execute query: %w", execErr)
 	}
 
-	type msg struct {
-		ID        string
-		Body      []byte
-		CreatedAt time.Time
-	}
-
-	var msgs []msg
-
-	for rows.Next() {
-		var m msg
-
-		if err := rows.Scan(&m.ID, &m.Body, &m.CreatedAt); err != nil {
-			rows.Close()
-
-			return 0, fmt.Errorf("scan message record: %w", err)
-		}
-
-		msgs = append(msgs, m)
-	}
-
-	rows.Close()
-
-	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("iterate rows: %w", err)
+	msgs, err := scanDeadLetterMessages(rows)
+	if err != nil {
+		return 0, err
 	}
 
 	if len(msgs) == 0 {
@@ -288,11 +268,42 @@ func moveMessagesToDLQ(ctx context.Context, tx pgx.Tx, props QueueProps) (uint64
 	if err != nil {
 		return 0, fmt.Errorf("remove dead-lettered messages: %w", err)
 	}
+
 	if tag.RowsAffected() != int64(len(ids)) {
 		return 0, fmt.Errorf("remove dead-lettered messages: deleted %d rows, want %d", tag.RowsAffected(), len(ids))
 	}
 
 	return uint64(len(msgs)), nil
+}
+
+type deadLetterMessage struct {
+	ID        string
+	Body      []byte
+	CreatedAt time.Time
+}
+
+func scanDeadLetterMessages(rows pgx.Rows) ([]deadLetterMessage, error) {
+	var messages []deadLetterMessage
+
+	for rows.Next() {
+		var message deadLetterMessage
+
+		if err := rows.Scan(&message.ID, &message.Body, &message.CreatedAt); err != nil {
+			rows.Close()
+
+			return nil, fmt.Errorf("scan message record: %w", err)
+		}
+
+		messages = append(messages, message)
+	}
+
+	rows.Close()
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rows: %w", err)
+	}
+
+	return messages, nil
 }
 
 func (s *Storage) updateQueuePropsAfterGC(ctx context.Context, queueID string, tx pgx.Tx) error {

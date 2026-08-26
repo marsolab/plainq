@@ -14,9 +14,11 @@ func normalizeSQLiteDriverPubSubError(err error, operation pubSubErrorContext) e
 	if !errors.As(err, &sqliteErr) {
 		return err
 	}
+
 	if sqliteErr.Code == sqlite3.ErrBusy || sqliteErr.Code == sqlite3.ErrLocked {
 		return errors.Join(pqerr.ErrUnavailable, err)
 	}
+
 	if sqliteErr.Code != sqlite3.ErrConstraint {
 		return err
 	}
@@ -30,6 +32,13 @@ func normalizeSQLiteDriverPubSubError(err error, operation pubSubErrorContext) e
 		}
 
 		return errors.Join(pqerr.ErrAlreadyExists, err)
+	case pubSubListTopics,
+		pubSubDeleteQueue,
+		pubSubDeleteTopic,
+		pubSubUnsubscribe,
+		pubSubPublish,
+		pubSubInventory:
+		return err
 	default:
 		return err
 	}
