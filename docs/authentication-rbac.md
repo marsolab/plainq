@@ -11,6 +11,20 @@ The PlainQ authentication and RBAC system provides:
 - Middleware for protecting endpoints
 - Administrative role management
 
+## Tenant-security upgrade
+
+Schema migration 006 assigns every existing user, queue, and topic to the
+fixed default tenant `01HQ5RJNXS6TPXK89PQWY4N8JH`. It also removes the legacy
+clear bearer-token columns. As a result, every session created before this
+migration is intentionally revoked: users must sign in once after upgrading.
+PlainQ does not retain a clear-token fallback.
+
+For old anonymous `schema.v1` gRPC clients, `-grpc.protect-legacy=false`
+temporarily exposes only resources migrated into that fixed tenant and marked
+as migration- or compatibility-created. It never opens the agent API or
+tenant-created resources. Set `-grpc.protect-legacy=true` after old clients have credentials.
+The compatibility mode is scheduled for removal after two releases.
+
 ## Architecture
 
 ### Components

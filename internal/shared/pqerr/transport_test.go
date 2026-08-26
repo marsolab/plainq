@@ -146,3 +146,10 @@ type partialFanoutError struct {
 func (e *partialFanoutError) Error() string { return "partial topic fan-out" }
 
 func (e *partialFanoutError) Unwrap() []error { return e.causes }
+
+func TestIsFailedPreconditionPreservesPolicyState(t *testing.T) {
+	err := fmt.Errorf("delete queue: %w", ErrFailedPrecondition)
+	if !IsFailedPrecondition(err) {
+		t.Fatalf("IsFailedPrecondition(%v) = false, want true", err)
+	}
+}

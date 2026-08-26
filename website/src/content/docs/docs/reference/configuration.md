@@ -28,12 +28,18 @@ for the authoritative, build-specific list. The commonly used flags are below.
 | Flag                 | Default                    | Purpose                                         |
 | -------------------- | -------------------------- | ----------------------------------------------- |
 | `-auth.enable`       | `true`                     | Toggle HTTP/Houston JWT sessions.               |
-| `-auth.jwt.secret`   | _required when auth is on_ | HMAC secret used to sign access/refresh tokens. |
+| `-auth.jwt.secret`   | _always required by serve_ | HMAC secret used to sign access/refresh tokens. |
+| `-auth.bootstrap.secret` | _required when auth is on_ | Shared secret for the first remote administrator. |
 | `-auth.access.ttl`   | `60m`                      | Access token TTL.                               |
 | `-auth.refresh.ttl`  | `720h`                     | Refresh token TTL.                              |
 
-HTTP topic/admin routes use sessions when enabled, but there is no per-topic or
-per-queue authorization. The gRPC listener has no built-in authentication.
+HTTP queue/topic and admin routes use sessions when enabled. Authenticated HTTP
+and gRPC queue/topic operations are tenant-scoped and resource-authorized.
+Legacy `schema.v1` gRPC calls may omit a token while
+`-grpc.protect-legacy=false`; that compatibility identity can reach only
+migrated or legacy-created rows in the fixed legacy tenant. The bundled CLI/TUI
+requires this compatibility mode because it does not yet send bearer/TLS
+credentials.
 
 ## Observability
 
@@ -64,6 +70,7 @@ resets retained raw history, and produces an explicit `notRecorded` gap.
   -grpc.addr=:8080 \
   -http.addr=:8081 \
   -auth.jwt.secret="$(openssl rand -hex 32)" \
+  -auth.bootstrap.secret="$(openssl rand -hex 32)" \
   -auth.access.ttl=60m \
   -auth.refresh.ttl=720h
 ```

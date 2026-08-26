@@ -5,12 +5,18 @@ INSERT INTO queue_properties (queue_id,
                               visibility_timeout_seconds,
                               max_receive_attempts,
                               drop_policy,
-                              dead_letter_queue_id)
-VALUES (?, ?, ?, ?, ?, ?, ?);
+                              dead_letter_queue_id,
+                              tenant_id,
+                              created_by_kind,
+                              created_by_id)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 -- name: DeleteQueueProperties :execrows
 DELETE FROM queue_properties
-WHERE queue_id = ?;
+WHERE queue_id = sqlc.arg('queue_id')
+  AND tenant_id = sqlc.arg('tenant_id')
+  AND (NOT CAST(sqlc.arg('legacy_compat') AS boolean)
+    OR (created_by_kind = 'system' AND created_by_id IN ('migration', 'legacy-v1')));
 
 -- name: CountQueueProperties :one
 SELECT COUNT(*)
@@ -25,9 +31,15 @@ SELECT queue_id,
        visibility_timeout_seconds,
        max_receive_attempts,
        drop_policy,
-       dead_letter_queue_id
+       dead_letter_queue_id,
+       tenant_id,
+       created_by_kind,
+       created_by_id
 FROM queue_properties
-WHERE queue_id = ?;
+WHERE queue_id = sqlc.arg('queue_id')
+  AND tenant_id = sqlc.arg('tenant_id')
+  AND (NOT CAST(sqlc.arg('legacy_compat') AS boolean)
+    OR (created_by_kind = 'system' AND created_by_id IN ('migration', 'legacy-v1')));
 
 -- name: GetQueuePropertiesByName :one
 SELECT queue_id,
@@ -38,9 +50,15 @@ SELECT queue_id,
        visibility_timeout_seconds,
        max_receive_attempts,
        drop_policy,
-       dead_letter_queue_id
+       dead_letter_queue_id,
+       tenant_id,
+       created_by_kind,
+       created_by_id
 FROM queue_properties
-WHERE queue_name = ?;
+WHERE queue_name = sqlc.arg('queue_name')
+  AND tenant_id = sqlc.arg('tenant_id')
+  AND (NOT CAST(sqlc.arg('legacy_compat') AS boolean)
+    OR (created_by_kind = 'system' AND created_by_id IN ('migration', 'legacy-v1')));
 
 -- name: UpdateQueuePropertiesGCAt :execrows
 UPDATE queue_properties

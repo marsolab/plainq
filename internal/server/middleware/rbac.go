@@ -39,21 +39,15 @@ func RequireQueuePermission(permissionChecker PermissionChecker, permission Perm
 				return
 			}
 
-			// Admin users have all permissions.
-			for _, role := range userInfo.Roles {
-				if role == "admin" {
-					metrics.RecordAuthorization(metrics.CheckQueuePermission, string(permission), metrics.DecisionAllow)
-					next.ServeHTTP(w, r)
-
-					return
-				}
-			}
-
 			// Get queue ID from URL parameter.
 			queueID := chi.URLParam(r, "queueID")
 			if queueID == "" {
 				// Try alternative parameter names.
 				queueID = chi.URLParam(r, "queue_id")
+			}
+
+			if queueID == "" {
+				queueID = chi.URLParam(r, "id")
 			}
 
 			if queueID == "" {
@@ -118,20 +112,14 @@ func RequireAdminOrPermission(permissionChecker PermissionChecker, permission Pe
 				return
 			}
 
-			// Check if user is admin.
-			for _, role := range userInfo.Roles {
-				if role == "admin" {
-					metrics.RecordAuthorization(metrics.CheckQueuePermission, string(permission), metrics.DecisionAllow)
-					next.ServeHTTP(w, r)
-
-					return
-				}
-			}
-
 			// Get queue ID from URL parameter.
 			queueID := chi.URLParam(r, "queueID")
 			if queueID == "" {
 				queueID = chi.URLParam(r, "queue_id")
+			}
+
+			if queueID == "" {
+				queueID = chi.URLParam(r, "id")
 			}
 
 			if queueID == "" {

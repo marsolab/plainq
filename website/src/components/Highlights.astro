@@ -1,13 +1,25 @@
 ---
 const items = [
-  { value: "1", label: "binary", detail: "server · CLI · UI" },
-  { value: "3", label: "backends", detail: "SQLite · Turso · Postgres" },
-  { value: "14", label: "gRPC methods", detail: "queues · messages · topics" },
-  { value: "/metrics", label: "included", detail: "health · logs · dashboards" },
+  {
+    title: "Stay responsive",
+    detail: "Keep slow work from making people wait.",
+  },
+  {
+    title: "Finish the work",
+    detail: "Unfinished jobs stay ready for another try.",
+  },
+  {
+    title: "Handle the rush",
+    detail: "Add help when demand climbs.",
+  },
+  {
+    title: "See it clearly",
+    detail: "Know what is waiting, working, and done.",
+  },
 ];
 ---
 
-<section class="border-b border-[var(--color-border)] bg-[var(--color-muted)]" aria-label="PlainQ at a glance">
+<section class="border-b border-[var(--color-border)] bg-[var(--color-muted)]" aria-label="What PlainQ helps you do">
   <div class="section-shell grid grid-cols-2 divide-x divide-[var(--color-border)] md:grid-cols-4">
     {
       items.map((item, index) => (
@@ -17,13 +29,12 @@ const items = [
           index === 2 && "border-t border-[var(--color-border)] md:border-l md:border-t-0",
           index === 3 && "border-l border-t border-[var(--color-border)] md:border-t-0",
         ]}>
-          <div class="font-display text-2xl font-semibold tracking-[-0.04em] sm:text-3xl">
-            {item.value}
-          </div>
-          <div class="mt-2 text-sm font-semibold">{item.label}</div>
-          <div class="mt-1 hidden font-mono text-[10px] text-[var(--color-muted-foreground)] sm:block">
+          <h2 class="font-display text-lg font-semibold leading-[1.05] tracking-[-0.035em] sm:text-xl">
+            {item.title}
+          </h2>
+          <p class="mt-3 text-sm leading-5 text-[var(--color-muted-foreground)]">
             {item.detail}
-          </div>
+          </p>
         </div>
       ))
     }

@@ -7,12 +7,15 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/marsolab/plainq/internal/server/service/queue"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
 )
 
 func TestLockTopicForDeleteUsesParentRowLock(t *testing.T) {
+	ctx := context.Background()
+	scope := queue.ScopeFromContext(ctx)
 	db := &parentLockDB{row: parentLockRow{value: "topic-1"}}
-	if err := lockTopicForDelete(context.Background(), db, "topic-1"); err != nil {
+	if err := lockTopicForDeleteInScope(ctx, db, "topic-1", scope); err != nil {
 		t.Fatalf("lock topic: %v", err)
 	}
 	if !strings.Contains(db.query, "FROM topic_properties") || !strings.Contains(db.query, "FOR UPDATE") {
@@ -21,8 +24,10 @@ func TestLockTopicForDeleteUsesParentRowLock(t *testing.T) {
 }
 
 func TestLockQueueForDeleteUsesParentRowLock(t *testing.T) {
+	ctx := context.Background()
+	scope := queue.ScopeFromContext(ctx)
 	db := &parentLockDB{row: parentLockRow{value: "queue-1"}}
-	if err := lockQueueForDelete(context.Background(), db, "queue-1"); err != nil {
+	if err := lockQueueForDeleteInScope(ctx, db, "queue-1", scope); err != nil {
 		t.Fatalf("lock queue: %v", err)
 	}
 	if !strings.Contains(db.query, "FROM queue_properties") || !strings.Contains(db.query, "FOR UPDATE") {
@@ -31,11 +36,13 @@ func TestLockQueueForDeleteUsesParentRowLock(t *testing.T) {
 }
 
 func TestLockParentForDeleteMapsMissingParent(t *testing.T) {
+	ctx := context.Background()
+	scope := queue.ScopeFromContext(ctx)
 	db := &parentLockDB{row: parentLockRow{err: pgx.ErrNoRows}}
-	if err := lockTopicForDelete(context.Background(), db, "missing"); !errors.Is(err, pqerr.ErrNotFound) {
+	if err := lockTopicForDeleteInScope(ctx, db, "missing", scope); !errors.Is(err, pqerr.ErrNotFound) {
 		t.Fatalf("lock missing topic error = %v, want %v", err, pqerr.ErrNotFound)
 	}
-	if err := lockQueueForDelete(context.Background(), db, "missing"); !errors.Is(err, pqerr.ErrNotFound) {
+	if err := lockQueueForDeleteInScope(ctx, db, "missing", scope); !errors.Is(err, pqerr.ErrNotFound) {
 		t.Fatalf("lock missing queue error = %v, want %v", err, pqerr.ErrNotFound)
 	}
 }

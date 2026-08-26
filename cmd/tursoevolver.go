@@ -3,12 +3,11 @@ package main
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"io/fs"
-	"slices"
-	"strings"
 	"time"
+
+	"github.com/marsolab/plainq/internal/server/mutations"
 )
 
 // tursoEvolver applies the embedded SQLite migrations against a Turso/libSQL
@@ -62,10 +61,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS id_uindex ON schema_version (id);
 )
 
 // newTursoEvolver returns a configured evolver.
-func newTursoEvolver(db *sql.DB, mutations fs.FS) *tursoEvolver {
+func newTursoEvolver(db *sql.DB, migrationFS fs.FS) *tursoEvolver {
 	return &tursoEvolver{
 		db:        db,
-		mutations: mutations,
+		mutations: migrationFS,
 		timeout:   tursoMutationTimeout,
 	}
 }
@@ -104,39 +103,53 @@ func (e *tursoEvolver) MutateSchema() error {
 		return versionErr
 	}
 
-	mutations, loadErr := loadSQLMutations(e.mutations)
+	loaded, loadErr := loadSQLMutations(e.mutations)
 	if loadErr != nil {
 		return loadErr
 	}
 
-	for _, m := range mutations {
+	for _, m := range loaded {
 		if m.version <= currentVersion {
 			continue
 		}
 
-		// The versions are indexes into the mutation files, never user input,
-		// so interpolating them keeps the script a single parameterless batch.
-		script := fmt.Sprintf("%s\n%s\n", m.changes,
-			fmt.Sprintf(tursoSchemaVersionBump, m.version, m.version-1),
-		)
-
-		if _, err := e.db.ExecContext(ctx, script); err != nil {
-			// Losing the race is not a failure: whoever won applied exactly the
-			// mutation this one was about to. Anything else is a real error.
-			applied, readErr := e.schemaVersion(ctx)
-			if readErr == nil && applied >= m.version {
-				currentVersion = applied
-
-				continue
-			}
-
-			return fmt.Errorf("apply schema mutation %q: %w", m.name, err)
+		applied, err := e.applyMutation(ctx, m)
+		if err != nil {
+			return err
 		}
 
-		currentVersion = m.version
+		currentVersion = applied
 	}
 
 	return nil
+}
+
+func (e *tursoEvolver) applyMutation(ctx context.Context, mutation sqlMutation) (int, error) {
+	var err error
+	if mutation.version == 6 {
+		// Tenant security rebuilds users while preserving every FK child.
+		err = mutations.ApplySQLiteStorage(ctx, e.db)
+	} else {
+		// Versions are derived from trusted embedded filenames. Interpolation
+		// keeps the migration and guarded version bump one remote batch.
+		script := fmt.Sprintf("%s\n%s\n", mutation.changes,
+			fmt.Sprintf(tursoSchemaVersionBump, mutation.version, mutation.version-1),
+		)
+		_, err = e.db.ExecContext(ctx, script)
+	}
+
+	if err == nil {
+		return mutation.version, nil
+	}
+
+	// Losing the race is not a failure: another runner applied exactly this
+	// version. Any unchanged/unreadable version preserves the original error.
+	applied, readErr := e.schemaVersion(ctx)
+	if readErr == nil && applied >= mutation.version {
+		return applied, nil
+	}
+
+	return 0, fmt.Errorf("apply schema mutation %q: %w", mutation.name, err)
 }
 
 // schemaVersion reads the currently recorded schema version.
@@ -176,37 +189,17 @@ type sqlMutation struct {
 // version of a file is its 1-based position among all entries in the
 // directory, so both evolvers agree on version numbers for the same set of
 // files.
-func loadSQLMutations(mutations fs.FS) ([]sqlMutation, error) {
-	entries, readErr := fs.ReadDir(mutations, ".")
-	if readErr != nil {
-		return nil, fmt.Errorf("read mutations dir: %w", readErr)
+func loadSQLMutations(migrationFS fs.FS) ([]sqlMutation, error) {
+	records, err := mutations.ValidatedStorageMutations(migrationFS)
+	if err != nil {
+		return nil, fmt.Errorf("validate sqlite migrations: %w", err)
 	}
 
-	slices.SortFunc(entries, func(i, j fs.DirEntry) int {
-		return strings.Compare(i.Name(), j.Name())
-	})
-
-	loaded := make([]sqlMutation, 0, len(entries))
-
-	for i, entry := range entries {
-		if !strings.HasSuffix(entry.Name(), ".sql") {
-			continue
-		}
-
-		changes, readFileErr := fs.ReadFile(mutations, entry.Name())
-		if readFileErr != nil {
-			return nil, fmt.Errorf("read mutation file %q: %w", entry.Name(), readFileErr)
-		}
-
+	loaded := make([]sqlMutation, 0, len(records))
+	for _, record := range records {
 		loaded = append(loaded, sqlMutation{
-			name:    entry.Name(),
-			changes: changes,
-			version: i + 1,
+			name: record.Name, changes: record.Changes, version: record.Version,
 		})
-	}
-
-	if len(loaded) == 0 {
-		return nil, errors.New("no schema mutations found")
 	}
 
 	return loaded, nil

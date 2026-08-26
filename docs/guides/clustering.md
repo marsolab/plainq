@@ -112,6 +112,7 @@ Enough to see it work. Each node gets its own data directory and its own ports.
 SECRET=$(openssl rand -hex 32)
 GOSSIP=$(openssl rand -base64 32)
 JWT=$(openssl rand -hex 32)
+BOOTSTRAP=$(openssl rand -hex 32)
 
 for i in 1 2 3; do
   mkdir -p /tmp/plainq-$i
@@ -119,6 +120,7 @@ for i in 1 2 3; do
     -storage.path=/tmp/plainq-$i/plainq.db \
     -grpc.addr=:808$i -http.addr=:818$i \
     -auth.jwt.secret="$JWT" \
+    -auth.bootstrap.secret="$BOOTSTRAP" \
     -cluster.enable \
     -cluster.node-id=node-$i \
     -cluster.bind.addr=127.0.0.1:928$i \
@@ -492,7 +494,8 @@ helm install plainq deploy/helm/plainq \
   --set cluster.replicas=3 \
   --set cluster.gossipSecret="$(openssl rand -base64 32)" \
   --set cluster.secret="$(openssl rand -hex 32)" \
-  --set auth.jwtSecret="$(openssl rand -hex 32)"
+  --set auth.jwtSecret="$(openssl rand -hex 32)" \
+  --set auth.bootstrap.secret="$(openssl rand -hex 32)"
 ```
 
 That gives you:

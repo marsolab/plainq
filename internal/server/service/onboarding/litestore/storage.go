@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"time"
 
+	"github.com/marsolab/plainq/internal/server/security"
 	"github.com/marsolab/plainq/internal/server/service/onboarding"
 	"github.com/marsolab/plainq/internal/server/service/onboarding/litestore/sqlcgen"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
@@ -76,44 +76,48 @@ func (s *Storage) GetAdminRoleID(ctx context.Context) (string, error) {
 	return id, nil
 }
 
-// CreateInitialAdmin creates the first admin user and assigns the admin role
-// inside a single transaction. A double-check ensures no admin exists yet —
-// this is a write-contention barrier, not true uniqueness (the users/roles
-// tables are not unique-constrained on role_name=admin).
-//
-//nolint:cyclop // Complex transaction with multiple validation steps.
-func (s *Storage) CreateInitialAdmin(ctx context.Context, admin onboarding.InitialAdmin) (sErr error) {
-	tx, err := pqlite.BeginTx(ctx, s.db)
+// Bootstrap performs every first-administrator side effect on one dedicated
+// writer connection. WithWriteTx retries the entire callback on SQLite/libSQL
+// contention, so a remote or concurrent caller re-runs the admin check after
+// the winning transaction commits instead of creating a second administrator.
+func (s *Storage) Bootstrap(ctx context.Context, record onboarding.BootstrapRecord) error {
+	err := pqlite.WithWriteTx(ctx, s.db, pqlite.DefaultWriteRetry(), func(tx pqlite.Tx) error {
+		sqlTx, ok := tx.(*sql.Tx)
+		if !ok {
+			return errors.New("bootstrap write transaction is not database/sql")
+		}
+
+		return writeBootstrap(ctx, s.queries.WithTx(sqlTx), record)
+	})
 	if err != nil {
-		return fmt.Errorf("begin transaction: %w", err)
+		return fmt.Errorf("bootstrap initial administrator: %w", err)
 	}
 
-	defer func() {
-		if err := tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
-			sErr = errors.Join(sErr, fmt.Errorf("rollback transaction: %w", err))
-		}
-	}()
+	return nil
+}
 
-	q := s.queries.WithTx(tx)
-
+//nolint:cyclop // Each first-admin transactional side effect has a distinct failure.
+func writeBootstrap(ctx context.Context, q *sqlcgen.Queries, record onboarding.BootstrapRecord) error {
 	count, err := q.CountAdminUsers(ctx)
 	if err != nil {
-		return fmt.Errorf("count admin users in tx: %w", err)
+		return fmt.Errorf("count admin users in transaction: %w", err)
 	}
 
 	if count > 0 {
 		return fmt.Errorf("%w: admin users already exist, onboarding not allowed", pqerr.ErrAlreadyExists)
 	}
 
-	now := time.Now()
+	admin := record.Admin
+
+	authVersion, err := security.AuthVersionInt64(admin.AuthVersion)
+	if err != nil {
+		return fmt.Errorf("validate admin authentication version: %w", err)
+	}
 
 	if err := q.CreateUser(ctx, sqlcgen.CreateUserParams{
-		UserID:    admin.UserID,
-		Email:     admin.Email,
-		Password:  admin.Password,
-		Verified:  admin.Verified,
-		CreatedAt: now,
-		UpdatedAt: now,
+		UserID: admin.UserID, Email: admin.Email, Password: admin.Password,
+		Verified: admin.Verified, CreatedAt: admin.CreatedAt, UpdatedAt: admin.CreatedAt,
+		OrgID: admin.TenantID, AuthVersion: authVersion, Status: admin.Status,
 	}); err != nil {
 		return fmt.Errorf("create admin user: %w", err)
 	}
@@ -128,15 +132,35 @@ func (s *Storage) CreateInitialAdmin(ctx context.Context, admin onboarding.Initi
 	}
 
 	if err := q.AssignUserRole(ctx, sqlcgen.AssignUserRoleParams{
-		UserID:    admin.UserID,
-		RoleID:    adminRoleID,
-		CreatedAt: now,
+		UserID: admin.UserID, RoleID: adminRoleID, CreatedAt: admin.CreatedAt,
 	}); err != nil {
 		return fmt.Errorf("assign admin role: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit transaction: %w", err)
+	if err := q.UpsertHumanSecurityPrincipal(ctx, sqlcgen.UpsertHumanSecurityPrincipalParams{
+		UpdatedAtNs: admin.CreatedAt.UnixNano(), UserID: admin.UserID,
+	}); err != nil {
+		return fmt.Errorf("project admin security principal: %w", err)
+	}
+
+	refresh := record.RefreshToken
+	if err := q.CreateRefreshToken(ctx, sqlcgen.CreateRefreshTokenParams{
+		ID: refresh.ID, Aid: refresh.AccountID, TokenHash: refresh.TokenHash,
+		CreatedAtNs: refresh.CreatedAt.UnixNano(), ExpiresAtNs: refresh.ExpiresAt.UnixNano(),
+		LastUsedAtNs: refresh.LastUsedAt.UnixNano(),
+	}); err != nil {
+		return fmt.Errorf("persist bootstrap refresh session: %w", err)
+	}
+
+	audit := record.Audit
+	if err := q.CreateSecurityAuditEvent(ctx, sqlcgen.CreateSecurityAuditEventParams{
+		AuditID: audit.ID, TenantID: audit.TenantID, PrincipalKind: audit.PrincipalKind,
+		PrincipalID: audit.PrincipalID, Action: audit.Action, ResourceKind: audit.ResourceKind,
+		ResourceID: audit.ResourceID, Outcome: audit.Outcome, RequestID: audit.RequestID,
+		Reason: audit.Reason, SourceIp: audit.SourceIP, UserAgent: audit.UserAgent,
+		MetadataJson: string(audit.MetadataJSON), CreatedAtNs: audit.CreatedAt.UnixNano(),
+	}); err != nil {
+		return fmt.Errorf("persist bootstrap security audit: %w", err)
 	}
 
 	return nil

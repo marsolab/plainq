@@ -18,24 +18,48 @@ const (
 	topicInventoryQuery = `SELECT t.topic_id, COUNT(s.subscription_id)
 		FROM topic_properties t
 		LEFT JOIN topic_subscriptions s ON s.topic_id = t.topic_id
+		WHERE t.tenant_id = ?
+		  AND (? = FALSE OR (t.created_by_kind = 'system' AND t.created_by_id IN ('migration', 'legacy-v1')))
 		GROUP BY t.topic_id
 		ORDER BY t.topic_id;`
 	listTopicSubscriptionsQuery = `SELECT s.subscription_id, s.topic_id, s.queue_id,
 		COALESCE(q.queue_name, ''), s.created_at
 		FROM topic_subscriptions s
-		LEFT JOIN queue_properties q ON q.queue_id = s.queue_id
+		JOIN topic_properties t ON t.topic_id = s.topic_id
+		JOIN queue_properties q ON q.queue_id = s.queue_id
 		WHERE s.topic_id = ?
+		  AND t.tenant_id = ?
+		  AND q.tenant_id = ?
+		  AND (? = FALSE OR (
+		      t.created_by_kind = 'system' AND t.created_by_id IN ('migration', 'legacy-v1')
+		      AND q.created_by_kind = 'system' AND q.created_by_id IN ('migration', 'legacy-v1')
+		  ))
 		ORDER BY s.created_at, s.subscription_id;`
 	listQueueSubscriptionsQuery = `SELECT s.subscription_id, s.topic_id, s.queue_id,
 		COALESCE(q.queue_name, ''), s.created_at
 		FROM topic_subscriptions s
-		LEFT JOIN queue_properties q ON q.queue_id = s.queue_id
+		JOIN topic_properties t ON t.topic_id = s.topic_id
+		JOIN queue_properties q ON q.queue_id = s.queue_id
 		WHERE s.queue_id = ?
+		  AND t.tenant_id = ?
+		  AND q.tenant_id = ?
+		  AND (? = FALSE OR (
+		      t.created_by_kind = 'system' AND t.created_by_id IN ('migration', 'legacy-v1')
+		      AND q.created_by_kind = 'system' AND q.created_by_id IN ('migration', 'legacy-v1')
+		  ))
 		ORDER BY s.topic_id, s.created_at, s.subscription_id;`
 )
 
 func (s *Storage) ListTopics(ctx context.Context) (*queue.ListTopicsResponse, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT topic_id, topic_name, created_at FROM topic_properties ORDER BY created_at DESC, topic_id;`)
+	scope := queue.ScopeFromContext(ctx)
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT topic_id, topic_name, created_at
+		FROM topic_properties
+		WHERE tenant_id = ?
+		  AND (? = FALSE OR (created_by_kind = 'system' AND created_by_id IN ('migration', 'legacy-v1')))
+		ORDER BY created_at DESC, topic_id;
+	`, scope.TenantID, scope.Compatibility)
 	if err != nil {
 		return nil, fmt.Errorf("list topics: %w", normalizePubSubError(err, pubSubListTopics))
 	}
@@ -70,6 +94,18 @@ func (s *Storage) CreateTopic(ctx context.Context, input *queue.CreateTopicReque
 		return nil, fmt.Errorf("%w: topic name is empty", pqerr.ErrInvalidInput)
 	}
 
+	id := queue.NextID(ctx, idkit.XID)
+	scope := queue.ScopeFromContext(ctx)
+
+	if mutation, ok := sqliteQueueMutation(ctx); ok {
+		output, err := s.createTopicWithPolicy(ctx, id, input, scope, mutation)
+		if err != nil {
+			return nil, fmt.Errorf("create topic with policy: %w", normalizePubSubError(err, pubSubCreateTopic))
+		}
+
+		return output, nil
+	}
+
 	tx, err := pqlite.BeginTx(ctx, s.db)
 	if err != nil {
 		return nil, fmt.Errorf("begin create topic: %w", normalizePubSubError(err, pubSubCreateTopic))
@@ -77,14 +113,17 @@ func (s *Storage) CreateTopic(ctx context.Context, input *queue.CreateTopicReque
 
 	defer func() { sErr = joinSQLiteRollback(sErr, tx, pubSubCreateTopic, "create topic") }()
 
-	id := queue.NextID(ctx, idkit.XID)
-
 	result, err := tx.ExecContext(
 		ctx,
-		`INSERT OR IGNORE INTO topic_properties (topic_id, topic_name, created_at) VALUES (?, ?, ?);`,
+		`INSERT OR IGNORE INTO topic_properties (
+			topic_id, topic_name, created_at, tenant_id, created_by_kind, created_by_id
+		) VALUES (?, ?, ?, ?, ?, ?);`,
 		id,
 		input.TopicName,
 		writeTime(ctx),
+		scope.TenantID,
+		scope.CreatorKind,
+		scope.CreatorID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create topic: %w", normalizePubSubError(err, pubSubCreateTopic))
@@ -106,13 +145,41 @@ func (s *Storage) CreateTopic(ctx context.Context, input *queue.CreateTopicReque
 	return &queue.CreateTopicResponse{TopicID: id}, nil
 }
 
+//nolint:cyclop // Topic locking, typed cascade capture, deletion, commit, and rollback must share one transaction.
 func (s *Storage) DeleteTopic(ctx context.Context, topicID string) (_ *queue.DeleteTopicResult, sErr error) {
+	scope := queue.ScopeFromContext(ctx)
+	if mutation, ok := sqliteQueueMutation(ctx); ok {
+		result, err := s.deleteTopicWithPolicy(ctx, topicID, scope, mutation)
+		if err != nil {
+			return nil, fmt.Errorf("delete topic with policy: %w", normalizePubSubError(err, pubSubDeleteTopic))
+		}
+
+		return result, nil
+	}
+
 	tx, err := pqlite.BeginTx(ctx, s.db)
 	if err != nil {
 		return nil, fmt.Errorf("begin delete topic: %w", normalizePubSubError(err, pubSubDeleteTopic))
 	}
 
 	defer func() { sErr = joinSQLiteRollback(sErr, tx, pubSubDeleteTopic, "delete topic") }()
+
+	lockResult, err := tx.ExecContext(ctx, `UPDATE topic_properties SET topic_id = topic_id
+		WHERE topic_id = ? AND tenant_id = ?
+		  AND (? = FALSE OR (created_by_kind = 'system' AND created_by_id IN ('migration', 'legacy-v1')));`,
+		topicID, scope.TenantID, scope.Compatibility)
+	if err != nil {
+		return nil, fmt.Errorf("lock topic for delete: %w", normalizePubSubError(err, pubSubDeleteTopic))
+	}
+
+	lockedRows, err := lockResult.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("lock topic for delete rows affected: %w", normalizePubSubError(err, pubSubDeleteTopic))
+	}
+
+	if lockedRows == 0 {
+		return nil, fmt.Errorf("lock topic for delete: %w", pqerr.ErrNotFound)
+	}
 
 	removed, err := listSubscriptions(ctx, tx, topicID, pubSubDeleteTopic)
 	if err != nil {
@@ -125,7 +192,10 @@ func (s *Storage) DeleteTopic(ctx context.Context, topicID string) (_ *queue.Del
 		return nil, fmt.Errorf("delete topic subscriptions: %w", normalizePubSubError(err, pubSubDeleteTopic))
 	}
 
-	result, err := tx.ExecContext(ctx, `DELETE FROM topic_properties WHERE topic_id = ?;`, topicID)
+	result, err := tx.ExecContext(ctx, `DELETE FROM topic_properties
+		WHERE topic_id = ? AND tenant_id = ?
+		  AND (? = FALSE OR (created_by_kind = 'system' AND created_by_id IN ('migration', 'legacy-v1')));`,
+		topicID, scope.TenantID, scope.Compatibility)
 	if err != nil {
 		return nil, fmt.Errorf("delete topic: %w", normalizePubSubError(err, pubSubDeleteTopic))
 	}
@@ -155,6 +225,16 @@ func (s *Storage) Subscribe(
 		return nil, fmt.Errorf("subscribe queue: %w", pqerr.ErrInvalidInput)
 	}
 
+	id := queue.NextID(ctx, idkit.XID)
+	if mutation, ok := sqliteQueueMutation(ctx); ok {
+		output, err := s.subscribeWithPolicy(ctx, id, topicID, input, mutation)
+		if err != nil {
+			return nil, fmt.Errorf("subscribe with policy: %w", normalizePubSubError(err, pubSubSubscribe))
+		}
+
+		return output, nil
+	}
+
 	tx, err := pqlite.BeginTx(ctx, s.db)
 	if err != nil {
 		return nil, fmt.Errorf("begin subscribe: %w", normalizePubSubError(err, pubSubSubscribe))
@@ -166,11 +246,10 @@ func (s *Storage) Subscribe(
 		return nil, err
 	}
 
-	id := queue.NextID(ctx, idkit.XID)
-
 	result, err := tx.ExecContext(
 		ctx,
-		`INSERT OR IGNORE INTO topic_subscriptions (subscription_id, topic_id, queue_id, created_at) VALUES (?, ?, ?, ?);`,
+		`INSERT OR IGNORE INTO topic_subscriptions (subscription_id, topic_id, queue_id, created_at)
+		 VALUES (?, ?, ?, ?);`,
 		id,
 		topicID,
 		input.QueueID,
@@ -197,22 +276,20 @@ func (s *Storage) Subscribe(
 }
 
 func ensureSubscriptionTargetsExist(ctx context.Context, tx *sql.Tx, topicID, queueID string) error {
-	topicExists, err := exists(
-		ctx,
-		tx,
-		`SELECT EXISTS(SELECT 1 FROM topic_properties WHERE topic_id = ?);`,
-		topicID,
-	)
+	scope := queue.ScopeFromContext(ctx)
+
+	topicExists, err := exists(ctx, tx, `SELECT EXISTS(SELECT 1 FROM topic_properties
+		WHERE topic_id = ? AND tenant_id = ?
+		  AND (? = FALSE OR (created_by_kind = 'system' AND created_by_id IN ('migration', 'legacy-v1'))));`,
+		topicID, scope.TenantID, scope.Compatibility)
 	if err != nil {
 		return fmt.Errorf("check subscription topic: %w", normalizePubSubError(err, pubSubSubscribe))
 	}
 
-	queueExists, err := exists(
-		ctx,
-		tx,
-		`SELECT EXISTS(SELECT 1 FROM queue_properties WHERE queue_id = ?);`,
-		queueID,
-	)
+	queueExists, err := exists(ctx, tx, `SELECT EXISTS(SELECT 1 FROM queue_properties
+		WHERE queue_id = ? AND tenant_id = ?
+		  AND (? = FALSE OR (created_by_kind = 'system' AND created_by_id IN ('migration', 'legacy-v1'))));`,
+		queueID, scope.TenantID, scope.Compatibility)
 	if err != nil {
 		return fmt.Errorf("check subscription queue: %w", normalizePubSubError(err, pubSubSubscribe))
 	}
@@ -225,11 +302,31 @@ func ensureSubscriptionTargetsExist(ctx context.Context, tx *sql.Tx, topicID, qu
 }
 
 func (s *Storage) Unsubscribe(ctx context.Context, topicID, subscriptionID string) error {
+	scope := queue.ScopeFromContext(ctx)
+	if mutation, ok := sqliteQueueMutation(ctx); ok {
+		if err := s.unsubscribeWithPolicy(ctx, topicID, subscriptionID, scope, mutation); err != nil {
+			return fmt.Errorf("unsubscribe with policy: %w", normalizePubSubError(err, pubSubUnsubscribe))
+		}
+
+		return nil
+	}
+
 	result, err := s.db.ExecContext(
 		ctx,
-		`DELETE FROM topic_subscriptions WHERE topic_id = ? AND subscription_id = ?;`,
+		`DELETE FROM topic_subscriptions
+		 WHERE topic_id = ?
+		   AND subscription_id = ?
+		   AND EXISTS (
+		       SELECT 1
+		       FROM topic_properties t
+		       WHERE t.topic_id = topic_subscriptions.topic_id
+		         AND t.tenant_id = ?
+		         AND (? = FALSE OR (t.created_by_kind = 'system' AND t.created_by_id IN ('migration', 'legacy-v1')))
+		   );`,
 		topicID,
 		subscriptionID,
+		scope.TenantID,
+		scope.Compatibility,
 	)
 	if err != nil {
 		return fmt.Errorf("unsubscribe queue: %w", normalizePubSubError(err, pubSubUnsubscribe))
@@ -250,6 +347,15 @@ func (s *Storage) Unsubscribe(ctx context.Context, topicID, subscriptionID strin
 func (s *Storage) Publish(ctx context.Context, topicID string, input *queue.PublishRequest) (*queue.PublishResponse, error) {
 	if input == nil || len(input.Messages) == 0 {
 		return nil, fmt.Errorf("%w: messages are empty", pqerr.ErrInvalidInput)
+	}
+
+	if mutation, ok := sqliteQueueMutation(ctx); ok {
+		output, err := s.publishWithPolicy(ctx, topicID, input, mutation)
+		if err != nil {
+			return output, fmt.Errorf("publish with policy: %w", normalizePubSubError(err, pubSubPublish))
+		}
+
+		return output, nil
 	}
 
 	if err := s.ensureTopicExists(ctx, topicID); err != nil {
@@ -282,7 +388,9 @@ func (s *Storage) Publish(ctx context.Context, topicID string, input *queue.Publ
 }
 
 func (s *Storage) TopicInventory(ctx context.Context) (queue.TopicInventory, error) {
-	rows, err := s.db.QueryContext(ctx, topicInventoryQuery)
+	scope := queue.ScopeFromContext(ctx)
+
+	rows, err := s.db.QueryContext(ctx, topicInventoryQuery, scope.TenantID, scope.Compatibility)
 	if err != nil {
 		return queue.TopicInventory{}, fmt.Errorf("topic inventory: %w", normalizePubSubError(err, pubSubInventory))
 	}
@@ -317,7 +425,12 @@ type queryContextRunner interface {
 }
 
 func (s *Storage) ensureTopicExists(ctx context.Context, topicID string) error {
-	ok, err := exists(ctx, s.db, `SELECT EXISTS(SELECT 1 FROM topic_properties WHERE topic_id = ?);`, topicID)
+	scope := queue.ScopeFromContext(ctx)
+
+	ok, err := exists(ctx, s.db, `SELECT EXISTS(SELECT 1 FROM topic_properties
+		WHERE topic_id = ? AND tenant_id = ?
+		  AND (? = FALSE OR (created_by_kind = 'system' AND created_by_id IN ('migration', 'legacy-v1'))));`,
+		topicID, scope.TenantID, scope.Compatibility)
 	if err != nil {
 		return fmt.Errorf("check topic exists: %w", normalizePubSubError(err, pubSubPublish))
 	}
@@ -329,10 +442,10 @@ func (s *Storage) ensureTopicExists(ctx context.Context, topicID string) error {
 	return nil
 }
 
-func exists(ctx context.Context, db queryContextRunner, query string, arg any) (bool, error) {
+func exists(ctx context.Context, db queryContextRunner, query string, args ...any) (bool, error) {
 	var ok bool
 
-	if err := db.QueryRowContext(ctx, query, arg).Scan(&ok); err != nil {
+	if err := db.QueryRowContext(ctx, query, args...).Scan(&ok); err != nil {
 		return false, fmt.Errorf("scan existence query: %w", err)
 	}
 
@@ -345,7 +458,16 @@ func listSubscriptions(
 	topicID string,
 	operation pubSubErrorContext,
 ) ([]queue.Subscription, error) {
-	rows, err := db.QueryContext(ctx, listTopicSubscriptionsQuery, topicID)
+	scope := queue.ScopeFromContext(ctx)
+
+	rows, err := db.QueryContext(
+		ctx,
+		listTopicSubscriptionsQuery,
+		topicID,
+		scope.TenantID,
+		scope.TenantID,
+		scope.Compatibility,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("list subscriptions: %w", normalizePubSubError(err, operation))
 	}
@@ -377,7 +499,16 @@ func listSubscriptions(
 }
 
 func listSubscriptionsByQueue(ctx context.Context, tx *sql.Tx, queueID string) ([]queue.Subscription, error) {
-	rows, err := tx.QueryContext(ctx, listQueueSubscriptionsQuery, queueID)
+	scope := queue.ScopeFromContext(ctx)
+
+	rows, err := tx.QueryContext(
+		ctx,
+		listQueueSubscriptionsQuery,
+		queueID,
+		scope.TenantID,
+		scope.TenantID,
+		scope.Compatibility,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("list queue subscriptions: %w", normalizePubSubError(err, pubSubDeleteQueue))
 	}

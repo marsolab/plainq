@@ -58,7 +58,7 @@ func (s *Storage) ListDirectory(ctx context.Context, query account.DirectoryQuer
 			UserID:        row.UserID,
 			Email:         row.Email,
 			Verified:      row.Verified,
-			OrgID:         row.OrgID.String,
+			OrgID:         row.OrgID,
 			OrgCode:       row.OrgCode.String,
 			OrgName:       row.OrgName.String,
 			OAuthProvider: row.OauthProvider.String,

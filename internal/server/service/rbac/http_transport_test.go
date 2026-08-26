@@ -124,6 +124,10 @@ func (s *fakeStorage) RemoveRoleFromUserUnlessLastHolder(_ context.Context, user
 }
 
 func (s *fakeStorage) DeleteRole(_ context.Context, roleID string) error {
+	if s.counts[roleID] > 0 {
+		return ErrRoleInUse
+	}
+
 	s.deletedRole = roleID
 
 	return nil

@@ -16,6 +16,7 @@
 #   DURATION       load duration                       (default: 2m)
 #   BATCH_SIZE     receive batch size (1-10)           (default: 1)
 #   MSG_BYTES      message body size in bytes          (default: 256)
+#   WORK_SLOT_MS   serialized SQLite work slot (ms)    (default: 25)
 #   RUN_ID         label for this run                  (default: git short sha)
 #   KEEP_UP        keep the stack running afterwards   (default: 1)
 #
@@ -32,12 +33,13 @@ VUS="${VUS:-20}"
 DURATION="${DURATION:-2m}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
 MSG_BYTES="${MSG_BYTES:-256}"
+WORK_SLOT_MS="${WORK_SLOT_MS:-25}"
 KEEP_UP="${KEEP_UP:-1}"
 
 CANDIDATE_SHA="$(git -C "${REPO_ROOT}" rev-parse --short HEAD)"
 RUN_ID="${RUN_ID:-${CANDIDATE_SHA}}"
 
-export VUS DURATION BATCH_SIZE MSG_BYTES RUN_ID
+export VUS DURATION BATCH_SIZE MSG_BYTES WORK_SLOT_MS RUN_ID
 
 log() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 err() { printf '\033[1;31mERR\033[0m %s\n' "$*" >&2; }
@@ -116,10 +118,10 @@ wait_healthy plainq-candidate 28081
 # 4. Run the k6 AB workload.
 # ---------------------------------------------------------------------------
 START_TS="$(date +%s)"
-log "Running k6: VUS=${VUS} DURATION=${DURATION} BATCH_SIZE=${BATCH_SIZE} MSG_BYTES=${MSG_BYTES} RUN_ID=${RUN_ID}"
+log "Running k6: VUS=${VUS} DURATION=${DURATION} BATCH_SIZE=${BATCH_SIZE} MSG_BYTES=${MSG_BYTES} WORK_SLOT_MS=${WORK_SLOT_MS} RUN_ID=${RUN_ID}"
 # Do not let a k6 threshold breach (exit 99) or other non-zero exit abort the
 # pipeline — a breach is exactly when the comparison report matters most. The
-# relative regression verdict from report.py is the real gate.
+# report applies its validity threshold before making a relative verdict.
 set +e
 dc run --rm k6
 K6_RC=$?
@@ -149,6 +151,8 @@ if command -v python3 >/dev/null 2>&1; then
   cat "${REPORT}" 2>/dev/null || true
   if [ "${REPORT_RC}" -eq 1 ]; then
     err "Regression detected — see report above."
+  elif [ "${REPORT_RC}" -eq 2 ]; then
+    err "Result inconclusive — workload success rate did not meet the validity threshold."
   fi
 else
   err "python3 not found; skipping report. Use Grafana for results."
@@ -167,6 +171,6 @@ else
   log "Stack left running. Stop it with: make -C perf down"
 fi
 
-# Preserve report.py's exit status so CI fails on a detected regression
-# (report.py exits 1 on regression) even after teardown/footer above.
+# Preserve report.py's exit status: 1 means regression and 2 means the
+# workload was invalid for a latency verdict.
 exit "${REPORT_RC}"

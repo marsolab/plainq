@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
 
 	vm "github.com/VictoriaMetrics/metrics"
 	"github.com/marsolab/plainq/internal/metrics"
+	"github.com/marsolab/plainq/internal/server/policytx"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/service/telemetry"
 	"github.com/maxatome/go-testdeep/td"
@@ -103,6 +105,71 @@ type fakeStorage struct {
 	deleteTopicResp *DeleteTopicResult
 	inventory       TopicInventory
 	err             error
+}
+
+// replayPolicyStorage returns previously committed policy results and marks
+// the call as a replay. Embedding the rest of PolicyStorage keeps this fake
+// focused on the observation boundary exercised below.
+type replayPolicyStorage struct {
+	*fakeStorage
+	PolicyStorage
+	replay bool
+}
+
+func (s *replayPolicyStorage) markReplay(ctx context.Context) {
+	if s.replay {
+		MarkPolicyReplay(ctx)
+	}
+}
+
+func (s *replayPolicyStorage) PurgeQueuePolicy(
+	ctx context.Context,
+	_ *v1.PurgeQueueRequest,
+	_ policytx.Mutation,
+) (*v1.PurgeQueueResponse, error) {
+	s.markReplay(ctx)
+
+	return &v1.PurgeQueueResponse{}, nil
+}
+
+func (s *replayPolicyStorage) DeleteQueuePolicy(
+	ctx context.Context,
+	_ *v1.DeleteQueueRequest,
+	_ policytx.Mutation,
+) (*DeleteQueueResult, error) {
+	s.markReplay(ctx)
+
+	return s.deleteQueueResp, nil
+}
+
+func (s *replayPolicyStorage) SendPolicy(
+	ctx context.Context,
+	_ *v1.SendRequest,
+	_ policytx.Mutation,
+) (*v1.SendResponse, error) {
+	s.markReplay(ctx)
+
+	return s.sendResp, nil
+}
+
+func (s *replayPolicyStorage) ReceivePolicy(
+	ctx context.Context,
+	_ *v1.ReceiveRequest,
+	_ policytx.Mutation,
+) (*v1.ReceiveResponse, error) {
+	s.markReplay(ctx)
+
+	return s.receiveResp, nil
+}
+
+func (s *replayPolicyStorage) DeletePolicy(
+	ctx context.Context,
+	_ *v1.DeleteRequest,
+	_ policytx.Mutation,
+) (*v1.DeleteResponse, error) {
+	s.markReplay(ctx)
+
+	return s.deleteResp, nil
 }
 
 func (f *fakeStorage) ListTopics(context.Context) (*ListTopicsResponse, error) {
@@ -267,6 +334,118 @@ func Test_ObservedStorage_doesNotCountFailedOperations(t *testing.T) {
 
 	td.Cmp(t, strings.Contains(scrapeMetrics(), `plainq_message_size_bytes_count{queue="QFAILED"}`), false,
 		"a failed write records no message sizes either",
+	)
+}
+
+func TestObservedStoragePolicyReplayDoesNotRepeatCommittedQueueEffects(t *testing.T) {
+	const (
+		purgedQueueID  = "QPOLICYREPLAYPURGE"
+		deletedQueueID = "QPOLICYREPLAYDELETE"
+		messageQueueID = "QPOLICYREPLAYMESSAGES"
+	)
+
+	spy := &recorderSpy{}
+	observer := telemetry.NewObserver(metrics.BackendSQLite)
+	observer.SetRecorder(spy)
+	policyStore := &replayPolicyStorage{fakeStorage: &fakeStorage{
+		deleteQueueResp: &DeleteQueueResult{},
+		sendResp:        &v1.SendResponse{MessageIds: []string{"message-1"}},
+		receiveResp: &v1.ReceiveResponse{Messages: []*v1.ReceiveMessage{{
+			Id: "message-1", Body: []byte("body"),
+		}}},
+		deleteResp: &v1.DeleteResponse{Successful: []string{"message-1"}},
+	}}
+	store := NewObservedStorage(policyStore, observer)
+
+	ctx := context.Background()
+	mutation := policytx.Mutation{}
+	_, err := store.PurgeQueuePolicy(ctx, &v1.PurgeQueueRequest{QueueId: purgedQueueID}, mutation)
+	td.Require(t).CmpNoError(err)
+	_, err = store.DeleteQueuePolicy(ctx, &v1.DeleteQueueRequest{QueueId: deletedQueueID}, mutation)
+	td.Require(t).CmpNoError(err)
+	_, err = store.SendPolicy(ctx, &v1.SendRequest{
+		QueueId: messageQueueID, Messages: []*v1.SendMessage{{Body: []byte("body")}},
+	}, mutation)
+	td.Require(t).CmpNoError(err)
+	_, err = store.ReceivePolicy(ctx, &v1.ReceiveRequest{QueueId: messageQueueID}, mutation)
+	td.Require(t).CmpNoError(err)
+	_, err = store.DeletePolicy(ctx, &v1.DeleteRequest{
+		QueueId: messageQueueID, MessageIds: []string{"message-1"},
+	}, mutation)
+	td.Require(t).CmpNoError(err)
+
+	spy.mu.Lock()
+	td.Cmp(t, spy.sent, uint64(1))
+	td.Cmp(t, spy.sentBytes, uint64(4))
+	td.Cmp(t, spy.received, uint64(1))
+	td.Cmp(t, spy.emptyRecv, 0)
+	td.Cmp(t, spy.deleted, uint64(1))
+	spy.mu.Unlock()
+
+	// Model activity committed after the original purge/delete. Replaying an
+	// old key must not erase these newer gauge values.
+	metrics.SetQueueStats(purgedQueueID, 7, 3)
+	metrics.SetQueueStats(deletedQueueID, 5, 2)
+	metrics.SetQueueStats(messageQueueID, 9, 4)
+	policyStore.replay = true
+
+	_, err = store.PurgeQueuePolicy(ctx, &v1.PurgeQueueRequest{QueueId: purgedQueueID}, mutation)
+	td.Require(t).CmpNoError(err)
+	_, err = store.DeleteQueuePolicy(ctx, &v1.DeleteQueueRequest{QueueId: deletedQueueID}, mutation)
+	td.Require(t).CmpNoError(err)
+	_, err = store.SendPolicy(ctx, &v1.SendRequest{
+		QueueId: messageQueueID, Messages: []*v1.SendMessage{{Body: []byte("body")}},
+	}, mutation)
+	td.Require(t).CmpNoError(err)
+	assertQueueGaugeSample(t, messageQueueID, 9, 4)
+	_, err = store.ReceivePolicy(ctx, &v1.ReceiveRequest{QueueId: messageQueueID}, mutation)
+	td.Require(t).CmpNoError(err)
+	assertQueueGaugeSample(t, messageQueueID, 9, 4)
+	_, err = store.DeletePolicy(ctx, &v1.DeleteRequest{
+		QueueId: messageQueueID, MessageIds: []string{"message-1"},
+	}, mutation)
+	td.Require(t).CmpNoError(err)
+	assertQueueGaugeSample(t, messageQueueID, 9, 4)
+
+	spy.mu.Lock()
+	td.Cmp(t, spy.sent, uint64(1))
+	td.Cmp(t, spy.sentBytes, uint64(4))
+	td.Cmp(t, spy.received, uint64(1))
+	td.Cmp(t, spy.emptyRecv, 0)
+	td.Cmp(t, spy.deleted, uint64(1))
+	spy.mu.Unlock()
+
+	exposition := scrapeMetrics()
+	for _, sample := range []string{
+		`plainq_queue_depth{queue="` + purgedQueueID + `"} 7`,
+		`plainq_messages_in_flight{queue="` + purgedQueueID + `"} 3`,
+		`plainq_queue_depth{queue="` + deletedQueueID + `"} 5`,
+		`plainq_messages_in_flight{queue="` + deletedQueueID + `"} 2`,
+	} {
+		td.Cmp(t, strings.Contains(exposition, sample), true, "replay preserves committed gauge sample")
+	}
+	for _, sample := range []string{
+		`plainq_messages_sent_total{queue="` + messageQueueID + `"} 1`,
+		`plainq_messages_sent_bytes_total{queue="` + messageQueueID + `"} 4`,
+		`plainq_messages_received_total{queue="` + messageQueueID + `"} 1`,
+		`plainq_messages_deleted_total{queue="` + messageQueueID + `"} 1`,
+		`plainq_message_size_bytes_count{queue="` + messageQueueID + `"} 1`,
+	} {
+		td.Cmp(t, strings.Contains(exposition, sample), true, "replay preserves one committed metric effect")
+	}
+}
+
+func assertQueueGaugeSample(t *testing.T, queueID string, depth, inFlight int64) {
+	t.Helper()
+
+	exposition := scrapeMetrics()
+	td.Cmp(t, strings.Contains(exposition,
+		`plainq_queue_depth{queue="`+queueID+`"} `+fmt.Sprint(depth)), true,
+		"queue depth must not move on replay",
+	)
+	td.Cmp(t, strings.Contains(exposition,
+		`plainq_messages_in_flight{queue="`+queueID+`"} `+fmt.Sprint(inFlight)), true,
+		"in-flight count must not move on replay",
 	)
 }
 

@@ -7,9 +7,10 @@ package v1
 import (
 	fmt "fmt"
 	protohelpers "github.com/planetscale/vtprotobuf/protohelpers"
-	timestamppb "github.com/planetscale/vtprotobuf/types/known/timestamppb"
+	timestamppb1 "github.com/planetscale/vtprotobuf/types/known/timestamppb"
+	proto "google.golang.org/protobuf/proto"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
-	timestamppb1 "google.golang.org/protobuf/types/known/timestamppb"
+	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
 	io "io"
 )
 
@@ -20,6 +21,2204 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+func (m *SendMessage) CloneVT() *SendMessage {
+	if m == nil {
+		return (*SendMessage)(nil)
+	}
+	r := new(SendMessage)
+	if rhs := m.Body; rhs != nil {
+		tmpBytes := make([]byte, len(rhs))
+		copy(tmpBytes, rhs)
+		r.Body = tmpBytes
+	}
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *SendMessage) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *ReceiveMessage) CloneVT() *ReceiveMessage {
+	if m == nil {
+		return (*ReceiveMessage)(nil)
+	}
+	r := new(ReceiveMessage)
+	r.Id = m.Id
+	r.ReceiptHandle = m.ReceiptHandle
+	r.DeliveryAttempt = m.DeliveryAttempt
+	r.LeaseExpiresAt = (*timestamppb.Timestamp)((*timestamppb1.Timestamp)(m.LeaseExpiresAt).CloneVT())
+	if rhs := m.Body; rhs != nil {
+		tmpBytes := make([]byte, len(rhs))
+		copy(tmpBytes, rhs)
+		r.Body = tmpBytes
+	}
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *ReceiveMessage) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *ListQueuesRequest) CloneVT() *ListQueuesRequest {
+	if m == nil {
+		return (*ListQueuesRequest)(nil)
+	}
+	r := new(ListQueuesRequest)
+	r.QueuePrefix = m.QueuePrefix
+	r.Limit = m.Limit
+	r.Cursor = m.Cursor
+	r.OrderBy = m.OrderBy
+	r.SortBy = m.SortBy
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *ListQueuesRequest) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *ListQueuesResponse) CloneVT() *ListQueuesResponse {
+	if m == nil {
+		return (*ListQueuesResponse)(nil)
+	}
+	r := new(ListQueuesResponse)
+	r.NextCursor = m.NextCursor
+	r.HasMore = m.HasMore
+	r.TotalCount = m.TotalCount
+	if rhs := m.Queues; rhs != nil {
+		tmpContainer := make([]*DescribeQueueResponse, len(rhs))
+		for k, v := range rhs {
+			tmpContainer[k] = v.CloneVT()
+		}
+		r.Queues = tmpContainer
+	}
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *ListQueuesResponse) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *DescribeQueueRequest) CloneVT() *DescribeQueueRequest {
+	if m == nil {
+		return (*DescribeQueueRequest)(nil)
+	}
+	r := new(DescribeQueueRequest)
+	r.QueueId = m.QueueId
+	r.QueueName = m.QueueName
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *DescribeQueueRequest) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *DescribeQueueResponse) CloneVT() *DescribeQueueResponse {
+	if m == nil {
+		return (*DescribeQueueResponse)(nil)
+	}
+	r := new(DescribeQueueResponse)
+	r.QueueId = m.QueueId
+	r.QueueName = m.QueueName
+	r.CreatedAt = (*timestamppb.Timestamp)((*timestamppb1.Timestamp)(m.CreatedAt).CloneVT())
+	r.RetentionPeriodSeconds = m.RetentionPeriodSeconds
+	r.VisibilityTimeoutSeconds = m.VisibilityTimeoutSeconds
+	r.MaxReceiveAttempts = m.MaxReceiveAttempts
+	r.EvictionPolicy = m.EvictionPolicy
+	r.DeadLetterQueueId = m.DeadLetterQueueId
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *DescribeQueueResponse) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *CreateQueueRequest) CloneVT() *CreateQueueRequest {
+	if m == nil {
+		return (*CreateQueueRequest)(nil)
+	}
+	r := new(CreateQueueRequest)
+	r.QueueName = m.QueueName
+	r.RetentionPeriodSeconds = m.RetentionPeriodSeconds
+	r.VisibilityTimeoutSeconds = m.VisibilityTimeoutSeconds
+	r.MaxReceiveAttempts = m.MaxReceiveAttempts
+	r.EvictionPolicy = m.EvictionPolicy
+	r.DeadLetterQueueId = m.DeadLetterQueueId
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *CreateQueueRequest) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *CreateQueueResponse) CloneVT() *CreateQueueResponse {
+	if m == nil {
+		return (*CreateQueueResponse)(nil)
+	}
+	r := new(CreateQueueResponse)
+	r.QueueId = m.QueueId
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *CreateQueueResponse) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *PurgeQueueRequest) CloneVT() *PurgeQueueRequest {
+	if m == nil {
+		return (*PurgeQueueRequest)(nil)
+	}
+	r := new(PurgeQueueRequest)
+	r.QueueId = m.QueueId
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *PurgeQueueRequest) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *PurgeQueueResponse) CloneVT() *PurgeQueueResponse {
+	if m == nil {
+		return (*PurgeQueueResponse)(nil)
+	}
+	r := new(PurgeQueueResponse)
+	r.MessagesCount = m.MessagesCount
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *PurgeQueueResponse) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *DeleteQueueRequest) CloneVT() *DeleteQueueRequest {
+	if m == nil {
+		return (*DeleteQueueRequest)(nil)
+	}
+	r := new(DeleteQueueRequest)
+	r.QueueId = m.QueueId
+	r.Force = m.Force
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *DeleteQueueRequest) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *DeleteQueueResponse) CloneVT() *DeleteQueueResponse {
+	if m == nil {
+		return (*DeleteQueueResponse)(nil)
+	}
+	r := new(DeleteQueueResponse)
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *DeleteQueueResponse) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *SendRequest) CloneVT() *SendRequest {
+	if m == nil {
+		return (*SendRequest)(nil)
+	}
+	r := new(SendRequest)
+	r.QueueId = m.QueueId
+	if rhs := m.Messages; rhs != nil {
+		tmpContainer := make([]*SendMessage, len(rhs))
+		for k, v := range rhs {
+			tmpContainer[k] = v.CloneVT()
+		}
+		r.Messages = tmpContainer
+	}
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *SendRequest) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *SendResponse) CloneVT() *SendResponse {
+	if m == nil {
+		return (*SendResponse)(nil)
+	}
+	r := new(SendResponse)
+	if rhs := m.MessageIds; rhs != nil {
+		tmpContainer := make([]string, len(rhs))
+		copy(tmpContainer, rhs)
+		r.MessageIds = tmpContainer
+	}
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *SendResponse) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *ReceiveRequest) CloneVT() *ReceiveRequest {
+	if m == nil {
+		return (*ReceiveRequest)(nil)
+	}
+	r := new(ReceiveRequest)
+	r.QueueId = m.QueueId
+	r.BatchSize = m.BatchSize
+	r.WaitTimeSeconds = m.WaitTimeSeconds
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *ReceiveRequest) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *ReceiveResponse) CloneVT() *ReceiveResponse {
+	if m == nil {
+		return (*ReceiveResponse)(nil)
+	}
+	r := new(ReceiveResponse)
+	if rhs := m.Messages; rhs != nil {
+		tmpContainer := make([]*ReceiveMessage, len(rhs))
+		for k, v := range rhs {
+			tmpContainer[k] = v.CloneVT()
+		}
+		r.Messages = tmpContainer
+	}
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *ReceiveResponse) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *DeleteRequest) CloneVT() *DeleteRequest {
+	if m == nil {
+		return (*DeleteRequest)(nil)
+	}
+	r := new(DeleteRequest)
+	r.QueueId = m.QueueId
+	if rhs := m.MessageIds; rhs != nil {
+		tmpContainer := make([]string, len(rhs))
+		copy(tmpContainer, rhs)
+		r.MessageIds = tmpContainer
+	}
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *DeleteRequest) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *DeleteResponse) CloneVT() *DeleteResponse {
+	if m == nil {
+		return (*DeleteResponse)(nil)
+	}
+	r := new(DeleteResponse)
+	if rhs := m.Successful; rhs != nil {
+		tmpContainer := make([]string, len(rhs))
+		copy(tmpContainer, rhs)
+		r.Successful = tmpContainer
+	}
+	if rhs := m.Failed; rhs != nil {
+		tmpContainer := make([]*DeleteFailure, len(rhs))
+		for k, v := range rhs {
+			tmpContainer[k] = v.CloneVT()
+		}
+		r.Failed = tmpContainer
+	}
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *DeleteResponse) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *DeleteFailure) CloneVT() *DeleteFailure {
+	if m == nil {
+		return (*DeleteFailure)(nil)
+	}
+	r := new(DeleteFailure)
+	r.MessageId = m.MessageId
+	r.Error = m.Error
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *DeleteFailure) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *Topic) CloneVT() *Topic {
+	if m == nil {
+		return (*Topic)(nil)
+	}
+	r := new(Topic)
+	r.TopicId = m.TopicId
+	r.TopicName = m.TopicName
+	r.CreatedAt = (*timestamppb.Timestamp)((*timestamppb1.Timestamp)(m.CreatedAt).CloneVT())
+	if rhs := m.Subscriptions; rhs != nil {
+		tmpContainer := make([]*Subscription, len(rhs))
+		for k, v := range rhs {
+			tmpContainer[k] = v.CloneVT()
+		}
+		r.Subscriptions = tmpContainer
+	}
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *Topic) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *Subscription) CloneVT() *Subscription {
+	if m == nil {
+		return (*Subscription)(nil)
+	}
+	r := new(Subscription)
+	r.SubscriptionId = m.SubscriptionId
+	r.TopicId = m.TopicId
+	r.QueueId = m.QueueId
+	r.QueueName = m.QueueName
+	r.CreatedAt = (*timestamppb.Timestamp)((*timestamppb1.Timestamp)(m.CreatedAt).CloneVT())
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *Subscription) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *PublishMessage) CloneVT() *PublishMessage {
+	if m == nil {
+		return (*PublishMessage)(nil)
+	}
+	r := new(PublishMessage)
+	if rhs := m.Body; rhs != nil {
+		tmpBytes := make([]byte, len(rhs))
+		copy(tmpBytes, rhs)
+		r.Body = tmpBytes
+	}
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *PublishMessage) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *ListTopicsRequest) CloneVT() *ListTopicsRequest {
+	if m == nil {
+		return (*ListTopicsRequest)(nil)
+	}
+	r := new(ListTopicsRequest)
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *ListTopicsRequest) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *ListTopicsResponse) CloneVT() *ListTopicsResponse {
+	if m == nil {
+		return (*ListTopicsResponse)(nil)
+	}
+	r := new(ListTopicsResponse)
+	if rhs := m.Topics; rhs != nil {
+		tmpContainer := make([]*Topic, len(rhs))
+		for k, v := range rhs {
+			tmpContainer[k] = v.CloneVT()
+		}
+		r.Topics = tmpContainer
+	}
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *ListTopicsResponse) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *CreateTopicRequest) CloneVT() *CreateTopicRequest {
+	if m == nil {
+		return (*CreateTopicRequest)(nil)
+	}
+	r := new(CreateTopicRequest)
+	r.TopicName = m.TopicName
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *CreateTopicRequest) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *CreateTopicResponse) CloneVT() *CreateTopicResponse {
+	if m == nil {
+		return (*CreateTopicResponse)(nil)
+	}
+	r := new(CreateTopicResponse)
+	r.TopicId = m.TopicId
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *CreateTopicResponse) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *DeleteTopicRequest) CloneVT() *DeleteTopicRequest {
+	if m == nil {
+		return (*DeleteTopicRequest)(nil)
+	}
+	r := new(DeleteTopicRequest)
+	r.TopicId = m.TopicId
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *DeleteTopicRequest) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *DeleteTopicResponse) CloneVT() *DeleteTopicResponse {
+	if m == nil {
+		return (*DeleteTopicResponse)(nil)
+	}
+	r := new(DeleteTopicResponse)
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *DeleteTopicResponse) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *SubscribeRequest) CloneVT() *SubscribeRequest {
+	if m == nil {
+		return (*SubscribeRequest)(nil)
+	}
+	r := new(SubscribeRequest)
+	r.TopicId = m.TopicId
+	r.QueueId = m.QueueId
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *SubscribeRequest) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *SubscribeResponse) CloneVT() *SubscribeResponse {
+	if m == nil {
+		return (*SubscribeResponse)(nil)
+	}
+	r := new(SubscribeResponse)
+	r.SubscriptionId = m.SubscriptionId
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *SubscribeResponse) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *UnsubscribeRequest) CloneVT() *UnsubscribeRequest {
+	if m == nil {
+		return (*UnsubscribeRequest)(nil)
+	}
+	r := new(UnsubscribeRequest)
+	r.TopicId = m.TopicId
+	r.SubscriptionId = m.SubscriptionId
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *UnsubscribeRequest) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *UnsubscribeResponse) CloneVT() *UnsubscribeResponse {
+	if m == nil {
+		return (*UnsubscribeResponse)(nil)
+	}
+	r := new(UnsubscribeResponse)
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *UnsubscribeResponse) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *PublishRequest) CloneVT() *PublishRequest {
+	if m == nil {
+		return (*PublishRequest)(nil)
+	}
+	r := new(PublishRequest)
+	r.TopicId = m.TopicId
+	if rhs := m.Messages; rhs != nil {
+		tmpContainer := make([]*PublishMessage, len(rhs))
+		for k, v := range rhs {
+			tmpContainer[k] = v.CloneVT()
+		}
+		r.Messages = tmpContainer
+	}
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *PublishRequest) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *PublishResponse) CloneVT() *PublishResponse {
+	if m == nil {
+		return (*PublishResponse)(nil)
+	}
+	r := new(PublishResponse)
+	r.TopicId = m.TopicId
+	r.DeliveredCount = m.DeliveredCount
+	if rhs := m.QueueIds; rhs != nil {
+		tmpContainer := make([]string, len(rhs))
+		copy(tmpContainer, rhs)
+		r.QueueIds = tmpContainer
+	}
+	if rhs := m.MessageIds; rhs != nil {
+		tmpContainer := make([]string, len(rhs))
+		copy(tmpContainer, rhs)
+		r.MessageIds = tmpContainer
+	}
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *PublishResponse) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *QueueDeliveryReceipt) CloneVT() *QueueDeliveryReceipt {
+	if m == nil {
+		return (*QueueDeliveryReceipt)(nil)
+	}
+	r := new(QueueDeliveryReceipt)
+	r.MessageId = m.MessageId
+	r.ReceiptHandle = m.ReceiptHandle
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *QueueDeliveryReceipt) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *QueueDeliveryFailure) CloneVT() *QueueDeliveryFailure {
+	if m == nil {
+		return (*QueueDeliveryFailure)(nil)
+	}
+	r := new(QueueDeliveryFailure)
+	r.MessageId = m.MessageId
+	r.Code = m.Code
+	r.Message = m.Message
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *QueueDeliveryFailure) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *QueueNackDelivery) CloneVT() *QueueNackDelivery {
+	if m == nil {
+		return (*QueueNackDelivery)(nil)
+	}
+	r := new(QueueNackDelivery)
+	r.Receipt = m.Receipt.CloneVT()
+	r.AvailableAfterSeconds = m.AvailableAfterSeconds
+	r.Reason = m.Reason
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *QueueNackDelivery) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *QueueExtendDelivery) CloneVT() *QueueExtendDelivery {
+	if m == nil {
+		return (*QueueExtendDelivery)(nil)
+	}
+	r := new(QueueExtendDelivery)
+	r.Receipt = m.Receipt.CloneVT()
+	r.ExtensionSeconds = m.ExtensionSeconds
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *QueueExtendDelivery) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *QueueExtendedDelivery) CloneVT() *QueueExtendedDelivery {
+	if m == nil {
+		return (*QueueExtendedDelivery)(nil)
+	}
+	r := new(QueueExtendedDelivery)
+	r.MessageId = m.MessageId
+	r.ReceiptHandle = m.ReceiptHandle
+	r.LeaseExpiresAt = (*timestamppb.Timestamp)((*timestamppb1.Timestamp)(m.LeaseExpiresAt).CloneVT())
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *QueueExtendedDelivery) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *AcknowledgeQueueRequest) CloneVT() *AcknowledgeQueueRequest {
+	if m == nil {
+		return (*AcknowledgeQueueRequest)(nil)
+	}
+	r := new(AcknowledgeQueueRequest)
+	r.QueueId = m.QueueId
+	if rhs := m.Receipts; rhs != nil {
+		tmpContainer := make([]*QueueDeliveryReceipt, len(rhs))
+		for k, v := range rhs {
+			tmpContainer[k] = v.CloneVT()
+		}
+		r.Receipts = tmpContainer
+	}
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *AcknowledgeQueueRequest) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *AcknowledgeQueueResponse) CloneVT() *AcknowledgeQueueResponse {
+	if m == nil {
+		return (*AcknowledgeQueueResponse)(nil)
+	}
+	r := new(AcknowledgeQueueResponse)
+	if rhs := m.SuccessfulMessageIds; rhs != nil {
+		tmpContainer := make([]string, len(rhs))
+		copy(tmpContainer, rhs)
+		r.SuccessfulMessageIds = tmpContainer
+	}
+	if rhs := m.Failed; rhs != nil {
+		tmpContainer := make([]*QueueDeliveryFailure, len(rhs))
+		for k, v := range rhs {
+			tmpContainer[k] = v.CloneVT()
+		}
+		r.Failed = tmpContainer
+	}
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *AcknowledgeQueueResponse) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *NackQueueRequest) CloneVT() *NackQueueRequest {
+	if m == nil {
+		return (*NackQueueRequest)(nil)
+	}
+	r := new(NackQueueRequest)
+	r.QueueId = m.QueueId
+	if rhs := m.Deliveries; rhs != nil {
+		tmpContainer := make([]*QueueNackDelivery, len(rhs))
+		for k, v := range rhs {
+			tmpContainer[k] = v.CloneVT()
+		}
+		r.Deliveries = tmpContainer
+	}
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *NackQueueRequest) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *NackQueueResponse) CloneVT() *NackQueueResponse {
+	if m == nil {
+		return (*NackQueueResponse)(nil)
+	}
+	r := new(NackQueueResponse)
+	if rhs := m.SuccessfulMessageIds; rhs != nil {
+		tmpContainer := make([]string, len(rhs))
+		copy(tmpContainer, rhs)
+		r.SuccessfulMessageIds = tmpContainer
+	}
+	if rhs := m.Failed; rhs != nil {
+		tmpContainer := make([]*QueueDeliveryFailure, len(rhs))
+		for k, v := range rhs {
+			tmpContainer[k] = v.CloneVT()
+		}
+		r.Failed = tmpContainer
+	}
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *NackQueueResponse) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *ExtendQueueLeaseRequest) CloneVT() *ExtendQueueLeaseRequest {
+	if m == nil {
+		return (*ExtendQueueLeaseRequest)(nil)
+	}
+	r := new(ExtendQueueLeaseRequest)
+	r.QueueId = m.QueueId
+	if rhs := m.Deliveries; rhs != nil {
+		tmpContainer := make([]*QueueExtendDelivery, len(rhs))
+		for k, v := range rhs {
+			tmpContainer[k] = v.CloneVT()
+		}
+		r.Deliveries = tmpContainer
+	}
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *ExtendQueueLeaseRequest) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (m *ExtendQueueLeaseResponse) CloneVT() *ExtendQueueLeaseResponse {
+	if m == nil {
+		return (*ExtendQueueLeaseResponse)(nil)
+	}
+	r := new(ExtendQueueLeaseResponse)
+	if rhs := m.Extended; rhs != nil {
+		tmpContainer := make([]*QueueExtendedDelivery, len(rhs))
+		for k, v := range rhs {
+			tmpContainer[k] = v.CloneVT()
+		}
+		r.Extended = tmpContainer
+	}
+	if rhs := m.Failed; rhs != nil {
+		tmpContainer := make([]*QueueDeliveryFailure, len(rhs))
+		for k, v := range rhs {
+			tmpContainer[k] = v.CloneVT()
+		}
+		r.Failed = tmpContainer
+	}
+	if len(m.unknownFields) > 0 {
+		r.unknownFields = make([]byte, len(m.unknownFields))
+		copy(r.unknownFields, m.unknownFields)
+	}
+	return r
+}
+
+func (m *ExtendQueueLeaseResponse) CloneMessageVT() proto.Message {
+	return m.CloneVT()
+}
+
+func (this *SendMessage) EqualVT(that *SendMessage) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if string(this.Body) != string(that.Body) {
+		return false
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *SendMessage) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*SendMessage)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *ReceiveMessage) EqualVT(that *ReceiveMessage) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if this.Id != that.Id {
+		return false
+	}
+	if string(this.Body) != string(that.Body) {
+		return false
+	}
+	if this.ReceiptHandle != that.ReceiptHandle {
+		return false
+	}
+	if this.DeliveryAttempt != that.DeliveryAttempt {
+		return false
+	}
+	if !(*timestamppb1.Timestamp)(this.LeaseExpiresAt).EqualVT((*timestamppb1.Timestamp)(that.LeaseExpiresAt)) {
+		return false
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *ReceiveMessage) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*ReceiveMessage)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *ListQueuesRequest) EqualVT(that *ListQueuesRequest) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if this.QueuePrefix != that.QueuePrefix {
+		return false
+	}
+	if this.Limit != that.Limit {
+		return false
+	}
+	if this.Cursor != that.Cursor {
+		return false
+	}
+	if this.OrderBy != that.OrderBy {
+		return false
+	}
+	if this.SortBy != that.SortBy {
+		return false
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *ListQueuesRequest) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*ListQueuesRequest)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *ListQueuesResponse) EqualVT(that *ListQueuesResponse) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if len(this.Queues) != len(that.Queues) {
+		return false
+	}
+	for i, vx := range this.Queues {
+		vy := that.Queues[i]
+		if p, q := vx, vy; p != q {
+			if p == nil {
+				p = &DescribeQueueResponse{}
+			}
+			if q == nil {
+				q = &DescribeQueueResponse{}
+			}
+			if !p.EqualVT(q) {
+				return false
+			}
+		}
+	}
+	if this.NextCursor != that.NextCursor {
+		return false
+	}
+	if this.HasMore != that.HasMore {
+		return false
+	}
+	if this.TotalCount != that.TotalCount {
+		return false
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *ListQueuesResponse) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*ListQueuesResponse)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *DescribeQueueRequest) EqualVT(that *DescribeQueueRequest) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if this.QueueId != that.QueueId {
+		return false
+	}
+	if this.QueueName != that.QueueName {
+		return false
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *DescribeQueueRequest) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*DescribeQueueRequest)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *DescribeQueueResponse) EqualVT(that *DescribeQueueResponse) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if this.QueueId != that.QueueId {
+		return false
+	}
+	if this.QueueName != that.QueueName {
+		return false
+	}
+	if !(*timestamppb1.Timestamp)(this.CreatedAt).EqualVT((*timestamppb1.Timestamp)(that.CreatedAt)) {
+		return false
+	}
+	if this.RetentionPeriodSeconds != that.RetentionPeriodSeconds {
+		return false
+	}
+	if this.VisibilityTimeoutSeconds != that.VisibilityTimeoutSeconds {
+		return false
+	}
+	if this.MaxReceiveAttempts != that.MaxReceiveAttempts {
+		return false
+	}
+	if this.EvictionPolicy != that.EvictionPolicy {
+		return false
+	}
+	if this.DeadLetterQueueId != that.DeadLetterQueueId {
+		return false
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *DescribeQueueResponse) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*DescribeQueueResponse)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *CreateQueueRequest) EqualVT(that *CreateQueueRequest) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if this.QueueName != that.QueueName {
+		return false
+	}
+	if this.RetentionPeriodSeconds != that.RetentionPeriodSeconds {
+		return false
+	}
+	if this.VisibilityTimeoutSeconds != that.VisibilityTimeoutSeconds {
+		return false
+	}
+	if this.MaxReceiveAttempts != that.MaxReceiveAttempts {
+		return false
+	}
+	if this.EvictionPolicy != that.EvictionPolicy {
+		return false
+	}
+	if this.DeadLetterQueueId != that.DeadLetterQueueId {
+		return false
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *CreateQueueRequest) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*CreateQueueRequest)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *CreateQueueResponse) EqualVT(that *CreateQueueResponse) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if this.QueueId != that.QueueId {
+		return false
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *CreateQueueResponse) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*CreateQueueResponse)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *PurgeQueueRequest) EqualVT(that *PurgeQueueRequest) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if this.QueueId != that.QueueId {
+		return false
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *PurgeQueueRequest) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*PurgeQueueRequest)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *PurgeQueueResponse) EqualVT(that *PurgeQueueResponse) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if this.MessagesCount != that.MessagesCount {
+		return false
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *PurgeQueueResponse) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*PurgeQueueResponse)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *DeleteQueueRequest) EqualVT(that *DeleteQueueRequest) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if this.QueueId != that.QueueId {
+		return false
+	}
+	if this.Force != that.Force {
+		return false
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *DeleteQueueRequest) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*DeleteQueueRequest)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *DeleteQueueResponse) EqualVT(that *DeleteQueueResponse) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *DeleteQueueResponse) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*DeleteQueueResponse)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *SendRequest) EqualVT(that *SendRequest) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if this.QueueId != that.QueueId {
+		return false
+	}
+	if len(this.Messages) != len(that.Messages) {
+		return false
+	}
+	for i, vx := range this.Messages {
+		vy := that.Messages[i]
+		if p, q := vx, vy; p != q {
+			if p == nil {
+				p = &SendMessage{}
+			}
+			if q == nil {
+				q = &SendMessage{}
+			}
+			if !p.EqualVT(q) {
+				return false
+			}
+		}
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *SendRequest) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*SendRequest)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *SendResponse) EqualVT(that *SendResponse) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if len(this.MessageIds) != len(that.MessageIds) {
+		return false
+	}
+	for i, vx := range this.MessageIds {
+		vy := that.MessageIds[i]
+		if vx != vy {
+			return false
+		}
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *SendResponse) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*SendResponse)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *ReceiveRequest) EqualVT(that *ReceiveRequest) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if this.QueueId != that.QueueId {
+		return false
+	}
+	if this.BatchSize != that.BatchSize {
+		return false
+	}
+	if this.WaitTimeSeconds != that.WaitTimeSeconds {
+		return false
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *ReceiveRequest) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*ReceiveRequest)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *ReceiveResponse) EqualVT(that *ReceiveResponse) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if len(this.Messages) != len(that.Messages) {
+		return false
+	}
+	for i, vx := range this.Messages {
+		vy := that.Messages[i]
+		if p, q := vx, vy; p != q {
+			if p == nil {
+				p = &ReceiveMessage{}
+			}
+			if q == nil {
+				q = &ReceiveMessage{}
+			}
+			if !p.EqualVT(q) {
+				return false
+			}
+		}
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *ReceiveResponse) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*ReceiveResponse)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *DeleteRequest) EqualVT(that *DeleteRequest) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if this.QueueId != that.QueueId {
+		return false
+	}
+	if len(this.MessageIds) != len(that.MessageIds) {
+		return false
+	}
+	for i, vx := range this.MessageIds {
+		vy := that.MessageIds[i]
+		if vx != vy {
+			return false
+		}
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *DeleteRequest) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*DeleteRequest)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *DeleteResponse) EqualVT(that *DeleteResponse) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if len(this.Successful) != len(that.Successful) {
+		return false
+	}
+	for i, vx := range this.Successful {
+		vy := that.Successful[i]
+		if vx != vy {
+			return false
+		}
+	}
+	if len(this.Failed) != len(that.Failed) {
+		return false
+	}
+	for i, vx := range this.Failed {
+		vy := that.Failed[i]
+		if p, q := vx, vy; p != q {
+			if p == nil {
+				p = &DeleteFailure{}
+			}
+			if q == nil {
+				q = &DeleteFailure{}
+			}
+			if !p.EqualVT(q) {
+				return false
+			}
+		}
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *DeleteResponse) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*DeleteResponse)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *DeleteFailure) EqualVT(that *DeleteFailure) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if this.MessageId != that.MessageId {
+		return false
+	}
+	if this.Error != that.Error {
+		return false
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *DeleteFailure) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*DeleteFailure)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *Topic) EqualVT(that *Topic) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if this.TopicId != that.TopicId {
+		return false
+	}
+	if this.TopicName != that.TopicName {
+		return false
+	}
+	if !(*timestamppb1.Timestamp)(this.CreatedAt).EqualVT((*timestamppb1.Timestamp)(that.CreatedAt)) {
+		return false
+	}
+	if len(this.Subscriptions) != len(that.Subscriptions) {
+		return false
+	}
+	for i, vx := range this.Subscriptions {
+		vy := that.Subscriptions[i]
+		if p, q := vx, vy; p != q {
+			if p == nil {
+				p = &Subscription{}
+			}
+			if q == nil {
+				q = &Subscription{}
+			}
+			if !p.EqualVT(q) {
+				return false
+			}
+		}
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *Topic) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*Topic)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *Subscription) EqualVT(that *Subscription) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if this.SubscriptionId != that.SubscriptionId {
+		return false
+	}
+	if this.TopicId != that.TopicId {
+		return false
+	}
+	if this.QueueId != that.QueueId {
+		return false
+	}
+	if this.QueueName != that.QueueName {
+		return false
+	}
+	if !(*timestamppb1.Timestamp)(this.CreatedAt).EqualVT((*timestamppb1.Timestamp)(that.CreatedAt)) {
+		return false
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *Subscription) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*Subscription)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *PublishMessage) EqualVT(that *PublishMessage) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if string(this.Body) != string(that.Body) {
+		return false
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *PublishMessage) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*PublishMessage)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *ListTopicsRequest) EqualVT(that *ListTopicsRequest) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *ListTopicsRequest) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*ListTopicsRequest)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *ListTopicsResponse) EqualVT(that *ListTopicsResponse) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if len(this.Topics) != len(that.Topics) {
+		return false
+	}
+	for i, vx := range this.Topics {
+		vy := that.Topics[i]
+		if p, q := vx, vy; p != q {
+			if p == nil {
+				p = &Topic{}
+			}
+			if q == nil {
+				q = &Topic{}
+			}
+			if !p.EqualVT(q) {
+				return false
+			}
+		}
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *ListTopicsResponse) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*ListTopicsResponse)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *CreateTopicRequest) EqualVT(that *CreateTopicRequest) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if this.TopicName != that.TopicName {
+		return false
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *CreateTopicRequest) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*CreateTopicRequest)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *CreateTopicResponse) EqualVT(that *CreateTopicResponse) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if this.TopicId != that.TopicId {
+		return false
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *CreateTopicResponse) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*CreateTopicResponse)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *DeleteTopicRequest) EqualVT(that *DeleteTopicRequest) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if this.TopicId != that.TopicId {
+		return false
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *DeleteTopicRequest) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*DeleteTopicRequest)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *DeleteTopicResponse) EqualVT(that *DeleteTopicResponse) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *DeleteTopicResponse) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*DeleteTopicResponse)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *SubscribeRequest) EqualVT(that *SubscribeRequest) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if this.TopicId != that.TopicId {
+		return false
+	}
+	if this.QueueId != that.QueueId {
+		return false
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *SubscribeRequest) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*SubscribeRequest)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *SubscribeResponse) EqualVT(that *SubscribeResponse) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if this.SubscriptionId != that.SubscriptionId {
+		return false
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *SubscribeResponse) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*SubscribeResponse)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *UnsubscribeRequest) EqualVT(that *UnsubscribeRequest) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if this.TopicId != that.TopicId {
+		return false
+	}
+	if this.SubscriptionId != that.SubscriptionId {
+		return false
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *UnsubscribeRequest) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*UnsubscribeRequest)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *UnsubscribeResponse) EqualVT(that *UnsubscribeResponse) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *UnsubscribeResponse) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*UnsubscribeResponse)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *PublishRequest) EqualVT(that *PublishRequest) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if this.TopicId != that.TopicId {
+		return false
+	}
+	if len(this.Messages) != len(that.Messages) {
+		return false
+	}
+	for i, vx := range this.Messages {
+		vy := that.Messages[i]
+		if p, q := vx, vy; p != q {
+			if p == nil {
+				p = &PublishMessage{}
+			}
+			if q == nil {
+				q = &PublishMessage{}
+			}
+			if !p.EqualVT(q) {
+				return false
+			}
+		}
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *PublishRequest) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*PublishRequest)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *PublishResponse) EqualVT(that *PublishResponse) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if this.TopicId != that.TopicId {
+		return false
+	}
+	if len(this.QueueIds) != len(that.QueueIds) {
+		return false
+	}
+	for i, vx := range this.QueueIds {
+		vy := that.QueueIds[i]
+		if vx != vy {
+			return false
+		}
+	}
+	if len(this.MessageIds) != len(that.MessageIds) {
+		return false
+	}
+	for i, vx := range this.MessageIds {
+		vy := that.MessageIds[i]
+		if vx != vy {
+			return false
+		}
+	}
+	if this.DeliveredCount != that.DeliveredCount {
+		return false
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *PublishResponse) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*PublishResponse)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *QueueDeliveryReceipt) EqualVT(that *QueueDeliveryReceipt) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if this.MessageId != that.MessageId {
+		return false
+	}
+	if this.ReceiptHandle != that.ReceiptHandle {
+		return false
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *QueueDeliveryReceipt) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*QueueDeliveryReceipt)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *QueueDeliveryFailure) EqualVT(that *QueueDeliveryFailure) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if this.MessageId != that.MessageId {
+		return false
+	}
+	if this.Code != that.Code {
+		return false
+	}
+	if this.Message != that.Message {
+		return false
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *QueueDeliveryFailure) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*QueueDeliveryFailure)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *QueueNackDelivery) EqualVT(that *QueueNackDelivery) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if !this.Receipt.EqualVT(that.Receipt) {
+		return false
+	}
+	if this.AvailableAfterSeconds != that.AvailableAfterSeconds {
+		return false
+	}
+	if this.Reason != that.Reason {
+		return false
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *QueueNackDelivery) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*QueueNackDelivery)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *QueueExtendDelivery) EqualVT(that *QueueExtendDelivery) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if !this.Receipt.EqualVT(that.Receipt) {
+		return false
+	}
+	if this.ExtensionSeconds != that.ExtensionSeconds {
+		return false
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *QueueExtendDelivery) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*QueueExtendDelivery)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *QueueExtendedDelivery) EqualVT(that *QueueExtendedDelivery) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if this.MessageId != that.MessageId {
+		return false
+	}
+	if this.ReceiptHandle != that.ReceiptHandle {
+		return false
+	}
+	if !(*timestamppb1.Timestamp)(this.LeaseExpiresAt).EqualVT((*timestamppb1.Timestamp)(that.LeaseExpiresAt)) {
+		return false
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *QueueExtendedDelivery) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*QueueExtendedDelivery)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *AcknowledgeQueueRequest) EqualVT(that *AcknowledgeQueueRequest) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if this.QueueId != that.QueueId {
+		return false
+	}
+	if len(this.Receipts) != len(that.Receipts) {
+		return false
+	}
+	for i, vx := range this.Receipts {
+		vy := that.Receipts[i]
+		if p, q := vx, vy; p != q {
+			if p == nil {
+				p = &QueueDeliveryReceipt{}
+			}
+			if q == nil {
+				q = &QueueDeliveryReceipt{}
+			}
+			if !p.EqualVT(q) {
+				return false
+			}
+		}
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *AcknowledgeQueueRequest) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*AcknowledgeQueueRequest)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *AcknowledgeQueueResponse) EqualVT(that *AcknowledgeQueueResponse) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if len(this.SuccessfulMessageIds) != len(that.SuccessfulMessageIds) {
+		return false
+	}
+	for i, vx := range this.SuccessfulMessageIds {
+		vy := that.SuccessfulMessageIds[i]
+		if vx != vy {
+			return false
+		}
+	}
+	if len(this.Failed) != len(that.Failed) {
+		return false
+	}
+	for i, vx := range this.Failed {
+		vy := that.Failed[i]
+		if p, q := vx, vy; p != q {
+			if p == nil {
+				p = &QueueDeliveryFailure{}
+			}
+			if q == nil {
+				q = &QueueDeliveryFailure{}
+			}
+			if !p.EqualVT(q) {
+				return false
+			}
+		}
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *AcknowledgeQueueResponse) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*AcknowledgeQueueResponse)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *NackQueueRequest) EqualVT(that *NackQueueRequest) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if this.QueueId != that.QueueId {
+		return false
+	}
+	if len(this.Deliveries) != len(that.Deliveries) {
+		return false
+	}
+	for i, vx := range this.Deliveries {
+		vy := that.Deliveries[i]
+		if p, q := vx, vy; p != q {
+			if p == nil {
+				p = &QueueNackDelivery{}
+			}
+			if q == nil {
+				q = &QueueNackDelivery{}
+			}
+			if !p.EqualVT(q) {
+				return false
+			}
+		}
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *NackQueueRequest) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*NackQueueRequest)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *NackQueueResponse) EqualVT(that *NackQueueResponse) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if len(this.SuccessfulMessageIds) != len(that.SuccessfulMessageIds) {
+		return false
+	}
+	for i, vx := range this.SuccessfulMessageIds {
+		vy := that.SuccessfulMessageIds[i]
+		if vx != vy {
+			return false
+		}
+	}
+	if len(this.Failed) != len(that.Failed) {
+		return false
+	}
+	for i, vx := range this.Failed {
+		vy := that.Failed[i]
+		if p, q := vx, vy; p != q {
+			if p == nil {
+				p = &QueueDeliveryFailure{}
+			}
+			if q == nil {
+				q = &QueueDeliveryFailure{}
+			}
+			if !p.EqualVT(q) {
+				return false
+			}
+		}
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *NackQueueResponse) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*NackQueueResponse)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *ExtendQueueLeaseRequest) EqualVT(that *ExtendQueueLeaseRequest) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if this.QueueId != that.QueueId {
+		return false
+	}
+	if len(this.Deliveries) != len(that.Deliveries) {
+		return false
+	}
+	for i, vx := range this.Deliveries {
+		vy := that.Deliveries[i]
+		if p, q := vx, vy; p != q {
+			if p == nil {
+				p = &QueueExtendDelivery{}
+			}
+			if q == nil {
+				q = &QueueExtendDelivery{}
+			}
+			if !p.EqualVT(q) {
+				return false
+			}
+		}
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *ExtendQueueLeaseRequest) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*ExtendQueueLeaseRequest)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
+func (this *ExtendQueueLeaseResponse) EqualVT(that *ExtendQueueLeaseResponse) bool {
+	if this == that {
+		return true
+	} else if this == nil || that == nil {
+		return false
+	}
+	if len(this.Extended) != len(that.Extended) {
+		return false
+	}
+	for i, vx := range this.Extended {
+		vy := that.Extended[i]
+		if p, q := vx, vy; p != q {
+			if p == nil {
+				p = &QueueExtendedDelivery{}
+			}
+			if q == nil {
+				q = &QueueExtendedDelivery{}
+			}
+			if !p.EqualVT(q) {
+				return false
+			}
+		}
+	}
+	if len(this.Failed) != len(that.Failed) {
+		return false
+	}
+	for i, vx := range this.Failed {
+		vy := that.Failed[i]
+		if p, q := vx, vy; p != q {
+			if p == nil {
+				p = &QueueDeliveryFailure{}
+			}
+			if q == nil {
+				q = &QueueDeliveryFailure{}
+			}
+			if !p.EqualVT(q) {
+				return false
+			}
+		}
+	}
+	return string(this.unknownFields) == string(that.unknownFields)
+}
+
+func (this *ExtendQueueLeaseResponse) EqualMessageVT(thatMsg proto.Message) bool {
+	that, ok := thatMsg.(*ExtendQueueLeaseResponse)
+	if !ok {
+		return false
+	}
+	return this.EqualVT(that)
+}
 func (m *SendMessage) MarshalVT() (dAtA []byte, err error) {
 	if m == nil {
 		return nil, nil
@@ -89,6 +2288,28 @@ func (m *ReceiveMessage) MarshalToSizedBufferVT(dAtA []byte) (int, error) {
 	if m.unknownFields != nil {
 		i -= len(m.unknownFields)
 		copy(dAtA[i:], m.unknownFields)
+	}
+	if m.LeaseExpiresAt != nil {
+		size, err := (*timestamppb1.Timestamp)(m.LeaseExpiresAt).MarshalToSizedBufferVT(dAtA[:i])
+		if err != nil {
+			return 0, err
+		}
+		i -= size
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(size))
+		i--
+		dAtA[i] = 0x2a
+	}
+	if m.DeliveryAttempt != 0 {
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(m.DeliveryAttempt))
+		i--
+		dAtA[i] = 0x20
+	}
+	if len(m.ReceiptHandle) > 0 {
+		i -= len(m.ReceiptHandle)
+		copy(dAtA[i:], m.ReceiptHandle)
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(len(m.ReceiptHandle)))
+		i--
+		dAtA[i] = 0x1a
 	}
 	if len(m.Body) > 0 {
 		i -= len(m.Body)
@@ -343,7 +2564,7 @@ func (m *DescribeQueueResponse) MarshalToSizedBufferVT(dAtA []byte) (int, error)
 		dAtA[i] = 0x20
 	}
 	if m.CreatedAt != nil {
-		size, err := (*timestamppb.Timestamp)(m.CreatedAt).MarshalToSizedBufferVT(dAtA[:i])
+		size, err := (*timestamppb1.Timestamp)(m.CreatedAt).MarshalToSizedBufferVT(dAtA[:i])
 		if err != nil {
 			return 0, err
 		}
@@ -1021,7 +3242,7 @@ func (m *Topic) MarshalToSizedBufferVT(dAtA []byte) (int, error) {
 		}
 	}
 	if m.CreatedAt != nil {
-		size, err := (*timestamppb.Timestamp)(m.CreatedAt).MarshalToSizedBufferVT(dAtA[:i])
+		size, err := (*timestamppb1.Timestamp)(m.CreatedAt).MarshalToSizedBufferVT(dAtA[:i])
 		if err != nil {
 			return 0, err
 		}
@@ -1078,7 +3299,7 @@ func (m *Subscription) MarshalToSizedBufferVT(dAtA []byte) (int, error) {
 		copy(dAtA[i:], m.unknownFields)
 	}
 	if m.CreatedAt != nil {
-		size, err := (*timestamppb.Timestamp)(m.CreatedAt).MarshalToSizedBufferVT(dAtA[:i])
+		size, err := (*timestamppb1.Timestamp)(m.CreatedAt).MarshalToSizedBufferVT(dAtA[:i])
 		if err != nil {
 			return 0, err
 		}
@@ -1671,6 +3892,588 @@ func (m *PublishResponse) MarshalToSizedBufferVT(dAtA []byte) (int, error) {
 	return len(dAtA) - i, nil
 }
 
+func (m *QueueDeliveryReceipt) MarshalVT() (dAtA []byte, err error) {
+	if m == nil {
+		return nil, nil
+	}
+	size := m.SizeVT()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBufferVT(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *QueueDeliveryReceipt) MarshalToVT(dAtA []byte) (int, error) {
+	size := m.SizeVT()
+	return m.MarshalToSizedBufferVT(dAtA[:size])
+}
+
+func (m *QueueDeliveryReceipt) MarshalToSizedBufferVT(dAtA []byte) (int, error) {
+	if m == nil {
+		return 0, nil
+	}
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if m.unknownFields != nil {
+		i -= len(m.unknownFields)
+		copy(dAtA[i:], m.unknownFields)
+	}
+	if len(m.ReceiptHandle) > 0 {
+		i -= len(m.ReceiptHandle)
+		copy(dAtA[i:], m.ReceiptHandle)
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(len(m.ReceiptHandle)))
+		i--
+		dAtA[i] = 0x12
+	}
+	if len(m.MessageId) > 0 {
+		i -= len(m.MessageId)
+		copy(dAtA[i:], m.MessageId)
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(len(m.MessageId)))
+		i--
+		dAtA[i] = 0xa
+	}
+	return len(dAtA) - i, nil
+}
+
+func (m *QueueDeliveryFailure) MarshalVT() (dAtA []byte, err error) {
+	if m == nil {
+		return nil, nil
+	}
+	size := m.SizeVT()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBufferVT(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *QueueDeliveryFailure) MarshalToVT(dAtA []byte) (int, error) {
+	size := m.SizeVT()
+	return m.MarshalToSizedBufferVT(dAtA[:size])
+}
+
+func (m *QueueDeliveryFailure) MarshalToSizedBufferVT(dAtA []byte) (int, error) {
+	if m == nil {
+		return 0, nil
+	}
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if m.unknownFields != nil {
+		i -= len(m.unknownFields)
+		copy(dAtA[i:], m.unknownFields)
+	}
+	if len(m.Message) > 0 {
+		i -= len(m.Message)
+		copy(dAtA[i:], m.Message)
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(len(m.Message)))
+		i--
+		dAtA[i] = 0x1a
+	}
+	if len(m.Code) > 0 {
+		i -= len(m.Code)
+		copy(dAtA[i:], m.Code)
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(len(m.Code)))
+		i--
+		dAtA[i] = 0x12
+	}
+	if len(m.MessageId) > 0 {
+		i -= len(m.MessageId)
+		copy(dAtA[i:], m.MessageId)
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(len(m.MessageId)))
+		i--
+		dAtA[i] = 0xa
+	}
+	return len(dAtA) - i, nil
+}
+
+func (m *QueueNackDelivery) MarshalVT() (dAtA []byte, err error) {
+	if m == nil {
+		return nil, nil
+	}
+	size := m.SizeVT()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBufferVT(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *QueueNackDelivery) MarshalToVT(dAtA []byte) (int, error) {
+	size := m.SizeVT()
+	return m.MarshalToSizedBufferVT(dAtA[:size])
+}
+
+func (m *QueueNackDelivery) MarshalToSizedBufferVT(dAtA []byte) (int, error) {
+	if m == nil {
+		return 0, nil
+	}
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if m.unknownFields != nil {
+		i -= len(m.unknownFields)
+		copy(dAtA[i:], m.unknownFields)
+	}
+	if len(m.Reason) > 0 {
+		i -= len(m.Reason)
+		copy(dAtA[i:], m.Reason)
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(len(m.Reason)))
+		i--
+		dAtA[i] = 0x1a
+	}
+	if m.AvailableAfterSeconds != 0 {
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(m.AvailableAfterSeconds))
+		i--
+		dAtA[i] = 0x10
+	}
+	if m.Receipt != nil {
+		size, err := m.Receipt.MarshalToSizedBufferVT(dAtA[:i])
+		if err != nil {
+			return 0, err
+		}
+		i -= size
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(size))
+		i--
+		dAtA[i] = 0xa
+	}
+	return len(dAtA) - i, nil
+}
+
+func (m *QueueExtendDelivery) MarshalVT() (dAtA []byte, err error) {
+	if m == nil {
+		return nil, nil
+	}
+	size := m.SizeVT()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBufferVT(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *QueueExtendDelivery) MarshalToVT(dAtA []byte) (int, error) {
+	size := m.SizeVT()
+	return m.MarshalToSizedBufferVT(dAtA[:size])
+}
+
+func (m *QueueExtendDelivery) MarshalToSizedBufferVT(dAtA []byte) (int, error) {
+	if m == nil {
+		return 0, nil
+	}
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if m.unknownFields != nil {
+		i -= len(m.unknownFields)
+		copy(dAtA[i:], m.unknownFields)
+	}
+	if m.ExtensionSeconds != 0 {
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(m.ExtensionSeconds))
+		i--
+		dAtA[i] = 0x10
+	}
+	if m.Receipt != nil {
+		size, err := m.Receipt.MarshalToSizedBufferVT(dAtA[:i])
+		if err != nil {
+			return 0, err
+		}
+		i -= size
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(size))
+		i--
+		dAtA[i] = 0xa
+	}
+	return len(dAtA) - i, nil
+}
+
+func (m *QueueExtendedDelivery) MarshalVT() (dAtA []byte, err error) {
+	if m == nil {
+		return nil, nil
+	}
+	size := m.SizeVT()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBufferVT(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *QueueExtendedDelivery) MarshalToVT(dAtA []byte) (int, error) {
+	size := m.SizeVT()
+	return m.MarshalToSizedBufferVT(dAtA[:size])
+}
+
+func (m *QueueExtendedDelivery) MarshalToSizedBufferVT(dAtA []byte) (int, error) {
+	if m == nil {
+		return 0, nil
+	}
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if m.unknownFields != nil {
+		i -= len(m.unknownFields)
+		copy(dAtA[i:], m.unknownFields)
+	}
+	if m.LeaseExpiresAt != nil {
+		size, err := (*timestamppb1.Timestamp)(m.LeaseExpiresAt).MarshalToSizedBufferVT(dAtA[:i])
+		if err != nil {
+			return 0, err
+		}
+		i -= size
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(size))
+		i--
+		dAtA[i] = 0x1a
+	}
+	if len(m.ReceiptHandle) > 0 {
+		i -= len(m.ReceiptHandle)
+		copy(dAtA[i:], m.ReceiptHandle)
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(len(m.ReceiptHandle)))
+		i--
+		dAtA[i] = 0x12
+	}
+	if len(m.MessageId) > 0 {
+		i -= len(m.MessageId)
+		copy(dAtA[i:], m.MessageId)
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(len(m.MessageId)))
+		i--
+		dAtA[i] = 0xa
+	}
+	return len(dAtA) - i, nil
+}
+
+func (m *AcknowledgeQueueRequest) MarshalVT() (dAtA []byte, err error) {
+	if m == nil {
+		return nil, nil
+	}
+	size := m.SizeVT()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBufferVT(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *AcknowledgeQueueRequest) MarshalToVT(dAtA []byte) (int, error) {
+	size := m.SizeVT()
+	return m.MarshalToSizedBufferVT(dAtA[:size])
+}
+
+func (m *AcknowledgeQueueRequest) MarshalToSizedBufferVT(dAtA []byte) (int, error) {
+	if m == nil {
+		return 0, nil
+	}
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if m.unknownFields != nil {
+		i -= len(m.unknownFields)
+		copy(dAtA[i:], m.unknownFields)
+	}
+	if len(m.Receipts) > 0 {
+		for iNdEx := len(m.Receipts) - 1; iNdEx >= 0; iNdEx-- {
+			size, err := m.Receipts[iNdEx].MarshalToSizedBufferVT(dAtA[:i])
+			if err != nil {
+				return 0, err
+			}
+			i -= size
+			i = protohelpers.EncodeVarint(dAtA, i, uint64(size))
+			i--
+			dAtA[i] = 0x12
+		}
+	}
+	if len(m.QueueId) > 0 {
+		i -= len(m.QueueId)
+		copy(dAtA[i:], m.QueueId)
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(len(m.QueueId)))
+		i--
+		dAtA[i] = 0xa
+	}
+	return len(dAtA) - i, nil
+}
+
+func (m *AcknowledgeQueueResponse) MarshalVT() (dAtA []byte, err error) {
+	if m == nil {
+		return nil, nil
+	}
+	size := m.SizeVT()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBufferVT(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *AcknowledgeQueueResponse) MarshalToVT(dAtA []byte) (int, error) {
+	size := m.SizeVT()
+	return m.MarshalToSizedBufferVT(dAtA[:size])
+}
+
+func (m *AcknowledgeQueueResponse) MarshalToSizedBufferVT(dAtA []byte) (int, error) {
+	if m == nil {
+		return 0, nil
+	}
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if m.unknownFields != nil {
+		i -= len(m.unknownFields)
+		copy(dAtA[i:], m.unknownFields)
+	}
+	if len(m.Failed) > 0 {
+		for iNdEx := len(m.Failed) - 1; iNdEx >= 0; iNdEx-- {
+			size, err := m.Failed[iNdEx].MarshalToSizedBufferVT(dAtA[:i])
+			if err != nil {
+				return 0, err
+			}
+			i -= size
+			i = protohelpers.EncodeVarint(dAtA, i, uint64(size))
+			i--
+			dAtA[i] = 0x12
+		}
+	}
+	if len(m.SuccessfulMessageIds) > 0 {
+		for iNdEx := len(m.SuccessfulMessageIds) - 1; iNdEx >= 0; iNdEx-- {
+			i -= len(m.SuccessfulMessageIds[iNdEx])
+			copy(dAtA[i:], m.SuccessfulMessageIds[iNdEx])
+			i = protohelpers.EncodeVarint(dAtA, i, uint64(len(m.SuccessfulMessageIds[iNdEx])))
+			i--
+			dAtA[i] = 0xa
+		}
+	}
+	return len(dAtA) - i, nil
+}
+
+func (m *NackQueueRequest) MarshalVT() (dAtA []byte, err error) {
+	if m == nil {
+		return nil, nil
+	}
+	size := m.SizeVT()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBufferVT(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *NackQueueRequest) MarshalToVT(dAtA []byte) (int, error) {
+	size := m.SizeVT()
+	return m.MarshalToSizedBufferVT(dAtA[:size])
+}
+
+func (m *NackQueueRequest) MarshalToSizedBufferVT(dAtA []byte) (int, error) {
+	if m == nil {
+		return 0, nil
+	}
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if m.unknownFields != nil {
+		i -= len(m.unknownFields)
+		copy(dAtA[i:], m.unknownFields)
+	}
+	if len(m.Deliveries) > 0 {
+		for iNdEx := len(m.Deliveries) - 1; iNdEx >= 0; iNdEx-- {
+			size, err := m.Deliveries[iNdEx].MarshalToSizedBufferVT(dAtA[:i])
+			if err != nil {
+				return 0, err
+			}
+			i -= size
+			i = protohelpers.EncodeVarint(dAtA, i, uint64(size))
+			i--
+			dAtA[i] = 0x12
+		}
+	}
+	if len(m.QueueId) > 0 {
+		i -= len(m.QueueId)
+		copy(dAtA[i:], m.QueueId)
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(len(m.QueueId)))
+		i--
+		dAtA[i] = 0xa
+	}
+	return len(dAtA) - i, nil
+}
+
+func (m *NackQueueResponse) MarshalVT() (dAtA []byte, err error) {
+	if m == nil {
+		return nil, nil
+	}
+	size := m.SizeVT()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBufferVT(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *NackQueueResponse) MarshalToVT(dAtA []byte) (int, error) {
+	size := m.SizeVT()
+	return m.MarshalToSizedBufferVT(dAtA[:size])
+}
+
+func (m *NackQueueResponse) MarshalToSizedBufferVT(dAtA []byte) (int, error) {
+	if m == nil {
+		return 0, nil
+	}
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if m.unknownFields != nil {
+		i -= len(m.unknownFields)
+		copy(dAtA[i:], m.unknownFields)
+	}
+	if len(m.Failed) > 0 {
+		for iNdEx := len(m.Failed) - 1; iNdEx >= 0; iNdEx-- {
+			size, err := m.Failed[iNdEx].MarshalToSizedBufferVT(dAtA[:i])
+			if err != nil {
+				return 0, err
+			}
+			i -= size
+			i = protohelpers.EncodeVarint(dAtA, i, uint64(size))
+			i--
+			dAtA[i] = 0x12
+		}
+	}
+	if len(m.SuccessfulMessageIds) > 0 {
+		for iNdEx := len(m.SuccessfulMessageIds) - 1; iNdEx >= 0; iNdEx-- {
+			i -= len(m.SuccessfulMessageIds[iNdEx])
+			copy(dAtA[i:], m.SuccessfulMessageIds[iNdEx])
+			i = protohelpers.EncodeVarint(dAtA, i, uint64(len(m.SuccessfulMessageIds[iNdEx])))
+			i--
+			dAtA[i] = 0xa
+		}
+	}
+	return len(dAtA) - i, nil
+}
+
+func (m *ExtendQueueLeaseRequest) MarshalVT() (dAtA []byte, err error) {
+	if m == nil {
+		return nil, nil
+	}
+	size := m.SizeVT()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBufferVT(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *ExtendQueueLeaseRequest) MarshalToVT(dAtA []byte) (int, error) {
+	size := m.SizeVT()
+	return m.MarshalToSizedBufferVT(dAtA[:size])
+}
+
+func (m *ExtendQueueLeaseRequest) MarshalToSizedBufferVT(dAtA []byte) (int, error) {
+	if m == nil {
+		return 0, nil
+	}
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if m.unknownFields != nil {
+		i -= len(m.unknownFields)
+		copy(dAtA[i:], m.unknownFields)
+	}
+	if len(m.Deliveries) > 0 {
+		for iNdEx := len(m.Deliveries) - 1; iNdEx >= 0; iNdEx-- {
+			size, err := m.Deliveries[iNdEx].MarshalToSizedBufferVT(dAtA[:i])
+			if err != nil {
+				return 0, err
+			}
+			i -= size
+			i = protohelpers.EncodeVarint(dAtA, i, uint64(size))
+			i--
+			dAtA[i] = 0x12
+		}
+	}
+	if len(m.QueueId) > 0 {
+		i -= len(m.QueueId)
+		copy(dAtA[i:], m.QueueId)
+		i = protohelpers.EncodeVarint(dAtA, i, uint64(len(m.QueueId)))
+		i--
+		dAtA[i] = 0xa
+	}
+	return len(dAtA) - i, nil
+}
+
+func (m *ExtendQueueLeaseResponse) MarshalVT() (dAtA []byte, err error) {
+	if m == nil {
+		return nil, nil
+	}
+	size := m.SizeVT()
+	dAtA = make([]byte, size)
+	n, err := m.MarshalToSizedBufferVT(dAtA[:size])
+	if err != nil {
+		return nil, err
+	}
+	return dAtA[:n], nil
+}
+
+func (m *ExtendQueueLeaseResponse) MarshalToVT(dAtA []byte) (int, error) {
+	size := m.SizeVT()
+	return m.MarshalToSizedBufferVT(dAtA[:size])
+}
+
+func (m *ExtendQueueLeaseResponse) MarshalToSizedBufferVT(dAtA []byte) (int, error) {
+	if m == nil {
+		return 0, nil
+	}
+	i := len(dAtA)
+	_ = i
+	var l int
+	_ = l
+	if m.unknownFields != nil {
+		i -= len(m.unknownFields)
+		copy(dAtA[i:], m.unknownFields)
+	}
+	if len(m.Failed) > 0 {
+		for iNdEx := len(m.Failed) - 1; iNdEx >= 0; iNdEx-- {
+			size, err := m.Failed[iNdEx].MarshalToSizedBufferVT(dAtA[:i])
+			if err != nil {
+				return 0, err
+			}
+			i -= size
+			i = protohelpers.EncodeVarint(dAtA, i, uint64(size))
+			i--
+			dAtA[i] = 0x12
+		}
+	}
+	if len(m.Extended) > 0 {
+		for iNdEx := len(m.Extended) - 1; iNdEx >= 0; iNdEx-- {
+			size, err := m.Extended[iNdEx].MarshalToSizedBufferVT(dAtA[:i])
+			if err != nil {
+				return 0, err
+			}
+			i -= size
+			i = protohelpers.EncodeVarint(dAtA, i, uint64(size))
+			i--
+			dAtA[i] = 0xa
+		}
+	}
+	return len(dAtA) - i, nil
+}
+
 func (m *SendMessage) SizeVT() (n int) {
 	if m == nil {
 		return 0
@@ -1697,6 +4500,17 @@ func (m *ReceiveMessage) SizeVT() (n int) {
 	}
 	l = len(m.Body)
 	if l > 0 {
+		n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
+	}
+	l = len(m.ReceiptHandle)
+	if l > 0 {
+		n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
+	}
+	if m.DeliveryAttempt != 0 {
+		n += 1 + protohelpers.SizeOfVarint(uint64(m.DeliveryAttempt))
+	}
+	if m.LeaseExpiresAt != nil {
+		l = (*timestamppb1.Timestamp)(m.LeaseExpiresAt).SizeVT()
 		n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
 	}
 	n += len(m.unknownFields)
@@ -1789,7 +4603,7 @@ func (m *DescribeQueueResponse) SizeVT() (n int) {
 		n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
 	}
 	if m.CreatedAt != nil {
-		l = (*timestamppb.Timestamp)(m.CreatedAt).SizeVT()
+		l = (*timestamppb1.Timestamp)(m.CreatedAt).SizeVT()
 		n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
 	}
 	if m.RetentionPeriodSeconds != 0 {
@@ -2057,7 +4871,7 @@ func (m *Topic) SizeVT() (n int) {
 		n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
 	}
 	if m.CreatedAt != nil {
-		l = (*timestamppb.Timestamp)(m.CreatedAt).SizeVT()
+		l = (*timestamppb1.Timestamp)(m.CreatedAt).SizeVT()
 		n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
 	}
 	if len(m.Subscriptions) > 0 {
@@ -2093,7 +4907,7 @@ func (m *Subscription) SizeVT() (n int) {
 		n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
 	}
 	if m.CreatedAt != nil {
-		l = (*timestamppb.Timestamp)(m.CreatedAt).SizeVT()
+		l = (*timestamppb1.Timestamp)(m.CreatedAt).SizeVT()
 		n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
 	}
 	n += len(m.unknownFields)
@@ -2301,6 +5115,232 @@ func (m *PublishResponse) SizeVT() (n int) {
 	return n
 }
 
+func (m *QueueDeliveryReceipt) SizeVT() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	l = len(m.MessageId)
+	if l > 0 {
+		n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
+	}
+	l = len(m.ReceiptHandle)
+	if l > 0 {
+		n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
+	}
+	n += len(m.unknownFields)
+	return n
+}
+
+func (m *QueueDeliveryFailure) SizeVT() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	l = len(m.MessageId)
+	if l > 0 {
+		n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
+	}
+	l = len(m.Code)
+	if l > 0 {
+		n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
+	}
+	l = len(m.Message)
+	if l > 0 {
+		n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
+	}
+	n += len(m.unknownFields)
+	return n
+}
+
+func (m *QueueNackDelivery) SizeVT() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	if m.Receipt != nil {
+		l = m.Receipt.SizeVT()
+		n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
+	}
+	if m.AvailableAfterSeconds != 0 {
+		n += 1 + protohelpers.SizeOfVarint(uint64(m.AvailableAfterSeconds))
+	}
+	l = len(m.Reason)
+	if l > 0 {
+		n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
+	}
+	n += len(m.unknownFields)
+	return n
+}
+
+func (m *QueueExtendDelivery) SizeVT() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	if m.Receipt != nil {
+		l = m.Receipt.SizeVT()
+		n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
+	}
+	if m.ExtensionSeconds != 0 {
+		n += 1 + protohelpers.SizeOfVarint(uint64(m.ExtensionSeconds))
+	}
+	n += len(m.unknownFields)
+	return n
+}
+
+func (m *QueueExtendedDelivery) SizeVT() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	l = len(m.MessageId)
+	if l > 0 {
+		n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
+	}
+	l = len(m.ReceiptHandle)
+	if l > 0 {
+		n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
+	}
+	if m.LeaseExpiresAt != nil {
+		l = (*timestamppb1.Timestamp)(m.LeaseExpiresAt).SizeVT()
+		n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
+	}
+	n += len(m.unknownFields)
+	return n
+}
+
+func (m *AcknowledgeQueueRequest) SizeVT() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	l = len(m.QueueId)
+	if l > 0 {
+		n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
+	}
+	if len(m.Receipts) > 0 {
+		for _, e := range m.Receipts {
+			l = e.SizeVT()
+			n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
+		}
+	}
+	n += len(m.unknownFields)
+	return n
+}
+
+func (m *AcknowledgeQueueResponse) SizeVT() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	if len(m.SuccessfulMessageIds) > 0 {
+		for _, s := range m.SuccessfulMessageIds {
+			l = len(s)
+			n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
+		}
+	}
+	if len(m.Failed) > 0 {
+		for _, e := range m.Failed {
+			l = e.SizeVT()
+			n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
+		}
+	}
+	n += len(m.unknownFields)
+	return n
+}
+
+func (m *NackQueueRequest) SizeVT() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	l = len(m.QueueId)
+	if l > 0 {
+		n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
+	}
+	if len(m.Deliveries) > 0 {
+		for _, e := range m.Deliveries {
+			l = e.SizeVT()
+			n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
+		}
+	}
+	n += len(m.unknownFields)
+	return n
+}
+
+func (m *NackQueueResponse) SizeVT() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	if len(m.SuccessfulMessageIds) > 0 {
+		for _, s := range m.SuccessfulMessageIds {
+			l = len(s)
+			n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
+		}
+	}
+	if len(m.Failed) > 0 {
+		for _, e := range m.Failed {
+			l = e.SizeVT()
+			n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
+		}
+	}
+	n += len(m.unknownFields)
+	return n
+}
+
+func (m *ExtendQueueLeaseRequest) SizeVT() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	l = len(m.QueueId)
+	if l > 0 {
+		n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
+	}
+	if len(m.Deliveries) > 0 {
+		for _, e := range m.Deliveries {
+			l = e.SizeVT()
+			n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
+		}
+	}
+	n += len(m.unknownFields)
+	return n
+}
+
+func (m *ExtendQueueLeaseResponse) SizeVT() (n int) {
+	if m == nil {
+		return 0
+	}
+	var l int
+	_ = l
+	if len(m.Extended) > 0 {
+		for _, e := range m.Extended {
+			l = e.SizeVT()
+			n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
+		}
+	}
+	if len(m.Failed) > 0 {
+		for _, e := range m.Failed {
+			l = e.SizeVT()
+			n += 1 + l + protohelpers.SizeOfVarint(uint64(l))
+		}
+	}
+	n += len(m.unknownFields)
+	return n
+}
+
 func (m *SendMessage) UnmarshalVT(dAtA []byte) error {
 	l := len(dAtA)
 	iNdEx := 0
@@ -2479,6 +5519,93 @@ func (m *ReceiveMessage) UnmarshalVT(dAtA []byte) error {
 			m.Body = append(m.Body[:0], dAtA[iNdEx:postIndex]...)
 			if m.Body == nil {
 				m.Body = []byte{}
+			}
+			iNdEx = postIndex
+		case 3:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ReceiptHandle", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.ReceiptHandle = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 4:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field DeliveryAttempt", wireType)
+			}
+			m.DeliveryAttempt = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.DeliveryAttempt |= uint32(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 5:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field LeaseExpiresAt", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + msglen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if m.LeaseExpiresAt == nil {
+				m.LeaseExpiresAt = &timestamppb.Timestamp{}
+			}
+			if err := (*timestamppb1.Timestamp)(m.LeaseExpiresAt).UnmarshalVT(dAtA[iNdEx:postIndex]); err != nil {
+				return err
 			}
 			iNdEx = postIndex
 		default:
@@ -3069,9 +6196,9 @@ func (m *DescribeQueueResponse) UnmarshalVT(dAtA []byte) error {
 				return io.ErrUnexpectedEOF
 			}
 			if m.CreatedAt == nil {
-				m.CreatedAt = &timestamppb1.Timestamp{}
+				m.CreatedAt = &timestamppb.Timestamp{}
 			}
-			if err := (*timestamppb.Timestamp)(m.CreatedAt).UnmarshalVT(dAtA[iNdEx:postIndex]); err != nil {
+			if err := (*timestamppb1.Timestamp)(m.CreatedAt).UnmarshalVT(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -4662,9 +7789,9 @@ func (m *Topic) UnmarshalVT(dAtA []byte) error {
 				return io.ErrUnexpectedEOF
 			}
 			if m.CreatedAt == nil {
-				m.CreatedAt = &timestamppb1.Timestamp{}
+				m.CreatedAt = &timestamppb.Timestamp{}
 			}
-			if err := (*timestamppb.Timestamp)(m.CreatedAt).UnmarshalVT(dAtA[iNdEx:postIndex]); err != nil {
+			if err := (*timestamppb1.Timestamp)(m.CreatedAt).UnmarshalVT(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -4911,9 +8038,9 @@ func (m *Subscription) UnmarshalVT(dAtA []byte) error {
 				return io.ErrUnexpectedEOF
 			}
 			if m.CreatedAt == nil {
-				m.CreatedAt = &timestamppb1.Timestamp{}
+				m.CreatedAt = &timestamppb.Timestamp{}
 			}
-			if err := (*timestamppb.Timestamp)(m.CreatedAt).UnmarshalVT(dAtA[iNdEx:postIndex]); err != nil {
+			if err := (*timestamppb1.Timestamp)(m.CreatedAt).UnmarshalVT(dAtA[iNdEx:postIndex]); err != nil {
 				return err
 			}
 			iNdEx = postIndex
@@ -6085,6 +9212,1367 @@ func (m *PublishResponse) UnmarshalVT(dAtA []byte) error {
 					break
 				}
 			}
+		default:
+			iNdEx = preIndex
+			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.unknownFields = append(m.unknownFields, dAtA[iNdEx:iNdEx+skippy]...)
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *QueueDeliveryReceipt) UnmarshalVT(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return protohelpers.ErrIntOverflow
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: QueueDeliveryReceipt: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: QueueDeliveryReceipt: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field MessageId", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.MessageId = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 2:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ReceiptHandle", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.ReceiptHandle = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.unknownFields = append(m.unknownFields, dAtA[iNdEx:iNdEx+skippy]...)
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *QueueDeliveryFailure) UnmarshalVT(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return protohelpers.ErrIntOverflow
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: QueueDeliveryFailure: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: QueueDeliveryFailure: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field MessageId", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.MessageId = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 2:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Code", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Code = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 3:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Message", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Message = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.unknownFields = append(m.unknownFields, dAtA[iNdEx:iNdEx+skippy]...)
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *QueueNackDelivery) UnmarshalVT(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return protohelpers.ErrIntOverflow
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: QueueNackDelivery: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: QueueNackDelivery: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Receipt", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + msglen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if m.Receipt == nil {
+				m.Receipt = &QueueDeliveryReceipt{}
+			}
+			if err := m.Receipt.UnmarshalVT(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 2:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field AvailableAfterSeconds", wireType)
+			}
+			m.AvailableAfterSeconds = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.AvailableAfterSeconds |= uint32(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		case 3:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Reason", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Reason = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.unknownFields = append(m.unknownFields, dAtA[iNdEx:iNdEx+skippy]...)
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *QueueExtendDelivery) UnmarshalVT(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return protohelpers.ErrIntOverflow
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: QueueExtendDelivery: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: QueueExtendDelivery: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Receipt", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + msglen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if m.Receipt == nil {
+				m.Receipt = &QueueDeliveryReceipt{}
+			}
+			if err := m.Receipt.UnmarshalVT(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 2:
+			if wireType != 0 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ExtensionSeconds", wireType)
+			}
+			m.ExtensionSeconds = 0
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				m.ExtensionSeconds |= uint32(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+		default:
+			iNdEx = preIndex
+			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.unknownFields = append(m.unknownFields, dAtA[iNdEx:iNdEx+skippy]...)
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *QueueExtendedDelivery) UnmarshalVT(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return protohelpers.ErrIntOverflow
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: QueueExtendedDelivery: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: QueueExtendedDelivery: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field MessageId", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.MessageId = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 2:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field ReceiptHandle", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.ReceiptHandle = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 3:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field LeaseExpiresAt", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + msglen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			if m.LeaseExpiresAt == nil {
+				m.LeaseExpiresAt = &timestamppb.Timestamp{}
+			}
+			if err := (*timestamppb1.Timestamp)(m.LeaseExpiresAt).UnmarshalVT(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.unknownFields = append(m.unknownFields, dAtA[iNdEx:iNdEx+skippy]...)
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *AcknowledgeQueueRequest) UnmarshalVT(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return protohelpers.ErrIntOverflow
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: AcknowledgeQueueRequest: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: AcknowledgeQueueRequest: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field QueueId", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.QueueId = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 2:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Receipts", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + msglen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Receipts = append(m.Receipts, &QueueDeliveryReceipt{})
+			if err := m.Receipts[len(m.Receipts)-1].UnmarshalVT(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.unknownFields = append(m.unknownFields, dAtA[iNdEx:iNdEx+skippy]...)
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *AcknowledgeQueueResponse) UnmarshalVT(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return protohelpers.ErrIntOverflow
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: AcknowledgeQueueResponse: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: AcknowledgeQueueResponse: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field SuccessfulMessageIds", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.SuccessfulMessageIds = append(m.SuccessfulMessageIds, string(dAtA[iNdEx:postIndex]))
+			iNdEx = postIndex
+		case 2:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Failed", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + msglen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Failed = append(m.Failed, &QueueDeliveryFailure{})
+			if err := m.Failed[len(m.Failed)-1].UnmarshalVT(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.unknownFields = append(m.unknownFields, dAtA[iNdEx:iNdEx+skippy]...)
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *NackQueueRequest) UnmarshalVT(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return protohelpers.ErrIntOverflow
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: NackQueueRequest: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: NackQueueRequest: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field QueueId", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.QueueId = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 2:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Deliveries", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + msglen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Deliveries = append(m.Deliveries, &QueueNackDelivery{})
+			if err := m.Deliveries[len(m.Deliveries)-1].UnmarshalVT(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.unknownFields = append(m.unknownFields, dAtA[iNdEx:iNdEx+skippy]...)
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *NackQueueResponse) UnmarshalVT(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return protohelpers.ErrIntOverflow
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: NackQueueResponse: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: NackQueueResponse: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field SuccessfulMessageIds", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.SuccessfulMessageIds = append(m.SuccessfulMessageIds, string(dAtA[iNdEx:postIndex]))
+			iNdEx = postIndex
+		case 2:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Failed", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + msglen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Failed = append(m.Failed, &QueueDeliveryFailure{})
+			if err := m.Failed[len(m.Failed)-1].UnmarshalVT(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.unknownFields = append(m.unknownFields, dAtA[iNdEx:iNdEx+skippy]...)
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *ExtendQueueLeaseRequest) UnmarshalVT(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return protohelpers.ErrIntOverflow
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: ExtendQueueLeaseRequest: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: ExtendQueueLeaseRequest: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field QueueId", wireType)
+			}
+			var stringLen uint64
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				stringLen |= uint64(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			intStringLen := int(stringLen)
+			if intStringLen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + intStringLen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.QueueId = string(dAtA[iNdEx:postIndex])
+			iNdEx = postIndex
+		case 2:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Deliveries", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + msglen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Deliveries = append(m.Deliveries, &QueueExtendDelivery{})
+			if err := m.Deliveries[len(m.Deliveries)-1].UnmarshalVT(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		default:
+			iNdEx = preIndex
+			skippy, err := protohelpers.Skip(dAtA[iNdEx:])
+			if err != nil {
+				return err
+			}
+			if (skippy < 0) || (iNdEx+skippy) < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if (iNdEx + skippy) > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.unknownFields = append(m.unknownFields, dAtA[iNdEx:iNdEx+skippy]...)
+			iNdEx += skippy
+		}
+	}
+
+	if iNdEx > l {
+		return io.ErrUnexpectedEOF
+	}
+	return nil
+}
+func (m *ExtendQueueLeaseResponse) UnmarshalVT(dAtA []byte) error {
+	l := len(dAtA)
+	iNdEx := 0
+	for iNdEx < l {
+		preIndex := iNdEx
+		var wire uint64
+		for shift := uint(0); ; shift += 7 {
+			if shift >= 64 {
+				return protohelpers.ErrIntOverflow
+			}
+			if iNdEx >= l {
+				return io.ErrUnexpectedEOF
+			}
+			b := dAtA[iNdEx]
+			iNdEx++
+			wire |= uint64(b&0x7F) << shift
+			if b < 0x80 {
+				break
+			}
+		}
+		fieldNum := int32(wire >> 3)
+		wireType := int(wire & 0x7)
+		if wireType == 4 {
+			return fmt.Errorf("proto: ExtendQueueLeaseResponse: wiretype end group for non-group")
+		}
+		if fieldNum <= 0 {
+			return fmt.Errorf("proto: ExtendQueueLeaseResponse: illegal tag %d (wire type %d)", fieldNum, wire)
+		}
+		switch fieldNum {
+		case 1:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Extended", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + msglen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Extended = append(m.Extended, &QueueExtendedDelivery{})
+			if err := m.Extended[len(m.Extended)-1].UnmarshalVT(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
+		case 2:
+			if wireType != 2 {
+				return fmt.Errorf("proto: wrong wireType = %d for field Failed", wireType)
+			}
+			var msglen int
+			for shift := uint(0); ; shift += 7 {
+				if shift >= 64 {
+					return protohelpers.ErrIntOverflow
+				}
+				if iNdEx >= l {
+					return io.ErrUnexpectedEOF
+				}
+				b := dAtA[iNdEx]
+				iNdEx++
+				msglen |= int(b&0x7F) << shift
+				if b < 0x80 {
+					break
+				}
+			}
+			if msglen < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			postIndex := iNdEx + msglen
+			if postIndex < 0 {
+				return protohelpers.ErrInvalidLength
+			}
+			if postIndex > l {
+				return io.ErrUnexpectedEOF
+			}
+			m.Failed = append(m.Failed, &QueueDeliveryFailure{})
+			if err := m.Failed[len(m.Failed)-1].UnmarshalVT(dAtA[iNdEx:postIndex]); err != nil {
+				return err
+			}
+			iNdEx = postIndex
 		default:
 			iNdEx = preIndex
 			skippy, err := protohelpers.Skip(dAtA[iNdEx:])

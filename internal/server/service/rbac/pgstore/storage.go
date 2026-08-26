@@ -124,66 +124,179 @@ func (s *Storage) GetAllRoles(ctx context.Context) ([]rbac.Role, error) {
 	return out, nil
 }
 
-func (s *Storage) UpdateRole(ctx context.Context, role rbac.Role) error {
-	rows, err := s.queries.UpdateRole(ctx, sqlcgen.UpdateRoleParams{
-		RoleName: role.RoleName,
-		RoleID:   role.RoleID,
-	})
+func (s *Storage) UpdateRole(ctx context.Context, role rbac.Role) (sErr error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
-		return fmt.Errorf("update role: %w", err)
+		return fmt.Errorf("update role: begin transaction: %w", err)
+	}
+	defer func() {
+		if err := tx.Rollback(ctx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+			sErr = errors.Join(sErr, fmt.Errorf("update role: rollback transaction: %w", err))
+		}
+	}()
+
+	q := s.queries.WithTx(tx)
+
+	rows, err := q.UpdateRole(ctx, sqlcgen.UpdateRoleParams{RoleName: role.RoleName, RoleID: role.RoleID})
+	if err != nil {
+		return fmt.Errorf("update role row: %w", err)
 	}
 
 	if rows == 0 {
 		return fmt.Errorf("role not found: %w", pqerr.ErrNotFound)
 	}
 
+	users, err := q.ListUsersWithRole(ctx, role.RoleID)
+	if err != nil {
+		return fmt.Errorf("list role holders: %w", err)
+	}
+
+	now := time.Now()
+	for _, userID := range users {
+		if err := bumpAndProjectHuman(ctx, q, userID, now); err != nil {
+			return fmt.Errorf("refresh renamed role holder %s: %w", userID, err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("update role: commit transaction: %w", err)
+	}
+
 	return nil
 }
 
-func (s *Storage) DeleteRole(ctx context.Context, roleID string) error {
-	rows, err := s.queries.DeleteRole(ctx, roleID)
+func (s *Storage) DeleteRole(ctx context.Context, roleID string) (sErr error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
-		return fmt.Errorf("delete role: %w", err)
+		return fmt.Errorf("delete role: begin transaction: %w", err)
+	}
+	defer func() {
+		if err := tx.Rollback(ctx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+			sErr = errors.Join(sErr, fmt.Errorf("delete role: rollback transaction: %w", err))
+		}
+	}()
+
+	q := s.queries.WithTx(tx)
+
+	rows, err := q.DeleteRole(ctx, roleID)
+	if err != nil {
+		return fmt.Errorf("delete role: delete row: %w", err)
 	}
 
 	if rows == 0 {
-		return fmt.Errorf("role not found: %w", pqerr.ErrNotFound)
+		return classifyRoleDeleteMiss(ctx, q, roleID)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("delete role: commit transaction: %w", err)
 	}
 
 	return nil
 }
 
-func (s *Storage) AssignRoleToUser(ctx context.Context, userID, roleID string) error {
-	rows, err := s.queries.AssignRoleToUser(ctx, sqlcgen.AssignRoleToUserParams{
-		UserID:    userID,
-		RoleID:    roleID,
-		CreatedAt: toTimestamptz(time.Now()),
-	})
-	if err != nil {
-		return fmt.Errorf("assign role to user: %w", err)
+func classifyRoleDeleteMiss(ctx context.Context, q *sqlcgen.Queries, roleID string) error {
+	if _, err := q.GetRoleByID(ctx, roleID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("role not found: %w", pqerr.ErrNotFound)
+		}
+
+		return fmt.Errorf("delete role: check role after conditional delete: %w", err)
 	}
 
-	// The insert ignores conflicts, so no affected row means the assignment
-	// already existed. Reporting it as success would claim a change that never
-	// happened.
+	holders, err := q.CountUsersWithRole(ctx, roleID)
+	if err != nil {
+		return fmt.Errorf("delete role: count holders after conditional delete: %w", err)
+	}
+
+	if holders > 0 {
+		return rbac.ErrRoleInUse
+	}
+
+	return errors.New("delete role: conditional delete affected no rows")
+}
+
+func (s *Storage) AssignRoleToUser(ctx context.Context, userID, roleID string) (sErr error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	if err != nil {
+		return fmt.Errorf("assign role to user: begin transaction: %w", err)
+	}
+	defer func() {
+		if err := tx.Rollback(ctx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+			sErr = errors.Join(sErr, fmt.Errorf("assign role to user: rollback transaction: %w", err))
+		}
+	}()
+
+	q := s.queries.WithTx(tx)
+
+	rows, err := q.AssignRoleToUser(ctx, sqlcgen.AssignRoleToUserParams{
+		UserID: userID, RoleID: roleID, CreatedAt: toTimestamptz(time.Now()),
+	})
+	if err != nil {
+		return fmt.Errorf("assign role to user: insert assignment: %w", err)
+	}
+
 	if rows == 0 {
 		return rbac.ErrRoleAlreadyAssigned
 	}
 
+	if err := bumpAndProjectHuman(ctx, q, userID, time.Now()); err != nil {
+		return fmt.Errorf("assign role to user: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("assign role to user: commit transaction: %w", err)
+	}
+
 	return nil
 }
 
-func (s *Storage) RemoveRoleFromUser(ctx context.Context, userID, roleID string) error {
-	rows, err := s.queries.RemoveRoleFromUser(ctx, sqlcgen.RemoveRoleFromUserParams{
-		UserID: userID,
-		RoleID: roleID,
-	})
+func (s *Storage) RemoveRoleFromUser(ctx context.Context, userID, roleID string) (sErr error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
-		return fmt.Errorf("remove role from user: %w", err)
+		return fmt.Errorf("remove role from user: begin transaction: %w", err)
+	}
+	defer func() {
+		if err := tx.Rollback(ctx); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+			sErr = errors.Join(sErr, fmt.Errorf("remove role from user: rollback transaction: %w", err))
+		}
+	}()
+
+	q := s.queries.WithTx(tx)
+
+	rows, err := q.RemoveRoleFromUser(ctx, sqlcgen.RemoveRoleFromUserParams{UserID: userID, RoleID: roleID})
+	if err != nil {
+		return fmt.Errorf("remove role from user: delete assignment: %w", err)
 	}
 
 	if rows == 0 {
 		return fmt.Errorf("user role not found: %w", pqerr.ErrNotFound)
+	}
+
+	if err := bumpAndProjectHuman(ctx, q, userID, time.Now()); err != nil {
+		return fmt.Errorf("remove role from user: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("remove role from user: commit transaction: %w", err)
+	}
+
+	return nil
+}
+
+func bumpAndProjectHuman(ctx context.Context, q *sqlcgen.Queries, userID string, now time.Time) error {
+	rows, err := q.BumpUserAuthVersion(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("bump human auth version: %w", err)
+	}
+
+	if rows != 1 {
+		return fmt.Errorf("account not found: %w", pqerr.ErrNotFound)
+	}
+
+	if err := q.UpsertHumanSecurityPrincipal(ctx, sqlcgen.UpsertHumanSecurityPrincipalParams{
+		UpdatedAtNs: now.UnixNano(), UserID: userID,
+	}); err != nil {
+		return fmt.Errorf("project human security principal: %w", err)
 	}
 
 	return nil

@@ -203,10 +203,14 @@ func main() {
 - The bundled Go client dials with **insecure (plaintext) transport** and a 10s
   dial timeout. The gRPC port is intended to sit on a trusted network or behind a
   proxy that terminates TLS — see [Deployment](deployment.md#network-exposure).
-- The gRPC listener has no built-in authentication. Treat `:8080` as a
-  privileged port and restrict who can reach it. When server authentication is
-  enabled, the HTTP topic subtree is bearer-token protected, but PlainQ makes no
-  per-topic or per-queue authorization decision. See
+- gRPC authentication and authorization are built in. Authenticated queue/topic
+  calls are tenant-scoped and resource-authorized. Agent messaging and
+  management RPCs require a bearer token; the public credential-exchange RPC
+  validates its presented bootstrap credential. Legacy `schema.v1` methods may omit a token while
+  `--grpc.protect-legacy=false`, but that compatibility identity is limited to
+  migrated or legacy-created rows in the fixed legacy tenant. The bundled
+  CLI/TUI has no bearer or TLS client configuration yet, so use a generated or
+  external authenticated client before enabling protection. See
   [Deployment → network exposure](deployment.md#network-exposure).
 - PlainQ registers the
   [vtprotobuf](https://github.com/planetscale/vtprotobuf) codec for faster

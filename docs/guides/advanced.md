@@ -111,9 +111,13 @@ publishes; it does not purge the queue.
 
 Because publish copies into every subscribed queue, work and storage scale with
 `message count × subscription count`. When server authentication is enabled,
-the HTTP topic subtree uses the existing bearer-token middleware. There is no
-per-topic or per-queue authorization layer. The gRPC listener retains its
-privileged-network model and must be protected externally. See
+the HTTP topic subtree requires a bearer session. Authenticated HTTP and gRPC
+requests are tenant-scoped and pass the shared queue/topic resource policy.
+Legacy `schema.v1` gRPC clients may omit a token only while
+`--grpc.protect-legacy=false`; that compatibility identity can see only the
+fixed-tenant rows marked as migrated or legacy-created. Set
+`--grpc.protect-legacy=true` once old clients have credentials. Transport TLS
+and network exposure remain separate deployment choices. See
 [Deployment → network exposure](deployment.md#network-exposure).
 
 ---

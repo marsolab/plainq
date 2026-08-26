@@ -1,0 +1,376 @@
+syntax = "proto3";
+
+package agent.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/plainq/go/agent/v1;agentv1";
+
+service AgentService {
+  rpc CreateAgent(CreateAgentRequest) returns (CreateAgentResponse) {}
+  rpc GetAgent(GetAgentRequest) returns (GetAgentResponse) {}
+  rpc ListAgents(ListAgentsRequest) returns (ListAgentsResponse) {}
+  rpc SetAgentStatus(SetAgentStatusRequest) returns (SetAgentStatusResponse) {}
+  rpc CreateAgentCredential(CreateAgentCredentialRequest) returns (CreateAgentCredentialResponse) {}
+  rpc ListAgentCredentials(ListAgentCredentialsRequest) returns (ListAgentCredentialsResponse) {}
+  rpc RegisterAgentCredential(RegisterAgentCredentialRequest) returns (RegisterAgentCredentialResponse) {}
+  rpc RevokeAgentCredential(RevokeAgentCredentialRequest) returns (RevokeAgentCredentialResponse) {}
+  rpc ExchangeAgentCredential(ExchangeAgentCredentialRequest) returns (ExchangeAgentCredentialResponse) {}
+  rpc CreateGrant(CreateGrantRequest) returns (CreateGrantResponse) {}
+  rpc ListGrants(ListGrantsRequest) returns (ListGrantsResponse) {}
+  rpc DeleteGrant(DeleteGrantRequest) returns (DeleteGrantResponse) {}
+  rpc SendToAgent(SendToAgentRequest) returns (SendToAgentResponse) {}
+  rpc ReceiveInbox(ReceiveInboxRequest) returns (ReceiveInboxResponse) {}
+  rpc ListenInbox(ListenInboxRequest) returns (stream ListenInboxResponse) {}
+  rpc AckInbox(AckInboxRequest) returns (AckInboxResponse) {}
+  rpc NackInbox(NackInboxRequest) returns (NackInboxResponse) {}
+  rpc ExtendInboxLease(ExtendInboxLeaseRequest) returns (ExtendInboxLeaseResponse) {}
+  rpc SubscribeAgent(SubscribeAgentRequest) returns (SubscribeAgentResponse) {}
+  rpc UnsubscribeAgent(UnsubscribeAgentRequest) returns (UnsubscribeAgentResponse) {}
+  rpc ListAgentSubscriptions(ListAgentSubscriptionsRequest) returns (ListAgentSubscriptionsResponse) {}
+  rpc ListAgentDeadLetters(ListAgentDeadLettersRequest) returns (ListAgentDeadLettersResponse) {}
+  rpc ReplayAgentDeadLetter(ReplayAgentDeadLetterRequest) returns (ReplayAgentDeadLetterResponse) {}
+}
+
+service PubSubService {
+  rpc CreateTopic(CreateTopicRequest) returns (CreateTopicResponse) {}
+  rpc GetTopic(GetTopicRequest) returns (GetTopicResponse) {}
+  rpc ListTopics(ListTopicsRequest) returns (ListTopicsResponse) {}
+  rpc DeleteTopic(DeleteTopicRequest) returns (DeleteTopicResponse) {}
+  rpc Publish(PublishRequest) returns (PublishResponse) {}
+  rpc CreateSubscription(CreateSubscriptionRequest) returns (CreateSubscriptionResponse) {}
+  rpc GetSubscription(GetSubscriptionRequest) returns (GetSubscriptionResponse) {}
+  rpc ListSubscriptions(ListSubscriptionsRequest) returns (ListSubscriptionsResponse) {}
+  rpc DeleteSubscription(DeleteSubscriptionRequest) returns (DeleteSubscriptionResponse) {}
+  rpc SeekSubscription(SeekSubscriptionRequest) returns (SeekSubscriptionResponse) {}
+  rpc PullSubscription(PullSubscriptionRequest) returns (PullSubscriptionResponse) {}
+  rpc ListenSubscription(ListenSubscriptionRequest) returns (stream ListenSubscriptionResponse) {}
+  rpc AckSubscription(AckSubscriptionRequest) returns (AckSubscriptionResponse) {}
+  rpc NackSubscription(NackSubscriptionRequest) returns (NackSubscriptionResponse) {}
+  rpc ExtendSubscriptionLease(ExtendSubscriptionLeaseRequest) returns (ExtendSubscriptionLeaseResponse) {}
+}
+
+service SystemService {
+  rpc GetCapabilities(GetCapabilitiesRequest) returns (GetCapabilitiesResponse) {}
+}
+
+enum AgentStatus {
+  AGENT_STATUS_UNSPECIFIED = 0;
+  AGENT_STATUS_ACTIVE = 1;
+  AGENT_STATUS_DISABLED = 2;
+}
+
+enum MessageSource {
+  MESSAGE_SOURCE_UNSPECIFIED = 0;
+  MESSAGE_SOURCE_DIRECT = 1;
+  MESSAGE_SOURCE_TOPIC = 2;
+}
+
+enum PrincipalKind {
+  PRINCIPAL_KIND_UNSPECIFIED = 0;
+  PRINCIPAL_KIND_HUMAN = 1;
+  PRINCIPAL_KIND_AGENT = 2;
+}
+
+enum ResourceKind {
+  RESOURCE_KIND_UNSPECIFIED = 0;
+  RESOURCE_KIND_TENANT = 1;
+  RESOURCE_KIND_AGENT = 2;
+  RESOURCE_KIND_QUEUE = 3;
+  RESOURCE_KIND_TOPIC = 4;
+  RESOURCE_KIND_SUBSCRIPTION = 5;
+}
+
+enum PubSubSubscriptionType {
+  PUBSUB_SUBSCRIPTION_TYPE_UNSPECIFIED = 0;
+  PUBSUB_SUBSCRIPTION_TYPE_DURABLE = 1;
+  PUBSUB_SUBSCRIPTION_TYPE_EPHEMERAL = 2;
+}
+
+enum PubSubDeliveryMode {
+  PUBSUB_DELIVERY_MODE_UNSPECIFIED = 0;
+  PUBSUB_DELIVERY_MODE_PULL = 1;
+  PUBSUB_DELIVERY_MODE_PUSH = 2;
+}
+
+enum PubSubStartPosition {
+  PUBSUB_START_POSITION_UNSPECIFIED = 0;
+  PUBSUB_START_POSITION_LATEST = 1;
+  PUBSUB_START_POSITION_EARLIEST = 2;
+  PUBSUB_START_POSITION_OFFSET = 3;
+}
+
+message OutboundAgentMessage {
+  string idempotency_key = 1;
+  string kind = 2;
+  uint32 schema_version = 3;
+  string content_type = 4;
+  map<string, string> attributes = 5;
+  string correlation_id = 6;
+  string causation_id = 7;
+  string conversation_id = 8;
+  string reply_to_agent_id = 9;
+  google.protobuf.Timestamp deadline = 10;
+  bytes body = 11;
+}
+
+message AgentMessageEnvelope {
+  string message_id = 1;
+  PrincipalKind sender_principal_kind = 2;
+  string sender_principal_id = 3;
+  string kind = 4;
+  uint32 schema_version = 5;
+  string content_type = 6;
+  map<string, string> attributes = 7;
+  string correlation_id = 8;
+  string causation_id = 9;
+  string conversation_id = 10;
+  string reply_to_agent_id = 11;
+  google.protobuf.Timestamp created_at = 12;
+  google.protobuf.Timestamp deadline = 13;
+  bytes body = 14;
+}
+
+message AgentDelivery {
+  string delivery_id = 1;
+  MessageSource source = 2;
+  AgentMessageEnvelope message = 3;
+  string receipt_handle = 4;
+  uint32 delivery_attempt = 5;
+  google.protobuf.Timestamp lease_expires_at = 6;
+  string topic_id = 7;
+  string subscription_id = 8;
+  uint64 topic_offset = 9;
+}
+
+message SubscriptionDelivery {
+  string delivery_id = 1;
+  AgentMessageEnvelope message = 2;
+  string receipt_handle = 3;
+  uint32 delivery_attempt = 4;
+  google.protobuf.Timestamp lease_expires_at = 5;
+  string topic_id = 6;
+  string subscription_id = 7;
+  uint64 topic_offset = 8;
+}
+
+message DeliveryReceipt {
+  string delivery_id = 1;
+  string receipt_handle = 2;
+  MessageSource source = 3;
+  string subscription_id = 4;
+}
+
+message DeliveryFailure {
+  string delivery_id = 1;
+  string code = 2;
+  string message = 3;
+}
+
+message Agent {
+  string agent_id = 1;
+  string agent_name = 2;
+  AgentStatus status = 3;
+  google.protobuf.Timestamp created_at = 4;
+  google.protobuf.Timestamp updated_at = 5;
+}
+
+message CreateAgentRequest { string agent_name = 1; }
+message CreateAgentResponse { Agent agent = 1; }
+message GetAgentRequest { string agent_id = 1; string agent_name = 2; }
+message GetAgentResponse { Agent agent = 1; }
+message ListAgentsRequest { string name_prefix = 1; uint32 limit = 2; string cursor = 3; }
+message ListAgentsResponse { repeated Agent agents = 1; string next_cursor = 2; bool has_more = 3; uint64 total_count = 4; }
+message SetAgentStatusRequest { string agent_id = 1; AgentStatus status = 2; }
+message SetAgentStatusResponse { Agent agent = 1; }
+message CreateAgentCredentialRequest { string agent_id = 1; string credential_name = 2; google.protobuf.Timestamp expires_at = 3; }
+message CreateAgentCredentialResponse { string credential_id = 1; string bootstrap_credential = 2; google.protobuf.Timestamp created_at = 3; google.protobuf.Timestamp expires_at = 4; }
+message AgentCredential {
+  string credential_id = 1;
+  string credential_name = 2;
+  google.protobuf.Timestamp created_at = 3;
+  google.protobuf.Timestamp expires_at = 4;
+  google.protobuf.Timestamp last_used_at = 5;
+  google.protobuf.Timestamp revoked_at = 6;
+}
+message ListAgentCredentialsRequest { string agent_id = 1; uint32 limit = 2; string cursor = 3; }
+message ListAgentCredentialsResponse { repeated AgentCredential credentials = 1; string next_cursor = 2; bool has_more = 3; }
+message RegisterAgentCredentialRequest { string agent_id = 1; string credential_id = 2; string credential_name = 3; bytes secret_sha256 = 4; google.protobuf.Timestamp expires_at = 5; }
+message RegisterAgentCredentialResponse { string credential_id = 1; google.protobuf.Timestamp created_at = 2; bool already_existed = 3; google.protobuf.Timestamp expires_at = 4; }
+message RevokeAgentCredentialRequest { string agent_id = 1; string credential_id = 2; }
+message RevokeAgentCredentialResponse {}
+message ExchangeAgentCredentialRequest { string bootstrap_credential = 1; }
+message ExchangeAgentCredentialResponse { string access_token = 1; google.protobuf.Timestamp expires_at = 2; Agent agent = 3; }
+message ResourceGrant {
+  string grant_id = 1;
+  PrincipalKind subject_kind = 2;
+  string subject_id = 3;
+  ResourceKind resource_kind = 4;
+  string resource_id = 5;
+  string action = 6;
+  google.protobuf.Timestamp created_at = 7;
+}
+message CreateGrantRequest { PrincipalKind subject_kind = 1; string subject_id = 2; ResourceKind resource_kind = 3; string resource_id = 4; string action = 5; }
+message CreateGrantResponse { ResourceGrant grant = 1; }
+message ListGrantsRequest { PrincipalKind subject_kind = 1; string subject_id = 2; ResourceKind resource_kind = 3; string resource_id = 4; uint32 limit = 5; string cursor = 6; }
+message ListGrantsResponse { repeated ResourceGrant grants = 1; string next_cursor = 2; bool has_more = 3; }
+message DeleteGrantRequest { string grant_id = 1; }
+message DeleteGrantResponse {}
+
+message SendToAgentRequest {
+  string target_agent_id = 1;
+  string target_agent_name = 2;
+  repeated OutboundAgentMessage messages = 3;
+}
+message SendToAgentResult { string message_id = 1; string delivery_id = 2; bool deduplicated = 3; }
+message SendToAgentResponse { repeated SendToAgentResult results = 1; }
+message ReceiveInboxRequest { uint32 batch_size = 1; uint32 wait_time_seconds = 2; uint32 lease_seconds = 3; }
+message ReceiveInboxResponse { repeated AgentDelivery deliveries = 1; }
+message ListenInboxRequest { uint32 batch_size = 1; uint32 lease_seconds = 2; }
+message ListenInboxResponse { AgentDelivery delivery = 1; }
+message AckInboxRequest { repeated DeliveryReceipt receipts = 1; }
+message AckInboxResponse { repeated string successful_delivery_ids = 1; repeated DeliveryFailure failed = 2; }
+message NackDelivery { DeliveryReceipt receipt = 1; uint32 available_after_seconds = 2; string reason = 3; }
+message NackInboxRequest { repeated NackDelivery deliveries = 1; }
+message NackInboxResponse { repeated string successful_delivery_ids = 1; repeated DeliveryFailure failed = 2; }
+message ExtendDelivery { DeliveryReceipt receipt = 1; uint32 extension_seconds = 2; }
+message ExtendInboxLeaseRequest { repeated ExtendDelivery deliveries = 1; }
+message ExtendedDelivery {
+  string delivery_id = 1;
+  string receipt_handle = 2;
+  google.protobuf.Timestamp lease_expires_at = 3;
+  MessageSource source = 4;
+  string subscription_id = 5;
+}
+message ExtendInboxLeaseResponse { repeated ExtendedDelivery extended = 1; repeated DeliveryFailure failed = 2; }
+
+message SubscribeAgentRequest {
+  string topic_id = 1;
+  string owner_agent_id = 2;
+  string subscription_name = 3;
+  PubSubStartPosition start_position = 4;
+  uint64 start_offset = 5;
+  uint32 ack_timeout_seconds = 6;
+  uint32 max_inflight = 7;
+}
+message SubscribeAgentResponse { PubSubSubscription subscription = 1; }
+message UnsubscribeAgentRequest { string subscription_id = 1; }
+message UnsubscribeAgentResponse {}
+message ListAgentSubscriptionsRequest { string agent_id = 1; uint32 limit = 2; string cursor = 3; }
+message ListAgentSubscriptionsResponse { repeated PubSubSubscription subscriptions = 1; string next_cursor = 2; bool has_more = 3; }
+message AgentDeadLetter { string dead_letter_id = 1; string original_delivery_id = 2; AgentMessageEnvelope message = 3; string reason = 4; uint32 delivery_attempt = 5; google.protobuf.Timestamp dead_lettered_at = 6; google.protobuf.Timestamp replayed_at = 7; }
+message ListAgentDeadLettersRequest { string agent_id = 1; uint32 limit = 2; string cursor = 3; }
+message ListAgentDeadLettersResponse { repeated AgentDeadLetter dead_letters = 1; string next_cursor = 2; bool has_more = 3; }
+message ReplayAgentDeadLetterRequest { string agent_id = 1; string dead_letter_id = 2; string idempotency_key = 3; google.protobuf.Timestamp replacement_deadline = 4; bool clear_deadline = 5; }
+message ReplayAgentDeadLetterResponse { string message_id = 1; string delivery_id = 2; bool deduplicated = 3; }
+
+message PubSubTopic {
+  string topic_id = 1;
+  string topic_name = 2;
+  uint64 retention_period_seconds = 3;
+  uint64 retention_bytes = 4;
+  uint64 next_offset = 5;
+  google.protobuf.Timestamp created_at = 6;
+}
+
+message PubSubSubscription {
+  string subscription_id = 1;
+  string subscription_name = 2;
+  string topic_id = 3;
+  string owner_agent_id = 4;
+  PubSubSubscriptionType type = 5;
+  PubSubDeliveryMode delivery_mode = 6;
+  PubSubStartPosition start_position = 7;
+  uint64 requested_start_offset = 8;
+  uint64 ack_timeout_seconds = 9;
+  uint32 max_inflight = 10;
+  uint64 acked_through_offset = 11;
+  uint64 next_claim_offset = 12;
+  uint64 retention_skipped_count = 13;
+  google.protobuf.Timestamp retention_skipped_at = 14;
+  google.protobuf.Timestamp created_at = 15;
+  uint64 deadline_skipped_count = 16;
+}
+
+message CreateTopicRequest { string topic_name = 1; uint64 retention_period_seconds = 2; uint64 retention_bytes = 3; }
+message CreateTopicResponse { PubSubTopic topic = 1; }
+message GetTopicRequest { string topic_id = 1; string topic_name = 2; }
+message GetTopicResponse { PubSubTopic topic = 1; }
+message ListTopicsRequest { string name_prefix = 1; uint32 limit = 2; string cursor = 3; }
+message ListTopicsResponse { repeated PubSubTopic topics = 1; string next_cursor = 2; bool has_more = 3; uint64 total_count = 4; }
+message DeleteTopicRequest { string topic_id = 1; bool force = 2; }
+message DeleteTopicResponse {}
+message PublishRequest { string topic_id = 1; string topic_name = 2; repeated OutboundAgentMessage messages = 3; }
+message PublishedTopicMessage { string message_id = 1; uint64 topic_offset = 2; bool deduplicated = 3; }
+message PublishResponse { string topic_id = 1; repeated PublishedTopicMessage messages = 2; }
+
+message CreateSubscriptionRequest {
+  string topic_id = 1;
+  string subscription_name = 2;
+  string owner_agent_id = 3;
+  PubSubSubscriptionType type = 4;
+  PubSubDeliveryMode delivery_mode = 5;
+  PubSubStartPosition start_position = 6;
+  uint64 start_offset = 7;
+  uint32 ack_timeout_seconds = 8;
+  uint32 max_inflight = 9;
+}
+message CreateSubscriptionResponse { PubSubSubscription subscription = 1; }
+message GetSubscriptionRequest { string subscription_id = 1; }
+message GetSubscriptionResponse { PubSubSubscription subscription = 1; }
+message ListSubscriptionsRequest { string topic_id = 1; string owner_agent_id = 2; uint32 limit = 3; string cursor = 4; }
+message ListSubscriptionsResponse { repeated PubSubSubscription subscriptions = 1; string next_cursor = 2; bool has_more = 3; }
+message DeleteSubscriptionRequest { string subscription_id = 1; }
+message DeleteSubscriptionResponse {}
+message SeekSubscriptionRequest { string subscription_id = 1; PubSubStartPosition position = 2; uint64 offset = 3; bool force = 4; }
+message SeekSubscriptionResponse { PubSubSubscription subscription = 1; }
+message PullSubscriptionRequest { string subscription_id = 1; uint32 batch_size = 2; uint32 wait_time_seconds = 3; uint32 lease_seconds = 4; }
+message PullSubscriptionResponse { repeated SubscriptionDelivery deliveries = 1; }
+message ListenSubscriptionRequest { string subscription_id = 1; uint32 batch_size = 2; uint32 lease_seconds = 3; }
+message ListenSubscriptionResponse { SubscriptionDelivery delivery = 1; }
+message AckSubscriptionRequest { string subscription_id = 1; repeated DeliveryReceipt receipts = 2; }
+message AckSubscriptionResponse { repeated string successful_delivery_ids = 1; repeated DeliveryFailure failed = 2; }
+message NackSubscriptionRequest { string subscription_id = 1; repeated NackDelivery deliveries = 2; }
+message NackSubscriptionResponse { repeated string successful_delivery_ids = 1; repeated DeliveryFailure failed = 2; }
+message ExtendSubscriptionLeaseRequest { string subscription_id = 1; repeated ExtendDelivery deliveries = 2; }
+message ExtendSubscriptionLeaseResponse { repeated ExtendedDelivery extended = 1; repeated DeliveryFailure failed = 2; }
+
+message GetCapabilitiesRequest {}
+message GetCapabilitiesResponse {
+  string server_version = 1;
+  repeated string api_services = 2;
+  bool agent_auth_required = 3;
+  bool transport_secure = 4;
+  bool cluster_enabled = 5;
+  uint64 max_message_bytes = 6;
+  uint32 max_send_batch = 7;
+  uint32 max_receive_batch = 8;
+  uint32 max_long_poll_seconds = 9;
+  uint32 default_lease_seconds = 10;
+  uint64 max_batch_bytes = 11;
+  uint64 max_attribute_bytes = 12;
+  uint32 max_attributes = 13;
+  uint32 max_attribute_key_bytes = 14;
+  uint32 max_attribute_value_bytes = 15;
+  uint32 max_envelope_field_bytes = 16;
+  uint32 max_content_type_bytes = 17;
+  uint64 max_lease_seconds = 18;
+  uint64 max_nack_delay_seconds = 19;
+  uint64 max_retention_seconds = 20;
+  uint32 max_inflight = 21;
+  uint32 max_agents_per_tenant = 22;
+  uint32 max_topics_per_tenant = 23;
+  uint32 max_subscriptions_per_agent = 24;
+  uint32 max_active_credentials = 25;
+  uint64 max_pending_messages = 26;
+  uint64 max_pending_bytes = 27;
+  uint64 max_stored_bytes_per_tenant = 28;
+  uint32 max_direct_attempts = 29;
+  uint32 message_units_per_second = 30;
+  uint64 idempotency_ttl_seconds = 31;
+  bool legacy_unsafe_delete_enabled = 32;
+  uint64 direct_dead_letter_retention_seconds = 33;
+  uint64 security_audit_retention_seconds = 34;
+  bool legacy_v1_auth_required = 35;
+  bool agent_messaging_feature_active = 36;
+}

@@ -8,13 +8,16 @@ questions that come up most.
 ### `auth.jwt.secret is required for session issuance`
 
 The server won't start because auth is enabled (the default) but no signing
-secret was supplied. Provide one:
+secret was supplied. Human auth also requires a separate 32-byte remote-admin
+bootstrap secret, so provide both:
 
 ```shell
-./plainq serve --auth.jwt.secret="$(openssl rand -hex 32)"
+./plainq serve \
+  --auth.jwt.secret="$(openssl rand -hex 32)" \
+  --auth.bootstrap.secret="$(openssl rand -hex 32)"
 ```
 
-In production, inject it from a secret manager rather than the command line. See
+In production, inject independent values from a secret manager rather than the command line. See
 [Configuration → Authentication](configuration.md#authentication).
 
 ### `pattern all:ui/dist: no matching files found`
@@ -102,11 +105,13 @@ failure possible.
 
 ### Is the HTTP/REST API authenticated?
 
-When authentication is enabled, the HTTP topic subtree uses the existing bearer
-token middleware. PlainQ does not make per-topic or per-queue authorization
-decisions, so an authenticated caller is not tenant-isolated by resource. The
-gRPC listener has no built-in authentication and remains a privileged-network
-endpoint. Protect both listeners accordingly; see
+When authentication is enabled, HTTP queue/topic routes require a bearer
+session. Authenticated HTTP and gRPC requests are tenant-scoped and pass the
+same resource-policy checks. The stable `schema.v1` gRPC service has a temporary
+anonymous compatibility mode when `--grpc.protect-legacy=false`; it is limited
+to fixed-tenant rows marked as migrated or legacy-created and never opens the
+agent API or tenant-created resources. Set `--grpc.protect-legacy=true` once old
+clients have credentials, and secure transport exposure separately; see
 [Deployment → network exposure](deployment.md#network-exposure).
 
 ### Is pub/sub ready for production?

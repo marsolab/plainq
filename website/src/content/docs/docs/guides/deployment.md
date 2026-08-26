@@ -16,7 +16,8 @@ entire state lives in one file.
 ```shell
 ./plainq serve \
   -storage.path=/var/lib/plainq/plainq.db \
-  -auth.jwt.secret="$(openssl rand -hex 32)"
+  -auth.jwt.secret="$(openssl rand -hex 32)" \
+  -auth.bootstrap.secret="$(openssl rand -hex 32)"
 ```
 
 Pair it with [Litestream](https://litestream.io) to continuously replicate the
@@ -27,7 +28,8 @@ SQLite file to object storage for cheap durability.
 ```shell
 docker run --rm -p 8080:8080 -p 8081:8081 -v plainq-data:/data \
   plainq:dev serve -storage.path=/data/plainq.db \
-  -auth.jwt.secret="$(openssl rand -hex 32)"
+  -auth.jwt.secret="$(openssl rand -hex 32)" \
+  -auth.bootstrap.secret="$(openssl rand -hex 32)"
 ```
 
 Mount a volume at `/data` and point `-storage.path` at it for a durable
@@ -42,19 +44,24 @@ The chart in `deploy/helm/plainq` deploys:
 
 ```shell
 helm install plainq deploy/helm/plainq \
-  --set auth.jwtSecret="$(openssl rand -hex 32)"
+  --set auth.jwtSecret="$(openssl rand -hex 32)" \
+  --set auth.bootstrap.secret="$(openssl rand -hex 32)"
 ```
 
-The JWT secret is sourced from a Kubernetes Secret. See the chart README in the
-repository for the full set of values.
+Both auth secrets are sourced from Kubernetes Secrets. See the chart README in
+the repository for the full set of values.
 
 ## Network exposure
 
 :::danger
-The gRPC listener has no built-in authentication. When server authentication is
-enabled, HTTP topic/admin routes use bearer sessions, but PlainQ does not make
-per-topic or per-queue authorization decisions. Treat both ports as privileged,
-terminate TLS, and apply network or proxy policy; login is not tenant isolation.
+Authenticated HTTP and gRPC queue/topic operations are tenant-scoped and pass
+the same resource-policy checks. Agent messaging and management require a
+bearer token; the public credential exchange validates its request credential.
+Legacy `schema.v1` gRPC calls may omit a token while
+`-grpc.protect-legacy=false`, but that compatibility identity is limited to
+migrated or legacy-created rows in the fixed legacy tenant. Built-in gRPC TLS is
+activated with agent APIs; otherwise use a TLS-terminating mesh/proxy. Keep gRPC
+private until compatibility protection is enabled.
 :::
 
 ## Health & metrics

@@ -1,3 +1,4 @@
+//nolint:contextcheck // policyHTTPContext always derives from the request's context and only adds bounded metadata.
 package queue
 
 import (
@@ -11,9 +12,9 @@ import (
 )
 
 func (s *Service) listTopicsHandler(w http.ResponseWriter, r *http.Request) {
-	output, err := s.pubsub.listTopics(r.Context(), &ListTopicsRequest{})
+	output, err := s.pubsub.listTopics(s.policyHTTPContext(r), &ListTopicsRequest{})
 	if err != nil {
-		httpkit.ErrorHTTP(w, r, pqerr.AsTransport(err))
+		queueHTTPError(w, r, err)
 
 		return
 	}
@@ -26,14 +27,14 @@ func (s *Service) createTopicHandler(w http.ResponseWriter, r *http.Request) {
 
 	var input CreateTopicRequest
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		httpkit.ErrorHTTP(w, r, pqerr.AsTransport(err))
+		queueHTTPError(w, r, err)
 
 		return
 	}
 
-	output, err := s.pubsub.createTopic(r.Context(), &input)
+	output, err := s.pubsub.createTopic(s.policyHTTPContext(r), &input)
 	if err != nil {
-		httpkit.ErrorHTTP(w, r, pqerr.AsTransport(err))
+		queueHTTPError(w, r, err)
 
 		return
 	}
@@ -42,8 +43,8 @@ func (s *Service) createTopicHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) deleteTopicHandler(w http.ResponseWriter, r *http.Request) {
-	if err := s.pubsub.deleteTopic(r.Context(), chi.URLParam(r, "topicID")); err != nil {
-		httpkit.ErrorHTTP(w, r, pqerr.AsTransport(err))
+	if err := s.pubsub.deleteTopic(s.policyHTTPContext(r), chi.URLParam(r, "topicID")); err != nil {
+		queueHTTPError(w, r, err)
 
 		return
 	}
@@ -56,14 +57,14 @@ func (s *Service) subscribeTopicHandler(w http.ResponseWriter, r *http.Request) 
 
 	var input SubscribeRequest
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		httpkit.ErrorHTTP(w, r, pqerr.AsTransport(err))
+		queueHTTPError(w, r, err)
 
 		return
 	}
 
-	output, err := s.pubsub.subscribe(r.Context(), chi.URLParam(r, "topicID"), &input)
+	output, err := s.pubsub.subscribe(s.policyHTTPContext(r), chi.URLParam(r, "topicID"), &input)
 	if err != nil {
-		httpkit.ErrorHTTP(w, r, pqerr.AsTransport(err))
+		queueHTTPError(w, r, err)
 
 		return
 	}
@@ -73,11 +74,11 @@ func (s *Service) subscribeTopicHandler(w http.ResponseWriter, r *http.Request) 
 
 func (s *Service) unsubscribeTopicHandler(w http.ResponseWriter, r *http.Request) {
 	if err := s.pubsub.unsubscribe(
-		r.Context(),
+		s.policyHTTPContext(r),
 		chi.URLParam(r, "topicID"),
 		chi.URLParam(r, "subscriptionID"),
 	); err != nil {
-		httpkit.ErrorHTTP(w, r, pqerr.AsTransport(err))
+		queueHTTPError(w, r, err)
 
 		return
 	}
@@ -90,20 +91,20 @@ func (s *Service) publishTopicHandler(w http.ResponseWriter, r *http.Request) {
 
 	var input PublishRequest
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		httpkit.ErrorHTTP(w, r, err)
+		queueHTTPError(w, r, err)
 
 		return
 	}
 
-	output, err := s.pubsub.publish(r.Context(), chi.URLParam(r, "topicID"), &input)
+	output, err := s.pubsub.publish(s.policyHTTPContext(r), chi.URLParam(r, "topicID"), &input)
 	if err != nil {
 		if errors.Is(err, pqerr.ErrCapacityExceeded) {
-			httpkit.ErrorHTTP(w, r, err, httpkit.WithStatus(http.StatusRequestEntityTooLarge))
+			queueHTTPError(w, r, err, httpkit.WithStatus(http.StatusRequestEntityTooLarge))
 
 			return
 		}
 
-		httpkit.ErrorHTTP(w, r, pqerr.AsTransport(err))
+		queueHTTPError(w, r, err)
 
 		return
 	}

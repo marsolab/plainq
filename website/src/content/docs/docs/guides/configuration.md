@@ -18,7 +18,8 @@ the complete list.
 | `-grpc.addr`             | `:8080`                     | gRPC listener address.                              |
 | `-http.addr`             | `:8081`                     | HTTP listener address (Houston + metrics + health). |
 | `-auth.enable`           | `true`                      | Toggle JWT auth.                                    |
-| `-auth.jwt.secret`       | _required when auth is on_  | HMAC secret used to sign access/refresh tokens.     |
+| `-auth.jwt.secret`       | _always required by serve_  | HMAC secret used to sign access/refresh tokens.     |
+| `-auth.bootstrap.secret` | _required when auth is on_  | Shared secret for the first remote administrator.  |
 | `-auth.access.ttl`       | `60m`                       | Access token TTL.                                   |
 | `-auth.refresh.ttl`      | `720h`                      | Refresh token TTL.                                  |
 | `-metrics.route`         | `/metrics`                  | Prometheus-style metrics endpoint.                  |
@@ -37,7 +38,8 @@ cheap, continuous replication to object storage.
 
 ```shell
 ./plainq serve -storage.path=/data/plainq.db \
-  -auth.jwt.secret="$(openssl rand -hex 32)"
+  -auth.jwt.secret="$(openssl rand -hex 32)" \
+  -auth.bootstrap.secret="$(openssl rand -hex 32)"
 ```
 
 ### PostgreSQL
@@ -47,7 +49,8 @@ Use Postgres when you want a shared backend across replicas.
 ```shell
 ./plainq serve -storage.driver=postgres \
   -storage.postgres.dsn="postgres://user:pass@host:5432/plainq?sslmode=require" \
-  -auth.jwt.secret="$(openssl rand -hex 32)"
+  -auth.jwt.secret="$(openssl rand -hex 32)" \
+  -auth.bootstrap.secret="$(openssl rand -hex 32)"
 ```
 
 ## Listeners
@@ -60,14 +63,19 @@ PlainQ exposes two listeners:
 
 ## Authentication
 
-The JWT secret powers Houston sessions and, when authentication is enabled, the
-HTTP topic/admin middleware. It does not add per-topic or per-queue
-authorization, and gRPC has no built-in authentication. See the project's
-`AUTH.md` and authentication & RBAC docs for the full account story.
+The JWT secret powers Houston sessions and the shared HTTP/gRPC authentication
+path. Authenticated queue/topic operations are tenant-scoped and
+resource-authorized. Legacy `schema.v1` gRPC calls may omit a token while
+`-grpc.protect-legacy=false`, but that compatibility identity is restricted to
+migrated or legacy-created rows in the fixed legacy tenant. The bundled CLI/TUI
+does not yet send bearer or TLS credentials, so keep compatibility enabled for
+those clients. See the project's authentication & RBAC docs for the full account
+story.
 
 :::caution
-Treat both the gRPC (`:8080`) and HTTP (`:8081`) ports as privileged and keep
-them on a trusted network. See the
+Built-in gRPC TLS is activated with agent APIs. A legacy-only server needs a
+TLS-terminating mesh/proxy; keep gRPC private while anonymous compatibility is
+enabled. See the
 [Deployment guide](/docs/guides/deployment/#network-exposure).
 :::
 

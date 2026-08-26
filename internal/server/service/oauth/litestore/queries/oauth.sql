@@ -30,8 +30,8 @@ SELECT user_id, email, org_id, oauth_provider, oauth_sub, is_oauth_user, last_sy
 FROM users
 WHERE oauth_provider = ? AND oauth_sub = ?;
 
--- name: GetUserIDByOAuthSub :one
-SELECT user_id
+-- name: GetOAuthUserIdentity :one
+SELECT user_id, org_id
 FROM users
 WHERE oauth_provider = ? AND oauth_sub = ?;
 
@@ -41,11 +41,50 @@ VALUES (?, ?, '', TRUE, ?, ?, ?, TRUE, ?, ?, ?);
 
 -- name: UpdateOAuthUser :exec
 UPDATE users
-SET email        = ?,
-    org_id       = ?,
-    last_sync_at = ?,
-    updated_at   = ?
-WHERE user_id = ?;
+SET email        = sqlc.arg('email'),
+    auth_version = auth_version + CASE
+        WHEN org_id <> CAST(sqlc.arg('org_id') AS text) THEN 1
+        ELSE 0
+    END,
+    org_id       = sqlc.arg('org_id'),
+    last_sync_at = sqlc.arg('last_sync_at'),
+    updated_at   = sqlc.arg('updated_at')
+WHERE user_id = sqlc.arg('user_id');
+
+-- name: DeleteHumanSecurityPrincipal :exec
+DELETE FROM security_principals
+WHERE tenant_id = sqlc.arg('tenant_id')
+  AND principal_kind = 'human'
+  AND principal_id = sqlc.arg('principal_id');
+
+-- name: UpsertHumanSecurityPrincipal :exec
+INSERT INTO security_principals (
+    tenant_id, principal_kind, principal_id, status, roles_json,
+    auth_version, updated_at_ns
+)
+SELECT u.org_id,
+       'human',
+       u.user_id,
+       u.status,
+       coalesce((
+           SELECT json_group_array(role_name)
+           FROM (
+               SELECT r.role_name AS role_name
+               FROM user_roles ur
+               JOIN roles r ON r.role_id = ur.role_id
+               WHERE ur.user_id = u.user_id
+               ORDER BY r.role_name
+           )
+       ), '[]'),
+       u.auth_version,
+       ?
+FROM users u
+WHERE u.user_id = ?
+ON CONFLICT (tenant_id, principal_kind, principal_id) DO UPDATE SET
+    status = excluded.status,
+    roles_json = excluded.roles_json,
+    auth_version = excluded.auth_version,
+    updated_at_ns = excluded.updated_at_ns;
 
 -- name: UpdateUserLastSync :exec
 UPDATE users

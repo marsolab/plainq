@@ -33,12 +33,14 @@ User=plainq
 Group=plainq
 WorkingDirectory=/var/lib/plainq
 Environment=PLAINQ_JWT_SECRET=     # set via a drop-in or systemd credential
+Environment=PLAINQ_BOOTSTRAP_SECRET= # independent 32-byte remote-admin secret
 ExecStart=/usr/local/bin/plainq serve \
   --storage.path=/var/lib/plainq/plainq.db \
   --storage.journal-mode=wal \
   --grpc.addr=127.0.0.1:8080 \
   --http.addr=:8081 \
-  --auth.jwt.secret=${PLAINQ_JWT_SECRET}
+  --auth.jwt.secret=${PLAINQ_JWT_SECRET} \
+  --auth.bootstrap.secret=${PLAINQ_BOOTSTRAP_SECRET}
 Restart=on-failure
 RestartSec=2
 
@@ -46,8 +48,8 @@ RestartSec=2
 WantedBy=multi-user.target
 ```
 
-Provide the secret out-of-band (a systemd `EnvironmentFile`,
-`LoadCredential=`, or your secret manager) — never bake it into the unit.
+Provide both independent secrets out-of-band (a systemd `EnvironmentFile`,
+`LoadCredential=`, or your secret manager) — never bake them into the unit.
 
 ```shell
 sudo systemctl daemon-reload
@@ -91,9 +93,11 @@ docker build -t plainq:local .
 docker run --rm -p 8081:8081 -p 8080:8080 \
   -v plainq-data:/data \
   -e PLAINQ_JWT_SECRET \
+  -e PLAINQ_BOOTSTRAP_SECRET \
   plainq:local serve \
   --storage.path=/data/plainq.db \
-  --auth.jwt.secret="$PLAINQ_JWT_SECRET"
+  --auth.jwt.secret="$PLAINQ_JWT_SECRET" \
+  --auth.bootstrap.secret="$PLAINQ_BOOTSTRAP_SECRET"
 ```
 
 Mount a **persistent volume** for the SQLite file (and its `-wal`/`-shm`
@@ -136,7 +140,8 @@ Point the server at your database and let it migrate its own schema on startup:
 ./plainq serve \
   --storage.driver=postgres \
   --storage.postgres.dsn='postgres://plainq:secret@pg.internal:5432/plainq?sslmode=require' \
-  --auth.jwt.secret="$PLAINQ_JWT_SECRET"
+  --auth.jwt.secret="$PLAINQ_JWT_SECRET" \
+  --auth.bootstrap.secret="$PLAINQ_BOOTSTRAP_SECRET"
 ```
 
 On boot the server connects (30s timeout), pings, and applies pending schema
@@ -147,17 +152,21 @@ PostgreSQL connection-pool sizing and backup practices apply.
 
 PlainQ has two listeners with different trust assumptions:
 
-- **gRPC (`:8080`)** — the queue API. It does **not** currently enforce the JWT
-  auth used by the HTTP surface, and the bundled client dials in plaintext. Treat
-  it as privileged: bind it to loopback or a private interface
-  (`--grpc.addr=127.0.0.1:8080`) and reach it over a trusted network, a service
-  mesh, or a TLS-terminating proxy.
+- **gRPC (`:8080`)** — queue/topic and agent APIs. Authenticated calls pass the
+  shared tenant/resource policy. Agent messaging and management RPCs require a
+  bearer token; the public credential-exchange RPC validates the bootstrap
+  credential carried by its request.
+  Legacy `schema.v1` calls may omit a token while
+  `--grpc.protect-legacy=false`; that compatibility identity can reach only
+  fixed-tenant rows marked as migrated or legacy-created. Until compatibility
+  is disabled, bind the listener privately. Built-in gRPC TLS is activated when
+  agent APIs are enabled (unless the development-only insecure mode is chosen);
+  a legacy-only server needs a trusted TLS-terminating mesh or proxy.
 - **HTTP (`:8081`)** — Houston, REST APIs, `/live`, `/health`, `/metrics`. When
-  server authentication is enabled, the topic subtree and authenticated admin
-  routes use bearer sessions. PlainQ does not make per-topic or per-queue
-  authorization decisions, and health/Prometheus are intentionally available to
-  infrastructure. Keep the listener behind TLS and an appropriate network or
-  proxy policy; do not treat login alone as tenant isolation.
+  server authentication is enabled, queue/topic and admin routes require bearer
+  sessions and use the same tenant/resource policy as gRPC. Health and
+  Prometheus exposition remain intentionally available to infrastructure. Keep
+  the listener behind TLS and an appropriate network or proxy policy.
 
 A typical layout:
 
@@ -170,7 +179,7 @@ A typical layout:
                │ :8081 (HTTP / Houston)
         ┌──────▼───────────────────────┐
         │           plainq             │
-        │  :8080 gRPC ← private only    │
+        │  :8080 gRPC ← auth + mesh/TLS  │
         └──────────────────────────────┘
 ```
 
@@ -179,10 +188,11 @@ operators reach Houston through the proxy.
 
 ## Pre-flight checklist
 
-- [ ] `--auth.jwt.secret` supplied from a secret manager, not the command line history.
-- [ ] gRPC bound to a private interface or fronted by mTLS/proxy.
+- [ ] Independent `--auth.jwt.secret` and `--auth.bootstrap.secret` values supplied from a secret manager.
+- [ ] `--grpc.protect-legacy=true` only after replacing the bundled CLI/TUI with a bearer-capable client.
+- [ ] With agent APIs enabled, built-in gRPC TLS configured; otherwise the listener is private or fronted by a trusted TLS-terminating mesh/proxy.
 - [ ] HTTP behind a TLS-terminating reverse proxy with timeouts and network
-      policy; built-in authentication is not per-resource authorization.
+      policy.
 - [ ] Persistent volume for the SQLite file (or a managed PostgreSQL).
 - [ ] Backups: Litestream (SQLite) or your PostgreSQL backup tooling.
 - [ ] `/live` wired as liveness and `/health` wired as readiness.

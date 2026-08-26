@@ -55,7 +55,8 @@ func (a *pubSubApplication) createTopic(ctx context.Context, input *CreateTopicR
 		return nil, validationErr
 	}
 
-	output, storageErr := a.storage.CreateTopic(ctx, input)
+	storageCtx, replay := trackPolicyReplay(ctx)
+	output, storageErr := a.storage.CreateTopic(storageCtx, input)
 
 	err = storageErr
 	if storageErr != nil {
@@ -64,6 +65,10 @@ func (a *pubSubApplication) createTopic(ctx context.Context, input *CreateTopicR
 
 	if output != nil {
 		attributedTopicID = output.TopicID
+	}
+
+	if replay.isReplay() {
+		return output, nil
 	}
 
 	a.reconcileTopicState(ctx)
@@ -86,11 +91,16 @@ func (a *pubSubApplication) deleteTopic(ctx context.Context, topicID string) (er
 
 	attributedTopicID = topicID
 
-	output, storageErr := a.storage.DeleteTopic(ctx, topicID)
+	storageCtx, replay := trackPolicyReplay(ctx)
+	output, storageErr := a.storage.DeleteTopic(storageCtx, topicID)
 
 	err = storageErr
 	if storageErr != nil {
 		return storageErr
+	}
+
+	if replay.isReplay() {
+		return nil
 	}
 
 	if output != nil {
@@ -130,11 +140,16 @@ func (a *pubSubApplication) subscribe(
 		return nil, validationErr
 	}
 
-	output, storageErr := a.storage.Subscribe(ctx, topicID, input)
+	storageCtx, replay := trackPolicyReplay(ctx)
+	output, storageErr := a.storage.Subscribe(storageCtx, topicID, input)
 	err = storageErr
 
 	if storageErr != nil {
 		return output, storageErr
+	}
+
+	if replay.isReplay() {
+		return output, nil
 	}
 
 	a.observer.TopicSubscriptionCreated(topicID)
@@ -165,11 +180,16 @@ func (a *pubSubApplication) unsubscribe(ctx context.Context, topicID, subscripti
 		return validationErr
 	}
 
-	storageErr := a.storage.Unsubscribe(ctx, topicID, subscriptionID)
+	storageCtx, replay := trackPolicyReplay(ctx)
+	storageErr := a.storage.Unsubscribe(storageCtx, topicID, subscriptionID)
 
 	err = storageErr
 	if storageErr != nil {
 		return storageErr
+	}
+
+	if replay.isReplay() {
+		return nil
 	}
 
 	a.observer.TopicSubscriptionDeleted(topicID)
@@ -204,9 +224,14 @@ func (a *pubSubApplication) publish(
 		return nil, validationErr
 	}
 
-	output, storageErr := a.storage.Publish(ctx, topicID, input)
+	storageCtx, replay := trackPolicyReplay(ctx)
+	output, storageErr := a.storage.Publish(storageCtx, topicID, input)
 
 	err = storageErr
+	if replay.isReplay() {
+		return output, storageErr
+	}
+
 	if errors.Is(storageErr, consensus.ErrCommitUnknown) {
 		return output, storageErr
 	}
@@ -250,9 +275,15 @@ func (a *pubSubApplication) deleteQueue(
 		return nil, err
 	}
 
-	output, err := a.storage.DeleteQueue(ctx, input)
+	storageCtx, replay := trackPolicyReplay(ctx)
+
+	output, err := a.storage.DeleteQueue(storageCtx, input)
 	if err != nil {
 		return output, err
+	}
+
+	if replay.isReplay() {
+		return output, nil
 	}
 
 	if output != nil {

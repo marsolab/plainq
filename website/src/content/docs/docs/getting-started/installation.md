@@ -45,7 +45,8 @@ docker build -t plainq:dev .
 
 docker run --rm -p 8080:8080 -p 8081:8081 -v plainq-data:/data \
   plainq:dev serve -storage.path=/data/plainq.db \
-  -auth.jwt.secret="$(openssl rand -hex 32)"
+  -auth.jwt.secret="$(openssl rand -hex 32)" \
+  -auth.bootstrap.secret="$(openssl rand -hex 32)"
 ```
 
 The image exposes `8080` (gRPC) and `8081` (HTTP/Houston). A bare
@@ -59,12 +60,14 @@ A production-grade chart lives in `deploy/helm/plainq`:
 
 ```shell
 helm install plainq deploy/helm/plainq \
-  --set auth.jwtSecret="$(openssl rand -hex 32)"
+  --set auth.jwtSecret="$(openssl rand -hex 32)" \
+  --set auth.bootstrap.secret="$(openssl rand -hex 32)"
 ```
 
 It deploys a StatefulSet + PVC for SQLite (or a Deployment + HPA when
-`storage.driver=postgres`) and sources the JWT secret from a Kubernetes Secret.
-See the [Deployment guide](/docs/guides/deployment/) for the full story.
+`storage.driver=postgres`) and sources both auth secrets from Kubernetes
+Secrets. See the [Deployment guide](/docs/guides/deployment/) for the full
+story.
 
 ## Verify the install
 

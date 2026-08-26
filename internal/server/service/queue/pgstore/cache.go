@@ -9,7 +9,6 @@ import (
 
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/servekit/tern"
-	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // QueueProps represents a cached set of queue properties.
@@ -57,25 +56,6 @@ func (c *QueuePropsCache) getByID(id string) (QueueProps, bool) {
 	defer c.mu.RUnlock()
 
 	v, cached := c.byID[id]
-	if !cached {
-		return QueueProps{}, false
-	}
-
-	c.props.MoveToFront(v)
-
-	props, ok := v.Value.(QueueProps)
-	if !ok {
-		panic(fmt.Errorf("invalid type in cache: %#v", v.Value))
-	}
-
-	return props, true
-}
-
-func (c *QueuePropsCache) getByName(name string) (QueueProps, bool) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	v, cached := c.byName[name]
 	if !cached {
 		return QueueProps{}, false
 	}
@@ -178,19 +158,6 @@ func sortProps(props []QueueProps, orderBy v1.ListQueuesRequest_OrderBy, sortBy 
 			return 0
 		}
 	})
-}
-
-func propsToProto(p QueueProps) *v1.DescribeQueueResponse {
-	return &v1.DescribeQueueResponse{
-		QueueId:                  p.ID,
-		QueueName:                p.Name,
-		CreatedAt:                timestamppb.New(p.CreatedAt.UTC()),
-		RetentionPeriodSeconds:   p.RetentionPeriodSeconds,
-		VisibilityTimeoutSeconds: p.VisibilityTimeoutSeconds,
-		MaxReceiveAttempts:       p.MaxReceiveAttempts,
-		EvictionPolicy:           v1.EvictionPolicy(p.EvictionPolicy), //nolint:gosec // EvictionPolicy enum is non-negative.
-		DeadLetterQueueId:        p.DeadLetterQueueID,
-	}
 }
 
 func propsFromProto(p *v1.DescribeQueueResponse) QueueProps {

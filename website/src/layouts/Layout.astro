@@ -1,5 +1,6 @@
 ---
 import "../styles/globals.css";
+import { Agentation } from "agentation";
 
 interface Props {
   title?: string;
@@ -12,6 +13,7 @@ const {
 } = Astro.props;
 
 const canonical = new URL(Astro.url.pathname, Astro.site).toString();
+const isDevelopment = import.meta.env.DEV;
 ---
 
 <!doctype html>
@@ -46,20 +48,6 @@ const canonical = new URL(Astro.url.pathname, Astro.site).toString();
     <a class="skip-link" href="#main-content">Skip to content</a>
     <slot />
 
-    {/* Dev-only visual feedback; Vite removes this branch in production. */}
-    <script>
-      if (import.meta.env.DEV) {
-        const [{ Agentation }, { createRoot }, { createElement }] =
-          await Promise.all([
-            import("agentation"),
-            import("react-dom/client"),
-            import("react"),
-          ]);
-        const mount = document.createElement("div");
-        mount.id = "agentation-root";
-        document.body.appendChild(mount);
-        createRoot(mount).render(createElement(Agentation));
-      }
-    </script>
+    {isDevelopment && <Agentation client:only="react" />}
   </body>
 </html>

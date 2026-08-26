@@ -28,11 +28,13 @@ gRPC code, and produces a `./plainq` binary at the repository root.
 
 ## 2. Start the server
 
-PlainQ ships with authentication **on by default**, and the JWT signing secret
-is required. Generate one inline:
+PlainQ ships with authentication **on by default**, and independent JWT signing
+and remote-admin bootstrap secrets are required. Generate both inline:
 
 ```shell
-./plainq serve --auth.jwt.secret="$(openssl rand -hex 32)"
+./plainq serve \
+  --auth.jwt.secret="$(openssl rand -hex 32)" \
+  --auth.bootstrap.secret="$(openssl rand -hex 32)"
 ```
 
 You'll see startup logs and:
@@ -42,11 +44,14 @@ You'll see startup logs and:
 - a SQLite database created at `./plainq.db`.
 
 :::caution
-In the current wiring, **neither** the gRPC API **nor** the HTTP API routes are
-gated by auth middleware at the server. The JWT secret powers Houston's
-login/onboarding and the account subsystem, but the queue, RBAC, and OAuth REST
-endpoints are reachable without a token. Treat **both** the gRPC (`:8080`) and
-HTTP (`:8081`) ports as privileged — keep them on a trusted network.
+HTTP queue/topic and admin routes require a bearer session when authentication
+is enabled. Authenticated HTTP and gRPC requests are tenant-scoped and
+resource-authorized. The quick-start CLI works without a token because legacy
+`schema.v1` gRPC compatibility is enabled by default; that identity can reach
+only fixed-tenant rows marked as migrated or legacy-created. Set
+`-grpc.protect-legacy=true` only after replacing the bundled CLI/TUI with a
+client that sends bearer metadata. Built-in gRPC TLS is activated with agent
+APIs; legacy-only deployments need a TLS-terminating mesh/proxy.
 :::
 
 ## 3. Send and receive a message

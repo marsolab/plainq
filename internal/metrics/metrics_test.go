@@ -153,6 +153,15 @@ func Test_Catalog_sortedByName(t *testing.T) {
 	}
 }
 
+func TestSecurityAuditPersistenceFailuresAreCounted(t *testing.T) {
+	before := securityAuditFailures.With().Get()
+
+	RecordSecurityAuditFailure()
+
+	td.Cmp(t, securityAuditFailures.With().Get()-before, uint64(1))
+	td.Cmp(t, hasSeries(t, "plainq_security_audit_failures_total"), true)
+}
+
 func Test_queueMetrics_recordTheQueueLifecycle(t *testing.T) {
 	const queueID = "QTESTLIFECYCLE"
 

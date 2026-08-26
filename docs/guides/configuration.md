@@ -36,7 +36,8 @@ PostgreSQL example:
 ./plainq serve \
   --storage.driver=postgres \
   --storage.postgres.dsn='postgres://user:pass@db:5432/plainq?sslmode=require' \
-  --auth.jwt.secret="$JWT_SECRET"
+  --auth.jwt.secret="$JWT_SECRET" \
+  --auth.bootstrap.secret="$BOOTSTRAP_SECRET"
 ```
 
 See [Deployment](deployment.md) for choosing a backend.
@@ -68,24 +69,34 @@ recommended):
 | Flag                                | Default  | Purpose                                                      |
 | ----------------------------------- | -------- | ------------------------------------------------------------ |
 | `--auth.enable`                     | `true`   | Master switch for the JWT auth subsystem (account APIs, Houston login). |
-| `--auth.jwt.secret`                 | _(empty)_| HMAC secret signing access/refresh tokens. **Required** to issue sessions. |
+| `--auth.jwt.secret`                 | _(empty)_| HMAC secret signing access/refresh tokens. **Always required by `serve`.** |
+| `--auth.bootstrap.secret`           | _(empty)_| Shared secret for creating the first remote administrator. **Required** with auth. |
 | `--auth.access.ttl`                 | `60m`    | Access-token lifetime.                                       |
 | `--auth.refresh.ttl`                | `720h`   | Refresh-token lifetime (30 days).                            |
 | `--auth.registration.enable`        | `true`   | Allow new user self-registration.                            |
-| `--auth.email.verification.enable`  | `true`   | Require email verification.                                  |
+| `--auth.email.verification.enable`  | `false`  | Reserved; enabling it fails closed until a verifier/delivery backend is configured. |
 
-> **`--auth.jwt.secret` is required even with auth enabled** — the server needs
-> it to issue and verify sessions, and `serve` will fail fast without it.
-> Generate one with `openssl rand -hex 32` and supply it via your secret manager
-> or an environment variable; don't hardcode it.
+> **The JWT secret is always required by the current `serve` construction, even
+> when `--auth.enable=false`; the bootstrap secret is additionally required when
+> authentication is enabled.** The JWT secret signs sessions; the separate
+> bootstrap secret authorizes creation of the first remote administrator. Each
+> must contain at least 32 bytes. Generate independent values with
+> `openssl rand -hex 32`, inject them from a secret manager, and never hardcode
+> them.
 
 See [Authentication & RBAC](../authentication-rbac.md) for the full model.
 
-> **Boundary:** when authentication is enabled, the HTTP topic subtree and
-> authenticated admin routes require bearer sessions. There is no per-topic or
-> per-queue authorization decision, and the gRPC listener has no built-in
-> authentication. Keep both listeners behind the appropriate network policy;
-> see [Deployment → network exposure](deployment.md#network-exposure).
+> **Boundary:** when authentication is enabled, HTTP queue/topic and admin
+> routes require bearer sessions. Authenticated HTTP and gRPC queue/topic
+> operations are tenant-scoped and pass the shared resource-policy checks.
+> Legacy `schema.v1` gRPC calls may omit a token only while
+> `--grpc.protect-legacy=false`; that compatibility identity is restricted to
+> migrated or legacy-created rows in the fixed legacy tenant. Set the flag to
+> `true` after old clients have credentials. The bundled CLI/TUI currently sends
+> neither bearer metadata nor TLS credentials, so it requires compatibility
+> mode; use a generated/external authenticated client before enabling legacy
+> protection. Keep transport TLS and network policy in place; see
+> [Deployment → network exposure](deployment.md#network-exposure).
 
 ## OAuth & multi-tenancy
 
@@ -157,12 +168,15 @@ behavior, Prometheus families, and Houston graphs.
   --http.write-timeout=30s \
   --http.idle-timeout=120s \
   --auth.jwt.secret="$PLAINQ_JWT_SECRET" \
+  --auth.bootstrap.secret="$PLAINQ_BOOTSTRAP_SECRET" \
   --auth.access.ttl=15m \
   --log.level=info
 ```
 
 Note `--grpc.addr=127.0.0.1:8080`: binding gRPC to loopback (or a private
-interface) keeps the unauthenticated queue/topic API off the public network.
+interface) limits exposure while legacy anonymous compatibility remains
+enabled. Set `--grpc.protect-legacy=true` only after moving the bundled CLI/TUI
+to a client that sends a bearer credential.
 
 ## Next steps
 

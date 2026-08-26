@@ -15,13 +15,14 @@ func TestPubSubErrorNormalization(t *testing.T) {
 		operation pubSubErrorContext
 		want      error
 	}{
-		"create unique violation is duplicate":    {&pgconn.PgError{Code: "23505", ConstraintName: "topic_name_uindex"}, pubSubCreateTopic, pqerr.ErrAlreadyExists},
-		"subscribe unique violation is duplicate": {&pgconn.PgError{Code: "23505", ConstraintName: "topic_subscriptions_topic_queue_uindex"}, pubSubSubscribe, pqerr.ErrAlreadyExists},
-		"shutdown is unavailable":                 {&pgconn.PgError{Code: "57P01"}, pubSubListTopics, pqerr.ErrUnavailable},
-		"serialization failure is unavailable":    {&pgconn.PgError{Code: "40001"}, pubSubDeleteQueue, pqerr.ErrUnavailable},
-		"deadlock is unavailable":                 {&pgconn.PgError{Code: "40P01"}, pubSubDeleteTopic, pqerr.ErrUnavailable},
-		"deadline is unavailable":                 {context.DeadlineExceeded, pubSubPublish, pqerr.ErrUnavailable},
-		"closed connection is unavailable":        {pgconn.ErrConnClosed, pubSubInventory, pqerr.ErrUnavailable},
+		"legacy create unique violation is duplicate": {&pgconn.PgError{Code: "23505", ConstraintName: "topic_name_uindex"}, pubSubCreateTopic, pqerr.ErrAlreadyExists},
+		"tenant create unique violation is duplicate": {&pgconn.PgError{Code: "23505", ConstraintName: "topic_tenant_name_uindex"}, pubSubCreateTopic, pqerr.ErrAlreadyExists},
+		"subscribe unique violation is duplicate":     {&pgconn.PgError{Code: "23505", ConstraintName: "topic_subscriptions_topic_queue_uindex"}, pubSubSubscribe, pqerr.ErrAlreadyExists},
+		"shutdown is unavailable":                     {&pgconn.PgError{Code: "57P01"}, pubSubListTopics, pqerr.ErrUnavailable},
+		"serialization failure is unavailable":        {&pgconn.PgError{Code: "40001"}, pubSubDeleteQueue, pqerr.ErrUnavailable},
+		"deadlock is unavailable":                     {&pgconn.PgError{Code: "40P01"}, pubSubDeleteTopic, pqerr.ErrUnavailable},
+		"deadline is unavailable":                     {context.DeadlineExceeded, pubSubPublish, pqerr.ErrUnavailable},
+		"closed connection is unavailable":            {pgconn.ErrConnClosed, pubSubInventory, pqerr.ErrUnavailable},
 	}
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {

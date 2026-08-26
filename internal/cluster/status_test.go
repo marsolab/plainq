@@ -22,8 +22,19 @@ func TestStatusReportsBothViews(t *testing.T) {
 	leader := cluster.leader(30 * time.Second)
 
 	cluster.waitFor(30*time.Second, func() bool {
-		return len(leader.node.Status().Members) == 3
-	}, "every node is in the configuration")
+		status := leader.node.Status()
+		if len(status.Members) != 3 || status.Voters != 3 || !status.Healthy {
+			return false
+		}
+
+		for _, member := range status.Members {
+			if member.Suffrage == consensus.SuffrageVoter && !member.Reachable {
+				return false
+			}
+		}
+
+		return true
+	}, "every voter is configured and reachable")
 
 	status := leader.node.Status()
 
@@ -78,23 +89,39 @@ func TestStatusShowsAnUnreachableMember(t *testing.T) {
 	leader := cluster.leader(30 * time.Second)
 
 	cluster.waitFor(30*time.Second, func() bool {
-		return len(leader.node.Status().Members) == 3
-	}, "every node is in the configuration")
+		status := leader.node.Status()
+		if len(status.Members) != 3 || status.Voters != 3 || !status.Healthy {
+			return false
+		}
+
+		for _, member := range status.Members {
+			if member.Suffrage == consensus.SuffrageVoter && !member.Reachable {
+				return false
+			}
+		}
+
+		return true
+	}, "every voter is configured and reachable")
 
 	departing := cluster.follower()
 	td.Require(t).CmpNoError(departing.node.Close())
 
+	var status Status
+
 	cluster.waitFor(30*time.Second, func() bool {
-		for _, member := range leader.node.Status().Members {
+		status = leader.node.Status()
+		if status.Voters != 3 || !status.Healthy {
+			return false
+		}
+
+		for _, member := range status.Members {
 			if member.ID == departing.id {
 				return !member.Reachable
 			}
 		}
 
 		return false
-	}, "the stopped node reads as unreachable")
-
-	status := leader.node.Status()
+	}, "the stopped node reads as unreachable while the remaining voters retain quorum")
 
 	td.Cmp(t, status.Voters, 3, "it is still in the configuration")
 	td.Cmp(t, status.Healthy, true, "two of three is still a quorum")

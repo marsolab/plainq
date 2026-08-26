@@ -791,18 +791,28 @@ func setupPostgresPubSub(t *testing.T, ctx context.Context, pool *pgxpool.Pool) 
 	t.Helper()
 	const schema = `
 CREATE TABLE queue_properties (
-  queue_id varchar(26), queue_name text NOT NULL UNIQUE,
+  queue_id varchar(26), queue_name text NOT NULL,
   created_at timestamptz DEFAULT now() NOT NULL, gc_at timestamptz DEFAULT now() NOT NULL,
   retention_period_seconds integer NOT NULL, visibility_timeout_seconds integer NOT NULL,
   max_receive_attempts integer NOT NULL, drop_policy integer DEFAULT 0 NOT NULL,
   dead_letter_queue_id varchar(26),
+  tenant_id text NOT NULL DEFAULT '01HQ5RJNXS6TPXK89PQWY4N8JH',
+  created_by_kind text NOT NULL DEFAULT 'system',
+  created_by_id text NOT NULL DEFAULT 'migration',
   CONSTRAINT queue_pk PRIMARY KEY (queue_id)
 );
+CREATE UNIQUE INDEX queue_tenant_name_uindex ON queue_properties(tenant_id, queue_name);
+CREATE INDEX queue_tenant_id_idx ON queue_properties(tenant_id, queue_id);
 CREATE TABLE topic_properties (
-  topic_id varchar(26), topic_name text NOT NULL UNIQUE,
+  topic_id varchar(26), topic_name text NOT NULL,
   created_at timestamptz DEFAULT now() NOT NULL,
+  tenant_id text NOT NULL DEFAULT '01HQ5RJNXS6TPXK89PQWY4N8JH',
+  created_by_kind text NOT NULL DEFAULT 'system',
+  created_by_id text NOT NULL DEFAULT 'migration',
   CONSTRAINT topic_pk PRIMARY KEY (topic_id)
 );
+CREATE UNIQUE INDEX topic_tenant_name_uindex ON topic_properties(tenant_id, topic_name);
+CREATE INDEX topic_tenant_id_idx ON topic_properties(tenant_id, topic_id);
 CREATE TABLE topic_subscriptions (
   subscription_id varchar(26),
   topic_id varchar(26) NOT NULL,

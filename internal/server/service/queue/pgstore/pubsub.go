@@ -18,34 +18,65 @@ const (
 	topicInventoryQuery = `SELECT t.topic_id, COUNT(s.subscription_id)
 	FROM topic_properties t
 	LEFT JOIN topic_subscriptions s ON s.topic_id = t.topic_id
+	WHERE t.tenant_id = $1
+	  AND (NOT $2::boolean OR (t.created_by_kind = 'system' AND t.created_by_id IN ('migration', 'legacy-v1')))
 	GROUP BY t.topic_id
 	ORDER BY t.topic_id;`
 
 	listTopicSubscriptionsQuery = `SELECT s.subscription_id, s.topic_id, s.queue_id, COALESCE(q.queue_name, ''), s.created_at
-FROM topic_subscriptions s
-LEFT JOIN queue_properties q ON q.queue_id = s.queue_id
-WHERE s.topic_id = $1
-ORDER BY s.created_at, s.subscription_id;`
+	FROM topic_subscriptions s
+	JOIN topic_properties t ON t.topic_id = s.topic_id
+	JOIN queue_properties q ON q.queue_id = s.queue_id
+	WHERE s.topic_id = $1
+	  AND t.tenant_id = $2
+	  AND q.tenant_id = $2
+	  AND (NOT $3::boolean OR (
+	      t.created_by_kind = 'system' AND t.created_by_id IN ('migration', 'legacy-v1')
+	      AND q.created_by_kind = 'system' AND q.created_by_id IN ('migration', 'legacy-v1')
+	  ))
+	ORDER BY s.created_at, s.subscription_id;`
 
 	captureTopicSubscriptionsQuery = `SELECT s.subscription_id, s.topic_id, s.queue_id, COALESCE(q.queue_name, ''), s.created_at
-FROM topic_subscriptions s
-LEFT JOIN queue_properties q ON q.queue_id = s.queue_id
-WHERE s.topic_id = $1
-ORDER BY s.created_at, s.subscription_id
-FOR UPDATE OF s;`
+	FROM topic_subscriptions s
+	JOIN topic_properties t ON t.topic_id = s.topic_id
+	JOIN queue_properties q ON q.queue_id = s.queue_id
+	WHERE s.topic_id = $1
+	  AND t.tenant_id = $2
+	  AND q.tenant_id = $2
+	  AND (NOT $3::boolean OR (
+	      t.created_by_kind = 'system' AND t.created_by_id IN ('migration', 'legacy-v1')
+	      AND q.created_by_kind = 'system' AND q.created_by_id IN ('migration', 'legacy-v1')
+	  ))
+	ORDER BY s.created_at, s.subscription_id
+	FOR UPDATE OF s;`
 
 	captureQueueSubscriptionsQuery = `SELECT s.subscription_id, s.topic_id, s.queue_id, COALESCE(q.queue_name, ''), s.created_at
-FROM topic_subscriptions s
-LEFT JOIN queue_properties q ON q.queue_id = s.queue_id
-WHERE s.queue_id = $1
-ORDER BY s.topic_id, s.created_at, s.subscription_id
-FOR UPDATE OF s;`
+	FROM topic_subscriptions s
+	JOIN topic_properties t ON t.topic_id = s.topic_id
+	JOIN queue_properties q ON q.queue_id = s.queue_id
+	WHERE s.queue_id = $1
+	  AND t.tenant_id = $2
+	  AND q.tenant_id = $2
+	  AND (NOT $3::boolean OR (
+	      t.created_by_kind = 'system' AND t.created_by_id IN ('migration', 'legacy-v1')
+	      AND q.created_by_kind = 'system' AND q.created_by_id IN ('migration', 'legacy-v1')
+	  ))
+	ORDER BY s.topic_id, s.created_at, s.subscription_id
+	FOR UPDATE OF s;`
 )
 
 var _ queue.Storage = (*Storage)(nil)
 
 func (s *Storage) ListTopics(ctx context.Context) (*queue.ListTopicsResponse, error) {
-	rows, err := s.pool.Query(ctx, `SELECT topic_id, topic_name, created_at FROM topic_properties ORDER BY created_at DESC, topic_id;`)
+	scope := queue.ScopeFromContext(ctx)
+
+	rows, err := s.pool.Query(ctx, `
+		SELECT topic_id, topic_name, created_at
+		FROM topic_properties
+		WHERE tenant_id = $1
+		  AND (NOT $2::boolean OR (created_by_kind = 'system' AND created_by_id IN ('migration', 'legacy-v1')))
+		ORDER BY created_at DESC, topic_id;
+	`, scope.TenantID, scope.Compatibility)
 	if err != nil {
 		return nil, fmt.Errorf("list topics: %w", normalizePubSubError(err, pubSubListTopics))
 	}
@@ -80,21 +111,35 @@ func (s *Storage) CreateTopic(ctx context.Context, input *queue.CreateTopicReque
 		return nil, fmt.Errorf("%w: topic name is empty", pqerr.ErrInvalidInput)
 	}
 
+	id := queue.NextID(ctx, idkit.XID)
+	scope := queue.ScopeFromContext(ctx)
+
+	if mutation, ok := postgresQueueMutation(ctx); ok {
+		output, err := s.createTopicWithPolicy(ctx, id, input, scope, mutation)
+		if err != nil {
+			return nil, fmt.Errorf("create topic with policy: %w", normalizePubSubError(err, pubSubCreateTopic))
+		}
+
+		return output, nil
+	}
+
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("begin create topic: %w", normalizePubSubError(err, pubSubCreateTopic))
 	}
-
 	defer func() { sErr = joinPostgresRollback(ctx, sErr, tx, pubSubCreateTopic, "create topic") }()
-
-	id := queue.NextID(ctx, idkit.XID)
 
 	tag, err := tx.Exec(
 		ctx,
-		`INSERT INTO topic_properties (topic_id, topic_name, created_at) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING;`,
+		`INSERT INTO topic_properties (
+			topic_id, topic_name, created_at, tenant_id, created_by_kind, created_by_id
+		) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING;`,
 		id,
 		input.TopicName,
 		queue.WriteTime(ctx),
+		scope.TenantID,
+		scope.CreatorKind,
+		scope.CreatorID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create topic: %w", normalizePubSubError(err, pubSubCreateTopic))
@@ -112,25 +157,45 @@ func (s *Storage) CreateTopic(ctx context.Context, input *queue.CreateTopicReque
 }
 
 func (s *Storage) DeleteTopic(ctx context.Context, topicID string) (_ *queue.DeleteTopicResult, sErr error) {
+	scope := queue.ScopeFromContext(ctx)
+	if mutation, ok := postgresQueueMutation(ctx); ok {
+		result, err := s.deleteTopicWithPolicy(ctx, topicID, scope, mutation)
+		if err != nil {
+			return nil, fmt.Errorf("delete topic with policy: %w", normalizePubSubError(err, pubSubDeleteTopic))
+		}
+
+		return result, nil
+	}
+
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("begin delete topic: %w", normalizePubSubError(err, pubSubDeleteTopic))
 	}
-
 	defer func() { sErr = joinPostgresRollback(ctx, sErr, tx, pubSubDeleteTopic, "delete topic") }()
 
-	if err := lockTopicForDelete(ctx, tx, topicID); err != nil {
+	if err := lockTopicForDeleteInScope(ctx, tx, topicID, scope); err != nil {
 		return nil, err
 	}
 
-	removed, err := querySubscriptions(ctx, tx, captureTopicSubscriptionsQuery, topicID, pubSubDeleteTopic)
+	removed, err := querySubscriptions(
+		ctx,
+		tx,
+		captureTopicSubscriptionsQuery,
+		pubSubDeleteTopic,
+		topicID,
+		scope.TenantID,
+		scope.Compatibility,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("capture topic subscriptions: %w", err)
 	}
 
 	deleteResult := &queue.DeleteTopicResult{RemovedSubscriptions: removed}
 
-	tag, err := tx.Exec(ctx, `DELETE FROM topic_properties WHERE topic_id = $1;`, topicID)
+	tag, err := tx.Exec(ctx, `DELETE FROM topic_properties
+		WHERE topic_id = $1 AND tenant_id = $2
+		  AND (NOT $3::boolean OR (created_by_kind = 'system' AND created_by_id IN ('migration', 'legacy-v1')));`,
+		topicID, scope.TenantID, scope.Compatibility)
 	if err != nil {
 		return nil, fmt.Errorf("delete topic: %w", normalizePubSubError(err, pubSubDeleteTopic))
 	}
@@ -146,34 +211,46 @@ func (s *Storage) DeleteTopic(ctx context.Context, topicID string) (_ *queue.Del
 	return deleteResult, nil
 }
 
-func (s *Storage) Subscribe(ctx context.Context, topicID string, input *queue.SubscribeRequest) (_ *queue.SubscribeResponse, sErr error) {
+//nolint:cyclop // Validation, policy delegation, scoped checks, duplicate handling, and commit form one atomic operation.
+func (s *Storage) Subscribe(
+	ctx context.Context,
+	topicID string,
+	input *queue.SubscribeRequest,
+) (_ *queue.SubscribeResponse, sErr error) {
 	if input == nil {
 		return nil, fmt.Errorf("subscribe queue: %w", pqerr.ErrInvalidInput)
+	}
+
+	id := queue.NextID(ctx, idkit.XID)
+	if mutation, ok := postgresQueueMutation(ctx); ok {
+		output, err := s.subscribeWithPolicy(ctx, id, topicID, input, mutation)
+		if err != nil {
+			return nil, fmt.Errorf("subscribe with policy: %w", normalizePubSubError(err, pubSubSubscribe))
+		}
+
+		return output, nil
 	}
 
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("begin subscribe: %w", normalizePubSubError(err, pubSubSubscribe))
 	}
-
 	defer func() { sErr = joinPostgresRollback(ctx, sErr, tx, pubSubSubscribe, "subscribe") }()
 
-	topicExists, err := pgExists(
-		ctx,
-		tx,
-		`SELECT EXISTS(SELECT 1 FROM topic_properties WHERE topic_id = $1);`,
-		topicID,
-	)
+	scope := queue.ScopeFromContext(ctx)
+
+	topicExists, err := pgExists(ctx, tx, `SELECT EXISTS(SELECT 1 FROM topic_properties
+		WHERE topic_id = $1 AND tenant_id = $2
+		  AND (NOT $3::boolean OR (created_by_kind = 'system' AND created_by_id IN ('migration', 'legacy-v1'))));`,
+		topicID, scope.TenantID, scope.Compatibility)
 	if err != nil {
 		return nil, fmt.Errorf("check subscription topic: %w", normalizePubSubError(err, pubSubSubscribe))
 	}
 
-	queueExists, err := pgExists(
-		ctx,
-		tx,
-		`SELECT EXISTS(SELECT 1 FROM queue_properties WHERE queue_id = $1);`,
-		input.QueueID,
-	)
+	queueExists, err := pgExists(ctx, tx, `SELECT EXISTS(SELECT 1 FROM queue_properties
+		WHERE queue_id = $1 AND tenant_id = $2
+		  AND (NOT $3::boolean OR (created_by_kind = 'system' AND created_by_id IN ('migration', 'legacy-v1'))));`,
+		input.QueueID, scope.TenantID, scope.Compatibility)
 	if err != nil {
 		return nil, fmt.Errorf("check subscription queue: %w", normalizePubSubError(err, pubSubSubscribe))
 	}
@@ -182,11 +259,10 @@ func (s *Storage) Subscribe(ctx context.Context, topicID string, input *queue.Su
 		return nil, fmt.Errorf("subscribe queue: %w", pqerr.ErrNotFound)
 	}
 
-	id := queue.NextID(ctx, idkit.XID)
-
 	tag, err := tx.Exec(
 		ctx,
-		`INSERT INTO topic_subscriptions (subscription_id, topic_id, queue_id, created_at) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING;`,
+		`INSERT INTO topic_subscriptions (subscription_id, topic_id, queue_id, created_at)
+		 VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING;`,
 		id,
 		topicID,
 		input.QueueID,
@@ -208,11 +284,31 @@ func (s *Storage) Subscribe(ctx context.Context, topicID string, input *queue.Su
 }
 
 func (s *Storage) Unsubscribe(ctx context.Context, topicID, subscriptionID string) error {
+	scope := queue.ScopeFromContext(ctx)
+	if mutation, ok := postgresQueueMutation(ctx); ok {
+		if err := s.unsubscribeWithPolicy(ctx, topicID, subscriptionID, scope, mutation); err != nil {
+			return fmt.Errorf("unsubscribe with policy: %w", normalizePubSubError(err, pubSubUnsubscribe))
+		}
+
+		return nil
+	}
+
 	tag, err := s.pool.Exec(
 		ctx,
-		`DELETE FROM topic_subscriptions WHERE topic_id = $1 AND subscription_id = $2;`,
+		`DELETE FROM topic_subscriptions
+		 WHERE topic_id = $1
+		   AND subscription_id = $2
+		   AND EXISTS (
+		       SELECT 1
+		       FROM topic_properties t
+		       WHERE t.topic_id = topic_subscriptions.topic_id
+		         AND t.tenant_id = $3
+		         AND (NOT $4::boolean OR (t.created_by_kind = 'system' AND t.created_by_id IN ('migration', 'legacy-v1')))
+		   );`,
 		topicID,
 		subscriptionID,
+		scope.TenantID,
+		scope.Compatibility,
 	)
 	if err != nil {
 		return fmt.Errorf("unsubscribe queue: %w", normalizePubSubError(err, pubSubUnsubscribe))
@@ -228,6 +324,15 @@ func (s *Storage) Unsubscribe(ctx context.Context, topicID, subscriptionID strin
 func (s *Storage) Publish(ctx context.Context, topicID string, input *queue.PublishRequest) (*queue.PublishResponse, error) {
 	if input == nil || len(input.Messages) == 0 {
 		return nil, fmt.Errorf("%w: messages are empty", pqerr.ErrInvalidInput)
+	}
+
+	if mutation, ok := postgresQueueMutation(ctx); ok {
+		output, err := s.publishWithPolicy(ctx, topicID, input, mutation)
+		if err != nil {
+			return output, fmt.Errorf("publish with policy: %w", normalizePubSubError(err, pubSubPublish))
+		}
+
+		return output, nil
 	}
 
 	if err := s.ensureTopicExists(ctx, topicID); err != nil {
@@ -260,7 +365,9 @@ func (s *Storage) Publish(ctx context.Context, topicID string, input *queue.Publ
 }
 
 func (s *Storage) TopicInventory(ctx context.Context) (queue.TopicInventory, error) {
-	rows, err := s.pool.Query(ctx, topicInventoryQuery)
+	scope := queue.ScopeFromContext(ctx)
+
+	rows, err := s.pool.Query(ctx, topicInventoryQuery, scope.TenantID, scope.Compatibility)
 	if err != nil {
 		return queue.TopicInventory{}, fmt.Errorf("topic inventory: %w", normalizePubSubError(err, pubSubInventory))
 	}
@@ -299,25 +406,45 @@ type pgQueryRower interface {
 	QueryRow(ctx context.Context, query string, args ...any) pgx.Row
 }
 
-func lockTopicForDelete(ctx context.Context, db pgQueryRower, topicID string) error {
+func lockTopicForDeleteInScope(
+	ctx context.Context,
+	db pgQueryRower,
+	topicID string,
+	scope queue.AccessScope,
+) error {
 	return lockParentForDelete(
 		ctx,
 		db,
-		`SELECT topic_id FROM topic_properties WHERE topic_id = $1 FOR UPDATE;`,
-		topicID,
+		`SELECT topic_id FROM topic_properties
+		 WHERE topic_id = $1 AND tenant_id = $2
+		   AND (NOT $3::boolean OR (created_by_kind = 'system' AND created_by_id IN ('migration', 'legacy-v1')))
+		 FOR UPDATE;`,
 		pubSubDeleteTopic,
 		"topic",
+		topicID,
+		scope.TenantID,
+		scope.Compatibility,
 	)
 }
 
-func lockQueueForDelete(ctx context.Context, db pgQueryRower, queueID string) error {
+func lockQueueForDeleteInScope(
+	ctx context.Context,
+	db pgQueryRower,
+	queueID string,
+	scope queue.AccessScope,
+) error {
 	return lockParentForDelete(
 		ctx,
 		db,
-		`SELECT queue_id FROM queue_properties WHERE queue_id = $1 FOR UPDATE;`,
-		queueID,
+		`SELECT queue_id FROM queue_properties
+		 WHERE queue_id = $1 AND tenant_id = $2
+		   AND (NOT $3::boolean OR (created_by_kind = 'system' AND created_by_id IN ('migration', 'legacy-v1')))
+		 FOR UPDATE;`,
 		pubSubDeleteQueue,
 		"queue",
+		queueID,
+		scope.TenantID,
+		scope.Compatibility,
 	)
 }
 
@@ -333,12 +460,12 @@ func lockParentForDelete(
 	ctx context.Context,
 	db pgQueryRower,
 	query string,
-	parentID string,
 	operation pubSubErrorContext,
 	parentName string,
+	args ...any,
 ) error {
 	var lockedID string
-	if err := db.QueryRow(ctx, query, parentID).Scan(&lockedID); err != nil {
+	if err := db.QueryRow(ctx, query, args...).Scan(&lockedID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("lock %s for delete: %w", parentName, pqerr.ErrNotFound)
 		}
@@ -350,7 +477,12 @@ func lockParentForDelete(
 }
 
 func (s *Storage) ensureTopicExists(ctx context.Context, topicID string) error {
-	ok, err := pgExists(ctx, s.pool, `SELECT EXISTS(SELECT 1 FROM topic_properties WHERE topic_id = $1);`, topicID)
+	scope := queue.ScopeFromContext(ctx)
+
+	ok, err := pgExists(ctx, s.pool, `SELECT EXISTS(SELECT 1 FROM topic_properties
+		WHERE topic_id = $1 AND tenant_id = $2
+		  AND (NOT $3::boolean OR (created_by_kind = 'system' AND created_by_id IN ('migration', 'legacy-v1'))));`,
+		topicID, scope.TenantID, scope.Compatibility)
 	if err != nil {
 		return fmt.Errorf("check topic exists: %w", normalizePubSubError(err, pubSubPublish))
 	}
@@ -362,10 +494,10 @@ func (s *Storage) ensureTopicExists(ctx context.Context, topicID string) error {
 	return nil
 }
 
-func pgExists(ctx context.Context, db pgQueryRunner, query string, arg any) (bool, error) {
+func pgExists(ctx context.Context, db pgQueryRunner, query string, args ...any) (bool, error) {
 	var ok bool
 
-	if err := db.QueryRow(ctx, query, arg).Scan(&ok); err != nil {
+	if err := db.QueryRow(ctx, query, args...).Scan(&ok); err != nil {
 		return false, fmt.Errorf("scan existence query: %w", err)
 	}
 
@@ -378,17 +510,27 @@ func listSubscriptions(
 	topicID string,
 	operation pubSubErrorContext,
 ) ([]queue.Subscription, error) {
-	return querySubscriptions(ctx, db, listTopicSubscriptionsQuery, topicID, operation)
+	scope := queue.ScopeFromContext(ctx)
+
+	return querySubscriptions(
+		ctx,
+		db,
+		listTopicSubscriptionsQuery,
+		operation,
+		topicID,
+		scope.TenantID,
+		scope.Compatibility,
+	)
 }
 
 func querySubscriptions(
 	ctx context.Context,
 	db pgQueryRunner,
 	query string,
-	parentID string,
 	operation pubSubErrorContext,
+	args ...any,
 ) ([]queue.Subscription, error) {
-	rows, err := db.Query(ctx, query, parentID)
+	rows, err := db.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list subscriptions: %w", normalizePubSubError(err, operation))
 	}
@@ -420,35 +562,17 @@ func querySubscriptions(
 }
 
 func listSubscriptionsByQueue(ctx context.Context, tx pgx.Tx, queueID string) ([]queue.Subscription, error) {
-	rows, err := tx.Query(ctx, captureQueueSubscriptionsQuery, queueID)
-	if err != nil {
-		return nil, fmt.Errorf("list queue subscriptions: %w", normalizePubSubError(err, pubSubDeleteQueue))
-	}
-	defer rows.Close()
+	scope := queue.ScopeFromContext(ctx)
 
-	subscriptions := []queue.Subscription{}
-
-	for rows.Next() {
-		var subscription queue.Subscription
-
-		if err := rows.Scan(
-			&subscription.SubscriptionID,
-			&subscription.TopicID,
-			&subscription.QueueID,
-			&subscription.QueueName,
-			&subscription.CreatedAt,
-		); err != nil {
-			return nil, fmt.Errorf("scan queue subscription: %w", normalizePubSubError(err, pubSubDeleteQueue))
-		}
-
-		subscriptions = append(subscriptions, subscription)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate queue subscriptions: %w", normalizePubSubError(err, pubSubDeleteQueue))
-	}
-
-	return subscriptions, nil
+	return querySubscriptions(
+		ctx,
+		tx,
+		captureQueueSubscriptionsQuery,
+		pubSubDeleteQueue,
+		queueID,
+		scope.TenantID,
+		scope.Compatibility,
+	)
 }
 
 func joinPostgresRollback(ctx context.Context, current error, tx pgx.Tx, operation pubSubErrorContext, label string) error {

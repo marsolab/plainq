@@ -2,12 +2,12 @@
 deps:
 	go mod tidy && go mod download
 
-.PHONY: schema schema-local schema-public-check schema-published schema-check
+.PHONY: schema schema-local schema-public-check schema-published schema-check schema-breaking
 schema: schema-local
 
 schema-local:
-	buf generate schema --template internal/server/schema/buf.gen.yaml --output internal/server/schema
-	cd schema && buf generate . --template buf.docs.gen.yaml
+	cd schema && buf lint && buf generate --template buf.docs.gen.yaml && perl -pi -e 's/[ \t]+$$//' docs/index.html
+	cd internal/server/schema && buf generate ../../../schema --template buf.gen.yaml
 
 schema-public-check:
 	@tmp=$$(mktemp -d); \
@@ -27,7 +27,10 @@ schema-published:
 	cd internal/server/schema && buf generate buf.build/plainq/schema
 
 schema-check: schema-local schema-public-check
-	git diff --exit-code -- internal/server/schema/v1 schema/docs
+	git diff --exit-code -- schema/docs internal/server/schema
+
+schema-breaking:
+	cd schema && buf breaking --against 'https://github.com/marsolab/plainq.git#branch=main,subdir=schema'
 
 .PHONY: sqlc-generate
 sqlc-generate:
@@ -70,7 +73,10 @@ docker:
 
 .PHONY: helm-lint helm-test
 helm-lint:
-	helm lint deploy/helm/plainq --set auth.jwtSecret=ci-test-secret
+	helm lint deploy/helm/plainq \
+		--set auth.jwtSecret=ci-test-jwt-secret-at-least-32-bytes \
+		--set auth.bootstrap.secret=ci-test-bootstrap-secret-32-bytes
 
 helm-test:
+	deploy/helm/plainq/tests/bootstrap-secret.sh
 	./deploy/helm/plainq/test-health-render.sh

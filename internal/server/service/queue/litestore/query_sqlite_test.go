@@ -129,6 +129,31 @@ func Test_messageBatchQueries_roundTrip(t *testing.T) {
 	td.Cmp(t, deleted, []string{"m1"}, "only the existing id is returned")
 }
 
+func Test_querySelectMessagesExcludesExhaustedRetries(t *testing.T) {
+	db := openTestDB(t)
+
+	const queueID = "qattempts"
+
+	_, err := db.Exec(queryCreateQueueTable(queueID))
+	td.Require(t).CmpNoError(err, "create queue table")
+
+	stamp := sqliteTime(testNow)
+	_, err = db.Exec(queryInsertMessagesBatch(queueID, 1, true), "m1", []byte("body"), stamp, stamp)
+	td.Require(t).CmpNoError(err, "insert message")
+
+	_, err = db.Exec(`update ` + queueID + ` set retries = 1 where msg_id = 'm1';`)
+	td.Require(t).CmpNoError(err, "exhaust message")
+
+	rows, err := db.Query(querySelectMessages(queueID), stamp, 1, 1)
+	td.Require(t).CmpNoError(err, "select messages")
+	defer func() { _ = rows.Close() }()
+
+	if rows.Next() {
+		t.Fatal("exhausted message was selected")
+	}
+	td.CmpNoError(t, rows.Err(), "iterate messages")
+}
+
 // Test_queryPeekMessages_browsesWithoutConsuming proves the peek query returns
 // messages oldest-first, flags in-flight rows, and — unlike Receive — leaves
 // visibility and retry counts untouched.

@@ -96,7 +96,7 @@ func normalizeUniqueViolation(err error, constraint string, operation pubSubErro
 	switch operation {
 	case pubSubCreateTopic:
 		switch constraint {
-		case "topic_name_uindex", "topic_id_uindex", "topic_pk":
+		case "topic_name_uindex", "topic_tenant_name_uindex", "topic_id_uindex", "topic_pk":
 			return errors.Join(pqerr.ErrAlreadyExists, err)
 		}
 	case pubSubSubscribe:

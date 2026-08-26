@@ -279,6 +279,157 @@ func TestCommitUnknownDoesNotFabricatePublishOrLifecycleEffects(t *testing.T) {
 	})
 }
 
+func TestPubSubApplicationPolicyReplayRecordsAttemptsWithoutRepeatingCommittedEffects(t *testing.T) {
+	topicID := idkit.XID()
+	subscriptionID := idkit.XID()
+	queueID := idkit.XID()
+
+	tests := map[string]struct {
+		storage   *mockStorage
+		operation string
+		topicID   string
+		call      func(context.Context, *pubSubApplication) error
+		wantErr   bool
+	}{
+		"create topic": {
+			storage: &mockStorage{createTopicFunc: func(ctx context.Context, _ *CreateTopicRequest) (*CreateTopicResponse, error) {
+				MarkPolicyReplay(ctx)
+
+				return &CreateTopicResponse{TopicID: topicID}, nil
+			}},
+			operation: metrics.OpCreateTopic,
+			topicID:   topicID,
+			call: func(ctx context.Context, app *pubSubApplication) error {
+				_, err := app.createTopic(ctx, &CreateTopicRequest{TopicName: "events"})
+
+				return err
+			},
+		},
+		"delete topic": {
+			storage: &mockStorage{deleteTopicFunc: func(ctx context.Context, _ string) (*DeleteTopicResult, error) {
+				MarkPolicyReplay(ctx)
+
+				return &DeleteTopicResult{RemovedSubscriptions: []Subscription{{TopicID: topicID}}}, nil
+			}},
+			operation: metrics.OpDeleteTopic,
+			topicID:   topicID,
+			call: func(ctx context.Context, app *pubSubApplication) error {
+				return app.deleteTopic(ctx, topicID)
+			},
+		},
+		"subscribe": {
+			storage: &mockStorage{subscribeFunc: func(ctx context.Context, _ string, _ *SubscribeRequest) (*SubscribeResponse, error) {
+				MarkPolicyReplay(ctx)
+
+				return &SubscribeResponse{SubscriptionID: subscriptionID}, nil
+			}},
+			operation: metrics.OpSubscribe,
+			topicID:   topicID,
+			call: func(ctx context.Context, app *pubSubApplication) error {
+				_, err := app.subscribe(ctx, topicID, &SubscribeRequest{QueueID: queueID})
+
+				return err
+			},
+		},
+		"unsubscribe": {
+			storage: &mockStorage{unsubscribeFunc: func(ctx context.Context, _, _ string) error {
+				MarkPolicyReplay(ctx)
+
+				return nil
+			}},
+			operation: metrics.OpUnsubscribe,
+			topicID:   topicID,
+			call: func(ctx context.Context, app *pubSubApplication) error {
+				return app.unsubscribe(ctx, topicID, subscriptionID)
+			},
+		},
+		"publish": {
+			storage: &mockStorage{publishFunc: func(ctx context.Context, _ string, _ *PublishRequest) (*PublishResponse, error) {
+				MarkPolicyReplay(ctx)
+
+				return &PublishResponse{TopicID: topicID, QueueIDs: []string{queueID}, DeliveredCount: 1}, nil
+			}},
+			operation: metrics.OpPublish,
+			topicID:   topicID,
+			call: func(ctx context.Context, app *pubSubApplication) error {
+				_, err := app.publish(ctx, topicID, &PublishRequest{Messages: []PublishMessage{{Body: []byte("once")}}})
+
+				return err
+			},
+		},
+		"partial publish": {
+			storage: &mockStorage{publishFunc: func(ctx context.Context, _ string, _ *PublishRequest) (*PublishResponse, error) {
+				MarkPolicyReplay(ctx)
+
+				output := &PublishResponse{TopicID: topicID, QueueIDs: []string{queueID}, DeliveredCount: 1}
+
+				return output, &PartialPublishError{Outcome: PublishOutcome{
+					Response: output, Partial: true, SelectedQueues: 2, FailedDeliveries: 1, FailedDestinations: 1,
+				}}
+			}},
+			operation: metrics.OpPublish,
+			topicID:   topicID,
+			call: func(ctx context.Context, app *pubSubApplication) error {
+				_, err := app.publish(ctx, topicID, &PublishRequest{Messages: []PublishMessage{{Body: []byte("once")}}})
+
+				return err
+			},
+			wantErr: true,
+		},
+		"delete queue cascade": {
+			storage: &mockStorage{deleteQueueFunc: func(ctx context.Context, _ *v1.DeleteQueueRequest) (*DeleteQueueResult, error) {
+				MarkPolicyReplay(ctx)
+
+				return &DeleteQueueResult{RemovedSubscriptions: []Subscription{{TopicID: topicID}}}, nil
+			}},
+			call: func(ctx context.Context, app *pubSubApplication) error {
+				_, err := app.deleteQueue(ctx, &v1.DeleteQueueRequest{QueueId: queueID, Force: true})
+
+				return err
+			},
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			recorder := &applicationRecorder{}
+			app := newApplicationForTest(test.storage, recorder)
+
+			callErr := test.call(context.Background(), app)
+			if (callErr != nil) != test.wantErr {
+				t.Fatalf("replayed call error = %v, want error %t", callErr, test.wantErr)
+			}
+			if len(recorder.publishes) != 0 || len(recorder.created) != 0 || len(recorder.deleted) != 0 ||
+				len(recorder.states) != 0 {
+				t.Fatalf(
+					"committed effects = publishes %#v created %#v deleted %#v states %#v, want none",
+					recorder.publishes,
+					recorder.created,
+					recorder.deleted,
+					recorder.states,
+				)
+			}
+			if test.operation == "" {
+				if len(recorder.requests) != 0 || len(recorder.operations) != 0 {
+					t.Fatalf("topic attempts = %#v / %#v, want none", recorder.requests, recorder.operations)
+				}
+
+				return
+			}
+
+			result := metrics.ResultOK
+			if test.wantErr {
+				result = metrics.ResultError
+			}
+			wantAttempt := []telemetry.TopicOperationEvent{{
+				Backend: metrics.BackendSQLite, Operation: test.operation, Result: result, TopicID: test.topicID,
+			}}
+			assertApplicationOperations(t, recorder.requests, wantAttempt)
+			assertApplicationOperations(t, recorder.operations, wantAttempt)
+		})
+	}
+}
+
 func TestPubSubApplicationValidationAttributionOrder(t *testing.T) {
 	topicID := idkit.XID()
 	tests := []struct {

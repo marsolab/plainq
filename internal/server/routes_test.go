@@ -11,15 +11,19 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/marsolab/plainq/internal/metrics"
 	"github.com/marsolab/plainq/internal/server/config"
+	"github.com/marsolab/plainq/internal/server/interceptor"
+	"github.com/marsolab/plainq/internal/server/principal"
 	"github.com/marsolab/plainq/internal/server/service/account"
 	"github.com/marsolab/plainq/internal/server/service/oauth"
 	"github.com/marsolab/plainq/internal/server/service/onboarding"
 	"github.com/marsolab/plainq/internal/server/service/queue"
 	"github.com/marsolab/plainq/internal/server/service/rbac"
+	"github.com/marsolab/plainq/internal/server/service/securityaudit"
 	"github.com/marsolab/plainq/internal/server/service/telemetry"
 	"github.com/marsolab/plainq/internal/server/service/telemetry/collector"
 	"github.com/marsolab/servekit/logkit"
 	"github.com/maxatome/go-testdeep/td"
+	"google.golang.org/grpc"
 )
 
 // healthCheckerStub satisfies the health-check dependency NewServer takes.
@@ -124,6 +128,38 @@ type (
 	oauthStorageStub      struct{ oauth.Storage }
 )
 
+type grpcMountStub struct{}
+
+func (grpcMountStub) Mount(*grpc.Server) {}
+
+type grpcAuthenticatorStub struct{}
+
+func (grpcAuthenticatorStub) Authenticate(context.Context, string) (principal.Principal, error) {
+	return principal.Principal{Kind: principal.KindAgent, ID: "agent-a", TenantID: "tenant-a"}, nil
+}
+
+type grpcResourceStub struct{}
+
+func (grpcResourceStub) ResolveResource(
+	context.Context,
+	string,
+	interceptor.ResourceSelector,
+) (interceptor.Resource, error) {
+	return interceptor.Resource{ID: "agent-a", OwnerAgentID: "agent-a"}, nil
+}
+
+func (grpcResourceStub) HasGrant(context.Context, interceptor.GrantCheck) (bool, error) {
+	return true, nil
+}
+
+type securityAuditorStub struct{}
+
+func (securityAuditorStub) Append(context.Context, securityaudit.Event) error { return nil }
+
+func (securityAuditorStub) List(context.Context, securityaudit.Query) (securityaudit.Page, error) {
+	return securityaudit.Page{}, nil
+}
+
 // Test_NewServer_mountsRoutes builds the whole route tree the way the binary
 // does, in both telemetry modes.
 //
@@ -203,6 +239,84 @@ func TestTopicSubscriptionsRouteDiscoveryIsProtected(t *testing.T) {
 		"/api/v1/metrics/topic/topic-1/subscriptions?range=1h", nil))
 	td.Cmp(t, recorder.Code, http.StatusUnauthorized)
 	td.Cmp(t, authCalls, 1)
+}
+
+func TestNewServerMountsAgentTransportOnlyWithCompleteSecurityDependencies(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Config{
+		HTTPAddr: "127.0.0.1:0", GRPCAddr: "127.0.0.1:0",
+		AgentEnable: true, AgentDevelopmentInsecureTransport: true,
+	}
+	logger := logkit.NewNop()
+	observer := telemetry.NewObserver(metrics.BackendSQLite)
+	queueService := queue.NewService(&cfg, logger, queueStorageStub{}, observer)
+	accountService := account.NewService(&cfg, logger, nil, nil, accountStorageStub{})
+	onboardingService := onboarding.NewService(&cfg, logger, nil, nil, onboardingStorageStub{})
+	rbacService := rbac.NewService(&cfg, logger, rbacStorageStub{})
+	oauthService := oauth.NewService(&cfg, logger, oauthStorageStub{})
+
+	_, err := NewServer(
+		&cfg, logger, healthCheckerStub{}, nil,
+		queueService, accountService, onboardingService, rbacService, oauthService,
+	)
+	if err == nil {
+		t.Fatal("NewServer() unexpectedly accepted agent APIs without security dependencies")
+	}
+
+	admission, err := interceptor.NewPrincipalAdmissionLimiter(100, 200)
+	if err != nil {
+		t.Fatalf("NewPrincipalAdmissionLimiter() error = %v", err)
+	}
+
+	_, err = NewServer(
+		&cfg, logger, healthCheckerStub{}, nil,
+		queueService, accountService, onboardingService, rbacService, oauthService,
+		WithAgentMessaging(grpcMountStub{}, grpcAuthenticatorStub{}, grpcResourceStub{}, admission),
+		WithSecurityAuditor(securityAuditorStub{}),
+	)
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+}
+
+func TestNewServerRequiresCompleteHumanGRPCSecurity(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Config{
+		HTTPAddr: "127.0.0.1:0", GRPCAddr: "127.0.0.1:0",
+		AuthEnable: true, AgentEnable: false, GRPCProtectLegacy: true,
+	}
+	logger := logkit.NewNop()
+	observer := telemetry.NewObserver(metrics.BackendSQLite)
+	queueService := queue.NewService(&cfg, logger, queueStorageStub{}, observer)
+	accountService := account.NewService(&cfg, logger, nil, nil, accountStorageStub{})
+	onboardingService := onboarding.NewService(&cfg, logger, nil, nil, onboardingStorageStub{})
+	rbacService := rbac.NewService(&cfg, logger, rbacStorageStub{})
+	oauthService := oauth.NewService(&cfg, logger, oauthStorageStub{})
+
+	_, err := NewServer(
+		&cfg, logger, healthCheckerStub{}, nil,
+		queueService, accountService, onboardingService, rbacService, oauthService,
+	)
+	if err == nil {
+		t.Fatal("NewServer() unexpectedly accepted human gRPC without authentication and admission dependencies")
+	}
+
+	admission, err := interceptor.NewPrincipalAdmissionLimiter(100, 200)
+	if err != nil {
+		t.Fatalf("NewPrincipalAdmissionLimiter() error = %v", err)
+	}
+
+	_, err = NewServer(
+		&cfg, logger, healthCheckerStub{}, nil,
+		queueService, accountService, onboardingService, rbacService, oauthService,
+		WithHumanGRPCSecurity(grpcAuthenticatorStub{}, admission),
+		WithSecurityAuditor(securityAuditorStub{}),
+	)
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
 }
 
 // withCollectorForTest wires a metrics handler without opening a telemetry

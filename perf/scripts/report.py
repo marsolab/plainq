@@ -18,6 +18,9 @@ import urllib.request
 REGRESSION_THRESHOLD = 0.10
 # A candidate p95 more than this fraction below baseline is an improvement.
 IMPROVEMENT_THRESHOLD = 0.05
+# Both variants must complete at least this fraction of their end-to-end
+# iterations successfully before latency is comparable.
+MIN_SUCCESS_RATE = 0.95
 
 OPS = ["total", "send", "receive", "delete"]
 
@@ -42,6 +45,29 @@ def vm_query(vm_url, promql, at):
         return None
 
 
+def vm_query_vector(vm_url, promql, at):
+    """Run an instant query and return all labeled scalar samples."""
+    params = urllib.parse.urlencode({"query": promql, "time": str(at)})
+    url = f"{vm_url}/api/v1/query?{params}"
+    try:
+        with urllib.request.urlopen(url, timeout=15) as resp:
+            payload = json.load(resp)
+    except Exception as exc:  # noqa: BLE001 - report tool, never hard-fail
+        print(f"warn: query failed ({promql}): {exc}", file=sys.stderr)
+        return []
+
+    samples = []
+    for result in payload.get("data", {}).get("result", []):
+        try:
+            samples.append({
+                "labels": result.get("metric", {}),
+                "value": float(result["value"][1]),
+            })
+        except (KeyError, IndexError, TypeError, ValueError):
+            continue
+    return samples
+
+
 def counter(vm_url, name, selector, window, at):
     """increase() of a k6 counter over the window, tolerating the _total suffix."""
     base = f'sum(increase({name}{{{selector}}}[{window}s]))'
@@ -54,6 +80,33 @@ def counter(vm_url, name, selector, window, at):
 def avg_gauge(vm_url, name, selector, window, at):
     """avg_over_time() of a gauge series over the window."""
     return vm_query(vm_url, f'avg(avg_over_time({name}{{{selector}}}[{window}s]))', at)
+
+
+def status_breakdown(vm_url, selector, window, at):
+    """Return bounded per-code/reason RPC counts for one operation."""
+    grouping = "code,grpc_status,reason"
+    query = (
+        f"sum by ({grouping}) "
+        f"(increase(k6_plainq_rpc_status{{{selector}}}[{window}s]))"
+    )
+    samples = vm_query_vector(vm_url, query, at)
+    if not samples:
+        query = (
+            f"sum by ({grouping}) "
+            f"(increase(k6_plainq_rpc_status_total{{{selector}}}[{window}s]))"
+        )
+        samples = vm_query_vector(vm_url, query, at)
+
+    rows = []
+    for sample in samples:
+        labels = sample["labels"]
+        rows.append({
+            "code": labels.get("code", "unknown"),
+            "status": labels.get("grpc_status", "UNKNOWN_STATUS"),
+            "reason": labels.get("reason", "unknown"),
+            "count": sample["value"],
+        })
+    return sorted(rows, key=lambda row: (row["code"], row["status"], row["reason"]))
 
 
 def collect(vm_url, variant, window, at):
@@ -70,6 +123,7 @@ def collect(vm_url, variant, window, at):
             "p99": _ms(avg_gauge(vm_url, "k6_plainq_latency_p99", opsel, window, at)),
             "reqs": counter(vm_url, "k6_plainq_reqs", opsel, window, at),
             "errs": counter(vm_url, "k6_plainq_errs", opsel, window, at),
+            "statuses": status_breakdown(vm_url, opsel, window, at),
         }
 
     # Server-side resource usage scraped from PlainQ /metrics.
@@ -113,6 +167,14 @@ def fmt_delta(candidate, baseline, lower_is_better=True):
     return f"{sign}{pct:.1f}%{arrow}"
 
 
+def success_rate(data):
+    reqs = data["total"]["reqs"] or 0
+    errs = data["total"]["errs"] or 0
+    if reqs <= 0:
+        return None
+    return max(0.0, 1.0 - errs / reqs)
+
+
 def verdict(cand, base):
     c95 = cand["total"]["p95"]
     b95 = base["total"]["p95"]
@@ -120,9 +182,27 @@ def verdict(cand, base):
     b_reqs = base["total"]["reqs"] or 0
     c_err = (cand["total"]["errs"] or 0) / c_reqs if c_reqs else 0
     b_err = (base["total"]["errs"] or 0) / b_reqs if b_reqs else 0
+    c_success = success_rate(cand)
+    b_success = success_rate(base)
 
     notes = []
     status = "✅ NO REGRESSION"
+
+    if c_success is None or b_success is None:
+        notes.append("one or both variants produced no completed iterations")
+        notes.append("latency verdict suppressed because workload validity could not be established")
+        return "⏸️ INCONCLUSIVE", notes
+
+    if c_success < MIN_SUCCESS_RATE or b_success < MIN_SUCCESS_RATE:
+        notes.append(
+            f"baseline success rate {b_success * 100:.2f}% and candidate success rate "
+            f"{c_success * 100:.2f}% must each meet the {MIN_SUCCESS_RATE * 100:.0f}% validity threshold"
+        )
+        notes.append(
+            "latency verdict suppressed because failed RPC latency is not comparable "
+            "to a successful workload"
+        )
+        return "⏸️ INCONCLUSIVE", notes
 
     if c95 is not None and b95 is not None and b95 > 0:
         pct = (c95 - b95) / b95
@@ -134,6 +214,7 @@ def verdict(cand, base):
             notes.append(f"candidate p95 is {-pct * 100:.1f}% faster than baseline")
     else:
         notes.append("insufficient latency data to compare p95")
+        return "⏸️ INCONCLUSIVE", notes
 
     if c_err > b_err + 0.01:
         status = "⚠️ REGRESSION"
@@ -169,10 +250,36 @@ def render(args, cand, base):
     lines.append(f"| Iterations/s | {fmt(b_rps)} | {fmt(c_rps)} | {fmt_delta(c_rps, b_rps, lower_is_better=False)} |")
     lines.append(f"| Iterations | {fmt(base['total']['reqs'], nd=0)} | {fmt(cand['total']['reqs'], nd=0)} | — |")
     lines.append(f"| Errors | {fmt(base['total']['errs'], nd=0)} | {fmt(cand['total']['errs'], nd=0)} | — |")
+    lines.append(
+        f"| Success rate | {fmt(_pct(success_rate(base)), suffix='%')} | "
+        f"{fmt(_pct(success_rate(cand)), suffix='%')} | — |"
+    )
+    lines.append("")
+
+    # Bounded status/reason labels make failures diagnosable without tagging
+    # raw backend errors or creating unbounded metric cardinality.
+    lines.append("## RPC status breakdown")
+    lines.append("")
+    lines.append("| Variant | Op | Code | Status | Reason | Count |")
+    lines.append("| --- | --- | --- | --- | --- | --- |")
+    status_rows = 0
+    for variant, data in (("baseline", base), ("candidate", cand)):
+        for op in OPS:
+            for row in data[op].get("statuses", []):
+                lines.append(
+                    f"| {variant} | {op} | {row['code']} | {row['status']} | "
+                    f"{row['reason']} | {fmt(row['count'], nd=0)} |"
+                )
+                status_rows += 1
+    if status_rows == 0:
+        lines.append("| — | — | — | — | no status samples | — |")
     lines.append("")
 
     # Latency per operation.
-    lines.append("## Latency by operation (ms)")
+    if status == "⏸️ INCONCLUSIVE":
+        lines.append("## Latency by operation (ms, diagnostic only)")
+    else:
+        lines.append("## Latency by operation (ms)")
     lines.append("")
     lines.append("| Op | Stat | Baseline | Candidate | Δ |")
     lines.append("| --- | --- | --- | --- | --- |")
@@ -180,7 +287,8 @@ def render(args, cand, base):
         for stat in ("p50", "p95", "p99"):
             b = base[op][stat]
             c = cand[op][stat]
-            lines.append(f"| {op} | {stat} | {fmt(b)} | {fmt(c)} | {fmt_delta(c, b)} |")
+            delta = "suppressed" if status == "⏸️ INCONCLUSIVE" else fmt_delta(c, b)
+            lines.append(f"| {op} | {stat} | {fmt(b)} | {fmt(c)} | {delta} |")
     lines.append("")
 
     # Server resources.
@@ -197,6 +305,10 @@ def render(args, cand, base):
     lines.append("")
 
     return "\n".join(lines)
+
+
+def _pct(value):
+    return None if value is None else value * 100.0
 
 
 def main():
@@ -223,8 +335,14 @@ def main():
             handle.write(report)
 
     status, _ = verdict(cand, base)
-    # Exit non-zero on regression so CI can gate on it.
-    sys.exit(1 if status.startswith("⚠️") else 0)
+    # A regression and an invalid workload are distinct non-zero outcomes.
+    # The workflow remains informational, but callers cannot mistake an
+    # inconclusive sample for a latency verdict.
+    if status.startswith("⚠️"):
+        sys.exit(1)
+    if status == "⏸️ INCONCLUSIVE":
+        sys.exit(2)
+    sys.exit(0)
 
 
 if __name__ == "__main__":

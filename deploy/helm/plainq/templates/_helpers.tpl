@@ -73,6 +73,19 @@ Uses auth.existingSecret when provided, otherwise the chart-managed Secret.
 {{- end }}
 
 {{/*
+Resolve the name of the Secret holding the remote bootstrap secret.
+Uses auth.bootstrap.existingSecret when provided, otherwise a distinct
+chart-managed Secret so the bootstrap and signing credentials rotate alone.
+*/}}
+{{- define "plainq.bootstrapSecretName" -}}
+{{- if .Values.auth.bootstrap.existingSecret }}
+{{- .Values.auth.bootstrap.existingSecret }}
+{{- else }}
+{{- printf "%s-bootstrap" (include "plainq.fullname" .) }}
+{{- end }}
+{{- end }}
+
+{{/*
 Resolve the name of the Secret holding the Postgres DSN.
 */}}
 {{- define "plainq.postgresSecretName" -}}

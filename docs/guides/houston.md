@@ -115,8 +115,9 @@ API and CLI still work — only the dashboard is absent.
 - Put Houston behind a **TLS-terminating reverse proxy** — it's a browser app
   handling credentials. See [Deployment](deployment.md#network-exposure).
 - Houston and the queue gRPC API are separate listeners. Exposing Houston
-  (`:8081`) does **not** expose the privileged gRPC port (`:8080`); keep the
-  latter private.
+  (`:8081`) does **not** expose gRPC (`:8080`). Built-in gRPC TLS is active with
+  agent APIs; for a legacy-only server, use a TLS-terminating mesh/proxy and keep
+  the listener private while anonymous compatibility is enabled.
 
 ## Next steps
 

@@ -17,10 +17,26 @@ import (
 type fakeDenylist struct {
 	denied bool
 	err    error
+	seen   *string
 }
 
-func (f fakeDenylist) IsAccessTokenDenied(context.Context, string) (bool, error) {
+func (f fakeDenylist) IsAccessTokenDenied(_ context.Context, tokenID string) (bool, error) {
+	if f.seen != nil {
+		*f.seen = tokenID
+	}
+
 	return f.denied, f.err
+}
+
+type fakeHumanSecurity struct {
+	tenantID    string
+	status      string
+	authVersion uint64
+	err         error
+}
+
+func (f fakeHumanSecurity) ResolveHumanSecurity(context.Context, string) (string, string, uint64, error) {
+	return f.tenantID, f.status, f.authVersion, f.err
 }
 
 func newTokenManager(t *testing.T) jwtkit.TokenManager {
@@ -44,18 +60,47 @@ func signValidToken(t *testing.T, tm jwtkit.TokenManager) string {
 
 	token, err := tm.Sign(&jwtkit.Token{
 		Claims: jwtkit.Claims{
+			ID:        "session-jti",
+			Issuer:    "plainq-server",
+			Audience:  []string{"plainq-human"},
+			Subject:   "user-1",
 			ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour)),
 			IssuedAt:  jwt.NewNumericDate(now),
 			NotBefore: jwt.NewNumericDate(now),
 		},
 		Meta: map[string]any{
-			"uid":   "user-1",
-			"email": "user@example.com",
+			"uid": "user-1", "email": "user@example.com", "token_use": "access",
+			"tenant_id": "tenant-1", "auth_version": uint64(2),
 		},
 	})
 	td.Require(t).CmpNoError(err)
 
 	return token
+}
+
+func TestAuthenticateJWTUsesJTIAndRejectsStaleLiveSecurity(t *testing.T) {
+	tm := newTokenManager(t)
+	validToken := signValidToken(t, tm)
+	seen := ""
+
+	nextCalled := false
+	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { nextCalled = true })
+	handler := AuthenticateJWT(
+		tm,
+		fakeDenylist{seen: &seen},
+		WithHumanSecurityResolver(fakeHumanSecurity{tenantID: "tenant-1", status: "active", authVersion: 3}),
+	)(next)
+	req := httptest.NewRequest(http.MethodGet, "/queue", nil)
+	req.Header.Set("Authorization", "Bearer "+validToken)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if seen != "session-jti" {
+		t.Fatalf("denylist key = %q, want JWT ID", seen)
+	}
+	if rec.Code != http.StatusUnauthorized || nextCalled {
+		t.Fatalf("stale version status=%d next=%v", rec.Code, nextCalled)
+	}
 }
 
 // TestAuthenticateJWTDenylist covers the revocation check: a cryptographically
