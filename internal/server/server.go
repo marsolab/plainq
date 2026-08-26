@@ -417,9 +417,11 @@ func listenerHTTP(cfg *config.Config, logger *slog.Logger, checker hc.HealthChec
 		} else {
 			middlewares = append(middlewares, httpkit.NoAccessLogMiddleware())
 		}
+
 		if cfg.HealthRouteMetrics {
 			middlewares = append(middlewares, httpkit.MetricsMiddleware())
 		}
+
 		httpListener.Mount(cfg.HealthRoute, readinessHandler(checker, cfg.HealthReporter), middlewares...)
 		httpListener.Mount(cfg.HealthLivenessRoute, livenessHandler(), middlewares...)
 	}
@@ -523,8 +525,10 @@ func livenessHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			w.WriteHeader(http.StatusMethodNotAllowed)
+
 			return
 		}
+
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 	})
@@ -559,6 +563,7 @@ func attachTelemetryObservers(local, logical *telemetry.Observer, sink telemetry
 	if local != nil {
 		local.SetRecorder(sink)
 	}
+
 	if logical != nil && logical != local {
 		logical.SetRecorder(telemetry.NewStateSuppressingRecorder(sink))
 	}
