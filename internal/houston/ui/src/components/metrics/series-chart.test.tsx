@@ -40,7 +40,9 @@ mock.module("./chart-tokens", () => ({
   }),
 }));
 
-const { SeriesChart, SeriesTable, describeSeries } = await import("./series-chart");
+const { SeriesChart, SeriesTable, countSeriesSamples, describeSeries } = await import(
+  "./series-chart"
+);
 
 const series: readonly SeriesSpec[] = [
   {
@@ -145,10 +147,10 @@ describe("describeSeries", () => {
       (value) => String(value),
     );
 
-    expect(summary).toBe("1h window, 3 samples · rate avg 5, peak 10");
+    expect(summary).toBe("1h window, 2 samples · rate avg 5, peak 10");
   });
 
-  test("describes a series with no known values as unavailable", () => {
+  test("describes rows with no measured values as no samples", () => {
     const summary = describeSeries(
       [{ t: 1000, rate: null }, { t: 2000 }],
       [series[0]],
@@ -156,6 +158,21 @@ describe("describeSeries", () => {
       (value) => String(value),
     );
 
-    expect(summary).toBe("1h window, 2 samples · rate unavailable");
+    expect(summary).toBe("1h window · no samples");
+  });
+
+  test("counts only timestamps carrying a finite measured value", () => {
+    expect(
+      countSeriesSamples(
+        [
+          { t: 1000, rate: null },
+          { t: 2000 },
+          { t: 3000, rate: 0 },
+          { t: 4000, active: 2 },
+          { t: 5000, rate: Number.NaN },
+        ],
+        series,
+      ),
+    ).toBe(2);
   });
 });

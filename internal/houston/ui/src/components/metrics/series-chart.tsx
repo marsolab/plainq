@@ -216,12 +216,15 @@ export function describeSeries(
   windowLabel: string,
   formatValue: (value: number) => string,
 ): string {
-  if (data.length === 0) return `${windowLabel} window · no samples`;
+  const sampleCount = countSeriesSamples(data, series);
+  if (sampleCount === 0) return `${windowLabel} window · no samples`;
 
   const parts = series.map((entry) => {
     const values = data
       .map((row) => row[entry.key])
-      .filter((value): value is number => typeof value === "number");
+      .filter(
+        (value): value is number => typeof value === "number" && Number.isFinite(value),
+      );
     if (values.length === 0) return `${entry.label.toLowerCase()} unavailable`;
 
     const average = values.reduce((sum, value) => sum + value, 0) / values.length;
@@ -229,5 +232,23 @@ export function describeSeries(
     return `${entry.label.toLowerCase()} avg ${formatValue(average)}, peak ${formatValue(peak)}`;
   });
 
-  return `${windowLabel} window, ${data.length} samples · ${parts.join(" · ")}`;
+  return `${windowLabel} window, ${sampleCount} samples · ${parts.join(" · ")}`;
+}
+
+/** Counts timestamps carrying at least one finite measured series value. */
+export function countSeriesSamples(
+  data: ReadonlyArray<ChartRow>,
+  series: readonly SeriesSpec[],
+): number {
+  return data.reduce(
+    (count, row) =>
+      count +
+      (series.some((entry) => {
+        const value = row[entry.key];
+        return typeof value === "number" && Number.isFinite(value);
+      })
+        ? 1
+        : 0),
+    0,
+  );
 }

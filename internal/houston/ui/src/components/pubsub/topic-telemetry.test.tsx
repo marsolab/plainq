@@ -328,6 +328,45 @@ describe("TopicTelemetryView", () => {
     expect(zeroMarkup.match(/0\/s/g)?.length).toBeGreaterThanOrEqual(3);
   });
 
+  test("treats an all-missing covered window as having no measured samples", () => {
+    const missingSeries = (series: MetricSeriesResponse): MetricSeriesResponse => ({
+      ...series,
+      samples: {
+        expectedPointCount: 6,
+        returnedPointCount: 0,
+        firstSampleAt: null,
+        lastSampleAt: null,
+        complete: false,
+        missingRanges: [{ from: timeRange.from, to: timeRange.to, reason: "notRecorded" }],
+      },
+      dataPoints: [],
+    });
+    const missingRates = {
+      ...rates(),
+      metrics: rates().metrics.map(missingSeries),
+    };
+    const missingSubscriptions = {
+      ...subscriptions(),
+      metrics: subscriptions().metrics.map(missingSeries),
+    };
+
+    const markup = renderToStaticMarkup(
+      <TopicTelemetryView
+        range="1h"
+        loads={readyLoads(missingRates, missingSubscriptions)}
+        deliveryView="table"
+        subscriptionView="table"
+        onRangeChange={() => {}}
+        onDeliveryViewChange={() => {}}
+        onSubscriptionViewChange={() => {}}
+      />,
+    );
+
+    expect(markup.match(/No samples in this range/g)).toHaveLength(2);
+    expect(markup).not.toContain("Publish and delivery outcomes view");
+    expect(markup).not.toContain("Active subscriptions view");
+  });
+
   test("shows loading skeletons and an initial error with no invented data", () => {
     const loadingMarkup = renderToStaticMarkup(
       <TopicTelemetryView

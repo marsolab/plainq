@@ -5,6 +5,7 @@ import * as React from "react";
 import { SeriesLegend, type SeriesSpec } from "@/components/metrics/lifecycle";
 import { Segmented } from "@/components/metrics/segmented";
 import {
+  countSeriesSamples,
   describeSeries,
   SeriesChart,
   SeriesTable,
@@ -227,6 +228,7 @@ function DeliveryPanel({
 }) {
   const retained = lastGoodFor(load, range);
   const rows = retained ? transformTopicSeries(retained.data, DELIVERY_KEYS) : [];
+  const sampleCount = countSeriesSamples(rows, DELIVERY_SERIES);
   const summary = describeSeries(rows, DELIVERY_SERIES, range, formatRate);
 
   return (
@@ -235,7 +237,7 @@ function DeliveryPanel({
         title="Publish and delivery outcomes"
         description="Published messages, successful deliveries, and failed delivery attempts."
         action={
-          retained && rows.length > 0 ? (
+          retained && sampleCount > 0 ? (
             <Segmented
               label="Publish and delivery outcomes view"
               value={view}
@@ -249,12 +251,13 @@ function DeliveryPanel({
       <PanelBody className="flex flex-col gap-3 px-4 py-3.5">
         <LoadNotice load={load} hasData={Boolean(retained)} />
         {retained ? (
-          rows.length > 0 ? (
+          sampleCount > 0 ? (
             <SeriesContent
               title="Publish and delivery outcomes"
               data={rows}
               series={DELIVERY_SERIES}
               response={retained.data}
+              sampleCount={sampleCount}
               view={view}
               summary={summary}
               formatValue={formatRate}
@@ -283,6 +286,7 @@ function SubscriptionPanel({
 }) {
   const retained = lastGoodFor(load, range);
   const rows = retained ? transformTopicSeries(retained.data, SUBSCRIPTION_KEYS) : [];
+  const sampleCount = countSeriesSamples(rows, SUBSCRIPTION_SERIES);
   const summary = describeSeries(rows, SUBSCRIPTION_SERIES, range, formatCount);
 
   return (
@@ -291,7 +295,7 @@ function SubscriptionPanel({
         title="Active subscriptions"
         description="The subscription count after each recorded change."
         action={
-          retained && rows.length > 0 ? (
+          retained && sampleCount > 0 ? (
             <Segmented
               label="Active subscriptions view"
               value={view}
@@ -308,12 +312,13 @@ function SubscriptionPanel({
       <PanelBody className="flex flex-col gap-3 px-4 py-3.5">
         <LoadNotice load={load} hasData={Boolean(retained)} />
         {retained ? (
-          rows.length > 0 ? (
+          sampleCount > 0 ? (
             <SeriesContent
               title="Active subscriptions"
               data={rows}
               series={SUBSCRIPTION_SERIES}
               response={retained.data}
+              sampleCount={sampleCount}
               view={view}
               summary={summary}
               formatValue={formatCount}
@@ -360,6 +365,7 @@ function SeriesContent({
   data,
   series,
   response,
+  sampleCount,
   view,
   summary,
   formatValue,
@@ -368,6 +374,7 @@ function SeriesContent({
   data: ReadonlyArray<ChartRow>;
   series: readonly SeriesSpec[];
   response: TopicSeriesResponse;
+  sampleCount: number;
   view: ViewMode;
   summary: string;
   formatValue: (value: number) => string;
@@ -390,7 +397,7 @@ function SeriesContent({
         <SeriesTable data={data} series={series} formatValue={formatValue} />
       )}
       <Micro className="text-[10px]">
-        {data.length} {data.length === 1 ? "sample" : "samples"} · Sample interval{" "}
+        {sampleCount} {sampleCount === 1 ? "sample" : "samples"} · Sample interval{" "}
         {formatDuration(response.sampleIntervalMs / 1000)}
       </Micro>
     </>
