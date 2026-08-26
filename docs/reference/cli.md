@@ -150,7 +150,8 @@ Usage: `plainq topic publish [flags] <topic-id>`.
 | `--file`    | _(empty)_ | Newline-delimited bodies; `-` explicitly reads stdin.          |
 
 At least one non-empty body is required. Inline messages and file lines may be
-combined; empty file lines are ignored. Text output is
+combined; empty file lines are ignored and every non-empty line is limited to
+4 MiB. Text output is
 `delivered<TAB><count>`. Zero subscribers is a successful zero. Fan-out attempts
 all selected destinations synchronously but is non-atomic, so exit `1` may be a
 partial delivery and a retry may duplicate retained copies.

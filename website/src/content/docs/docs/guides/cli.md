@@ -102,7 +102,8 @@ and prints its ID.
 ### `plainq topic delete`
 
 `plainq topic delete "$TID"` deletes the topic and subscriptions, but preserves
-the queues and messages already delivered to them.
+the queues and messages already delivered to them. Text output is
+`deleted<TAB><topic-id>`.
 
 ### `plainq topic subscribe`
 
@@ -112,7 +113,8 @@ prints the subscription ID.
 ### `plainq topic unsubscribe`
 
 `plainq topic unsubscribe "$TID" "$SID"` stops future delivery through that
-subscription. Existing queue messages remain.
+subscription. Existing queue messages remain. Text output is
+`unsubscribed<TAB><subscription-id>`.
 
 ### `plainq topic publish`
 
@@ -122,10 +124,10 @@ generate-events | plainq topic publish -file=- "$TID"
 ```
 
 Repeat `-message`, use newline-delimited `-file`, or combine them. Empty lines
-are ignored and stdin is read only with `-file=-`. Zero subscribers succeeds
-with zero deliveries. A failed fan-out may already have retained copies in some
-queues, so retry can duplicate them. Consume and acknowledge with `plainq
-receive` and `plainq delete-message`.
+are ignored, every non-empty line is limited to 4 MiB, and stdin is read only
+with `-file=-`. Zero subscribers succeeds with zero deliveries. A failed fan-out
+may already have retained copies in some queues, so retry can duplicate them.
+Consume and acknowledge with `plainq receive` and `plainq delete-message`.
 
 ### Script-friendly output
 

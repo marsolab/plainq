@@ -319,8 +319,9 @@ generate-events | plainq topic publish -file=- <topic-id>
 
 At least one body is required. Repeat `--message`, use a newline-delimited
 `--file`, or combine both. Empty file lines are ignored, each non-empty line is
-one message, and stdin is read only when `--file=-` is explicit. Text output is
-`delivered<TAB><count>`; `--json` returns the stable protobuf JSON response.
+one message with a 4 MiB maximum, and stdin is read only when `--file=-` is
+explicit. Text output is `delivered<TAB><count>`; `--json` returns the stable
+protobuf JSON response.
 
 Publishing to a topic with no subscribers succeeds with zero deliveries. With
 subscribers, PlainQ synchronously attempts the complete batch for every selected

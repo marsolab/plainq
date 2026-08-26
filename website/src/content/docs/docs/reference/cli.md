@@ -109,7 +109,8 @@ contains full subscription objects and timestamps.
 ### `plainq topic delete`
 
 `plainq topic delete [flags] <topic-id>` deletes the topic and subscriptions,
-not the queues or already delivered messages.
+not the queues or already delivered messages. Text output is
+`deleted<TAB><topic-id>`.
 
 ### `plainq topic subscribe`
 
@@ -119,7 +120,8 @@ and prints the subscription ID.
 ### `plainq topic unsubscribe`
 
 `plainq topic unsubscribe [flags] <topic-id> <subscription-id>` removes the
-binding while preserving existing queue messages.
+binding while preserving existing queue messages. Text output is
+`unsubscribed<TAB><subscription-id>`.
 
 ### `plainq topic publish`
 
@@ -130,10 +132,10 @@ binding while preserving existing queue messages.
 | `-message` | —       | Message body; repeat for a batch.                              |
 | `-file`    | —       | Newline-delimited bodies; `-` explicitly reads standard input. |
 
-Inline and file input may be combined; empty file lines are ignored. Text is
-`delivered<TAB><count>`. Zero subscribers succeeds. Fan-out attempts every
-selected queue but is not atomic, so a failed command may be partial and retry
-may duplicate retained copies.
+Inline and file input may be combined; empty file lines are ignored and every
+non-empty line is limited to 4 MiB. Text is `delivered<TAB><count>`. Zero
+subscribers succeeds. Fan-out attempts every selected queue but is not atomic,
+so a failed command may be partial and retry may duplicate retained copies.
 
 ### `plainq tui`
 

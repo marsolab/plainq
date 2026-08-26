@@ -12,14 +12,7 @@ import (
 )
 
 func TestTopicCommandDocumentationMirrorsCanonicalHeadings(t *testing.T) {
-	want := []string{
-		"plainq topic create",
-		"plainq topic delete",
-		"plainq topic list",
-		"plainq topic publish",
-		"plainq topic subscribe",
-		"plainq topic unsubscribe",
-	}
+	want := topicLeafPathsFromSchema(t)
 
 	for _, name := range []string{
 		"docs/guides/cli.md",
@@ -30,6 +23,30 @@ func TestTopicCommandDocumentationMirrorsCanonicalHeadings(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			got := topicCommandHeadings(readDocumentationFile(t, name))
 			td.Cmp(t, got, want, "topic command headings must mirror the six stable CLI leaves")
+		})
+	}
+}
+
+func TestTopicCommandDocumentationIncludesStableInputAndOutputContract(t *testing.T) {
+	want := []string{
+		"4 MiB",
+		"deleted<TAB><topic-id>",
+		"unsubscribed<TAB><subscription-id>",
+	}
+
+	for _, name := range []string{
+		"docs/guides/cli.md",
+		"docs/reference/cli.md",
+		"website/src/content/docs/docs/guides/cli.md",
+		"website/src/content/docs/docs/reference/cli.md",
+	} {
+		t.Run(name, func(t *testing.T) {
+			content := readDocumentationFile(t, name)
+			for _, contract := range want {
+				if !strings.Contains(content, contract) {
+					t.Errorf("%s is missing stable topic CLI contract %q", name, contract)
+				}
+			}
 		})
 	}
 }
@@ -106,6 +123,36 @@ func readDocumentationFile(t *testing.T, name string) string {
 	}
 
 	return string(content)
+}
+
+func topicLeafPathsFromSchema(t *testing.T) []string {
+	t.Helper()
+
+	surface, err := buildSchema(testRoot(t), schemaTargetCLI)
+	if err != nil {
+		t.Fatalf("build CLI schema: %v", err)
+	}
+	if surface.CLI == nil {
+		t.Fatal("CLI schema is absent")
+	}
+
+	for _, command := range surface.CLI.Commands {
+		if command.Path != "plainq topic" {
+			continue
+		}
+
+		paths := make([]string, 0, len(command.Subcommands))
+		for _, leaf := range command.Subcommands {
+			paths = append(paths, leaf.Path)
+		}
+		sort.Strings(paths)
+
+		return paths
+	}
+
+	t.Fatal("plainq topic command is absent from the CLI schema")
+
+	return nil
 }
 
 func topicCommandHeadings(content string) []string {
