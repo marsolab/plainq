@@ -264,19 +264,22 @@ func (a *pubSubApplication) deleteQueue(
 }
 
 func (a *pubSubApplication) reconcileTopicState(ctx context.Context) {
-	state, err := a.storage.TopicInventory(ctx)
+	err := a.observer.CaptureTopicState(func() (telemetry.TopicStateEvent, error) {
+		state, err := a.storage.TopicInventory(ctx)
+		if err != nil {
+			return telemetry.TopicStateEvent{}, err
+		}
+		return telemetry.TopicStateEvent{
+			TopicsExist:   state.TopicsExist,
+			Subscriptions: state.SubscriptionCounts,
+		}, nil
+	})
 	if err != nil {
-		a.observer.TopicStateUnavailable()
 		a.observer.StorageError("topic_inventory")
 		a.logger.WarnContext(ctx, "reconcile topic telemetry", slog.String("error", err.Error()))
 
 		return
 	}
-
-	a.observer.ReconcileTopicState(telemetry.TopicStateEvent{
-		TopicsExist:   state.TopicsExist,
-		Subscriptions: state.SubscriptionCounts,
-	})
 }
 
 func selectedDestinations(output *PublishResponse, err error) uint64 {

@@ -12,6 +12,7 @@ func TestError_Error(t *testing.T) {
 		"ErrInvalidID":        {err: ErrInvalidID, want: "invalid id"},
 		"ErrAlreadyExists":    {err: ErrAlreadyExists, want: "already exist"},
 		"ErrInvalidBatchSize": {err: ErrInvalidBatchSize, want: "invalid batch size"},
+		"ErrCapacityExceeded": {err: ErrCapacityExceeded, want: "request exceeds capacity"},
 		"ErrNotFound":         {err: ErrNotFound, want: "not found"},
 		"Custom":              {err: Error("test error"), want: "test error"},
 	}

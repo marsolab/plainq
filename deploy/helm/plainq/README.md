@@ -26,7 +26,7 @@ helm install plainq ./deploy/helm/plainq \
 | Port | Name | Purpose |
 | ---- | ---- | ------- |
 | 8080 | grpc | Primary gRPC queue API |
-| 8081 | http | Houston admin UI, REST auth API, `/health`, `/metrics` |
+| 8081 | http | Houston admin UI, REST auth API, `/live`, `/health`, `/metrics` |
 
 ## How the JWT secret is wired
 
@@ -128,6 +128,9 @@ separate Ingress/host if you need different backend protocols.
 | `auth.jwtSecret` | `""` | Inline JWT secret (dev only). |
 | `auth.secretKey` | `jwt-secret` | Key within the JWT secret. |
 | `config.logLevel` | `info` | Log level. |
+| `config.healthEnabled` | `true` | Serve health routes and install chart-managed probes. |
+| `config.healthLivenessRoute` | `/live` | Process-liveness route and default liveness probe path. |
+| `config.healthRoute` | `/health` | Storage/cluster-readiness route and default readiness probe path. |
 | `extraArgs` | `[]` | Extra `serve` flags. |
 | `resources` | requests 100m/128Mi | Container resources. |
 | `autoscaling.enabled` | `false` | HPA (postgres only). |

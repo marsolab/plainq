@@ -79,11 +79,12 @@ type PublishDeliveryFailure struct {
 }
 
 type PublishOutcome struct {
-	Response         *PublishResponse         `json:"response"`
-	Partial          bool                     `json:"partial"`
-	SelectedQueues   uint64                   `json:"selectedQueues"`
-	FailedDeliveries uint64                   `json:"failedDeliveries"`
-	DeliveryFailures []PublishDeliveryFailure `json:"deliveryFailures"`
+	Response           *PublishResponse         `json:"response"`
+	Partial            bool                     `json:"partial"`
+	SelectedQueues     uint64                   `json:"selectedQueues"`
+	FailedDeliveries   uint64                   `json:"failedDeliveries"`
+	FailedDestinations uint64                   `json:"failedDestinations"`
+	DeliveryFailures   []PublishDeliveryFailure `json:"deliveryFailures"`
 }
 
 type PartialPublishError struct {
@@ -96,7 +97,7 @@ func (e *PartialPublishError) Error() string {
 		"%s: %d queue messages failed across %d destinations",
 		pqerr.ErrPartialFanout,
 		e.Outcome.FailedDeliveries,
-		len(e.Outcome.DeliveryFailures),
+		e.Outcome.FailedDestinations,
 	)
 }
 

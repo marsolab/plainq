@@ -8,7 +8,26 @@ import (
 	"time"
 
 	"github.com/heartwilltell/scotty"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
+
+func TestGRPCResourceExhaustedIsActionableUsageError(t *testing.T) {
+	err := grpcError(
+		"plainq.example:8080",
+		"publish messages",
+		status.Error(codes.ResourceExhausted, "encoded publish command exceeds 67108864 bytes"),
+	)
+	var usage *usageError
+	if !errors.As(err, &usage) {
+		t.Fatalf("grpcError(ResourceExhausted) = %T %v, want usage error", err, err)
+	}
+	for _, want := range []string{"publish messages", "reduce", "64 MiB"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("grpcError(ResourceExhausted) = %q, want %q", err, want)
+		}
+	}
+}
 
 // TestCommandSpecsAreSelfDescribing is the guard that keeps this CLI usable by
 // a caller who only has the binary — no documentation, no source. Every command

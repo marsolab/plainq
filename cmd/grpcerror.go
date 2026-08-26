@@ -55,6 +55,10 @@ func grpcError(addr, operation string, err error) error {
 	case codes.InvalidArgument:
 		return usagef("%s: %s", operation, message)
 
+	case codes.ResourceExhausted:
+		return usagef("%s: %s (reduce the message batch or body so the encoded command is at most 64 MiB)",
+			operation, message)
+
 	case codes.Unauthenticated, codes.PermissionDenied:
 		return fmt.Errorf("%s: %s (the server requires credentials for this call)", operation, message)
 

@@ -55,6 +55,12 @@ func TestRoundTrip(t *testing.T) {
 	}
 }
 
+func TestEncodedCommandLimitIsStable(t *testing.T) {
+	if MaxEncodedBytes != 64<<20 {
+		t.Fatalf("MaxEncodedBytes = %d, want %d", MaxEncodedBytes, 64<<20)
+	}
+}
+
 // The timestamp is the whole point of the envelope: it is what every replica
 // uses in place of its own clock.
 func TestTimeRoundTrips(t *testing.T) {

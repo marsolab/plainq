@@ -1,28 +1,37 @@
 # Observability
 
-PlainQ ships the operational basics in the box: a health endpoint, Prometheus
+PlainQ ships the operational basics in the box: health endpoints, Prometheus
 metrics, an internal telemetry store that powers Houston's dashboards, structured
 logs, and an optional profiler.
 
 ## Health
 
-A liveness/readiness endpoint is served on the HTTP listener:
+Separate liveness and readiness endpoints are served on the HTTP listener:
 
-| Property | Default        |
-| -------- | -------------- |
-| Route    | `/health`      |
-| Flag     | `--health.route` (path), `--health` (enable) |
+| Purpose | Default | Flag |
+| --- | --- | --- |
+| Process liveness | `/live` | `--health.liveness.route` |
+| Storage and cluster readiness | `/health` | `--health.route` |
+| Enable both endpoints | `true` | `--health` |
 
 ```shell
+curl http://localhost:8081/live
 curl http://localhost:8081/health
 ```
+
+`/live` returns 200 while the process can answer HTTP. `/health` returns 503
+when physical storage is unhealthy, a cluster has no write quorum, or the local
+replica is quarantined after an unsafe state-machine outcome. Replica quarantine
+survives process restart; recover it only with a verified snapshot restore or a
+complete replica wipe and reseed. Do not create or delete the apply-guard files
+individually.
 
 Wire this to your orchestrator's probes:
 
 ```yaml
 # Kubernetes
 livenessProbe:
-  httpGet: { path: /health, port: 8081 }
+  httpGet: { path: /live, port: 8081 }
   initialDelaySeconds: 5
   periodSeconds: 10
 readinessProbe:
@@ -30,10 +39,10 @@ readinessProbe:
   periodSeconds: 10
 ```
 
-The health endpoint is intentionally unauthenticated so probes work without
+The health endpoints are intentionally unauthenticated so probes work without
 credentials. Related flags: `--health.route.logs` and `--health.route.metrics`
-toggle access logging and self-metrics for the endpoint itself (both off by
-default to avoid probe noise).
+toggle access logging and self-metrics for both endpoints (both off by default
+to avoid probe noise).
 
 ## Prometheus metrics
 
@@ -412,8 +421,10 @@ is polling an idle queue, and
 says how long a message actually waits — which is the number your users
 experience.
 
-And keep the plain one: a failing `/health` should take the instance out of
-rotation.
+And keep the plain one: a failing readiness `/health` should take the instance
+out of rotation. Do not wire liveness to readiness; `/live` deliberately stays
+healthy during a dependency failure or replica quarantine so orchestration does
+not erase useful recovery state in a restart loop.
 
 ## Next steps
 

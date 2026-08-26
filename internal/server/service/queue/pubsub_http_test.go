@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -179,6 +180,33 @@ func TestPubSubHTTPAndGRPCHaveStatusParity(t *testing.T) {
 		grpcResponse, grpcErr := newTestService(storage).Publish(context.Background(), &v1.PublishRequest{TopicId: topicID, Messages: []*v1.PublishMessage{{Body: []byte("x")}}})
 		if httpResponse.Code != http.StatusInternalServerError || status.Code(grpcErr) != codes.Internal || grpcResponse != nil {
 			t.Fatalf("HTTP/gRPC = %d/%v response=%#v, want %d/%v nil", httpResponse.Code, status.Code(grpcErr), grpcResponse, http.StatusInternalServerError, codes.Internal)
+		}
+	})
+
+	t.Run("oversized publish is non-retryable capacity", func(t *testing.T) {
+		storage := &mockStorage{publishFunc: func(context.Context, string, *PublishRequest) (*PublishResponse, error) {
+			return nil, fmt.Errorf("encoded publish command: %w", pqerr.ErrCapacityExceeded)
+		}}
+		httpResponse := doRequest(t, newTestService(storage), http.MethodPost, "/topics/"+topicID+"/publish", `{"messages":[{"body":"eA=="}]}`)
+		grpcResponse, grpcErr := newTestService(storage).Publish(context.Background(), &v1.PublishRequest{
+			TopicId: topicID, Messages: []*v1.PublishMessage{{Body: []byte("x")}},
+		})
+		if httpResponse.Code != http.StatusRequestEntityTooLarge || status.Code(grpcErr) != codes.ResourceExhausted || grpcResponse != nil {
+			t.Fatalf("HTTP/gRPC = %d/%v response=%#v, want %d/%v nil",
+				httpResponse.Code, status.Code(grpcErr), grpcResponse,
+				http.StatusRequestEntityTooLarge, codes.ResourceExhausted)
+		}
+	})
+
+	t.Run("zero-count legacy partial never dereferences nil response", func(t *testing.T) {
+		storage := &mockStorage{publishFunc: func(context.Context, string, *PublishRequest) (*PublishResponse, error) {
+			return nil, &PartialPublishError{Outcome: PublishOutcome{Partial: true}}
+		}}
+		grpcResponse, grpcErr := newTestService(storage).Publish(context.Background(), &v1.PublishRequest{
+			TopicId: topicID, Messages: []*v1.PublishMessage{{Body: []byte("x")}},
+		})
+		if status.Code(grpcErr) != codes.Internal || grpcResponse != nil {
+			t.Fatalf("gRPC = %v response=%#v, want Internal/nil", status.Code(grpcErr), grpcResponse)
 		}
 	})
 }

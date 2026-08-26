@@ -377,6 +377,51 @@ derives endpoint flags and default probe paths from the same route values. The
 operator omits default HTTP probes when health is disabled, while preserving
 explicit pod probe overrides.
 
+Recovery is fail-closed too. Snapshot restore reports quarantine before
+`BeginRestore` or any storage mutation, aborts if that durable latch cannot be
+persisted, and calls `Recover` only after snapshot commit plus a successful
+exact inventory. If the final recovery directory sync fails, recovery
+re-establishes a durable dirty guard and diagnostic quarantine marker, joins
+all rollback diagnostics, and leaves the in-memory generation latched. The
+leader sweeper uses the same gated Store read as public queue listing, so a
+quarantined leader cannot inspect local queues or propose sweep commands.
+
+Exact topic state has one ordered capture-and-apply seam on `Observer`; the
+observer lock covers both the inventory read and its gauge application. Startup
+and ordinary application reconciliation use that seam, while FSM mutation and
+restore callbacks participate in the same lock. In cluster mode the logical
+ingress observer records activity only: it does not capture inventory, mutate
+exact Prometheus gauges, or feed exact collector state. The FSM-local observer
+is therefore the only authority for exact topic/subscription state on a
+replica.
+
+One encoded cluster command is capped at exactly 64 MiB. Store rejects the
+fully encoded command before consensus or forwarding, and peer request readers
+read at most the limit plus one byte. `ErrCapacityExceeded` is stable and
+non-retryable; public HTTP maps it to 413, gRPC to `ResourceExhausted`, and the
+CLI asks the caller to reduce the batch/body. Peer publish responses have a
+separate finite ceiling of `2 * 64 MiB + 4 KiB`. The v2 wire is compact and
+carries only `Response`, explicit `Partial`, `SelectedQueues`,
+`FailedDeliveries`, and `FailedDestinations`; unbounded local destination causes
+and failure lists never cross the peer hop. Fixed XID queue IDs and ULID message
+IDs make the two-times command bound sufficient for every valid non-empty
+publish result. A peer response outside that envelope is terminal and is never
+retried after the command may have applied.
+
+Rolling upgrades keep `/v1/forward` as the legacy protocol and add
+`/v2/forward` for the compact outcome. A new follower tries v2 and falls back
+exactly once to v1 only for a bare route-level 404 with no machine error class,
+which proves Apply did not run. A classified application `NotFound` never falls
+back. Legacy full publish success is converted to the v2 outcome internally;
+legacy partial fan-out becomes an explicit typed partial with conservative zero
+counts and is never retried. New leaders keep legacy v1 full-success bodies and
+legacy terminal partial errors for old followers.
+
+Helm exposes an explicit default-true health enable flag. Disabling it removes
+only chart-managed `/live` and `/health` probes; explicit independent probe
+overrides remain. Null probe values are accepted without rendering panics, and
+route flags plus default probe paths derive from the same values.
+
 Every binding removed by a commit whose outcome/effects are known to ingress
 increments the subscription-deleted lifecycle counter, whether removal came
 from explicit unsubscribe, topic deletion, or the queue foreign-key cascade.

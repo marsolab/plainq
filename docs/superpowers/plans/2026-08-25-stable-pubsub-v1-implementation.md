@@ -1159,6 +1159,8 @@ git commit -m "feat: share stable pubsub application boundary"
 
 - Modify: `internal/cluster/store.go`
 - Modify: `internal/cluster/store_test.go`
+- Modify: `internal/cluster/command/command.go`
+- Modify: `internal/cluster/command/command_test.go`
 - Modify: `internal/cluster/consensus/raft/raft.go`
 - Add: `internal/cluster/consensus/raft/raft_test.go`
 - Add: `internal/cluster/health.go`
@@ -1178,20 +1180,38 @@ git commit -m "feat: share stable pubsub application boundary"
 - Modify: `internal/metrics/metrics_test.go`
 - Modify: `cmd/server.go`
 - Add: `cmd/server_test.go`
+- Modify: `cmd/grpcerror.go`
+- Modify: `cmd/cli_test.go`
 - Modify: `internal/server/config/config.go`
 - Modify: `internal/server/server.go`
 - Modify: `internal/server/routes_test.go`
 - Modify: `internal/server/system_handler_test.go`
 - Modify: `internal/server/service/telemetry/observer.go`
 - Modify: `internal/server/service/telemetry/observer_test.go`
+- Modify: `internal/server/service/queue/pubsub.go`
+- Modify: `internal/server/service/queue/pubsub_application.go`
+- Modify: `internal/server/service/queue/pubsub_application_test.go`
+- Modify: `internal/server/service/queue/pubsub_fanout.go`
+- Modify: `internal/server/service/queue/pubsub_fanout_test.go`
+- Modify: `internal/server/service/queue/pubsub_http.go`
+- Modify: `internal/server/service/queue/pubsub_http_test.go`
+- Modify: `internal/server/service/queue/grpc_transport.go`
+- Modify: `internal/shared/pqerr/errors.go`
+- Modify: `internal/shared/pqerr/errors_test.go`
+- Modify: `internal/shared/pqerr/transport_test.go`
 - Modify: `deploy/helm/plainq/templates/_pod.tpl`
 - Modify: `deploy/helm/plainq/values.yaml`
+- Add: `deploy/helm/plainq/test-health-render.sh`
+- Modify: `deploy/helm/plainq/README.md`
+- Modify: `.github/workflows/helm.yml`
+- Modify: `Makefile`
+- Modify: `docs/guides/observability.md`
 - Modify: `operator/api/v1alpha1/defaults.go`
 - Modify: `operator/internal/render/args.go`
 - Modify: `operator/internal/render/workload.go`
 - Modify: `operator/internal/render/render_test.go`
 
-**Contract:** a committed partial publish remains an apply success with an internal partial outcome; ingress reconstructs the public Internal error. Every typed partial quarantines the replica that observed it, the one durable health latch gates Store and peer data paths, and restart cannot clear it. Every replica reconciles exact gauges after state changes/restore, while only ingress records logical counters. `/live` is process liveness; `/health` is storage/quorum/quarantine readiness.
+**Contract:** a committed partial publish remains an apply success with an internal partial outcome; ingress reconstructs the public Internal error. Every typed partial quarantines the replica that observed it, the one durable health latch gates Store, peer, and sweeper data paths, and restart cannot clear it. Every replica reconciles exact gauges through one ordered local-observer seam, while ingress records logical counters without touching exact Prometheus or collector state. Encoded cluster commands have one non-retryable 64 MiB ceiling and finite, versioned peer responses remain rolling-upgrade compatible. `/live` is process liveness; `/health` is storage/quorum/quarantine readiness.
 
 - [ ] **Step 1: Add cluster regression tests**
 
@@ -1224,11 +1244,33 @@ Add:
 - `TestPreGuardRaftStoreInitializesVersionExactlyOnce`
 - `TestReplicaQuarantineMarkerWriteFailureStaysUnreadyAfterRestart`
 - `TestReplicaApplyGuardFinishAndDiagnosticFailuresStayQuarantinedAfterRestart`
+- `TestReplicaRecoveryFinalSyncFailureRollsBackAndStaysQuarantinedAfterRestart`
+- `TestReplicaRecoveryJoinsRollbackDiagnosticsAndRestoresQuarantineMarker`
 - `TestReplicaApplyGuardBeginFailureTerminatesBeforeStorage`
 - `TestReplicaApplyGuardFinishFailureTerminatesWithDirtyGuard`
 - `TestSuccessfulPublishRestoresReplicaApplyGuard`
 - `TestSuccessfulSnapshotRestoreClearsReplicaQuarantine`
 - `TestServingTokenRejectsFailRecoverABA`
+- `TestQuarantinedLeaderSweepDoesNotTouchLocalStorageOrConsensus`
+- `TestFSMRestoreAbortsBeforeMutationWhenQuarantinePersistenceFails`
+- `TestVerifiedSnapshotRestoreIsTheOnlyReplicaHealthRecoveryPath`
+- `TestObserverTopicCaptureIsOrderedWithFSMReconciliation`
+- `TestObserverSerializesConcurrentTopicCaptures`
+- `TestStateSuppressingObserverSkipsExactTopicCaptureAndState`
+- `TestBlockedStartupInventoryCannotOverwriteNewerFSMState`
+- `TestStoreRejectsOversizedEncodedCommandBeforeApplyOrForward`
+- `TestForwardRejectsCommandOneByteOverLimitBeforeApply`
+- `TestPeerClientRejectsOversizedCommandBeforeHTTP`
+- `TestV2ForwardUsesCompactPublishOutcome`
+- `TestV1ForwardPreservesLegacyPublishSemantics`
+- `TestNewFollowerFallsBackToLegacyLeaderExactlyOnce`
+- `TestNewFollowerDoesNotFallbackOnApplicationNotFound`
+- `TestPublishIdentifierWireFitsDerivedResponseCeiling`
+- `TestAuthenticatedFollowerCarriesKnownPublishOutcomeLargerThanCommandLimit`
+- `TestBuggyPeerResponseOverflowIsFiniteAndTerminal`
+- `TestServerRejectsResponseOverflowBeforeWritingSuccessStatus`
+- `TestPubSubHTTPAndGRPCHaveStatusParity/capacity_exceeded`
+- `TestGRPCResourceExhaustedIsActionableUsageError`
 - `TestLivenessStaysHealthyWhileQuarantinedReadinessFails`
 - `TestHelmUsesSeparateLivenessAndReadinessRoutes`
 - `TestOperatorUsesSeparateLivenessAndReadinessRoutes`
@@ -1289,7 +1331,7 @@ _ = f.reportReplicaFault(err)
 return nil, err
 ```
 
-This is a committed business partial outcome, not a failed state-machine apply. It therefore travels as HTTP 200 plus internal JSON across peer forwarding.
+This is a committed business partial outcome, not a failed state-machine apply. It therefore travels as HTTP 200 plus the compact internal JSON outcome on `/v2/forward`; the rolling-upgrade `/v1/forward` behavior is specified in Step 6.
 
 Every `*queue.PartialPublishError` produced while applying a replicated command invokes `ReplicaFaultReporter` before returning its outcome. This is unconditional: do not inspect `FailedDeliveries`, whitelist a nested domain sentinel, or treat a leader's partial differently from a follower's. A follower-only `NotFound` inside a partial can mean that replica already lacks a subscribed queue even when every other node succeeds. Only a top-level `pqerr.ErrNotFound` returned before any destination mutation is contractually non-mutating and may restore the clean guard. Causes remain diagnostic, but any partial or unclassified replica-local result is proof that this state-machine application may not be deterministic on that node. Durably quarantine it, fail its public read/write readiness gate, and require a verified snapshot restore or explicit wipe/reseed before it serves again, while still returning the conservative partial outcome on the applying leader. A process restart alone never clears quarantine. Add leader/follower fault-injection cases for full and partial outcome shapes, different failed destinations, follower-only `NotFound`, and a partial whose nested cause is `Unavailable`.
 
@@ -1328,13 +1370,13 @@ Centralize this path as `f.abortApply(err)`: call the required callback and imme
 
 `Fail` atomically latches the first cause before doing file I/O, then best-effort writes a same-directory temporary diagnostic file with mode `0600`, calls `Sync`, renames it to the quarantine marker, and syncs the parent directory. It returns any persistence error while keeping the in-memory latch closed. The FSM logs that failure at error level; safety still comes from the already-durable absence of the clean marker. Never put message bodies in either file. Tests inject failure specifically into the diagnostic-marker write after a durable `BeginPublishApply`, restart `newReplicaHealth`, and assert the replica remains quarantined.
 
-`Recover` runs only after verified snapshot commit and inventory. It writes and syncs a fresh clean marker, removes the quarantine/dirty markers, syncs the parent directory, and only then clears the in-memory latch. If any write, removal, or directory sync fails, it returns an error and remains quarantined. A normal restart with a quarantine marker or without the clean marker stays unready; a successful snapshot restore is the only in-process path to `Recover`. The markers share the Raft data directory's durability boundary—operators must place that directory on durable storage and wipe/reseed the entire replica, not create/delete individual markers, for manual recovery.
+`Recover` runs only after verified snapshot commit and inventory. It writes and syncs a fresh clean marker, removes the quarantine/dirty markers, syncs the parent directory, and only then clears the in-memory latch. If the final directory sync fails after clean has been installed, it attempts both a clean-to-dirty rollback with a durable directory sync and an independent diagnostic quarantine marker, joins every rollback diagnostic into the returned error, and leaves the in-memory generation latched. A restart must remain unavailable whenever either safety record was established. Any write, removal, or directory-sync failure returns an error and keeps the node quarantined. A normal restart with a quarantine marker or without the clean marker stays unready; a successful snapshot restore is the only in-process path to `Recover`. The markers share the Raft data directory's durability boundary—operators must place that directory on durable storage and wipe/reseed the entire replica, not create/delete individual markers, for manual recovery.
 
-`NewNode` creates exactly one `replicaHealth` and shares it with the FSM, cluster `Store`, peer server, `Node.Health`, and `Node.Status`. The first fault wins until recovery. Add an internal `WithReplicaHealth(*replicaHealth)` store option and a small `ensureServing()` helper. Start `Store.readBarrier`, `Store.apply`, and `Store.countSubscribers` with `ensureServing`; make Task 3's `TopicInventory` use `readBarrier` too. Every local read (`DescribeQueue`, `ListQueues`, `Peek`, `ListTopics`, `TopicInventory`, and the subscriber-count read) captures `ServingToken()` before storage and requires `CheckServingToken(token)` afterward. The token is a monotonic generation, not only a nil health check, so a blocked read spanning Fail then Recover still returns typed `Unavailable`. This covers every public read, every local/forwarded write entry, publish's preliminary subscriber count, and the leader sweeper. A call already applying when the fault is discovered may return its conservative partial result; every call that begins after the latch closes returns typed `Unavailable`.
+`NewNode` creates exactly one `replicaHealth` and shares it with the FSM, cluster `Store`, peer server, `Node.Health`, and `Node.Status`. The first fault wins until recovery. Add an internal `WithReplicaHealth(*replicaHealth)` store option and a small `ensureServing()` helper. Start `Store.readBarrier`, `Store.apply`, and `Store.countSubscribers` with `ensureServing`; make Task 3's `TopicInventory` use `readBarrier` too. Every local read (`DescribeQueue`, `ListQueues`, `Peek`, `ListTopics`, `TopicInventory`, and the subscriber-count read) captures `ServingToken()` before storage and requires `CheckServingToken(token)` afterward. The token is a monotonic generation, not only a nil health check, so a blocked read spanning Fail then Recover still returns typed `Unavailable`. The leader sweeper must call gated `Store.ListQueues`, never `store.local.ListQueues`; after quarantine it performs no local list/sweep work and proposes no command. This covers every public read, every local/forwarded write entry, publish's preliminary subscriber count, and the leader sweeper. A call already applying when the fault is discovered may return its conservative partial result; every call that begins after the latch closes returns typed `Unavailable`.
 
 The peer server bypasses `Store`, so add `ForwardGate func() error` to
-`peer.ServerConfig` and check it at the start of `/v1/forward`, before decoding
-or invoking the consensus applier. `NewNode` supplies the same
+`peer.ServerConfig` and check it at the start of both `/v1/forward` and
+`/v2/forward`, before decoding or invoking the consensus applier. `NewNode` supplies the same
 `replicaHealth.Check` used by Store. Join, leave, and status remain available
 for repair. A node that successfully applied while another replica failed may
 remain healthy; the invariant is that every replica which observed a local
@@ -1396,17 +1438,35 @@ func NewNode(cfg Config, local queue.ReplicatedStorage, logger *slog.Logger, opt
 func WithTopicStateReconciler(reconcile fsm.TopicStateReconciler) NodeOption
 ```
 
-`NewNode` constructs the durable health latch before the FSM/consensus engine, passes it through the required `applyGuard` constructor parameter, passes the production terminator through required `fatalApply`, always passes `replicaHealth.Fail` and `replicaHealth.Recover` into the FSM, and returns an error if marker initialization fails. There is no option or default that can omit/replace the guard or terminator; direct FSM tests must supply explicit fakes. `initClusterNode` passes only the topic-state node option. After successful create topic, delete topic, subscribe, unsubscribe, and delete queue dispatch, call `storage.TopicInventory` and invoke the callback with `&inventory`. On a reconciliation read failure, log and invoke the callback with `nil` without changing the committed command response. After `CommitRestore`, run the same reconciliation before reporting restore completion. Call `Recover` only after both `CommitRestore` and this exact inventory read succeed, and propagate a recovery-marker error from restore; a failed restore, failed inventory, or failed marker removal leaves the node quarantined.
+`NewNode` constructs the durable health latch before the FSM/consensus engine, passes it through the required `applyGuard` constructor parameter, passes the production terminator through required `fatalApply`, always passes `replicaHealth.Fail` and `replicaHealth.Recover` into the FSM, and returns an error if marker initialization fails. There is no option or default that can omit/replace the guard or terminator; direct FSM tests must supply explicit fakes. `initClusterNode` passes only the topic-state node option. After successful create topic, delete topic, subscribe, unsubscribe, and delete queue dispatch, call `storage.TopicInventory` and invoke the callback with `&inventory`. On a reconciliation read failure, log and invoke the callback with `nil` without changing the committed command response. `FSM.Restore` first invokes the production fault reporter, before `BeginRestore` or any storage mutation, and aborts immediately if durable quarantine persistence fails. After `CommitRestore`, run the same reconciliation before reporting restore completion. Call `Recover` only after both `CommitRestore` and this exact inventory read succeed, and propagate a recovery-marker error from restore; a failed restore, failed inventory, or failed marker removal leaves the node quarantined.
 
 `NewNode` also installs its non-replaceable `replicaHealth` as the FSM `ReplicaApplyGuard` and its production process terminator as `FatalApply`. The publish apply branch calls `BeginPublishApply` before `storage.Publish`; it calls `FinishPublishApply` only after a full success or a typed, contractually non-mutating precondition error. Partial/unknown outcomes call `Fail` and deliberately leave the clean guard absent. Tests assert begin happens before the first storage mutation, finish happens after the last mutation, a begin failure performs no storage call or ordinary Apply return, and diagnostic-marker failure still produces a quarantined restart.
 
 At the start of every decoded committed entry, `FSM.Apply` calls `ReplicaApplyGuard.Check`. Once quarantined, later publish and non-publish entries return typed unavailable outcomes without invoking storage or the fatal callback, so an unhealthy voter neither mutates further nor crash-loops while Raft advances. `FSM.Restore` deliberately does not use this apply gate: it stages and commits the snapshot, verifies `TopicInventory`, and only then calls `Recover`. Tests execute partial → non-publish → publish → restore and prove only the verified restore reopens mutation.
 
-The callback maps non-nil inventory only to `Observer.ReconcileTopicState`; nil calls `Observer.TopicStateUnavailable`. It never calls request, operation, publish, or lifecycle methods.
+The callback maps non-nil inventory only to `Observer.ReconcileTopicState`; nil calls `Observer.TopicStateUnavailable`. It never calls request, operation, publish, or lifecycle methods. Both paths take the same Observer lock used by `CaptureTopicState`, so ordinary FSM reconciliation is ordered with startup and application inventory captures.
 
-- [ ] **Step 6: Preserve typed temporary unavailability over peer forwarding**
+- [ ] **Step 6: Preserve typed peer outcomes with finite rolling-upgrade wires**
 
 Add an `unavailable` peer error class for `pqerr.ErrUnavailable`, map it to HTTP 503, and reconstruct it on the calling node. This same class carries a quarantined leader's `ForwardGate` rejection. Keep `partial fan-out` in the successful internal outcome path so it remains public Internal rather than 503 even when a nested destination cause was unavailable.
+
+Define `command.MaxEncodedBytes = 64 << 20` as the one cluster command ceiling. `Store.apply` encodes once and rejects the exact encoded byte slice before either `consensus.Apply` or `Forward`. Peer Client repeats the preflight before HTTP, and peer Server reads the request through `LimitReader(MaxEncodedBytes+1)` before invoking `Applier.Apply`. Map the stable, non-retryable `pqerr.ErrCapacityExceeded` to peer HTTP 413 plus machine class `capacity`, public HTTP 413, public gRPC `codes.ResourceExhausted`, and an actionable CLI usage error that asks the caller to reduce its batch/body. It must not match InvalidArgument, Unavailable, or any safe-to-reroute class.
+
+Publish results need a distinct finite response envelope because one accepted command can return every destination XID and generated message ULID. Add `FailedDestinations uint64` to `PublishOutcome` and `PartialPublishError` diagnostics. Keep detailed `DeliveryFailures` and arbitrary `Cause` strings local only. `/v2/forward` serializes this compact shape:
+
+```go
+type compactPublishOutcome struct {
+	Response           *queue.PublishResponse `json:"response"`
+	Partial            bool                   `json:"partial"`
+	SelectedQueues     uint64                 `json:"selectedQueues"`
+	FailedDeliveries   uint64                 `json:"failedDeliveries"`
+	FailedDestinations uint64                 `json:"failedDestinations"`
+}
+```
+
+Set the peer response ceiling to `2*command.MaxEncodedBytes + 4<<10`. For every non-empty publish, valid queue IDs are fixed 20-byte XIDs and message IDs are fixed 26-byte ULIDs; a proof test must show their JSON representation remains below twice the command's encoded ID section, with 4 KiB covering fixed fields, topic ID, counts, delimiters, and framing. Server encodes and checks this bound before writing success status. Client reads at most the bound plus one byte. An overflow from a buggy peer returns a finite `ErrResponseTooLarge`, is diagnostic, and is never retried because Apply may already have happened. A deterministic authenticated regression must carry a known successful outcome larger than 64 MiB but below this response ceiling with every ID intact.
+
+Keep `/v1/forward` for old followers and add `/v2/forward` for the compact shape. New Client tries v2 first and falls back to v1 exactly once only when it receives an unclassified route-level 404: no machine error header proves the command never reached Apply. A classified application `NotFound` never falls back. A legacy full `PublishResponse` is converted to compact `PublishOutcome` bytes before cluster Store decoding. A legacy partial terminal error becomes `*queue.PartialPublishError{Outcome: {Partial: true}}` with conservative zero delivery/destination counts and is never retried. New Server preserves legacy v1 full-success response bytes and returns legacy partial-fanout class with no success body. Fixtures cover new follower to old leader and old follower to new leader, full and partial results, exactly one Apply, and nil-response gRPC handling.
 
 Make `Node` implement `hc.HealthChecker`:
 
@@ -1467,7 +1527,7 @@ queueStorage, queueClose, err := initQueueStorage(&cfg, &clusterCfg, logger, bac
 
 logicalObserver := localObserver
 if clusterCfg.Enabled {
-	logicalObserver = telemetry.NewObserver(metrics.BackendCluster)
+	logicalObserver = telemetry.NewStateSuppressingObserver(metrics.BackendCluster)
 }
 ```
 
@@ -1488,7 +1548,15 @@ func(inventory *queue.TopicInventory) {
 
 Wrap the final standalone/cluster storage with `ObservedStorage(..., logicalObserver)` and construct `queue.Service` with `logicalObserver`.
 
-Preserve a reference to the physical replicated storage. After `clusterNode.Start` (or immediately in standalone mode) and before collector attachment, call `TopicInventory` directly on that physical storage and reconcile the local observer. Do not call startup inventory through the cluster `Store`: in strong-consistency mode a healthy follower's public read barrier correctly rejects the read. A pre-populated standalone or clustered replica therefore has exact local topic/subscription gauges before recorder attachment; a physical inventory failure calls `TopicStateUnavailable`, records `storage_errors_total{operation="topic_inventory"}`, and aborts startup rather than publishing a known zero. Later FSM apply/restore callbacks keep the local observer current as a follower catches up.
+Add one ordered capture-and-apply seam:
+
+```go
+func (o *Observer) CaptureTopicState(
+	capture func() (TopicStateEvent, error),
+) error
+```
+
+For an authoritative observer, this method holds the Observer lock across both the inventory callback and exact-state application. Application reconciliation and startup use this seam; concurrent captures serialize, and an FSM callback that arrives while capture is blocked cannot later be overwritten by an older snapshot. For a state-suppressing logical observer the method returns without invoking `capture` at all. Preserve a reference to the physical replicated storage. After `clusterNode.Start` (or immediately in standalone mode) and before collector attachment, call `CaptureTopicState` with a callback that reads `TopicInventory` directly on that physical storage. Do not call startup inventory through the cluster `Store`: in strong-consistency mode a healthy follower's public read barrier correctly rejects the read. A pre-populated standalone or clustered replica therefore has exact local topic/subscription gauges before recorder attachment; a physical inventory failure records unknown exact state plus `storage_errors_total{operation="topic_inventory"}` and aborts startup rather than publishing a known zero. Later FSM apply/restore callbacks keep the local observer current as a follower catches up.
 
 Replace `WithObserver` with:
 
@@ -1496,31 +1564,43 @@ Replace `WithObserver` with:
 func WithTelemetryObservers(local, logical *telemetry.Observer) Option
 ```
 
-When the pointers are identical (standalone), attach the collector once as the full recorder. When cluster mode supplies distinct observers, attach the collector fully to the local observer and attach `telemetry.NewStateSuppressingRecorder(collector)` to the logical observer. The wrapper forwards request, storage, publish, lifecycle, and queue message counters but overrides queue exact-count mutations plus `RecordTopicState`/`RecordTopicStateUnavailable` as no-ops. Local FSM reconciliation is the sole source of internal exact queue/topic gauges; a logical strong-follower reconciliation failure therefore cannot erase known local collector state. Prometheus remains directly driven by both observers, and `TopicStateUnavailable` still leaves its last exact Prometheus gauges unchanged. Add wrapper tests for event forwarding, state suppression, pointer deduplication, and unknown-state attachment. Collector worker context/join behavior remains wholly owned by Task 10.
+When the pointers are identical (standalone), attach the collector once as the full recorder. When cluster mode supplies distinct observers, attach the collector fully to the local observer and attach `telemetry.NewStateSuppressingRecorder(collector)` to the logical observer. The recorder wrapper forwards request, storage, publish, lifecycle, and queue message counters but overrides queue exact-count mutations plus `RecordTopicState`/`RecordTopicStateUnavailable` as no-ops. The logical `NewStateSuppressingObserver` additionally suppresses exact topic Prometheus changes and refuses capture; it still emits activity metrics. Local FSM reconciliation is the sole source of both Prometheus and collector exact topic/subscription gauges, so a logical strong-follower capture cannot run or erase newer local state. Add blocked-capture ordering, concurrent-capture serialization, suppressed-capture, wrapper forwarding, pointer-deduplication, and unknown-state tests. Collector worker context/join behavior remains wholly owned by Task 10.
 
 Keep the concrete `*hc.MultiServiceChecker` in `cmd/server.go` when health is enabled. After storage/cluster initialization, register exactly one service: `healthServices.AddService("cluster", clusterNode)` in cluster mode, otherwise assert the physical queue storage implements `hc.HealthChecker` and register it as `"storage"`. Return a startup error rather than silently installing an empty readiness report when that assertion fails. The cluster registration covers quorum, the physical replica, and quarantine; the cluster `Store` gate protects public operations even when the HTTP health endpoint is disabled.
 
 Preserve `--health.route=/health` as the dependency/readiness endpoint and add `--health.liveness.route=/live` with `HealthLivenessRoute` in config. Validate that both enabled routes start with `/`, are non-empty, and differ. Mount both routes on the returned `httpkit.ListenerHTTP` rather than using Servekit's built-in health reporter: the pinned JSON/HTML reporter writes HTTP 200 on checker failure. A local `readinessHandler` preserves plain/JSON/HTML bodies but always writes 503 before the body when `checker.Health` fails; GET and HEAD must have the same status. A separate liveness handler always returns 200 once the HTTP process is serving and never calls the dependency checker. Preserve health access-log/self-metric flags as middleware on both routes.
 
-Update Helm args/config so `-health.route` and the default readiness probe derive from the same `config.healthRoute` value, while `-health.liveness.route` and the default liveness probe derive from the same `config.healthLivenessRoute` value; defaults remain `/health` and `/live`. Add `DefaultLivenessRoute = "/live"` to the operator defaults, emit `-health.liveness.route=/live`, and render distinct default probes while preserving explicit pod probe overrides. When operator `health.enabled=false`, omit both default HTTP probes but keep any explicit liveness/readiness overrides. Test default/plain/JSON/HTML readiness failures, customized Helm routes, operator defaults, disabled health, and explicit overrides. This prevents orchestration from erasing a quarantine through a liveness restart. Task 14 documents both routes and the durable-recovery rule.
+Update Helm args/config so explicit default-true `config.healthEnabled` emits `-health=true`, `-health.route` and the default readiness probe derive from the same `config.healthRoute` value, while `-health.liveness.route` and the default liveness probe derive from the same `config.healthLivenessRoute` value; defaults remain `/health` and `/live`. Empty probe maps select those chart-managed defaults. A null liveness or readiness probe independently omits that probe without a deep-copy panic. When health is false, omit both chart-managed HTTP probes while preserving explicit independent exec/TCP/custom overrides. Add a lasting chart render script to Helm CI/Make coverage for default, disabled, null, custom route, and explicit override cases. Add `DefaultLivenessRoute = "/live"` to the operator defaults, emit `-health.liveness.route=/live`, and render distinct default probes while preserving explicit pod probe overrides. When operator `health.enabled=false`, omit both default HTTP probes but keep any explicit liveness/readiness overrides. Test default/plain/JSON/HTML readiness failures, customized Helm routes, operator defaults, disabled health, null probes, and explicit overrides. This prevents orchestration from erasing a quarantine through a liveness restart. Update the observability guide with both routes and the durable-recovery rule here; Task 14 carries that contract into the final stable API documentation.
 
 - [ ] **Step 8: Run cluster and server wiring tests**
 
 Run the Step 2 command again, then:
 
 ```bash
-go test -race ./internal/cluster/... ./internal/server ./cmd -count=1
+go test -race ./internal/cluster/... ./internal/server/service/telemetry \
+  ./internal/server/service/queue ./internal/shared/pqerr ./cmd -count=1
+make helm-test
+helm lint deploy/helm/plainq --set auth.jwtSecret=test-secret
+go test ./... -count=1
+go vet ./...
 cd operator && go test -race ./... -count=1
 ```
 
-Expected: PASS with exact follower gauges and one ingress logical event.
+Expected: PASS with exact follower gauges and one ingress logical event, bounded
+mixed-version forwarding, public 413/ResourceExhausted behavior, and safe Helm
+probe rendering for default, disabled, null, and custom configurations.
 
 - [ ] **Step 9: Commit**
 
 ```bash
-git add internal/cluster internal/metrics cmd/server.go cmd/server_test.go internal/server/config \
+git add internal/cluster internal/metrics internal/shared/pqerr \
+  internal/server/config internal/server/service/queue internal/server/service/telemetry \
   internal/server/server.go internal/server/routes_test.go internal/server/system_handler_test.go \
-  deploy/helm/plainq operator/api/v1alpha1/defaults.go operator/internal/render
+  cmd/server.go cmd/server_test.go cmd/grpcerror.go cmd/cli_test.go \
+  deploy/helm/plainq .github/workflows/helm.yml Makefile docs/guides/observability.md \
+  docs/superpowers/specs/2026-08-25-stable-pubsub-design.md \
+  docs/superpowers/plans/2026-08-25-stable-pubsub-v1-implementation.md \
+  operator/api/v1alpha1/defaults.go operator/internal/render
 git commit -m "feat: reconcile pubsub telemetry across cluster"
 ```
 

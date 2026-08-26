@@ -415,11 +415,12 @@ func TestFSMPartialPublishIsCommittedOutcomeNotApplyFailure(t *testing.T) {
 	response := &queue.PublishResponse{TopicID: "topicone", QueueIDs: []string{"queueone"}, DeliveredCount: 1}
 	partial := &queue.PartialPublishError{
 		Outcome: queue.PublishOutcome{
-			Response:         response,
-			Partial:          true,
-			SelectedQueues:   2,
-			FailedDeliveries: 1,
-			DeliveryFailures: []queue.PublishDeliveryFailure{{QueueID: "queuetwo", Messages: 1, Cause: "not found"}},
+			Response:           response,
+			Partial:            true,
+			SelectedQueues:     2,
+			FailedDeliveries:   1,
+			FailedDestinations: 1,
+			DeliveryFailures:   []queue.PublishDeliveryFailure{{QueueID: "queuetwo", Messages: 1, Cause: "not found"}},
 		},
 		Causes: []error{pqerr.ErrNotFound},
 	}
@@ -705,9 +706,14 @@ func TestFSMRestoreReconcilesTopicStateWithoutLifecycleEvents(t *testing.T) {
 
 	targetStorage := newStore(t)
 	var reconciled *queue.TopicInventory
+	faultCalls := 0
 	recoveryCalls := 0
 	target := New(targetStorage, nil, noopApplyGuard{}, panicFatalApply,
 		WithTopicStateReconciler(func(inventory *queue.TopicInventory) { reconciled = inventory }),
+		WithReplicaFaultReporter(func(error) error {
+			faultCalls++
+			return nil
+		}),
 		WithReplicaRecoveryReporter(func() error {
 			recoveryCalls++
 			return nil
@@ -720,8 +726,47 @@ func TestFSMRestoreReconcilesTopicStateWithoutLifecycleEvents(t *testing.T) {
 	if reconciled == nil || reconciled.TopicsExist != 1 || reconciled.SubscriptionCounts["topicone"] != 1 {
 		t.Fatalf("restored topic inventory = %#v, want one topic/subscription", reconciled)
 	}
+	if faultCalls != 1 {
+		t.Fatalf("replica fault calls = %d, want 1 before restore", faultCalls)
+	}
 	if recoveryCalls != 1 {
 		t.Fatalf("replica recovery calls = %d, want 1", recoveryCalls)
+	}
+}
+
+type beginCountingRestoreStorage struct {
+	queue.ReplicatedStorage
+	beginCalls int
+}
+
+func (s *beginCountingRestoreStorage) BeginRestore(context.Context) error {
+	s.beginCalls++
+	return s.ReplicatedStorage.BeginRestore(context.Background())
+}
+
+func TestFSMRestoreAbortsBeforeMutationWhenQuarantinePersistenceFails(t *testing.T) {
+	source, _ := newFSM(t)
+	encoded := persistSnapshot(t, source)
+	storage := &beginCountingRestoreStorage{ReplicatedStorage: newStore(t)}
+	quarantineErr := errors.New("persist restore quarantine")
+	recoveryCalls := 0
+	target := New(storage, nil, noopApplyGuard{}, panicFatalApply,
+		WithReplicaFaultReporter(func(error) error { return quarantineErr }),
+		WithReplicaRecoveryReporter(func() error {
+			recoveryCalls++
+			return nil
+		}),
+	)
+
+	err := target.Restore(io.NopCloser(bytes.NewReader(encoded)))
+	if !errors.Is(err, quarantineErr) {
+		t.Fatalf("Restore() = %v, want %v", err, quarantineErr)
+	}
+	if storage.beginCalls != 0 {
+		t.Fatalf("BeginRestore calls = %d, want 0", storage.beginCalls)
+	}
+	if recoveryCalls != 0 {
+		t.Fatalf("replica recovery calls = %d, want 0", recoveryCalls)
 	}
 }
 

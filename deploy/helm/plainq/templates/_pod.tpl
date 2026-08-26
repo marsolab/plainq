@@ -26,6 +26,7 @@ appears in the rendered manifest, only the variable reference does.
 - -auth.enable=false
 {{- end }}
 - -log.level={{ .Values.config.logLevel }}
+- -health={{ .Values.config.healthEnabled }}
 - -health.route={{ .Values.config.healthRoute }}
 - -health.liveness.route={{ .Values.config.healthLivenessRoute }}
 - -metrics.route={{ .Values.config.metricsRoute }}
@@ -145,13 +146,27 @@ plainq.containerSpec renders the shared PlainQ container definition for both the
 StatefulSet (sqlite) and the Deployment (postgres).
 */}}
 {{- define "plainq.containerSpec" -}}
-{{- $livenessProbe := deepCopy .Values.livenessProbe -}}
-{{- if and $livenessProbe.httpGet (not (hasKey $livenessProbe.httpGet "path")) -}}
-{{- $_ := set $livenessProbe.httpGet "path" .Values.config.healthLivenessRoute -}}
+{{- $livenessProbe := .Values.livenessProbe -}}
+{{- if and .Values.config.healthEnabled (kindIs "map" $livenessProbe) (empty $livenessProbe) -}}
+{{- $livenessProbe = dict "httpGet" (dict "port" "http" "path" .Values.config.healthLivenessRoute) "initialDelaySeconds" 10 "periodSeconds" 15 "timeoutSeconds" 3 "failureThreshold" 3 -}}
+{{- else if kindIs "map" $livenessProbe -}}
+{{- $livenessProbe = deepCopy $livenessProbe -}}
+{{- with get $livenessProbe "httpGet" -}}
+{{- if not (hasKey . "path") -}}
+{{- $_ := set . "path" $.Values.config.healthLivenessRoute -}}
 {{- end -}}
-{{- $readinessProbe := deepCopy .Values.readinessProbe -}}
-{{- if and $readinessProbe.httpGet (not (hasKey $readinessProbe.httpGet "path")) -}}
-{{- $_ := set $readinessProbe.httpGet "path" .Values.config.healthRoute -}}
+{{- end -}}
+{{- end -}}
+{{- $readinessProbe := .Values.readinessProbe -}}
+{{- if and .Values.config.healthEnabled (kindIs "map" $readinessProbe) (empty $readinessProbe) -}}
+{{- $readinessProbe = dict "httpGet" (dict "port" "http" "path" .Values.config.healthRoute) "initialDelaySeconds" 5 "periodSeconds" 10 "timeoutSeconds" 3 "failureThreshold" 3 -}}
+{{- else if kindIs "map" $readinessProbe -}}
+{{- $readinessProbe = deepCopy $readinessProbe -}}
+{{- with get $readinessProbe "httpGet" -}}
+{{- if not (hasKey . "path") -}}
+{{- $_ := set . "path" $.Values.config.healthRoute -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 - name: {{ .Chart.Name }}
   securityContext:
@@ -188,10 +203,14 @@ StatefulSet (sqlite) and the Deployment (postgres).
       containerPort: {{ .Values.cluster.gossipPort }}
       protocol: UDP
     {{- end }}
+  {{- with $livenessProbe }}
   livenessProbe:
-    {{- toYaml $livenessProbe | nindent 4 }}
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with $readinessProbe }}
   readinessProbe:
-    {{- toYaml $readinessProbe | nindent 4 }}
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   resources:
     {{- toYaml .Values.resources | nindent 4 }}
   volumeMounts:

@@ -78,6 +78,17 @@ func TestAsTransportPassesNilThrough(t *testing.T) {
 	}
 }
 
+func TestCapacityIsNotMisclassifiedAsInvalidArgumentOrRetryable(t *testing.T) {
+	original := fmt.Errorf("encoded command: %w", ErrCapacityExceeded)
+	got := AsTransport(original)
+	if !errors.Is(got, ErrCapacityExceeded) {
+		t.Fatalf("AsTransport(capacity) = %v, want capacity sentinel", got)
+	}
+	if errors.Is(got, errkit.ErrInvalidArgument) || errors.Is(got, errkit.ErrUnavailable) {
+		t.Fatalf("AsTransport(capacity) = %v, must remain its own non-retryable class", got)
+	}
+}
+
 func TestPartialFanoutAlwaysMapsToInternal(t *testing.T) {
 	unknownCause := errors.New("queue connection reset")
 	partial := &partialFanoutError{causes: []error{

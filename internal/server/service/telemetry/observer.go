@@ -147,7 +147,8 @@ func (*stateSuppressingRecorder) RecordTopicStateUnavailable()     {}
 // Recorder callbacks run while mu is held. A recorder must not call back into
 // this Observer.
 type Observer struct {
-	backend string
+	backend         string
+	exactTopicState bool
 
 	mu sync.Mutex
 
@@ -163,6 +164,17 @@ type Observer struct {
 
 // NewObserver returns an Observer for the named storage backend.
 func NewObserver(backend string) *Observer {
+	return &Observer{
+		backend:            backend,
+		exactTopicState:    true,
+		topicSubscriptions: make(map[string]int64),
+	}
+}
+
+// NewStateSuppressingObserver returns an activity observer that never captures
+// or applies exact topic gauges. Cluster ingress uses it so only the local FSM
+// observer owns Prometheus and collector topic inventory state.
+func NewStateSuppressingObserver(backend string) *Observer {
 	return &Observer{
 		backend:            backend,
 		topicSubscriptions: make(map[string]int64),
@@ -187,7 +199,7 @@ func (o *Observer) SetRecorder(sink Recorder) {
 	}
 
 	topicSink, ok := sink.(TopicRecorder)
-	if ok && o.topicsKnown {
+	if ok && o.exactTopicState && o.topicsKnown {
 		topicSink.RecordTopicState(TopicStateEvent{
 			TopicsExist:   o.topicsExist,
 			Subscriptions: cloneSubscriptions(o.topicSubscriptions),
@@ -462,13 +474,40 @@ func (o *Observer) TopicSubscriptionDeleted(topicID string) {
 	}
 }
 
+// CaptureTopicState captures and applies an inventory as one ordered action.
+// The callback runs while the Observer ordering lock is held and must not call
+// back into this Observer. A state-suppressing observer skips the callback.
+func (o *Observer) CaptureTopicState(capture func() (TopicStateEvent, error)) error {
+	if !o.exactTopicState {
+		return nil
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	event, err := capture()
+	if err != nil {
+		o.topicStateUnavailableLocked()
+		return err
+	}
+	o.reconcileTopicStateLocked(event)
+
+	return nil
+}
+
 // ReconcileTopicState installs one exact topic inventory. Removed topics are
 // reset to zero before the new state is published.
 func (o *Observer) ReconcileTopicState(event TopicStateEvent) {
-	next := cloneSubscriptions(event.Subscriptions)
+	if !o.exactTopicState {
+		return
+	}
 
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	o.reconcileTopicStateLocked(event)
+}
+
+func (o *Observer) reconcileTopicStateLocked(event TopicStateEvent) {
+	next := cloneSubscriptions(event.Subscriptions)
 
 	for topicID := range o.topicSubscriptions {
 		if _, exists := next[topicID]; !exists {
@@ -497,9 +536,16 @@ func (o *Observer) ReconcileTopicState(event TopicStateEvent) {
 // last Prometheus gauges or lifecycle totals. The prior map remains retained so
 // a later successful inventory can close removed-topic series with zero.
 func (o *Observer) TopicStateUnavailable() {
+	if !o.exactTopicState {
+		return
+	}
+
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	o.topicStateUnavailableLocked()
+}
 
+func (o *Observer) topicStateUnavailableLocked() {
 	o.topicsKnown = false
 	if sink, ok := o.sink.(TopicRecorder); ok {
 		sink.RecordTopicStateUnavailable()

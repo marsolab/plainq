@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/marsolab/plainq/internal/cluster/command"
 	"github.com/marsolab/plainq/internal/cluster/consensus"
 	"github.com/marsolab/plainq/internal/cluster/deletewire"
 	"github.com/marsolab/plainq/internal/cluster/transport"
@@ -49,9 +50,28 @@ const errorHeader = "X-Plainq-Cluster-Error"
 // a peer is a follower that has stopped answering its own clients.
 const requestTimeout = 30 * time.Second
 
-// maxRequestBytes caps a forwarded command. It matches the largest Send a
-// client can make plus framing.
-const maxRequestBytes = 64 << 20
+const (
+	// maxRequestBytes is kept as a local name for the peer protocol, but the
+	// command package owns the one cluster-wide encoded-command ceiling.
+	maxRequestBytes = command.MaxEncodedBytes
+
+	// publishResponseFramingBytes covers the fixed JSON field names, topic id,
+	// integer counts, brackets and future compatible framing. For a non-empty
+	// publish, every QueueID is a fixed 20-byte XID and every MessageID is a
+	// fixed 26-byte ULID. QueueIDs and MessageIDs together occupy less than
+	// twice the command's length-prefixed MessageID bytes; see the proof test.
+	publishResponseFramingBytes = 4 << 10
+
+	// maxResponseBytes is deliberately larger than maxRequestBytes. A valid
+	// publish result can list both destination and message identifiers even
+	// though the command lists only message identifiers.
+	maxResponseBytes = 2*command.MaxEncodedBytes + publishResponseFramingBytes
+)
+
+// ErrResponseTooLarge means a peer produced a response outside the finite
+// protocol envelope. It is terminal: retrying the already-applied command
+// could duplicate work.
+var ErrResponseTooLarge = errors.New("peer: response exceeds safe limit")
 
 // Applier is what the peer server hands a forwarded command to. It is the
 // consensus engine, narrowed to the one method this package needs.
@@ -90,11 +110,12 @@ type JoinResponse struct {
 
 // Server answers peer RPC on the cluster port.
 type Server struct {
-	applier     Applier
-	membership  Membership
-	forwardGate func() error
-	secret      []byte
-	logger      *slog.Logger
+	applier       Applier
+	membership    Membership
+	forwardGate   func() error
+	secret        []byte
+	logger        *slog.Logger
+	responseLimit int // tests may lower the finite production ceiling.
 
 	http   *http.Server
 	router chi.Router
@@ -141,10 +162,16 @@ func NewServer(cfg ServerConfig) *Server {
 		r.Use(observe)
 		r.Use(s.authenticate)
 
-		r.Post("/forward", s.forwardHandler)
+		r.Post("/forward", s.forwardV1Handler)
 		r.Post("/join", s.joinHandler)
 		r.Post("/leave", s.leaveHandler)
 		r.Get("/status", s.statusHandler)
+	})
+	s.router.Route("/v2", func(r chi.Router) {
+		r.Use(observe)
+		r.Use(s.authenticate)
+
+		r.Post("/forward", s.forwardV2Handler)
 	})
 
 	s.http = &http.Server{
@@ -251,8 +278,23 @@ func (r *statusRecorder) WriteHeader(status int) {
 	r.ResponseWriter.WriteHeader(status)
 }
 
+type forwardVersion uint8
+
+const (
+	forwardLegacyV1  forwardVersion = 1
+	forwardCompactV2 forwardVersion = 2
+)
+
+func (s *Server) forwardV1Handler(w http.ResponseWriter, r *http.Request) {
+	s.forwardHandler(w, r, forwardLegacyV1)
+}
+
+func (s *Server) forwardV2Handler(w http.ResponseWriter, r *http.Request) {
+	s.forwardHandler(w, r, forwardCompactV2)
+}
+
 // forwardHandler commits a command a follower could not commit itself.
-func (s *Server) forwardHandler(w http.ResponseWriter, r *http.Request) {
+func (s *Server) forwardHandler(w http.ResponseWriter, r *http.Request, version forwardVersion) {
 	if s.forwardGate != nil {
 		if err := s.forwardGate(); err != nil {
 			s.writeApplyError(w, err)
@@ -260,10 +302,17 @@ func (s *Server) forwardHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	payload, readErr := io.ReadAll(io.LimitReader(r.Body, maxRequestBytes))
+	payload, oversized, readErr := readBounded(r.Body, maxRequestBytes)
 	if readErr != nil {
 		http.Error(w, "read forwarded command: "+readErr.Error(), http.StatusBadRequest)
 
+		return
+	}
+	if oversized {
+		s.writeApplyError(w, fmt.Errorf(
+			"%w: encoded command exceeds %d bytes",
+			pqerr.ErrCapacityExceeded, command.MaxEncodedBytes,
+		))
 		return
 	}
 
@@ -272,6 +321,21 @@ func (s *Server) forwardHandler(w http.ResponseWriter, r *http.Request) {
 		s.writeApplyError(w, applyErr)
 
 		return
+	}
+	if version == forwardLegacyV1 {
+		if outcome, ok := publishOutcome(response); ok {
+			if outcome.Partial {
+				// Legacy followers understand only the terminal class. They never
+				// learned the new outcome envelope, so do not send a body they could
+				// mistake for a successful PublishResponse.
+				w.Header().Set(errorHeader, "partial-fanout")
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			response = outcome.Response
+		}
+	} else if outcome, ok := publishOutcome(response); ok {
+		response = compactPublishOutcomeFrom(outcome)
 	}
 
 	encoded, encodeErr := encodeResponse(response)
@@ -282,6 +346,14 @@ func (s *Server) forwardHandler(w http.ResponseWriter, r *http.Request) {
 
 		http.Error(w, encodeErr.Error(), http.StatusInternalServerError)
 
+		return
+	}
+	responseLimit := s.responseLimit
+	if responseLimit <= 0 {
+		responseLimit = maxResponseBytes
+	}
+	if len(encoded) > responseLimit {
+		s.writeResponseTooLarge(w, len(encoded), responseLimit)
 		return
 	}
 
@@ -295,6 +367,58 @@ func (s *Server) forwardHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func readBounded(reader io.Reader, limit int) ([]byte, bool, error) {
+	encoded, err := io.ReadAll(io.LimitReader(reader, int64(limit)+1))
+	if err != nil {
+		return nil, false, err
+	}
+	if len(encoded) > limit {
+		return nil, true, nil
+	}
+
+	return encoded, false, nil
+}
+
+func publishOutcome(response any) (*queue.PublishOutcome, bool) {
+	switch outcome := response.(type) {
+	case *queue.PublishOutcome:
+		return outcome, outcome != nil
+	case queue.PublishOutcome:
+		return &outcome, true
+	default:
+		return nil, false
+	}
+}
+
+// compactPublishOutcome is the v2 peer wire. Local state may keep detailed
+// per-destination failures and arbitrary diagnostic causes; those fields have
+// no finite transport bound and never cross the peer hop.
+type compactPublishOutcome struct {
+	Response           *queue.PublishResponse `json:"response"`
+	Partial            bool                   `json:"partial"`
+	SelectedQueues     uint64                 `json:"selectedQueues"`
+	FailedDeliveries   uint64                 `json:"failedDeliveries"`
+	FailedDestinations uint64                 `json:"failedDestinations"`
+}
+
+func compactPublishOutcomeFrom(outcome *queue.PublishOutcome) compactPublishOutcome {
+	return compactPublishOutcome{
+		Response:           outcome.Response,
+		Partial:            outcome.Partial,
+		SelectedQueues:     outcome.SelectedQueues,
+		FailedDeliveries:   outcome.FailedDeliveries,
+		FailedDestinations: outcome.FailedDestinations,
+	}
+}
+
+func (s *Server) writeResponseTooLarge(w http.ResponseWriter, encodedBytes, limit int) {
+	err := fmt.Errorf("%w: encoded response is %d bytes; limit is %d bytes",
+		ErrResponseTooLarge, encodedBytes, limit)
+	s.logger.Error("Refusing an oversized peer response", slog.String("error", err.Error()))
+	w.Header().Set(errorHeader, "response-too-large")
+	http.Error(w, err.Error(), http.StatusInternalServerError)
+}
+
 // writeApplyError translates a failed apply into a status the caller can act
 // on. The distinction that matters most is "not the leader": the follower that
 // asked has to know to look up the leader again rather than treat the write as
@@ -304,6 +428,9 @@ func (s *Server) writeApplyError(w http.ResponseWriter, err error) {
 	class := "internal"
 
 	switch {
+	case errors.Is(err, pqerr.ErrCapacityExceeded):
+		status, class = http.StatusRequestEntityTooLarge, "capacity"
+
 	case errors.Is(err, pqerr.ErrPartialFanout):
 		status, class = http.StatusInternalServerError, "partial-fanout"
 
@@ -458,9 +585,10 @@ func encodeResponse(response any) ([]byte, error) {
 
 // Client calls another node's peer RPC.
 type Client struct {
-	mux    *transport.Mux
-	secret string
-	http   *http.Client
+	mux           *transport.Mux
+	secret        string
+	http          *http.Client
+	responseLimit int // tests may lower the finite production ceiling.
 }
 
 // NewClient builds a peer client that dials through the cluster mux, so peer
@@ -493,12 +621,61 @@ func NewClient(mux *transport.Mux, secret string) *Client {
 
 // Forward sends an encoded command to the leader and returns its response.
 func (c *Client) Forward(ctx context.Context, addr string, payload []byte) ([]byte, error) {
-	body, err := c.do(ctx, http.MethodPost, addr, "/v1/forward", "application/octet-stream", bytes.NewReader(payload))
-	if err != nil {
+	if len(payload) > command.MaxEncodedBytes {
+		return nil, fmt.Errorf(
+			"%w: encoded command is %d bytes; limit is %d bytes",
+			pqerr.ErrCapacityExceeded, len(payload), command.MaxEncodedBytes,
+		)
+	}
+
+	body, err := c.do(ctx, http.MethodPost, addr, "/v2/forward", "application/octet-stream", bytes.NewReader(payload))
+	if err == nil {
+		return body, nil
+	}
+
+	var responseErr *peerResponseError
+	if !errors.As(err, &responseErr) || responseErr.statusCode != http.StatusNotFound || responseErr.class != "" {
 		return nil, err
 	}
 
-	return body, nil
+	// A bare 404 proves the v2 route did not exist and therefore no command
+	// reached Apply. Application NotFound responses carry a machine class and
+	// must never fall back, because applying again could duplicate a write.
+	legacyBody, legacyErr := c.do(
+		ctx, http.MethodPost, addr, "/v1/forward", "application/octet-stream", bytes.NewReader(payload),
+	)
+	decoded, decodeErr := command.Decode(payload)
+	legacyPublish := decodeErr == nil && decoded.Op == command.OpPublish
+	if legacyErr != nil {
+		if legacyPublish && errors.Is(legacyErr, pqerr.ErrPartialFanout) {
+			return nil, &queue.PartialPublishError{
+				Outcome: queue.PublishOutcome{Partial: true},
+				Causes:  []error{legacyErr},
+			}
+		}
+		return nil, legacyErr
+	}
+	if !legacyPublish {
+		return legacyBody, nil
+	}
+
+	var legacyResponse *queue.PublishResponse
+	if len(legacyBody) > 0 {
+		legacyResponse = new(queue.PublishResponse)
+		if err := json.Unmarshal(legacyBody, legacyResponse); err != nil {
+			return nil, fmt.Errorf("decode legacy publish response from %s: %w", addr, err)
+		}
+	}
+	outcome := &queue.PublishOutcome{Response: legacyResponse}
+	if legacyResponse != nil {
+		outcome.SelectedQueues = uint64(len(legacyResponse.QueueIDs))
+	}
+	converted, encodeErr := json.Marshal(compactPublishOutcomeFrom(outcome))
+	if encodeErr != nil {
+		return nil, fmt.Errorf("convert legacy publish response from %s: %w", addr, encodeErr)
+	}
+
+	return converted, nil
 }
 
 // Join asks the node at addr to admit this node to the cluster.
@@ -576,23 +753,45 @@ func (c *Client) do(ctx context.Context, method, addr, path, contentType string,
 
 	defer closeResponse(resp)
 
-	responseBody, readErr := io.ReadAll(io.LimitReader(resp.Body, maxRequestBytes))
+	responseLimit := c.responseLimit
+	if responseLimit <= 0 {
+		responseLimit = maxResponseBytes
+	}
+	responseBody, oversized, readErr := readBounded(resp.Body, responseLimit)
 	if readErr != nil {
 		return nil, fmt.Errorf("read peer response from %s: %w", addr, readErr)
+	}
+	if oversized {
+		return nil, fmt.Errorf(
+			"%w: response from %s exceeds %d bytes",
+			ErrResponseTooLarge, addr, responseLimit,
+		)
 	}
 
 	if resp.StatusCode == http.StatusOK {
 		return responseBody, nil
 	}
 
-	return nil, peerError(addr, resp, responseBody)
+	return nil, &peerResponseError{
+		statusCode: resp.StatusCode,
+		class:      resp.Header.Get(errorHeader),
+		err:        peerError(addr, resp, responseBody),
+	}
 }
 
-// closeResponse drains and closes a response body so the connection returns to
-// the pool. Neither result is actionable — the call already has its answer.
+type peerResponseError struct {
+	statusCode int
+	class      string
+	err        error
+}
+
+func (e *peerResponseError) Error() string { return e.err.Error() }
+func (e *peerResponseError) Unwrap() error { return e.err }
+
+// closeResponse closes a response body. Normal bounded reads reach EOF and
+// remain reusable; oversized responses are deliberately not drained, so a
+// buggy peer cannot force an unbounded read while the connection is closed.
 func closeResponse(resp *http.Response) {
-	//nolint:errcheck,dogsled // draining is best-effort connection reuse.
-	_, _ = io.Copy(io.Discard, resp.Body)
 	_ = resp.Body.Close()
 }
 
@@ -607,6 +806,12 @@ func peerError(addr string, resp *http.Response, body []byte) error {
 	base := fmt.Errorf("peer %s: %s", addr, message)
 
 	switch resp.Header.Get(errorHeader) {
+	case "capacity":
+		return fmt.Errorf("%w: %w", pqerr.ErrCapacityExceeded, base)
+
+	case "response-too-large":
+		return fmt.Errorf("%w: %w", ErrResponseTooLarge, base)
+
 	case "not-leader":
 		return fmt.Errorf("%w: %w", consensus.ErrNotLeader, base)
 

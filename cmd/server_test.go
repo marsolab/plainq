@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/marsolab/plainq/internal/metrics"
 	"github.com/marsolab/plainq/internal/server/service/queue"
@@ -30,12 +31,37 @@ func TestClusterIngressUsesClusterBackend(t *testing.T) {
 	if logical == local || logical.Backend() != metrics.BackendCluster {
 		t.Fatalf("logical observer = %p backend %q, want distinct cluster observer", logical, logical.Backend())
 	}
+	captureCalled := false
+	if err := logical.CaptureTopicState(func() (telemetry.TopicStateEvent, error) {
+		captureCalled = true
+		return telemetry.TopicStateEvent{}, nil
+	}); err != nil {
+		t.Fatalf("logical CaptureTopicState() = %v", err)
+	}
+	if captureCalled {
+		t.Fatal("cluster ingress observer captured exact topic state")
+	}
 }
 
 type inventoryStorage struct {
 	queue.Storage
 	inventory queue.TopicInventory
 	err       error
+}
+
+type blockingInventoryStorage struct {
+	queue.Storage
+	started chan struct{}
+	release chan struct{}
+}
+
+func (s *blockingInventoryStorage) TopicInventory(context.Context) (queue.TopicInventory, error) {
+	close(s.started)
+	<-s.release
+	return queue.TopicInventory{
+		TopicsExist:        1,
+		SubscriptionCounts: map[string]int64{"startup-old": 1},
+	}, nil
 }
 
 func (s *inventoryStorage) TopicInventory(context.Context) (queue.TopicInventory, error) {
@@ -83,6 +109,45 @@ func TestStartupInventoryReplaysBeforeCollectorAttachment(t *testing.T) {
 	bad := &inventoryStorage{err: inventoryErr}
 	if err := replayStartupTopicInventory(context.Background(), bad, observer); !errors.Is(err, inventoryErr) {
 		t.Fatalf("failed startup inventory = %v, want %v", err, inventoryErr)
+	}
+}
+
+func TestBlockedStartupInventoryCannotOverwriteNewerFSMState(t *testing.T) {
+	observer := telemetry.NewObserver(metrics.BackendSQLite)
+	storage := &blockingInventoryStorage{started: make(chan struct{}), release: make(chan struct{})}
+	startupDone := make(chan error, 1)
+	go func() {
+		startupDone <- replayStartupTopicInventory(context.Background(), storage, observer)
+	}()
+	<-storage.started
+
+	reconcileDone := make(chan struct{})
+	go func() {
+		observer.ReconcileTopicState(telemetry.TopicStateEvent{
+			TopicsExist:   1,
+			Subscriptions: map[string]int64{"fsm-new": 2},
+		})
+		close(reconcileDone)
+	}()
+	select {
+	case <-reconcileDone:
+		t.Fatal("newer FSM state overtook blocked startup capture")
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	close(storage.release)
+	if err := <-startupDone; err != nil {
+		t.Fatalf("replayStartupTopicInventory() = %v", err)
+	}
+	<-reconcileDone
+
+	recorder := new(inventoryRecorder)
+	observer.SetRecorder(recorder)
+	if recorder.state == nil || recorder.state.Subscriptions["fsm-new"] != 2 {
+		t.Fatalf("attached recorder state = %#v, want newer FSM inventory", recorder.state)
+	}
+	if _, stale := recorder.state.Subscriptions["startup-old"]; stale {
+		t.Fatalf("attached recorder retained stale startup inventory: %#v", recorder.state)
 	}
 }
 

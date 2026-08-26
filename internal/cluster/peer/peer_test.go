@@ -1,14 +1,19 @@
 package peer
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/marsolab/plainq/internal/cluster/command"
 	"github.com/marsolab/plainq/internal/cluster/consensus"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/service/queue"
@@ -22,12 +27,53 @@ type stubApplier struct {
 	response any
 	err      error
 	seen     []byte
+	calls    int
 }
 
 func (s *stubApplier) Apply(_ context.Context, data []byte) (any, error) {
+	s.calls++
 	s.seen = append([]byte(nil), data...)
 
 	return s.response, s.err
+}
+
+func TestForwardRejectsCommandOneByteOverLimitBeforeApply(t *testing.T) {
+	applier := new(stubApplier)
+	server := NewServer(ServerConfig{Applier: applier, Membership: &stubMembership{}})
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/v2/forward",
+		bytes.NewReader(make([]byte, command.MaxEncodedBytes+1)),
+	)
+	w := httptest.NewRecorder()
+
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusRequestEntityTooLarge || w.Header().Get(errorHeader) != "capacity" {
+		t.Fatalf("oversized forward status/class = %d/%q, want %d/capacity",
+			w.Code, w.Header().Get(errorHeader), http.StatusRequestEntityTooLarge)
+	}
+	if applier.calls != 0 {
+		t.Fatalf("oversized forward Apply calls = %d, want 0", applier.calls)
+	}
+}
+
+func TestPeerClientRejectsOversizedCommandBeforeHTTP(t *testing.T) {
+	applier := new(stubApplier)
+	server := newTestServer(t, applier, &stubMembership{}, "")
+	client := &Client{http: server.Client()}
+
+	_, err := client.Forward(
+		context.Background(),
+		strings.TrimPrefix(server.URL, "http://"),
+		make([]byte, command.MaxEncodedBytes+1),
+	)
+	if !errors.Is(err, pqerr.ErrCapacityExceeded) {
+		t.Fatalf("Forward() = %v, want capacity error", err)
+	}
+	if applier.calls != 0 {
+		t.Fatalf("client-preflight Apply calls = %d, want 0", applier.calls)
+	}
 }
 
 // stubMembership records the membership calls it receives.
@@ -144,6 +190,7 @@ func TestForwardTranslatesConsensusErrors(t *testing.T) {
 		"invalid input":    {err: pqerr.ErrInvalidInput, status: http.StatusBadRequest, class: "invalid-argument"},
 		"failed condition": {err: pqerr.ErrFailedPrecondition, status: http.StatusConflict, class: "failed-precondition"},
 		"unavailable":      {err: pqerr.ErrUnavailable, status: http.StatusServiceUnavailable, class: "unavailable"},
+		"capacity":         {err: pqerr.ErrCapacityExceeded, status: http.StatusRequestEntityTooLarge, class: "capacity"},
 		"anything else":    {err: errors.New("disk on fire"), status: http.StatusInternalServerError, class: "internal"},
 	}
 
@@ -174,6 +221,7 @@ func TestPeerErrorsKeepTheirClass(t *testing.T) {
 		"invalid-argument":    {class: "invalid-argument", target: pqerr.ErrInvalidInput},
 		"failed-precondition": {class: "failed-precondition", target: pqerr.ErrFailedPrecondition},
 		"unavailable":         {class: "unavailable", target: pqerr.ErrUnavailable},
+		"capacity":            {class: "capacity", target: pqerr.ErrCapacityExceeded},
 	}
 
 	for name, tc := range cases {
@@ -253,8 +301,9 @@ func TestPeerForwardGateRunsBeforeApplyAndPreservesUnavailableClass(t *testing.T
 func TestPartialFanoutTakesPrecedenceOverNestedUnavailableAcrossPeer(t *testing.T) {
 	partial := &queue.PartialPublishError{
 		Outcome: queue.PublishOutcome{
-			FailedDeliveries: 1,
-			DeliveryFailures: []queue.PublishDeliveryFailure{{QueueID: "queue-1", Messages: 1}},
+			FailedDeliveries:   1,
+			FailedDestinations: 1,
+			DeliveryFailures:   []queue.PublishDeliveryFailure{{QueueID: "queue-1", Messages: 1}},
 		},
 		Causes: []error{errors.Join(pqerr.ErrUnavailable, consensus.ErrNotLeader, errors.New("destination unavailable"))},
 	}
@@ -329,6 +378,283 @@ func TestEncodeResponse(t *testing.T) {
 	encoded, err = encodeResponse(nil)
 	td.Require(t).CmpNoError(err)
 	td.Cmp(t, encoded, td.Nil(), "a command with no response sends no body")
+}
+
+func TestV2ForwardUsesCompactPublishOutcome(t *testing.T) {
+	outcome := &queue.PublishOutcome{
+		Response:           &queue.PublishResponse{TopicID: "topicone", QueueIDs: []string{"queueone"}},
+		Partial:            true,
+		SelectedQueues:     2,
+		FailedDeliveries:   3,
+		FailedDestinations: 1,
+		DeliveryFailures: []queue.PublishDeliveryFailure{{
+			QueueID: "queuetwo", Messages: 3, Cause: "arbitrary backend secret",
+		}},
+	}
+	applier := &stubApplier{response: outcome}
+	server := newTestServer(t, applier, &stubMembership{}, "")
+
+	resp := post(t, server, http.MethodPost, "/v2/forward", "", "publish-command")
+	body, err := io.ReadAll(resp.Body)
+	td.Require(t).CmpNoError(err)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("v2 forward status = %d, want 200: %s", resp.StatusCode, body)
+	}
+	if bytes.Contains(body, []byte("deliveryFailures")) || bytes.Contains(body, []byte("arbitrary backend secret")) {
+		t.Fatalf("compact v2 outcome leaked detailed failures: %s", body)
+	}
+	var decoded queue.PublishOutcome
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("decode v2 outcome: %v", err)
+	}
+	if !decoded.Partial || decoded.SelectedQueues != 2 || decoded.FailedDeliveries != 3 || decoded.FailedDestinations != 1 {
+		t.Fatalf("decoded compact outcome = %#v", decoded)
+	}
+	if applier.calls != 1 {
+		t.Fatalf("v2 Apply calls = %d, want 1", applier.calls)
+	}
+}
+
+func TestV1ForwardPreservesLegacyPublishSemantics(t *testing.T) {
+	t.Run("full success is PublishResponse", func(t *testing.T) {
+		applier := &stubApplier{response: &queue.PublishOutcome{
+			Response: &queue.PublishResponse{TopicID: "topicone", QueueIDs: []string{"queueone"}},
+		}}
+		server := newTestServer(t, applier, &stubMembership{}, "")
+		resp := post(t, server, http.MethodPost, "/v1/forward", "", "publish-command")
+		body, err := io.ReadAll(resp.Body)
+		td.Require(t).CmpNoError(err)
+		var legacy queue.PublishResponse
+		if err := json.Unmarshal(body, &legacy); err != nil {
+			t.Fatalf("decode legacy success: %v", err)
+		}
+		if resp.StatusCode != http.StatusOK || legacy.TopicID != "topicone" {
+			t.Fatalf("legacy full status/response = %d/%#v", resp.StatusCode, legacy)
+		}
+		if applier.calls != 1 {
+			t.Fatalf("legacy full Apply calls = %d, want 1", applier.calls)
+		}
+	})
+
+	t.Run("partial is terminal legacy error", func(t *testing.T) {
+		applier := &stubApplier{response: &queue.PublishOutcome{Partial: true}}
+		server := newTestServer(t, applier, &stubMembership{}, "")
+		resp := post(t, server, http.MethodPost, "/v1/forward", "", "publish-command")
+		body, err := io.ReadAll(resp.Body)
+		td.Require(t).CmpNoError(err)
+		if resp.StatusCode != http.StatusInternalServerError || resp.Header.Get(errorHeader) != "partial-fanout" {
+			t.Fatalf("legacy partial status/class = %d/%q", resp.StatusCode, resp.Header.Get(errorHeader))
+		}
+		if len(body) != 0 {
+			t.Fatalf("legacy partial body = %q, want empty", body)
+		}
+		if applier.calls != 1 {
+			t.Fatalf("legacy partial Apply calls = %d, want 1", applier.calls)
+		}
+	})
+}
+
+func TestNewFollowerFallsBackToLegacyLeaderExactlyOnce(t *testing.T) {
+	encoded, err := (&command.Command{
+		Op:      command.OpPublish,
+		Target:  "topicone",
+		Payload: []byte(`{"messages":[{"body":"aGk="}]}`),
+	}).Encode()
+	td.Require(t).CmpNoError(err)
+
+	for _, partialResult := range []bool{false, true} {
+		name := "full"
+		if partialResult {
+			name = "partial"
+		}
+		t.Run(name, func(t *testing.T) {
+			applyCalls := 0
+			legacy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/v1/forward" {
+					http.NotFound(w, r)
+					return
+				}
+				applyCalls++
+				if partialResult {
+					w.Header().Set(errorHeader, "partial-fanout")
+					http.Error(w, "partial topic fan-out", http.StatusInternalServerError)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(&queue.PublishResponse{
+					TopicID: "topicone", QueueIDs: []string{"queueone"}, MessageIDs: []string{"01J00000000000000000000000"}, DeliveredCount: 1,
+				})
+			}))
+			t.Cleanup(legacy.Close)
+			client := &Client{http: legacy.Client()}
+
+			raw, forwardErr := client.Forward(
+				context.Background(), strings.TrimPrefix(legacy.URL, "http://"), encoded,
+			)
+			if partialResult {
+				var partial *queue.PartialPublishError
+				if !errors.As(forwardErr, &partial) || !partial.Outcome.Partial ||
+					partial.Outcome.FailedDeliveries != 0 || partial.Outcome.FailedDestinations != 0 {
+					t.Fatalf("legacy partial Forward() = %v, want typed conservative partial", forwardErr)
+				}
+			} else {
+				if forwardErr != nil {
+					t.Fatalf("legacy full Forward() = %v", forwardErr)
+				}
+				var outcome queue.PublishOutcome
+				if err := json.Unmarshal(raw, &outcome); err != nil {
+					t.Fatalf("decode converted outcome: %v", err)
+				}
+				if outcome.Response == nil || outcome.Response.TopicID != "topicone" || outcome.Partial {
+					t.Fatalf("converted legacy outcome = %#v", outcome)
+				}
+			}
+			if applyCalls != 1 {
+				t.Fatalf("legacy leader Apply calls = %d, want 1", applyCalls)
+			}
+		})
+	}
+}
+
+func TestNewFollowerDoesNotFallbackOnApplicationNotFound(t *testing.T) {
+	v1Calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/forward" {
+			v1Calls++
+		}
+		w.Header().Set(errorHeader, "not-found")
+		http.Error(w, "topic missing", http.StatusNotFound)
+	}))
+	t.Cleanup(server.Close)
+	client := &Client{http: server.Client()}
+
+	_, err := client.Forward(context.Background(), strings.TrimPrefix(server.URL, "http://"), []byte("command"))
+	if !errors.Is(err, pqerr.ErrNotFound) {
+		t.Fatalf("Forward() = %v, want not found", err)
+	}
+	if v1Calls != 0 {
+		t.Fatalf("application NotFound triggered %d v1 fallback calls", v1Calls)
+	}
+}
+
+func TestPublishIdentifierWireFitsDerivedResponseCeiling(t *testing.T) {
+	queueID := "c5s8b4p9e8rg5u5fgq10"
+	messageID := queue.NewBatchIDs(time.Unix(1_700_000_000, 0).UTC())()
+	if len(queueID) != 20 || len(messageID) != 26 {
+		t.Fatalf("test XID/ULID lengths = %d/%d, want 20/26", len(queueID), len(messageID))
+	}
+
+	for _, count := range []int{1, 10, 10_000} {
+		queueIDs := make([]string, count)
+		messageIDs := make([]string, count)
+		for i := range count {
+			queueIDs[i] = queueID
+			messageIDs[i] = messageID
+		}
+		queueJSON, err := json.Marshal(queueIDs)
+		td.Require(t).CmpNoError(err)
+		messageJSON, err := json.Marshal(messageIDs)
+		td.Require(t).CmpNoError(err)
+
+		commandIDsBytes := uvarintBytes(uint64(count)) + count*(uvarintBytes(uint64(len(messageID)))+len(messageID))
+		if got, limit := len(queueJSON)+len(messageJSON), 2*commandIDsBytes; got >= limit {
+			t.Fatalf("%d QueueID+MessageID JSON bytes = %d, want < 2x command ID bytes (%d)",
+				count, got, limit)
+		}
+	}
+	if maxResponseBytes != 2*command.MaxEncodedBytes+publishResponseFramingBytes {
+		t.Fatalf("maxResponseBytes = %d, want derived ceiling", maxResponseBytes)
+	}
+}
+
+func uvarintBytes(value uint64) int {
+	var encoded [binary.MaxVarintLen64]byte
+	return binary.PutUvarint(encoded[:], value)
+}
+
+func TestAuthenticatedFollowerCarriesKnownPublishOutcomeLargerThanCommandLimit(t *testing.T) {
+	const queueID = "c5s8b4p9e8rg5u5fgq10"
+	messageID := queue.NewBatchIDs(time.Unix(1_700_000_000, 0).UTC())()
+	count := command.MaxEncodedBytes/52 + 128
+	messageIDs := make([]string, count)
+	queueIDs := make([]string, count)
+	for i := range count {
+		messageIDs[i] = messageID
+		queueIDs[i] = queueID
+	}
+	payload, err := (&command.Command{
+		Op:      command.OpPublish,
+		Target:  "c5s8b4p9e8rg5u5fgq11",
+		IDs:     messageIDs,
+		Payload: []byte(`{"messages":[{"body":"aA=="}]}`),
+	}).Encode()
+	td.Require(t).CmpNoError(err)
+	if len(payload) >= command.MaxEncodedBytes {
+		t.Fatalf("accepted command fixture = %d bytes, want under %d", len(payload), command.MaxEncodedBytes)
+	}
+
+	applier := &stubApplier{response: &queue.PublishOutcome{Response: &queue.PublishResponse{
+		TopicID: "c5s8b4p9e8rg5u5fgq11", QueueIDs: queueIDs, MessageIDs: messageIDs, DeliveredCount: count,
+	}}}
+	server := newTestServer(t, applier, &stubMembership{}, "shared-secret")
+	client := &Client{http: server.Client(), secret: "shared-secret"}
+	raw, err := client.Forward(context.Background(), strings.TrimPrefix(server.URL, "http://"), payload)
+	if err != nil {
+		t.Fatalf("Forward() large known outcome = %v", err)
+	}
+	if len(raw) <= command.MaxEncodedBytes || len(raw) > maxResponseBytes {
+		t.Fatalf("known response bytes = %d, want (%d, %d]", len(raw), command.MaxEncodedBytes, maxResponseBytes)
+	}
+	if !json.Valid(raw) {
+		t.Fatal("large known outcome was truncated or malformed")
+	}
+	if got := bytes.Count(raw, []byte(queueID)); got != count {
+		t.Fatalf("carried queue IDs = %d, want %d", got, count)
+	}
+	if got := bytes.Count(raw, []byte(messageID)); got != count {
+		t.Fatalf("carried message IDs = %d, want %d", got, count)
+	}
+	if applier.calls != 1 {
+		t.Fatalf("large known outcome Apply calls = %d, want 1", applier.calls)
+	}
+}
+
+func TestBuggyPeerResponseOverflowIsFiniteAndTerminal(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_, _ = w.Write(bytes.Repeat([]byte("x"), 65))
+	}))
+	t.Cleanup(server.Close)
+	client := &Client{http: server.Client(), responseLimit: 64}
+
+	_, err := client.Forward(context.Background(), strings.TrimPrefix(server.URL, "http://"), []byte("command"))
+	if !errors.Is(err, ErrResponseTooLarge) {
+		t.Fatalf("Forward() buggy response = %v, want response-too-large", err)
+	}
+	if errors.Is(err, consensus.ErrNotLeader) || errors.Is(err, pqerr.ErrUnavailable) {
+		t.Fatalf("response overflow = %v, must remain terminal", err)
+	}
+	if calls != 1 {
+		t.Fatalf("buggy peer calls = %d, want 1 with no fallback/retry", calls)
+	}
+}
+
+func TestServerRejectsResponseOverflowBeforeWritingSuccessStatus(t *testing.T) {
+	applier := &stubApplier{response: &vtResponse{payload: bytes.Repeat([]byte("x"), 65)}}
+	server := NewServer(ServerConfig{Applier: applier, Membership: &stubMembership{}})
+	server.responseLimit = 64
+	req := httptest.NewRequest(http.MethodPost, "/v2/forward", strings.NewReader("command"))
+	w := httptest.NewRecorder()
+
+	server.router.ServeHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError || w.Header().Get(errorHeader) != "response-too-large" {
+		t.Fatalf("response overflow status/class = %d/%q, want 500/response-too-large",
+			w.Code, w.Header().Get(errorHeader))
+	}
+	if applier.calls != 1 {
+		t.Fatalf("response overflow Apply calls = %d, want 1 known committed outcome", applier.calls)
+	}
 }
 
 func TestJoinAddsAMember(t *testing.T) {

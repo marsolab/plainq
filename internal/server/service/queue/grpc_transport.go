@@ -195,6 +195,9 @@ func (s *Service) Publish(ctx context.Context, r *v1.PublishRequest) (*v1.Publis
 
 	output, err := s.pubsub.publish(ctx, r.GetTopicId(), input)
 	if err != nil {
+		if errors.Is(err, pqerr.ErrCapacityExceeded) {
+			return nil, status.Error(codes.ResourceExhausted, err.Error())
+		}
 		return grpckit.ErrorGRPC[*v1.PublishResponse](ctx, pqerr.AsTransport(err))
 	}
 

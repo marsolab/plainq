@@ -68,6 +68,9 @@ docker:
 		--build-arg COMMIT=$(shell git rev-parse --short HEAD) \
 		-t $(IMAGE):$(VERSION) .
 
-.PHONY: helm-lint
+.PHONY: helm-lint helm-test
 helm-lint:
 	helm lint deploy/helm/plainq --set auth.jwtSecret=ci-test-secret
+
+helm-test:
+	./deploy/helm/plainq/test-health-render.sh

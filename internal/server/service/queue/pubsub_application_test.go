@@ -128,9 +128,10 @@ func TestPubSubApplicationPartialPublishRecordsOutcomeOnce(t *testing.T) {
 		DeliveredCount: 2,
 	}
 	partial := &PartialPublishError{Outcome: PublishOutcome{
-		Response:         response,
-		SelectedQueues:   3,
-		FailedDeliveries: 1,
+		Response:           response,
+		SelectedQueues:     3,
+		FailedDeliveries:   1,
+		FailedDestinations: 1,
 	}, Causes: []error{pqerr.ErrUnavailable}}
 	recorder := &applicationRecorder{}
 	app := newApplicationForTest(&mockStorage{publishFunc: func(context.Context, string, *PublishRequest) (*PublishResponse, error) {
@@ -218,9 +219,10 @@ func TestDeleteQueueRecordsSubscriptionCascadeWithoutTopicRequest(t *testing.T) 
 func TestCommitUnknownDoesNotFabricatePublishOrLifecycleEffects(t *testing.T) {
 	topicID := idkit.XID()
 	partial := &PartialPublishError{Outcome: PublishOutcome{
-		Response:         &PublishResponse{TopicID: topicID, DeliveredCount: 1},
-		SelectedQueues:   2,
-		FailedDeliveries: 1,
+		Response:           &PublishResponse{TopicID: topicID, DeliveredCount: 1},
+		SelectedQueues:     2,
+		FailedDeliveries:   1,
+		FailedDestinations: 1,
 	}}
 
 	t.Run("publish", func(t *testing.T) {

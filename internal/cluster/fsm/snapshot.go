@@ -179,6 +179,12 @@ func (f *FSM) Restore(reader io.ReadCloser) error {
 	defer cancel()
 
 	restoreErr = func() error {
+		// A restore replaces the complete replica state. Close serving and
+		// durably record that fact before BeginRestore can mutate anything; a
+		// failed or unverifiable restore remains quarantined for a later retry.
+		if err := f.reportReplicaFault(errors.New("replica snapshot restore is in progress")); err != nil {
+			return fmt.Errorf("quarantine replica before state restore: %w", err)
+		}
 		if err := f.storage.BeginRestore(ctx); err != nil {
 			return fmt.Errorf("begin state restore: %w", err)
 		}

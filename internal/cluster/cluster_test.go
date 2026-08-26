@@ -1,9 +1,11 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"path/filepath"
 	"strconv"
@@ -12,6 +14,9 @@ import (
 	"testing"
 	"time"
 
+	hraft "github.com/hashicorp/raft"
+	raftengine "github.com/marsolab/plainq/internal/cluster/consensus/raft"
+	clusterfsm "github.com/marsolab/plainq/internal/cluster/fsm"
 	"github.com/marsolab/plainq/internal/server/mutations"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/service/queue"
@@ -43,8 +48,26 @@ type publishFault func(context.Context, string, *queue.PublishRequest) (*queue.P
 type testReplicatedStorage struct {
 	*litestore.Storage
 
-	mu    sync.RWMutex
-	fault publishFault
+	mu           sync.RWMutex
+	fault        publishFault
+	inventoryErr error
+}
+
+func (s *testReplicatedStorage) setInventoryError(err error) {
+	s.mu.Lock()
+	s.inventoryErr = err
+	s.mu.Unlock()
+}
+
+func (s *testReplicatedStorage) TopicInventory(ctx context.Context) (queue.TopicInventory, error) {
+	s.mu.RLock()
+	err := s.inventoryErr
+	s.mu.RUnlock()
+	if err != nil {
+		return queue.TopicInventory{}, err
+	}
+
+	return s.Storage.TopicInventory(ctx)
 }
 
 func (s *testReplicatedStorage) setPublishFault(fault publishFault) {
@@ -421,6 +444,104 @@ func TestDifferentReplicaFailuresNeverServeDivergedState(t *testing.T) {
 	}
 }
 
+func TestVerifiedSnapshotRestoreIsTheOnlyReplicaHealthRecoveryPath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("starts a raft node")
+	}
+
+	ctx := context.Background()
+	cluster := newTestCluster(t, 1)
+	leader := cluster.leader(10 * time.Second)
+	encoded := persistClusterFSMSnapshot(t, leader.node)
+	healthyGeneration := leader.node.replicaHealth.generation.Load()
+
+	inventoryErr := errors.New("post-commit restored inventory unavailable")
+	leader.replicated.setInventoryError(inventoryErr)
+	err := leader.node.fsm.Restore(io.NopCloser(bytes.NewReader(encoded)))
+	if !errors.Is(err, inventoryErr) {
+		t.Fatalf("Restore() = %v, want %v", err, inventoryErr)
+	}
+	if leader.node.replicaHealth.generation.Load() <= healthyGeneration {
+		t.Fatal("failed restore did not advance replica health generation")
+	}
+	if _, err := leader.node.Store().ListTopics(ctx); !errors.Is(err, pqerr.ErrUnavailable) {
+		t.Fatalf("Store.ListTopics() after failed restore = %v, want unavailable", err)
+	}
+	if err := leader.node.Health(ctx); !errors.Is(err, pqerr.ErrUnavailable) {
+		t.Fatalf("Node.Health() after failed restore = %v, want unavailable", err)
+	}
+	_, leaderAddr, err := leader.node.consensus.Leader()
+	if err != nil {
+		t.Fatalf("consensus Leader() = %v", err)
+	}
+	if _, err := leader.node.peerClient.Forward(ctx, leaderAddr, []byte("{}")); !errors.Is(err, pqerr.ErrUnavailable) {
+		t.Fatalf("peer Forward() after failed restore = %v, want unavailable", err)
+	}
+
+	if err := leader.node.Close(); err != nil {
+		t.Fatalf("close quarantined node: %v", err)
+	}
+	var reopened *replicaHealth
+	if err := raftengine.WithStableStore(leader.node.cfg.DataDir, func(stableStore hraft.StableStore) error {
+		var openErr error
+		reopened, openErr = newReplicaHealth(leader.node.cfg.DataDir, stableStore)
+		return openErr
+	}); err != nil {
+		t.Fatalf("reopen replica health: %v", err)
+	}
+	if err := reopened.Check(); !errors.Is(err, pqerr.ErrUnavailable) {
+		t.Fatalf("reopened replica Check() = %v, want unavailable", err)
+	}
+
+	reopenedGeneration := reopened.generation.Load()
+	leader.replicated.setInventoryError(nil)
+	recoveryFSM := clusterfsm.New(
+		leader.replicated,
+		nil,
+		reopened,
+		func(fatalErr error) { panic(fatalErr) },
+		clusterfsm.WithReplicaFaultReporter(reopened.Fail),
+		clusterfsm.WithReplicaRecoveryReporter(reopened.Recover),
+	)
+	if err := recoveryFSM.Restore(io.NopCloser(bytes.NewReader(encoded))); err != nil {
+		t.Fatalf("verified recovery Restore() = %v", err)
+	}
+	if err := reopened.Check(); err != nil {
+		t.Fatalf("recovered replica Check() = %v", err)
+	}
+	if reopened.generation.Load() <= reopenedGeneration {
+		t.Fatal("successful verified restore did not advance replica health generation")
+	}
+	recoveredStore := NewStore(leader.replicated, nil, nil, WithReplicaHealth(reopened))
+	if _, err := recoveredStore.ListTopics(ctx); err != nil {
+		t.Fatalf("recovered Store.ListTopics() = %v", err)
+	}
+}
+
+type clusterSnapshotSink struct {
+	bytes.Buffer
+}
+
+func (*clusterSnapshotSink) ID() string    { return "cluster-test" }
+func (*clusterSnapshotSink) Cancel() error { return nil }
+func (*clusterSnapshotSink) Close() error  { return nil }
+
+func persistClusterFSMSnapshot(t *testing.T, node *Node) []byte {
+	t.Helper()
+
+	snapshot, err := node.fsm.Snapshot()
+	if err != nil {
+		t.Fatalf("FSM Snapshot() = %v", err)
+	}
+	sink := new(clusterSnapshotSink)
+	if err := snapshot.Persist(sink); err != nil {
+		t.Fatalf("persist FSM snapshot: %v", err)
+	}
+	snapshot.Release()
+
+	return append([]byte(nil), sink.Bytes()...)
+}
+
 func createClusterPublishFixture(t *testing.T, storage queue.Storage) string {
 	t.Helper()
 	ctx := context.Background()
@@ -451,10 +572,11 @@ func partialPublishFault(queueID string, cause error) publishFault {
 		response := &queue.PublishResponse{TopicID: topicID}
 		return response, &queue.PartialPublishError{
 			Outcome: queue.PublishOutcome{
-				Response:         response,
-				Partial:          true,
-				SelectedQueues:   1,
-				FailedDeliveries: uint64(len(request.Messages)),
+				Response:           response,
+				Partial:            true,
+				SelectedQueues:     1,
+				FailedDeliveries:   uint64(len(request.Messages)),
+				FailedDestinations: 1,
 				DeliveryFailures: []queue.PublishDeliveryFailure{{
 					QueueID:  queueID,
 					Messages: uint64(len(request.Messages)),

@@ -93,6 +93,9 @@ func TestFanOutAttemptsEverySelectedDestination(t *testing.T) {
 	if partial.Outcome.FailedDeliveries != 2 {
 		t.Fatalf("FanOut() failed deliveries = %d, want 2", partial.Outcome.FailedDeliveries)
 	}
+	if partial.Outcome.FailedDestinations != 1 {
+		t.Fatalf("FanOut() failed destinations = %d, want 1", partial.Outcome.FailedDestinations)
+	}
 }
 
 func TestFanOutRetainsSuccessfulCopiesAfterFailure(t *testing.T) {

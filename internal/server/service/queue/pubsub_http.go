@@ -2,6 +2,7 @@ package queue
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -96,6 +97,10 @@ func (s *Service) publishTopicHandler(w http.ResponseWriter, r *http.Request) {
 
 	output, err := s.pubsub.publish(r.Context(), chi.URLParam(r, "topicID"), &input)
 	if err != nil {
+		if errors.Is(err, pqerr.ErrCapacityExceeded) {
+			httpkit.ErrorHTTP(w, r, err, httpkit.WithStatus(http.StatusRequestEntityTooLarge))
+			return
+		}
 		httpkit.ErrorHTTP(w, r, pqerr.AsTransport(err))
 
 		return

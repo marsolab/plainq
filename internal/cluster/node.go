@@ -960,7 +960,7 @@ func (n *Node) sweep(ctx context.Context) {
 			return
 		}
 
-		queues, err := n.store.local.ListQueues(ctx, listAllQueues(cursor))
+		queues, err := n.store.ListQueues(ctx, listAllQueues(cursor))
 		if err != nil {
 			n.logger.Error("Failed to list queues for cluster eviction",
 				slog.String("error", err.Error()),

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"reflect"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	hraft "github.com/hashicorp/raft"
+	"github.com/marsolab/plainq/internal/cluster/command"
 	"github.com/marsolab/plainq/internal/cluster/consensus"
 	"github.com/marsolab/plainq/internal/cluster/deletewire"
 	"github.com/marsolab/plainq/internal/cluster/peer"
@@ -99,7 +101,7 @@ func TestStoreLeaderReturnsPartialPublishOutcomeAndError(t *testing.T) {
 type httpPeerForwarder struct{}
 
 func (httpPeerForwarder) Forward(ctx context.Context, addr string, payload []byte) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+addr+"/v1/forward", bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+addr+"/v2/forward", bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -153,6 +155,55 @@ type blockingDescribeStorage struct {
 	queue.ReplicatedStorage
 	started chan struct{}
 	release chan struct{}
+}
+
+type sweepCountingStorage struct {
+	queue.ReplicatedStorage
+	mu         sync.Mutex
+	listCalls  int
+	sweepCalls int
+}
+
+func (s *sweepCountingStorage) ListQueues(context.Context, *v1.ListQueuesRequest) (*v1.ListQueuesResponse, error) {
+	s.mu.Lock()
+	s.listCalls++
+	s.mu.Unlock()
+	return &v1.ListQueuesResponse{Queues: []*v1.DescribeQueueResponse{{QueueId: "queueone"}}}, nil
+}
+
+func (s *sweepCountingStorage) Sweep(context.Context, string) (uint64, error) {
+	s.mu.Lock()
+	s.sweepCalls++
+	s.mu.Unlock()
+	return 1, nil
+}
+
+func TestQuarantinedLeaderSweepDoesNotTouchLocalStorageOrConsensus(t *testing.T) {
+	health := newHealthyReplicaForStoreTest(t)
+	if err := health.Fail(errors.New("replica partial")); err != nil {
+		t.Fatalf("Fail() = %v", err)
+	}
+	local := new(sweepCountingStorage)
+	engine := new(commitUnknownConsensus)
+	store := NewStore(local, engine, nil, WithReplicaHealth(health))
+	node := &Node{
+		consensus: engine,
+		store:     store,
+		logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	node.sweep(context.Background())
+
+	local.mu.Lock()
+	listCalls, sweepCalls := local.listCalls, local.sweepCalls
+	local.mu.Unlock()
+	engine.mu.Lock()
+	applyCalls := engine.applyCalls
+	engine.mu.Unlock()
+	if listCalls != 0 || sweepCalls != 0 || applyCalls != 0 {
+		t.Fatalf("quarantined sweep local list/sweep/apply calls = %d/%d/%d, want 0/0/0",
+			listCalls, sweepCalls, applyCalls)
+	}
 }
 
 func (s *blockingDescribeStorage) DescribeQueue(context.Context, *v1.DescribeQueueRequest) (*v1.DescribeQueueResponse, error) {
@@ -290,6 +341,38 @@ func TestStoreDoesNotRetryOrForwardCommitUnknown(t *testing.T) {
 	forwarder.mu.Unlock()
 	if forwardCalls != 0 {
 		t.Fatalf("peer Forward calls = %d, want 0 for indeterminate commit", forwardCalls)
+	}
+}
+
+func TestStoreRejectsOversizedEncodedCommandBeforeApplyOrForward(t *testing.T) {
+	payload := make([]byte, command.MaxEncodedBytes)
+
+	for _, leader := range []bool{true, false} {
+		name := "follower"
+		if leader {
+			name = "leader"
+		}
+		t.Run(name, func(t *testing.T) {
+			engine := &scriptedConsensus{leader: leader}
+			forwarder := new(countingForwarder)
+			store := NewStore(nil, engine, forwarder)
+			_, err := store.apply(context.Background(), &command.Command{
+				Op:      command.OpPublish,
+				Payload: payload,
+			})
+			if !errors.Is(err, pqerr.ErrCapacityExceeded) {
+				t.Fatalf("apply oversized command = %v, want capacity error", err)
+			}
+			engine.mu.Lock()
+			applyCalls := engine.applyCalls
+			engine.mu.Unlock()
+			forwarder.mu.Lock()
+			forwardCalls := forwarder.calls
+			forwarder.mu.Unlock()
+			if applyCalls != 0 || forwardCalls != 0 {
+				t.Fatalf("oversized command Apply/Forward calls = %d/%d, want 0/0", applyCalls, forwardCalls)
+			}
+		})
 	}
 }
 

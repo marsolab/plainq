@@ -57,10 +57,11 @@ func FanOut(
 
 	return response, &PartialPublishError{
 		Outcome: PublishOutcome{
-			Response:         response,
-			SelectedQueues:   uint64(len(subscriptions)),
-			FailedDeliveries: uint64(len(failures) * len(messages)),
-			DeliveryFailures: failures,
+			Response:           response,
+			SelectedQueues:     uint64(len(subscriptions)),
+			FailedDeliveries:   uint64(len(failures) * len(messages)),
+			FailedDestinations: uint64(len(failures)),
+			DeliveryFailures:   failures,
 		},
 		Causes: causes,
 	}

@@ -277,13 +277,38 @@ func (h *replicaHealth) Recover() error {
 		return fmt.Errorf("remove replica quarantine marker: %w", err)
 	}
 	if err := h.syncDir(filepath.Dir(h.cleanPath)); err != nil {
-		return fmt.Errorf("sync recovered replica health directory: %w", err)
+		return errors.Join(
+			fmt.Errorf("sync recovered replica health directory: %w", err),
+			wrapIfNonNil("re-quarantine replica after failed recovery", h.requarantineFailedRecovery()),
+		)
 	}
 
 	h.generation.Add(1)
 	h.fault.Store(nil)
 
 	return nil
+}
+
+// requarantineFailedRecovery establishes two independent fail-closed records:
+// the dirty apply guard and the diagnostic quarantine marker. Either durable
+// record is sufficient to keep a restarted process unavailable. Both paths
+// are attempted so a failure in one does not prevent the other from restoring
+// restart safety, and every diagnostic is returned to the caller.
+func (h *replicaHealth) requarantineFailedRecovery() error {
+	var rollbackErrs []error
+	dir := filepath.Dir(h.cleanPath)
+
+	if err := h.rename(h.cleanPath, h.dirtyPath); err != nil {
+		rollbackErrs = append(rollbackErrs, fmt.Errorf("rename recovered clean guard to dirty: %w", err))
+	} else if err := h.syncDir(dir); err != nil {
+		rollbackErrs = append(rollbackErrs, fmt.Errorf("sync restored dirty guard: %w", err))
+	}
+
+	if err := h.writeMarker(h.quarantinePath, replicaQuarantineContents); err != nil {
+		rollbackErrs = append(rollbackErrs, fmt.Errorf("restore quarantine marker: %w", err))
+	}
+
+	return errors.Join(rollbackErrs...)
 }
 
 func (h *replicaHealth) latch(err error) {

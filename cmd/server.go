@@ -72,7 +72,7 @@ func newTelemetryObservers(driver string, clustered bool) (*telemetry.Observer, 
 		return local, local
 	}
 
-	return local, telemetry.NewObserver(metrics.BackendCluster)
+	return local, telemetry.NewStateSuppressingObserver(metrics.BackendCluster)
 }
 
 func replayStartupTopicInventory(
@@ -80,16 +80,20 @@ func replayStartupTopicInventory(
 	storage queue.Storage,
 	observer *telemetry.Observer,
 ) error {
-	inventory, err := storage.TopicInventory(ctx)
+	err := observer.CaptureTopicState(func() (telemetry.TopicStateEvent, error) {
+		inventory, err := storage.TopicInventory(ctx)
+		if err != nil {
+			return telemetry.TopicStateEvent{}, err
+		}
+		return telemetry.TopicStateEvent{
+			TopicsExist:   inventory.TopicsExist,
+			Subscriptions: inventory.SubscriptionCounts,
+		}, nil
+	})
 	if err != nil {
-		observer.TopicStateUnavailable()
 		observer.StorageError("topic_inventory")
 		return fmt.Errorf("read startup topic inventory: %w", err)
 	}
-	observer.ReconcileTopicState(telemetry.TopicStateEvent{
-		TopicsExist:   inventory.TopicsExist,
-		Subscriptions: inventory.SubscriptionCounts,
-	})
 
 	return nil
 }

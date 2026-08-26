@@ -461,6 +461,130 @@ func TestObserverRecorderAttachAndReplayIsLinearizedWithEvents(t *testing.T) {
 	old.mu.Unlock()
 }
 
+func TestObserverTopicCaptureIsOrderedWithFSMReconciliation(t *testing.T) {
+	observer := NewObserver(metrics.BackendSQLite)
+	recorder := newTopicRecorderSpy()
+	observer.SetRecorder(recorder)
+
+	captureStarted := make(chan struct{})
+	releaseCapture := make(chan struct{})
+	captureDone := make(chan error, 1)
+	go func() {
+		captureDone <- observer.CaptureTopicState(func() (TopicStateEvent, error) {
+			close(captureStarted)
+			<-releaseCapture
+			return TopicStateEvent{
+				TopicsExist:   1,
+				Subscriptions: map[string]int64{"TSTALECAPTURE": 1},
+			}, nil
+		})
+	}()
+	<-captureStarted
+
+	reconcileDone := make(chan struct{})
+	go func() {
+		observer.ReconcileTopicState(TopicStateEvent{
+			TopicsExist:   2,
+			Subscriptions: map[string]int64{"TNEWERFSM": 3},
+		})
+		close(reconcileDone)
+	}()
+	select {
+	case <-reconcileDone:
+		t.Fatal("FSM reconciliation overtook an in-progress inventory capture")
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	close(releaseCapture)
+	if err := <-captureDone; err != nil {
+		t.Fatalf("CaptureTopicState() = %v", err)
+	}
+	<-reconcileDone
+
+	replay := newTopicRecorderSpy()
+	observer.SetRecorder(replay)
+	replay.mu.Lock()
+	defer replay.mu.Unlock()
+	td.Cmp(t, replay.states, []TopicStateEvent{{
+		TopicsExist:   2,
+		Subscriptions: map[string]int64{"TNEWERFSM": 3},
+	}})
+}
+
+func TestObserverSerializesConcurrentTopicCaptures(t *testing.T) {
+	observer := NewObserver(metrics.BackendSQLite)
+	recorder := newTopicRecorderSpy()
+	observer.SetRecorder(recorder)
+
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- observer.CaptureTopicState(func() (TopicStateEvent, error) {
+			close(firstStarted)
+			<-releaseFirst
+			return TopicStateEvent{TopicsExist: 1, Subscriptions: map[string]int64{"TOLD": 1}}, nil
+		})
+	}()
+	<-firstStarted
+
+	secondInvoked := make(chan struct{})
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- observer.CaptureTopicState(func() (TopicStateEvent, error) {
+			close(secondInvoked)
+			return TopicStateEvent{TopicsExist: 1, Subscriptions: map[string]int64{"TNEW": 2}}, nil
+		})
+	}()
+	select {
+	case <-secondInvoked:
+		t.Fatal("second inventory capture overtook the first capture")
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	close(releaseFirst)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first CaptureTopicState() = %v", err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second CaptureTopicState() = %v", err)
+	}
+
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	td.Cmp(t, recorder.states, []TopicStateEvent{
+		{TopicsExist: 1, Subscriptions: map[string]int64{"TOLD": 1}},
+		{TopicsExist: 1, Subscriptions: map[string]int64{"TNEW": 2}},
+	})
+}
+
+func TestStateSuppressingObserverSkipsExactTopicCaptureAndState(t *testing.T) {
+	const topicID = "TSUPPRESSEDLOGICAL"
+	observer := NewStateSuppressingObserver(metrics.BackendCluster)
+	recorder := newTopicRecorderSpy()
+	observer.SetRecorder(recorder)
+	beforeGauge := prometheusValue(`plainq_topic_subscriptions{topic="` + topicID + `"}`)
+
+	captureCalled := false
+	if err := observer.CaptureTopicState(func() (TopicStateEvent, error) {
+		captureCalled = true
+		return TopicStateEvent{TopicsExist: 1, Subscriptions: map[string]int64{topicID: 9}}, nil
+	}); err != nil {
+		t.Fatalf("CaptureTopicState() = %v", err)
+	}
+	observer.ReconcileTopicState(TopicStateEvent{TopicsExist: 1, Subscriptions: map[string]int64{topicID: 7}})
+	observer.TopicStateUnavailable()
+
+	if captureCalled {
+		t.Fatal("state-suppressing observer invoked exact-state capture")
+	}
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	td.Cmp(t, recorder.states, []TopicStateEvent(nil))
+	td.Cmp(t, recorder.unavailable, 0)
+	td.Cmp(t, prometheusValue(`plainq_topic_subscriptions{topic="`+topicID+`"}`), beforeGauge)
+}
+
 func TestStateSuppressingRecorderForwardsEventsButNotExactState(t *testing.T) {
 	inner := newTopicRecorderSpy()
 	recorder := NewStateSuppressingRecorder(inner)

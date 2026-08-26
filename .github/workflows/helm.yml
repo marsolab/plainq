@@ -6,12 +6,14 @@ on:
       - main
     paths:
       - 'deploy/helm/**'
+      - 'Makefile'
       - '.github/workflows/helm.yml'
   pull_request:
     branches:
       - main
     paths:
       - 'deploy/helm/**'
+      - 'Makefile'
       - '.github/workflows/helm.yml'
 
 permissions:
@@ -28,6 +30,9 @@ jobs:
 
       - name: helm lint
         run: helm lint deploy/helm/plainq --set auth.jwtSecret=ci-test-secret
+
+      - name: health render contract
+        run: make helm-test
 
       - name: helm template (sqlite)
         run: helm template plainq deploy/helm/plainq --set auth.jwtSecret=ci-test-secret > /dev/null

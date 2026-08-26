@@ -38,6 +38,10 @@ const (
 	// after another destination may already have accepted its queue copies.
 	ErrPartialFanout Error = "partial topic fan-out"
 
+	// ErrCapacityExceeded means the exact encoded request cannot fit within a
+	// stable server or cluster transport limit. Retrying unchanged cannot help.
+	ErrCapacityExceeded Error = "request exceeds capacity"
+
 	// Transport related errors.
 
 	// ErrGracefulShutdown indicates that it is not possible to shut down

@@ -164,6 +164,79 @@ func TestSuccessfulSnapshotRestoreClearsReplicaQuarantine(t *testing.T) {
 	}
 }
 
+func TestReplicaRecoveryFinalSyncFailureRollsBackAndStaysQuarantinedAfterRestart(t *testing.T) {
+	dir := t.TempDir()
+	stable := hraft.NewInmemStore()
+	health, err := newReplicaHealth(dir, stable)
+	if err != nil {
+		t.Fatalf("newReplicaHealth() error = %v", err)
+	}
+	if err := health.BeginPublishApply(); err != nil {
+		t.Fatalf("BeginPublishApply() = %v", err)
+	}
+	if err := health.Fail(errors.New("partial")); err != nil {
+		t.Fatalf("Fail() = %v", err)
+	}
+
+	syncErr := errors.New("final recovery directory sync failed")
+	syncCalls := 0
+	health.syncDir = func(string) error {
+		syncCalls++
+		if syncCalls == 1 {
+			return syncErr
+		}
+		return nil
+	}
+	if err := health.Recover(); !errors.Is(err, syncErr) {
+		t.Fatalf("Recover() = %v, want %v", err, syncErr)
+	}
+	if err := health.Check(); !errors.Is(err, pqerr.ErrUnavailable) {
+		t.Fatalf("Check() after failed recovery = %v, want unavailable", err)
+	}
+
+	reopened, err := newReplicaHealth(dir, stable)
+	if err != nil {
+		t.Fatalf("reopen newReplicaHealth() error = %v", err)
+	}
+	if err := reopened.Check(); !errors.Is(err, pqerr.ErrUnavailable) {
+		t.Fatalf("reopened Check() = %v, want unavailable", err)
+	}
+}
+
+func TestReplicaRecoveryJoinsRollbackDiagnosticsAndRestoresQuarantineMarker(t *testing.T) {
+	dir := t.TempDir()
+	stable := hraft.NewInmemStore()
+	health, err := newReplicaHealth(dir, stable)
+	if err != nil {
+		t.Fatalf("newReplicaHealth() error = %v", err)
+	}
+	if err := health.BeginPublishApply(); err != nil {
+		t.Fatalf("BeginPublishApply() = %v", err)
+	}
+	if err := health.Fail(errors.New("partial")); err != nil {
+		t.Fatalf("Fail() = %v", err)
+	}
+
+	syncErr := errors.New("final recovery directory sync failed")
+	renameErr := errors.New("recovery rollback rename failed")
+	health.syncDir = func(string) error { return syncErr }
+	health.rename = func(string, string) error { return renameErr }
+	if err := health.Recover(); !errors.Is(err, syncErr) || !errors.Is(err, renameErr) {
+		t.Fatalf("Recover() = %v, want joined sync and rollback errors", err)
+	}
+	if err := health.Check(); !errors.Is(err, pqerr.ErrUnavailable) {
+		t.Fatalf("Check() after failed recovery = %v, want unavailable", err)
+	}
+
+	reopened, err := newReplicaHealth(dir, stable)
+	if err != nil {
+		t.Fatalf("reopen newReplicaHealth() error = %v", err)
+	}
+	if err := reopened.Check(); !errors.Is(err, pqerr.ErrUnavailable) {
+		t.Fatalf("reopened Check() = %v, want unavailable", err)
+	}
+}
+
 func TestReplicaApplyGuardFinishAndDiagnosticFailuresStayQuarantinedAfterRestart(t *testing.T) {
 	dir := t.TempDir()
 	stable := hraft.NewInmemStore()

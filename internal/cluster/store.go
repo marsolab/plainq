@@ -484,6 +484,12 @@ func (s *Store) apply(ctx context.Context, cmd *command.Command) (any, error) {
 		if encodeErr != nil {
 			return nil, fmt.Errorf("encode %s command: %w", cmd.Op, encodeErr)
 		}
+		if len(encoded) > command.MaxEncodedBytes {
+			return nil, fmt.Errorf(
+				"%w: encoded %s command is %d bytes; limit is %d bytes",
+				pqerr.ErrCapacityExceeded, cmd.Op, len(encoded), command.MaxEncodedBytes,
+			)
+		}
 
 		ctx, cancel := context.WithTimeout(ctx, s.applyTimeout)
 		defer cancel()
