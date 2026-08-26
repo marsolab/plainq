@@ -2,15 +2,24 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	hraft "github.com/hashicorp/raft"
+	"github.com/marsolab/plainq/internal/cluster/command"
+	clusterfsm "github.com/marsolab/plainq/internal/cluster/fsm"
 	"github.com/marsolab/plainq/internal/metrics"
+	"github.com/marsolab/plainq/internal/server/mutations"
+	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/service/queue"
+	"github.com/marsolab/plainq/internal/server/service/queue/litestore"
 	"github.com/marsolab/plainq/internal/server/service/telemetry"
+	"github.com/marsolab/servekit/dbkit/litekit"
 )
 
 func TestTursoUsesTursoTelemetryBackend(t *testing.T) {
@@ -69,26 +78,147 @@ func (s *inventoryStorage) TopicInventory(context.Context) (queue.TopicInventory
 }
 
 type inventoryRecorder struct {
-	state       *telemetry.TopicStateEvent
-	unavailable int
+	state                *telemetry.TopicStateEvent
+	unavailable          int
+	topicRequests        int
+	topicOperations      int
+	topicPublishes       int
+	subscriptionsCreated int
+	subscriptionsDeleted int
 }
 
-func (*inventoryRecorder) RecordSend(string, uint64, uint64)                  {}
-func (*inventoryRecorder) RecordReceive(string, uint64, bool)                 {}
-func (*inventoryRecorder) RecordDelete(string, uint64)                        {}
-func (*inventoryRecorder) RecordRedelivery(string, uint64)                    {}
-func (*inventoryRecorder) RecordDrop(string, uint64)                          {}
-func (*inventoryRecorder) RecordDLQ(string, uint64)                           {}
-func (*inventoryRecorder) IncrementQueues()                                   {}
-func (*inventoryRecorder) DecrementQueues()                                   {}
-func (*inventoryRecorder) SetQueuesExist(int64)                               {}
-func (*inventoryRecorder) RecordTopicRequest(telemetry.TopicOperationEvent)   {}
-func (*inventoryRecorder) RecordTopicOperation(telemetry.TopicOperationEvent) {}
-func (*inventoryRecorder) RecordTopicPublish(telemetry.TopicPublishEvent)     {}
-func (*inventoryRecorder) RecordTopicSubscriptionCreated(string)              {}
-func (*inventoryRecorder) RecordTopicSubscriptionDeleted(string)              {}
+func (*inventoryRecorder) RecordSend(string, uint64, uint64)  {}
+func (*inventoryRecorder) RecordReceive(string, uint64, bool) {}
+func (*inventoryRecorder) RecordDelete(string, uint64)        {}
+func (*inventoryRecorder) RecordRedelivery(string, uint64)    {}
+func (*inventoryRecorder) RecordDrop(string, uint64)          {}
+func (*inventoryRecorder) RecordDLQ(string, uint64)           {}
+func (*inventoryRecorder) IncrementQueues()                   {}
+func (*inventoryRecorder) DecrementQueues()                   {}
+func (*inventoryRecorder) SetQueuesExist(int64)               {}
+func (r *inventoryRecorder) RecordTopicRequest(telemetry.TopicOperationEvent) {
+	r.topicRequests++
+}
+func (r *inventoryRecorder) RecordTopicOperation(telemetry.TopicOperationEvent) {
+	r.topicOperations++
+}
+func (r *inventoryRecorder) RecordTopicPublish(telemetry.TopicPublishEvent) {
+	r.topicPublishes++
+}
+func (r *inventoryRecorder) RecordTopicSubscriptionCreated(string) {
+	r.subscriptionsCreated++
+}
+func (r *inventoryRecorder) RecordTopicSubscriptionDeleted(string) {
+	r.subscriptionsDeleted++
+}
 func (r *inventoryRecorder) RecordTopicState(state telemetry.TopicStateEvent) { r.state = &state }
 func (r *inventoryRecorder) RecordTopicStateUnavailable()                     { r.unavailable++ }
+
+type testReplicaApplyGuard struct{}
+
+func (testReplicaApplyGuard) BeginPublishApply() error  { return nil }
+func (testReplicaApplyGuard) FinishPublishApply() error { return nil }
+func (testReplicaApplyGuard) Check() error              { return nil }
+
+func TestFollowerApplyDoesNotDuplicateLogicalTopicCounters(t *testing.T) {
+	localObserver, logicalObserver := newTelemetryObservers(storageDriverSQLite, true)
+	localRecorder := new(inventoryRecorder)
+	logicalRecorder := new(inventoryRecorder)
+	localObserver.SetRecorder(localRecorder)
+	logicalObserver.SetRecorder(logicalRecorder)
+
+	db, err := litekit.New(filepath.Join(t.TempDir(), "follower.db"), litekit.WithJournalMode(litekit.WAL))
+	if err != nil {
+		t.Fatalf("open follower database: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	evolver, err := litekit.NewEvolver(db, mutations.SqliteStorageMutations())
+	if err != nil {
+		t.Fatalf("create follower evolver: %v", err)
+	}
+	if err := evolver.MutateSchema(); err != nil {
+		t.Fatalf("migrate follower database: %v", err)
+	}
+
+	storage, err := litestore.New(db, litestore.WithoutGC(), litestore.WithObserver(localObserver))
+	if err != nil {
+		t.Fatalf("create follower storage: %v", err)
+	}
+	t.Cleanup(func() { _ = storage.Close() })
+
+	machine := clusterfsm.New(
+		storage,
+		nil,
+		testReplicaApplyGuard{},
+		func(fatalErr error) { panic(fatalErr) },
+		clusterfsm.WithTopicStateReconciler(func(inventory *queue.TopicInventory) {
+			if inventory == nil {
+				localObserver.TopicStateUnavailable()
+				return
+			}
+			localObserver.ReconcileTopicState(telemetry.TopicStateEvent{
+				TopicsExist:   inventory.TopicsExist,
+				Subscriptions: inventory.SubscriptionCounts,
+			})
+		}),
+	)
+
+	apply := func(index uint64, cmd *command.Command) {
+		t.Helper()
+		encoded, encodeErr := cmd.Encode()
+		if encodeErr != nil {
+			t.Fatalf("encode %s command: %v", cmd.Op, encodeErr)
+		}
+		if result := machine.Apply(&hraft.Log{Index: index, Type: hraft.LogCommand, Data: encoded}); result != nil {
+			if applyErr, ok := result.(error); ok {
+				t.Fatalf("apply %s command: %v", cmd.Op, applyErr)
+			}
+		}
+	}
+	protoCommand := func(op command.Op, message interface{ MarshalVT() ([]byte, error) }, ids ...string) *command.Command {
+		t.Helper()
+		payload, marshalErr := message.MarshalVT()
+		if marshalErr != nil {
+			t.Fatalf("marshal %s command: %v", op, marshalErr)
+		}
+		return &command.Command{Op: op, Timestamp: time.Now().UnixNano(), IDs: ids, Payload: payload}
+	}
+	jsonCommand := func(op command.Op, target string, value any, ids ...string) *command.Command {
+		t.Helper()
+		payload, marshalErr := json.Marshal(value)
+		if marshalErr != nil {
+			t.Fatalf("marshal %s command: %v", op, marshalErr)
+		}
+		return &command.Command{Op: op, Timestamp: time.Now().UnixNano(), Target: target, IDs: ids, Payload: payload}
+	}
+
+	apply(1, protoCommand(command.OpCreateQueue, &v1.CreateQueueRequest{QueueName: "follower-queue"}, "queueone"))
+	apply(2, jsonCommand(command.OpCreateTopic, "", &queue.CreateTopicRequest{TopicName: "follower-topic"}, "topicone"))
+	apply(3, jsonCommand(command.OpSubscribe, "topicone", &queue.SubscribeRequest{QueueID: "queueone"}, "subone"))
+	apply(4, jsonCommand(command.OpPublish, "topicone", &queue.PublishRequest{
+		Messages: []queue.PublishMessage{{Body: []byte("payload")}},
+	}, "messageone"))
+
+	if localRecorder.state == nil || localRecorder.state.TopicsExist != 1 || localRecorder.state.Subscriptions["topicone"] != 1 {
+		t.Fatalf("follower exact state = %#v, want one topic with one subscription", localRecorder.state)
+	}
+	if localRecorder.topicRequests != 0 || localRecorder.topicOperations != 0 || localRecorder.topicPublishes != 0 ||
+		localRecorder.subscriptionsCreated != 0 || localRecorder.subscriptionsDeleted != 0 {
+		t.Fatalf(
+			"follower local logical counters = request:%d operation:%d publish:%d created:%d deleted:%d, want all zero",
+			localRecorder.topicRequests,
+			localRecorder.topicOperations,
+			localRecorder.topicPublishes,
+			localRecorder.subscriptionsCreated,
+			localRecorder.subscriptionsDeleted,
+		)
+	}
+	if logicalRecorder.state != nil || logicalRecorder.topicRequests != 0 || logicalRecorder.topicOperations != 0 ||
+		logicalRecorder.topicPublishes != 0 || logicalRecorder.subscriptionsCreated != 0 || logicalRecorder.subscriptionsDeleted != 0 {
+		t.Fatalf("follower logical recorder changed: %#v", logicalRecorder)
+	}
+}
 
 func TestStartupInventoryReplaysBeforeCollectorAttachment(t *testing.T) {
 	observer := telemetry.NewObserver(metrics.BackendSQLite)
