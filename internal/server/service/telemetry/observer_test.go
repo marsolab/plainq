@@ -18,10 +18,12 @@ import (
 type queueRecorderSpy struct {
 	mu sync.Mutex
 
-	sent          uint64
-	queuesDelta   int
-	queuesExact   int64
-	queueSetCalls int
+	sent            uint64
+	queuesDelta     int
+	queuesExact     int64
+	queueSetCalls   int
+	queueIncrements int
+	queueDecrements int
 }
 
 func (r *queueRecorderSpy) RecordSend(_ string, count, _ uint64) {
@@ -42,6 +44,7 @@ func (r *queueRecorderSpy) IncrementQueues() {
 	defer r.mu.Unlock()
 
 	r.queuesDelta++
+	r.queueIncrements++
 }
 
 func (r *queueRecorderSpy) DecrementQueues() {
@@ -49,6 +52,7 @@ func (r *queueRecorderSpy) DecrementQueues() {
 	defer r.mu.Unlock()
 
 	r.queuesDelta--
+	r.queueDecrements++
 }
 
 func (r *queueRecorderSpy) SetQueuesExist(count int64) {
@@ -239,6 +243,82 @@ func TestObserverAcceptsQueueOnlyRecorder(t *testing.T) {
 	defer recorder.mu.Unlock()
 
 	td.Cmp(t, recorder.sent, uint64(1))
+}
+
+func TestObserverUnknownQueueCreateDoesNotChangeCount(t *testing.T) {
+	observer := NewObserver(metrics.BackendSQLite)
+	recorder := &queueRecorderSpy{}
+	observer.SetRecorder(recorder)
+	beforeGauge := prometheusValue("plainq_queues_exist")
+
+	observer.QueueCreated()
+
+	td.Cmp(t, observer.Queues(), uint64(0),
+		"an incremental create cannot manufacture an authoritative count",
+	)
+	td.Cmp(t, prometheusValue("plainq_queues_exist"), beforeGauge)
+
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+
+	td.Cmp(t, recorder.queueIncrements, 0)
+	td.Cmp(t, recorder.queuesDelta, 0)
+}
+
+func TestObserverUnknownQueueDeleteDoesNotChangeCount(t *testing.T) {
+	const queueID = "QUNKNOWNDELETE"
+
+	observer := NewObserver(metrics.BackendSQLite)
+	recorder := &queueRecorderSpy{}
+	observer.SetRecorder(recorder)
+	beforeGauge := prometheusValue("plainq_queues_exist")
+	metrics.RecordSend(queueID, 1, 1)
+
+	observer.QueueDeleted(queueID)
+
+	td.Cmp(t, observer.Queues(), uint64(0),
+		"an incremental delete cannot manufacture an authoritative count",
+	)
+	td.Cmp(t, prometheusValue("plainq_queues_exist"), beforeGauge)
+	td.Cmp(t, prometheusValue(`plainq_queue_depth{queue="`+queueID+`"}`), float64(0),
+		"per-queue cleanup remains valid even while the global count is unknown",
+	)
+
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+
+	td.Cmp(t, recorder.queueDecrements, 0)
+	td.Cmp(t, recorder.queuesDelta, 0)
+}
+
+func TestObserverKnownQueueMutationsUpdateCount(t *testing.T) {
+	const queueID = "QKNOWNMUTATIONS"
+
+	observer := NewObserver(metrics.BackendSQLite)
+	recorder := &queueRecorderSpy{}
+	observer.SetRecorder(recorder)
+	observer.SetQueues(4)
+
+	observer.QueueCreated()
+
+	td.Cmp(t, observer.Queues(), uint64(5))
+	td.Cmp(t, prometheusValue("plainq_queues_exist"), float64(5))
+
+	metrics.RecordSend(queueID, 1, 1)
+	observer.QueueDeleted(queueID)
+
+	td.Cmp(t, observer.Queues(), uint64(4))
+	td.Cmp(t, prometheusValue("plainq_queues_exist"), float64(4))
+	td.Cmp(t, prometheusValue(`plainq_queue_depth{queue="`+queueID+`"}`), float64(0))
+
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+
+	td.Cmp(t, recorder.queueSetCalls, 1)
+	td.Cmp(t, recorder.queuesExact, int64(4))
+	td.Cmp(t, recorder.queueIncrements, 1)
+	td.Cmp(t, recorder.queueDecrements, 1)
+	td.Cmp(t, recorder.queuesDelta, 0)
 }
 
 func TestObserverDoesNotReplayUnknownQueueState(t *testing.T) {

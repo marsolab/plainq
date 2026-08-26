@@ -146,6 +146,10 @@ func (o *Observer) QueueCreated() {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
+	if !o.queuesKnown {
+		return
+	}
+
 	metrics.AddQueuesExist(1)
 	o.queues++
 
@@ -160,11 +164,14 @@ func (o *Observer) QueueDeleted(queueID string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
-	metrics.AddQueuesExist(-1)
 	metrics.ResetQueue(queueID)
-	if o.queues > 0 {
-		o.queues--
+
+	if !o.queuesKnown || o.queues == 0 {
+		return
 	}
+
+	metrics.AddQueuesExist(-1)
+	o.queues--
 
 	if o.sink != nil {
 		o.sink.DecrementQueues()

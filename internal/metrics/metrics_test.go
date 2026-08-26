@@ -258,6 +258,97 @@ func TestRecordTopicRequestExportsClassicDurationHistogram(t *testing.T) {
 	}
 }
 
+func TestPubSubExpositionContract(t *testing.T) {
+	exposeMetadataForTest(t)
+
+	const topicID = "TMETRICEXPOSITION"
+
+	RecordTopicRequest(BackendPostgres, OpSubscribe, ResultOK, 2*time.Millisecond)
+	RecordTopicOperation(BackendPostgres, OpSubscribe, ResultOK, 3*time.Millisecond)
+	RecordPublish(topicID, 2, 12, 3, 5, 1)
+	RecordSubscriptionCreated(topicID)
+	RecordSubscriptionDeleted(topicID)
+	SetTopicSubscriptions(topicID, 3)
+	SetTopicsExist(1)
+
+	type familyContract struct {
+		kind       string
+		sampleName string
+		labels     []string
+		bucket     bool
+	}
+
+	families := map[string]familyContract{
+		"plainq_topic_requests_total": {
+			kind: "counter", labels: []string{"backend", "operation", "result"},
+		},
+		"plainq_topic_request_duration_seconds": {
+			kind: "histogram", sampleName: "plainq_topic_request_duration_seconds_count",
+			labels: []string{"backend", "operation"}, bucket: true,
+		},
+		"plainq_topic_operations_total": {
+			kind: "counter", labels: []string{"backend", "operation", "result"},
+		},
+		"plainq_topic_operation_duration_seconds": {
+			kind: "histogram", sampleName: "plainq_topic_operation_duration_seconds_count",
+			labels: []string{"backend", "operation"}, bucket: true,
+		},
+		"plainq_topic_messages_published_total": {
+			kind: "counter", labels: []string{"topic"},
+		},
+		"plainq_topic_published_bytes_total": {
+			kind: "counter", labels: []string{"topic"},
+		},
+		"plainq_topic_deliveries_total": {
+			kind: "counter", labels: []string{"topic"},
+		},
+		"plainq_topic_delivery_failures_total": {
+			kind: "counter", labels: []string{"topic"},
+		},
+		"plainq_topic_fanout": {
+			kind: "histogram", sampleName: "plainq_topic_fanout_count",
+			labels: []string{"topic"}, bucket: true,
+		},
+		"plainq_topic_subscriptions": {
+			kind: "gauge", labels: []string{"topic"},
+		},
+		"plainq_topic_subscriptions_created_total": {
+			kind: "counter", labels: []string{"topic"},
+		},
+		"plainq_topic_subscriptions_deleted_total": {
+			kind: "counter", labels: []string{"topic"},
+		},
+		"plainq_topics_exist": {
+			kind: "gauge", labels: []string{},
+		},
+	}
+	td.Require(t).Cmp(len(families), 13, "the stable pub/sub exposition has thirteen families")
+
+	out := scrape()
+	for family, contract := range families {
+		t.Run(family, func(t *testing.T) {
+			td.Cmp(t, metadataLine(out, "HELP", family), "# HELP "+family,
+				"VictoriaMetrics v1.44 emits name-only HELP metadata",
+			)
+			td.Cmp(t, metadataLine(out, "TYPE", family), "# TYPE "+family+" "+contract.kind)
+
+			sampleName := contract.sampleName
+			if sampleName == "" {
+				sampleName = family
+			}
+
+			td.Cmp(t, sampleLabelKeys(t, out, sampleName), contract.labels)
+
+			if contract.bucket {
+				wantBucketLabels := append(append([]string(nil), contract.labels...), "le")
+				td.Cmp(t, sampleLabelKeys(t, out, family+"_bucket"), wantBucketLabels,
+					"classic Prometheus histograms expose cumulative le buckets",
+				)
+			}
+		})
+	}
+}
+
 func TestRecordPublishUsesSelectedDestinationWidth(t *testing.T) {
 	const topicID = "TMETRICFANOUTSELECTED"
 
@@ -394,6 +485,127 @@ func exposeMetadataForTest(t *testing.T) {
 
 	ExposeMetadata(true)
 	t.Cleanup(func() { ExposeMetadata(wasEnabled) })
+}
+
+func metadataLine(exposition, directive, family string) string {
+	prefix := "# " + directive + " "
+
+	for line := range strings.SplitSeq(exposition, "\n") {
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+
+		fields := strings.Fields(line)
+		if len(fields) >= 3 && fields[2] == family {
+			return line
+		}
+	}
+
+	return ""
+}
+
+func sampleLabelKeys(t *testing.T, exposition, wantName string) []string {
+	t.Helper()
+
+	for line := range strings.SplitSeq(exposition, "\n") {
+		name, labels, ok := parsePrometheusSample(t, line)
+		if ok && name == wantName {
+			return labels
+		}
+	}
+
+	t.Fatalf("sample %s is absent from exposition", wantName)
+
+	return nil
+}
+
+func parsePrometheusSample(t *testing.T, line string) (string, []string, bool) {
+	t.Helper()
+
+	if line == "" || strings.HasPrefix(line, "#") {
+		return "", nil, false
+	}
+
+	headEnd := prometheusSampleHeadEnd(line)
+	if headEnd < 0 {
+		t.Fatalf("malformed Prometheus sample line %q", line)
+	}
+
+	head := line[:headEnd]
+	open := strings.IndexByte(head, '{')
+	if open < 0 {
+		return head, []string{}, true
+	}
+
+	if !strings.HasSuffix(head, "}") {
+		t.Fatalf("malformed Prometheus labels in %q", line)
+	}
+
+	name := head[:open]
+	labels := head[open+1 : len(head)-1]
+	keys := make([]string, 0, strings.Count(labels, ",")+1)
+
+	for len(labels) > 0 {
+		equals := strings.IndexByte(labels, '=')
+		if equals <= 0 || equals+1 >= len(labels) || labels[equals+1] != '"' {
+			t.Fatalf("malformed Prometheus label in %q", line)
+		}
+
+		keys = append(keys, labels[:equals])
+		labels = labels[equals+2:]
+
+		escaped := false
+		closingQuote := -1
+		for i := range len(labels) {
+			switch {
+			case escaped:
+				escaped = false
+			case labels[i] == '\\':
+				escaped = true
+			case labels[i] == '"':
+				closingQuote = i
+			}
+
+			if closingQuote >= 0 {
+				break
+			}
+		}
+
+		if closingQuote < 0 {
+			t.Fatalf("unterminated Prometheus label in %q", line)
+		}
+
+		labels = labels[closingQuote+1:]
+		if labels == "" {
+			break
+		}
+		if labels[0] != ',' {
+			t.Fatalf("malformed Prometheus label separator in %q", line)
+		}
+		labels = labels[1:]
+	}
+
+	return name, keys, true
+}
+
+func prometheusSampleHeadEnd(line string) int {
+	inQuotes := false
+	escaped := false
+
+	for i := range len(line) {
+		switch {
+		case escaped:
+			escaped = false
+		case inQuotes && line[i] == '\\':
+			escaped = true
+		case line[i] == '"':
+			inQuotes = !inQuotes
+		case !inQuotes && (line[i] == ' ' || line[i] == '\t'):
+			return i
+		}
+	}
+
+	return -1
 }
 
 // Test_exposition_carriesTypeMetadata checks that a human pointing a browser
