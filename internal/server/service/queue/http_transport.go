@@ -2,6 +2,7 @@ package queue
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -124,6 +125,11 @@ func (s *Service) deleteQueueHandler(w http.ResponseWriter, r *http.Request) {
 
 	_, deleteErr := s.storage.DeleteQueue(r.Context(), &input)
 	if deleteErr != nil {
+		if errors.Is(deleteErr, pqerr.ErrFailedPrecondition) {
+			httpkit.ErrorHTTP(w, r, deleteErr, httpkit.WithStatus(http.StatusConflict))
+
+			return
+		}
 		httpkit.ErrorHTTP(w, r, pqerr.AsTransport(deleteErr))
 
 		return

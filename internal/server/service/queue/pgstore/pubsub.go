@@ -239,6 +239,14 @@ func lockQueueForDelete(ctx context.Context, db pgQueryRower, queueID string) er
 	)
 }
 
+func lockQueueTableForDelete(ctx context.Context, db pgQueryRunner, queueID string) error {
+	if _, err := db.Exec(ctx, `LOCK TABLE `+quoteIdent(queueID)+` IN ACCESS EXCLUSIVE MODE;`); err != nil {
+		return fmt.Errorf("lock queue %q table for delete: %w", queueID, normalizePubSubError(err, pubSubDeleteQueue))
+	}
+
+	return nil
+}
+
 func lockParentForDelete(
 	ctx context.Context,
 	db pgQueryRower,

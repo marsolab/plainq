@@ -72,7 +72,7 @@ func TestDeleteResultWireUsesCanonicalEnvelopeBytesAndLimit(t *testing.T) {
 	if !errors.As(err, &capacityErr) || errors.Is(err, pqerr.ErrInvalidInput) {
 		t.Fatalf("Marshal() error = %v, want typed unclassified capacity error", err)
 	}
-	if capacityErr.EncodedBytes != len(want) || capacityErr.Limit != tooSmall {
+	if capacityErr.EncodedBytes != int64(len(want)) || capacityErr.Limit != int64(tooSmall) {
 		t.Fatalf("capacity error = %#v, want encoded=%d limit=%d", capacityErr, len(want), tooSmall)
 	}
 }

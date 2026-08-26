@@ -135,14 +135,16 @@ func TestForwardTranslatesConsensusErrors(t *testing.T) {
 		status int
 		class  string
 	}{
-		"not leader":     {err: consensus.ErrNotLeader, status: http.StatusServiceUnavailable, class: "not-leader"},
-		"no leader":      {err: consensus.ErrNoLeader, status: http.StatusServiceUnavailable, class: "not-leader"},
-		"shut down":      {err: consensus.ErrShutdown, status: http.StatusServiceUnavailable, class: "shutdown"},
-		"not found":      {err: pqerr.ErrNotFound, status: http.StatusNotFound, class: "not-found"},
-		"already exists": {err: pqerr.ErrAlreadyExists, status: http.StatusConflict, class: "already-exists"},
-		"invalid input":  {err: pqerr.ErrInvalidInput, status: http.StatusBadRequest, class: "invalid-argument"},
-		"unavailable":    {err: pqerr.ErrUnavailable, status: http.StatusServiceUnavailable, class: "unavailable"},
-		"anything else":  {err: errors.New("disk on fire"), status: http.StatusInternalServerError, class: "internal"},
+		"not leader":       {err: consensus.ErrNotLeader, status: http.StatusServiceUnavailable, class: "not-leader"},
+		"no leader":        {err: consensus.ErrNoLeader, status: http.StatusServiceUnavailable, class: "not-leader"},
+		"commit unknown":   {err: consensus.ErrCommitUnknown, status: http.StatusInternalServerError, class: "commit-unknown"},
+		"shut down":        {err: consensus.ErrShutdown, status: http.StatusServiceUnavailable, class: "shutdown"},
+		"not found":        {err: pqerr.ErrNotFound, status: http.StatusNotFound, class: "not-found"},
+		"already exists":   {err: pqerr.ErrAlreadyExists, status: http.StatusConflict, class: "already-exists"},
+		"invalid input":    {err: pqerr.ErrInvalidInput, status: http.StatusBadRequest, class: "invalid-argument"},
+		"failed condition": {err: pqerr.ErrFailedPrecondition, status: http.StatusConflict, class: "failed-precondition"},
+		"unavailable":      {err: pqerr.ErrUnavailable, status: http.StatusServiceUnavailable, class: "unavailable"},
+		"anything else":    {err: errors.New("disk on fire"), status: http.StatusInternalServerError, class: "internal"},
 	}
 
 	for name, tc := range cases {
@@ -164,12 +166,14 @@ func TestPeerErrorsKeepTheirClass(t *testing.T) {
 		class  string
 		target error
 	}{
-		"not-leader":       {class: "not-leader", target: consensus.ErrNotLeader},
-		"shutdown":         {class: "shutdown", target: consensus.ErrShutdown},
-		"not-found":        {class: "not-found", target: pqerr.ErrNotFound},
-		"already-exists":   {class: "already-exists", target: pqerr.ErrAlreadyExists},
-		"invalid-argument": {class: "invalid-argument", target: pqerr.ErrInvalidInput},
-		"unavailable":      {class: "unavailable", target: pqerr.ErrUnavailable},
+		"not-leader":          {class: "not-leader", target: consensus.ErrNotLeader},
+		"commit-unknown":      {class: "commit-unknown", target: consensus.ErrCommitUnknown},
+		"shutdown":            {class: "shutdown", target: consensus.ErrShutdown},
+		"not-found":           {class: "not-found", target: pqerr.ErrNotFound},
+		"already-exists":      {class: "already-exists", target: pqerr.ErrAlreadyExists},
+		"invalid-argument":    {class: "invalid-argument", target: pqerr.ErrInvalidInput},
+		"failed-precondition": {class: "failed-precondition", target: pqerr.ErrFailedPrecondition},
+		"unavailable":         {class: "unavailable", target: pqerr.ErrUnavailable},
 	}
 
 	for name, tc := range cases {
@@ -193,6 +197,60 @@ func TestPeerErrorsKeepTheirClass(t *testing.T) {
 			td.Cmp(t, err.Error(), td.Contains("something went wrong"))
 		})
 	}
+}
+
+func TestPeerClientRoundTripsTerminalWriteClassesWithoutRetryMarkers(t *testing.T) {
+	tests := []struct {
+		name      string
+		remoteErr error
+		target    error
+	}{
+		{name: "commit unknown", remoteErr: errors.Join(consensus.ErrCommitUnknown, consensus.ErrNotLeader), target: consensus.ErrCommitUnknown},
+		{name: "failed precondition", remoteErr: pqerr.ErrFailedPrecondition, target: pqerr.ErrFailedPrecondition},
+		{name: "partial fanout", remoteErr: &queue.PartialPublishError{Causes: []error{consensus.ErrNotLeader}}, target: pqerr.ErrPartialFanout},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := newTestServer(t, &stubApplier{err: test.remoteErr}, &stubMembership{}, "")
+			client := &Client{http: server.Client()}
+			_, err := client.Forward(context.Background(), strings.TrimPrefix(server.URL, "http://"), []byte("command"))
+			if !errors.Is(err, test.target) {
+				t.Fatalf("Forward() error = %v, want %v", err, test.target)
+			}
+			if errors.Is(err, consensus.ErrNotLeader) {
+				t.Fatalf("Forward() error = %v, must not retain a retryable not-leader marker", err)
+			}
+		})
+	}
+}
+
+func TestPartialFanoutTakesPrecedenceOverNestedUnavailableAcrossPeer(t *testing.T) {
+	partial := &queue.PartialPublishError{
+		Outcome: queue.PublishOutcome{
+			FailedDeliveries: 1,
+			DeliveryFailures: []queue.PublishDeliveryFailure{{QueueID: "queue-1", Messages: 1}},
+		},
+		Causes: []error{errors.Join(pqerr.ErrUnavailable, consensus.ErrNotLeader, errors.New("destination unavailable"))},
+	}
+	server := newTestServer(t, &stubApplier{err: partial}, &stubMembership{}, "")
+
+	resp := post(t, server, http.MethodPost, "/v1/forward", "", "publish-command")
+	body, err := io.ReadAll(resp.Body)
+	td.Require(t).CmpNoError(err)
+	td.Cmp(t, resp.StatusCode, http.StatusInternalServerError)
+	td.Cmp(t, resp.Header.Get(errorHeader), "partial-fanout")
+
+	followerErr := peerError("leader:8082", resp, body)
+	td.Cmp(t, errors.Is(followerErr, pqerr.ErrPartialFanout), true)
+	td.Cmp(t, errors.Is(followerErr, pqerr.ErrUnavailable), false,
+		"a follower must not retry a partially committed fan-out")
+	td.Cmp(t, errors.Is(followerErr, consensus.ErrNotLeader), false,
+		"a follower must not reroute a partially committed fan-out")
+
+	publicErr := pqerr.AsTransport(followerErr)
+	td.Cmp(t, errors.Is(publicErr, pqerr.ErrPartialFanout), true)
+	td.Cmp(t, errors.Is(publicErr, pqerr.ErrUnavailable), false,
+		"the reconstructed public error remains Internal")
 }
 
 func TestDeleteCapacityErrorIsFollowerRoutable(t *testing.T) {

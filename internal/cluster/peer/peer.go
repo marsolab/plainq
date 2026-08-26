@@ -291,6 +291,12 @@ func (s *Server) writeApplyError(w http.ResponseWriter, err error) {
 	class := "internal"
 
 	switch {
+	case errors.Is(err, pqerr.ErrPartialFanout):
+		status, class = http.StatusInternalServerError, "partial-fanout"
+
+	case errors.Is(err, consensus.ErrCommitUnknown):
+		status, class = http.StatusInternalServerError, "commit-unknown"
+
 	case errors.Is(err, consensus.ErrNotLeader), errors.Is(err, consensus.ErrNoLeader):
 		status, class = http.StatusServiceUnavailable, "not-leader"
 
@@ -302,6 +308,9 @@ func (s *Server) writeApplyError(w http.ResponseWriter, err error) {
 
 	case errors.Is(err, pqerr.ErrAlreadyExists), errors.Is(err, errkit.ErrAlreadyExists):
 		status, class = http.StatusConflict, "already-exists"
+
+	case errors.Is(err, pqerr.ErrFailedPrecondition):
+		status, class = http.StatusConflict, "failed-precondition"
 
 	case errors.Is(err, pqerr.ErrInvalidInput), errors.Is(err, pqerr.ErrInvalidID),
 		errors.Is(err, errkit.ErrInvalidArgument):
@@ -588,6 +597,12 @@ func peerError(addr string, resp *http.Response, body []byte) error {
 	case "not-leader":
 		return fmt.Errorf("%w: %w", consensus.ErrNotLeader, base)
 
+	case "commit-unknown":
+		return fmt.Errorf("%w: %w", consensus.ErrCommitUnknown, base)
+
+	case "partial-fanout":
+		return fmt.Errorf("%w: %w", pqerr.ErrPartialFanout, base)
+
 	case "shutdown":
 		return fmt.Errorf("%w: %w", consensus.ErrShutdown, base)
 
@@ -596,6 +611,9 @@ func peerError(addr string, resp *http.Response, body []byte) error {
 
 	case "already-exists":
 		return fmt.Errorf("%w: %w", pqerr.ErrAlreadyExists, base)
+
+	case "failed-precondition":
+		return fmt.Errorf("%w: %w", pqerr.ErrFailedPrecondition, base)
 
 	case "invalid-argument":
 		return fmt.Errorf("%w: %w", pqerr.ErrInvalidInput, base)

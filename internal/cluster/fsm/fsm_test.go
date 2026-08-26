@@ -98,22 +98,16 @@ func TestNewFollowerAppliesLegacyOversizedDeletesWithoutCapacityCheck(t *testing
 	requireApplied(t, apply(t, machine, 3, jsonCommand(t, command.OpSubscribe, topicID,
 		&queue.SubscribeRequest{QueueID: queueID}, "subone")), "create legacy subscription")
 
-	preview, err := storage.PreviewDeleteTopic(context.Background(), topicID)
-	if err != nil {
-		t.Fatalf("preview legacy delete: %v", err)
-	}
-	_, err = deleteresult.Marshal(preview, 128)
-	var capacityErr *deleteresult.CapacityError
-	if !errors.As(err, &capacityErr) {
-		t.Fatalf("legacy delete preview size error = %v, want capacity error at test limit", err)
-	}
-
 	response := apply(t, machine, 4, &command.Command{Op: command.OpDeleteTopic, Target: topicID})
 	result, ok := response.(*queue.DeleteTopicResult)
 	if !ok || len(result.RemovedSubscriptions) != 1 {
 		t.Fatalf("legacy committed delete response = %#v, want one removed subscription", response)
 	}
-	td.Cmp(t, result, preview, "topic preview exactly matches committed legacy effect")
+	_, err := deleteresult.Marshal(result, 128)
+	var capacityErr *deleteresult.CapacityError
+	if !errors.As(err, &capacityErr) {
+		t.Fatalf("legacy committed delete size error = %v, want capacity error at test limit", err)
+	}
 	if _, err := storage.DeleteTopic(context.Background(), topicID); !errors.Is(err, pqerr.ErrNotFound) {
 		t.Fatalf("topic after legacy committed delete error = %v, want not found", err)
 	}
@@ -123,21 +117,35 @@ func TestNewFollowerAppliesLegacyOversizedDeletesWithoutCapacityCheck(t *testing
 		&queue.CreateTopicRequest{TopicName: "legacy-two"}, secondTopicID)), "create second legacy topic")
 	requireApplied(t, apply(t, machine, 6, jsonCommand(t, command.OpSubscribe, secondTopicID,
 		&queue.SubscribeRequest{QueueID: queueID}, "subtwo")), "create second legacy subscription")
-	queuePreview, err := storage.PreviewDeleteQueue(context.Background(), queueID)
-	if err != nil {
-		t.Fatalf("preview legacy queue delete: %v", err)
-	}
-	_, err = deleteresult.Marshal(queuePreview, 128)
-	if !errors.As(err, &capacityErr) {
-		t.Fatalf("legacy queue delete preview size error = %v, want capacity error at test limit", err)
-	}
 	response = apply(t, machine, 7, protoCommand(t, command.OpDeleteQueue,
 		&v1.DeleteQueueRequest{QueueId: queueID, Force: true}))
 	queueResult, ok := response.(*queue.DeleteQueueResult)
 	if !ok || len(queueResult.RemovedSubscriptions) != 1 {
 		t.Fatalf("legacy committed queue delete response = %#v, want one removed subscription", response)
 	}
-	td.Cmp(t, queueResult, queuePreview, "queue preview exactly matches committed legacy effect")
+	_, err = deleteresult.Marshal(queueResult, 128)
+	if !errors.As(err, &capacityErr) {
+		t.Fatalf("legacy committed queue delete size error = %v, want capacity error at test limit", err)
+	}
+	if _, err := storage.DescribeQueue(context.Background(), &v1.DescribeQueueRequest{QueueId: queueID}); !errors.Is(err, pqerr.ErrNotFound) {
+		t.Fatalf("queue after legacy committed delete error = %v, want not found", err)
+	}
+}
+
+func TestNewFollowerAppliesLegacyUnforcedNonEmptyQueueDelete(t *testing.T) {
+	machine, storage := newFSM(t)
+	queueID := "legacyforcequeue"
+	requireApplied(t, apply(t, machine, 1, protoCommand(t, command.OpCreateQueue,
+		&v1.CreateQueueRequest{QueueName: "legacy-force"}, queueID)), "create legacy queue")
+	requireApplied(t, apply(t, machine, 2, protoCommand(t, command.OpSend,
+		&v1.SendRequest{QueueId: queueID, Messages: []*v1.SendMessage{{Body: []byte("legacy")}}},
+		"01K3EZJQ9NK4ZWJ7MFK60JR16P")), "send legacy message")
+
+	response := apply(t, machine, 3, protoCommand(t, command.OpDeleteQueue,
+		&v1.DeleteQueueRequest{QueueId: queueID, Force: false}))
+	if _, ok := response.(*queue.DeleteQueueResult); !ok {
+		t.Fatalf("legacy unforced committed delete response = %#v, want *queue.DeleteQueueResult", response)
+	}
 	if _, err := storage.DescribeQueue(context.Background(), &v1.DescribeQueueRequest{QueueId: queueID}); !errors.Is(err, pqerr.ErrNotFound) {
 		t.Fatalf("queue after legacy committed delete error = %v, want not found", err)
 	}

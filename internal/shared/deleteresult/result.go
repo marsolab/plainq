@@ -22,11 +22,20 @@ const (
 // It intentionally has no domain-error classification: this is a server-side
 // representation limit, not invalid client input and not a retryable failure.
 type CapacityError struct {
-	EncodedBytes int
-	Limit        int
+	EncodedBytes int64
+	Limit        int64
+	LowerBound   bool
 }
 
 func (e *CapacityError) Error() string {
+	if e.LowerBound {
+		return fmt.Sprintf(
+			"delete result exceeds transport capacity: encoded result is at least %d bytes for a %d-byte limit",
+			e.EncodedBytes,
+			e.Limit,
+		)
+	}
+
 	return fmt.Sprintf(
 		"delete result exceeds transport capacity: encoded size %d bytes exceeds %d-byte limit",
 		e.EncodedBytes,
@@ -45,7 +54,7 @@ func Marshal(result any, limit int) ([]byte, error) {
 	encoded := protowire.AppendTag(nil, FieldNumber, protowire.BytesType)
 	encoded = protowire.AppendBytes(encoded, payload)
 	if len(encoded) > limit {
-		return nil, &CapacityError{EncodedBytes: len(encoded), Limit: limit}
+		return nil, &CapacityError{EncodedBytes: int64(len(encoded)), Limit: int64(limit)}
 	}
 
 	return encoded, nil

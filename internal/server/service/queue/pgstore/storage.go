@@ -315,7 +315,9 @@ func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest)
 		return nil, fmt.Errorf("queue props (id: %q): %w", queueID, pqerr.ErrNotFound)
 	}
 
-	tx, txErr := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+	// READ COMMITTED gives the message count a fresh statement snapshot after
+	// the dynamic-table lock has drained any writer that started first.
+	tx, txErr := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if txErr != nil {
 		return nil, fmt.Errorf(fmtBeginTxError, normalizePubSubError(txErr, pubSubDeleteQueue))
 	}
@@ -324,6 +326,16 @@ func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest)
 
 	if err := lockQueueForDelete(ctx, tx, queueID); err != nil {
 		return nil, err
+	}
+	if err := lockQueueTableForDelete(ctx, tx, queueID); err != nil {
+		return nil, err
+	}
+	var messageCount uint64
+	if err := tx.QueryRow(ctx, queryCountMessages(queueID)).Scan(&messageCount); err != nil {
+		return nil, fmt.Errorf("count queue %q messages before delete: %w", queueID, normalizePubSubError(err, pubSubDeleteQueue))
+	}
+	if messageCount > 0 && !input.GetForce() {
+		return nil, fmt.Errorf("delete non-empty queue %q: %w", queueID, pqerr.ErrFailedPrecondition)
 	}
 	removedSubscriptions, captureErr := listSubscriptionsByQueue(ctx, tx, queueID)
 	if captureErr != nil {

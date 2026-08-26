@@ -14,6 +14,7 @@ import (
 	"github.com/marsolab/plainq/internal/metrics"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/service/queue"
+	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/marsolab/servekit/idkit"
 	"github.com/marsolab/servekit/logkit"
 )
@@ -385,10 +386,10 @@ func (s *Store) readBarrier(ctx context.Context) error {
 // waits it out, up to the apply timeout, and only then gives up.
 //
 // The retry is deliberately narrow. It fires only when this node is certain
-// the command was *not* committed: either no leader was known, so nothing was
-// ever proposed, or the local engine rejected the proposal outright. A
-// forwarded command whose reply was lost may well have been committed, and
-// re-sending that would enqueue the same message twice.
+// the command was *not* committed: either no leader was known, or a local or
+// remote engine rejected the proposal before its outcome became ambiguous.
+// ErrCommitUnknown and transport failures may follow a commit, so re-sending
+// either could enqueue the same message twice.
 func (s *Store) apply(ctx context.Context, cmd *command.Command) (any, error) {
 	// The timer covers the whole write, retries included, because that is the
 	// latency the client actually waited: a write that spent 400ms waiting out
@@ -423,7 +424,7 @@ func (s *Store) apply(ctx context.Context, cmd *command.Command) (any, error) {
 			// A transport failure carries neither class — the leader may well have
 			// committed before the reply was lost — and re-sending that would
 			// enqueue the same message twice.
-			if !errors.Is(err, consensus.ErrNoLeader) && !errors.Is(err, consensus.ErrNotLeader) {
+			if !safeToReroute(err) {
 				return nil, err
 			}
 
@@ -460,18 +461,27 @@ func (s *Store) applyOnce(ctx context.Context, cmd *command.Command, encoded []b
 			return response, nil
 		}
 
-		if !errors.Is(err, consensus.ErrNotLeader) {
+		if !safeToReroute(err) || !errors.Is(err, consensus.ErrNotLeader) {
 			return nil, fmt.Errorf("commit %s: %w", cmd.Op, err)
 		}
 
-		// Leadership moved between the check and the proposal. The command was
-		// not committed, so forwarding it is safe rather than a duplicate.
+		// Leadership moved between the hint and a proposal that the engine
+		// definitively rejected. An in-flight leadership loss is reported as
+		// ErrCommitUnknown above and never reaches this forwarding path.
 		s.logger.Debug("Lost leadership mid-write, forwarding to the new leader",
 			slog.String("op", cmd.Op.String()),
 		)
 	}
 
 	return s.forward(ctx, cmd, encoded)
+}
+
+func safeToReroute(err error) bool {
+	if errors.Is(err, consensus.ErrCommitUnknown) || errors.Is(err, pqerr.ErrPartialFanout) {
+		return false
+	}
+
+	return errors.Is(err, consensus.ErrNoLeader) || errors.Is(err, consensus.ErrNotLeader)
 }
 
 func (s *Store) forward(ctx context.Context, cmd *command.Command, encoded []byte) (any, error) {

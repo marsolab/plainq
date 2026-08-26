@@ -434,6 +434,34 @@ func (s *Storage) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest)
 		}
 	}()
 
+	// Claim the parent row with a no-op write before inspecting the dynamic
+	// queue table. SQLite has no SELECT FOR UPDATE; this acquires writer
+	// ownership without changing replicated state.
+	lockResult, lockErr := tx.ExecContext(ctx,
+		`UPDATE queue_properties SET queue_id = queue_id WHERE queue_id = ?;`, queueID)
+	if lockErr != nil {
+		return nil, fmt.Errorf("lock queue %q for delete: %w", queueID, normalizePubSubError(lockErr, pubSubDeleteQueue))
+	}
+	lockedRows, lockRowsErr := lockResult.RowsAffected()
+	if lockRowsErr != nil {
+		return nil, fmt.Errorf("lock queue %q for delete rows: %w", queueID, normalizePubSubError(lockRowsErr, pubSubDeleteQueue))
+	}
+	if lockedRows < 1 {
+		return nil, fmt.Errorf("lock queue %q for delete: %w", queueID, pqerr.ErrNotFound)
+	}
+
+	var messageCount uint64
+	if err := tx.QueryRowContext(ctx, queryCountMessages(queueID)).Scan(&messageCount); err != nil {
+		return nil, fmt.Errorf("count queue %q messages before delete: %w", queueID, normalizePubSubError(err, pubSubDeleteQueue))
+	}
+	// A committed legacy leader may have proposed Force=false before this
+	// invariant existed. Every follower must still apply that log entry; only
+	// standalone calls enforce here. New clustered calls are rejected by the
+	// leader's proposal preflight before they can enter the log.
+	if messageCount > 0 && !input.GetForce() && !queue.Replicated(ctx) {
+		return nil, fmt.Errorf("delete non-empty queue %q: %w", queueID, pqerr.ErrFailedPrecondition)
+	}
+
 	removedSubscriptions, captureErr := listSubscriptionsByQueue(ctx, tx, queueID)
 	if captureErr != nil {
 		return nil, fmt.Errorf("capture queue %q subscriptions: %w", queueID, captureErr)

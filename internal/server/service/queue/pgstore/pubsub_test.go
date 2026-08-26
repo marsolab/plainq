@@ -126,6 +126,127 @@ func TestPostgresTopicConformance(t *testing.T) {
 	}
 }
 
+func TestPostgresDeleteQueueRequiresForceForMessagesAndRollsBackEffects(t *testing.T) {
+	ctx, storage, _, _ := newPostgresPubSubStorage(t)
+	topic, err := storage.CreateTopic(ctx, &queue.CreateTopicRequest{TopicName: "force-safe"})
+	if err != nil {
+		t.Fatalf("create topic: %v", err)
+	}
+	queueID := createPostgresQueue(t, ctx, storage, "force-safe")
+	subscription, err := storage.Subscribe(ctx, topic.TopicID, &queue.SubscribeRequest{QueueID: queueID})
+	if err != nil {
+		t.Fatalf("subscribe queue: %v", err)
+	}
+	if _, err := storage.Send(ctx, &v1.SendRequest{
+		QueueId:  queueID,
+		Messages: []*v1.SendMessage{{Body: []byte("must survive rejected delete")}},
+	}); err != nil {
+		t.Fatalf("send message: %v", err)
+	}
+
+	result, err := storage.DeleteQueue(ctx, &v1.DeleteQueueRequest{QueueId: queueID})
+	if result != nil || !errors.Is(err, pqerr.ErrFailedPrecondition) {
+		t.Fatalf("unforced non-empty delete = %#v, %v; want nil %v", result, err, pqerr.ErrFailedPrecondition)
+	}
+	if _, err := storage.DescribeQueue(ctx, &v1.DescribeQueueRequest{QueueId: queueID}); err != nil {
+		t.Fatalf("queue after rejected delete: %v", err)
+	}
+	inventory, err := storage.TopicInventory(ctx)
+	if err != nil || inventory.SubscriptionCounts[topic.TopicID] != 1 {
+		t.Fatalf("bindings after rejected delete = %#v, %v; want intact", inventory, err)
+	}
+	received, err := storage.Receive(ctx, &v1.ReceiveRequest{QueueId: queueID})
+	if err != nil || len(received.GetMessages()) != 1 {
+		t.Fatalf("messages after rejected delete = %#v, %v; want one", received, err)
+	}
+
+	result, err = storage.DeleteQueue(ctx, &v1.DeleteQueueRequest{QueueId: queueID, Force: true})
+	if err != nil {
+		t.Fatalf("forced non-empty delete: %v", err)
+	}
+	if got := subscriptionIDs(result.RemovedSubscriptions); !reflect.DeepEqual(got, []string{subscription.SubscriptionID}) {
+		t.Fatalf("forced delete effects = %v, want [%s]", got, subscription.SubscriptionID)
+	}
+}
+
+func TestPostgresUnforcedDeleteExcludesConcurrentSend(t *testing.T) {
+	ctx, storage, pool, applicationName := newPostgresPubSubStorage(t)
+	queueID := createPostgresQueue(t, ctx, storage, "delete-send-race")
+	const advisoryKey int64 = 82620267
+	installBlockingQueueDeleteTrigger(t, ctx, pool, advisoryKey)
+	blocker := holdPostgresAdvisoryLock(t, ctx, pool, advisoryKey)
+
+	deleteDone := make(chan postgresQueueDeleteOutcome, 1)
+	go func() {
+		result, err := storage.DeleteQueue(ctx, &v1.DeleteQueueRequest{QueueId: queueID})
+		deleteDone <- postgresQueueDeleteOutcome{result: result, err: err}
+	}()
+	waitForPostgresQueryWait(t, ctx, pool, applicationName, "-- name: DeleteQueueProperties", "advisory")
+
+	type sendOutcome struct {
+		result *v1.SendResponse
+		err    error
+	}
+	sendDone := make(chan sendOutcome, 1)
+	go func() {
+		result, err := storage.Send(ctx, &v1.SendRequest{
+			QueueId:  queueID,
+			Messages: []*v1.SendMessage{{Body: []byte("concurrent")}},
+		})
+		sendDone <- sendOutcome{result: result, err: err}
+	}()
+	waitForPostgresQueryWait(t, ctx, pool, applicationName, "INSERT INTO", "relation")
+	commitPostgresBlocker(t, ctx, blocker)
+	deleted := <-deleteDone
+	sent := <-sendDone
+	if deleted.err != nil || deleted.result == nil {
+		t.Fatalf("delete that won table ownership = %#v, %v; want committed result", deleted.result, deleted.err)
+	}
+	if sent.result != nil || sent.err == nil {
+		t.Fatalf("Send after committed queue delete = %#v, %v; want failure", sent.result, sent.err)
+	}
+}
+
+func TestPostgresUnforcedDeleteSeesSendCommittedBeforeTableLock(t *testing.T) {
+	ctx, storage, pool, applicationName := newPostgresPubSubStorage(t)
+	queueID := createPostgresQueue(t, ctx, storage, "send-first-delete-race")
+
+	sender, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin sender transaction: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := sender.Rollback(context.Background()); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+			t.Errorf("rollback sender transaction: %v", err)
+		}
+	})
+	if _, err := sender.Exec(ctx, queryInsertMessagesBatch(queueID, 1), "send-first-message", []byte("message")); err != nil {
+		t.Fatalf("insert uncommitted send: %v", err)
+	}
+
+	deleteDone := make(chan postgresQueueDeleteOutcome, 1)
+	go func() {
+		result, deleteErr := storage.DeleteQueue(ctx, &v1.DeleteQueueRequest{QueueId: queueID})
+		deleteDone <- postgresQueueDeleteOutcome{result: result, err: deleteErr}
+	}()
+	waitForPostgresQueryWait(t, ctx, pool, applicationName, "LOCK TABLE", "relation")
+
+	if err := sender.Commit(ctx); err != nil {
+		t.Fatalf("commit sender transaction: %v", err)
+	}
+	deleted := <-deleteDone
+	if deleted.result != nil || !errors.Is(deleted.err, pqerr.ErrFailedPrecondition) {
+		t.Fatalf("delete after send-first lock drain = %#v, %v; want nil %v", deleted.result, deleted.err, pqerr.ErrFailedPrecondition)
+	}
+	if _, err := storage.DescribeQueue(ctx, &v1.DescribeQueueRequest{QueueId: queueID}); err != nil {
+		t.Fatalf("queue after rejected delete: %v", err)
+	}
+	var messageCount int64
+	if err := pool.QueryRow(ctx, queryCountMessages(queueID)).Scan(&messageCount); err != nil || messageCount != 1 {
+		t.Fatalf("messages after rejected delete = %d, %v; want one", messageCount, err)
+	}
+}
+
 func TestPostgresDeleteTopicWaitsForUncommittedSubscribeBeforeCapture(t *testing.T) {
 	ctx, storage, pool, applicationName := newPostgresPubSubStorage(t)
 	topic, err := storage.CreateTopic(ctx, &queue.CreateTopicRequest{TopicName: "topic-subscribe-race"})
@@ -691,7 +812,8 @@ CREATE TABLE topic_subscriptions (
   CONSTRAINT topic_subscription_topic_fk FOREIGN KEY (topic_id) REFERENCES topic_properties(topic_id) ON DELETE CASCADE,
   CONSTRAINT topic_subscription_queue_fk FOREIGN KEY (queue_id) REFERENCES queue_properties(queue_id) ON DELETE CASCADE
 );
-CREATE UNIQUE INDEX topic_subscriptions_topic_queue_uindex ON topic_subscriptions(topic_id, queue_id);`
+CREATE UNIQUE INDEX topic_subscriptions_topic_queue_uindex ON topic_subscriptions(topic_id, queue_id);
+CREATE INDEX topic_subscriptions_queue_id_index ON topic_subscriptions(queue_id);`
 	if _, err := pool.Exec(ctx, schema); err != nil {
 		t.Fatalf("create test tables: %v", err)
 	}

@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -101,7 +103,7 @@ func TestNewLeaderRejectsOversizedForwardedDeleteBeforeLegacyFollowerApply(t *te
 
 func TestProposalGuardRejectsNonLeaderDeleteBeforePreview(t *testing.T) {
 	underlying := &proposalConsensusRecorder{leader: false}
-	preview := &proposalPreviewRecorder{topicResult: &queue.DeleteTopicResult{}}
+	preview := &proposalPreviewRecorder{}
 	guard := newProposalGuard(underlying, preview)
 	encoded := encodeProposalCommand(t, &command.Command{Op: command.OpDeleteTopic, Target: "topic-1"})
 
@@ -123,7 +125,7 @@ func TestProposalGuardRejectsNonLeaderDeleteBeforePreview(t *testing.T) {
 func TestProposalGuardBarrierFailureStopsBeforePreviewAndApply(t *testing.T) {
 	barrierErr := errors.New("barrier failed")
 	underlying := &proposalConsensusRecorder{leader: true, barrierErr: barrierErr}
-	preview := &proposalPreviewRecorder{topicResult: &queue.DeleteTopicResult{}}
+	preview := &proposalPreviewRecorder{}
 	guard := newProposalGuard(underlying, preview)
 	encoded := encodeProposalCommand(t, &command.Command{Op: command.OpDeleteTopic, Target: "topic-1"})
 
@@ -139,34 +141,182 @@ func TestProposalGuardBarrierFailureStopsBeforePreviewAndApply(t *testing.T) {
 	}
 }
 
-func TestProposalGuardOrdersBarrierPreviewMarshalAndApply(t *testing.T) {
+func TestStoreForwardsDeleteOnceWhenGuardBarrierLosesLeadership(t *testing.T) {
+	underlying := &proposalConsensusRecorder{
+		leader:     true,
+		barrierErr: fmt.Errorf("leadership changed before preview: %w", consensus.ErrNotLeader),
+	}
+	preflight := &proposalPreviewRecorder{}
+	guard := newProposalGuard(underlying, preflight)
+	forwarder := new(countingForwarder)
+	store := NewStore(nil, guard, forwarder, WithApplyTimeout(time.Second))
+
+	result, err := store.DeleteTopic(context.Background(), "topic-1")
+	if err != nil || result == nil || len(result.RemovedSubscriptions) != 0 {
+		t.Fatalf("DeleteTopic() = %#v, %v; want forwarded legacy-empty success", result, err)
+	}
+	if got := preflight.callCount(); got != 0 {
+		t.Fatalf("preflight calls after barrier leadership loss = %d, want zero", got)
+	}
+	if got := underlying.applyCount(); got != 0 {
+		t.Fatalf("local underlying Apply calls = %d, want zero", got)
+	}
+	forwarder.mu.Lock()
+	forwardCalls := forwarder.calls
+	forwarded := append([][]byte(nil), forwarder.payloads...)
+	forwarder.mu.Unlock()
+	if forwardCalls != 1 || len(forwarded) != 1 {
+		t.Fatalf("Forward calls/payloads = %d/%d, want 1/1", forwardCalls, len(forwarded))
+	}
+	cmd, err := command.Decode(forwarded[0])
+	if err != nil || cmd.Op != command.OpDeleteTopic || cmd.Target != "topic-1" {
+		t.Fatalf("forwarded command = %#v, %v; want original topic delete", cmd, err)
+	}
+}
+
+func TestProposalGuardOrdersBarrierPreflightAndApply(t *testing.T) {
 	events := new(proposalEventLog)
 	underlying := &proposalConsensusRecorder{leader: true, events: events}
-	preview := &proposalPreviewRecorder{topicResult: &queue.DeleteTopicResult{}, events: events}
+	preview := &proposalPreviewRecorder{events: events}
 	guard := newProposalGuard(underlying, preview)
 	if guard.deleteResultLimit != deleteresult.MaxEnvelopeBytes {
 		t.Fatalf("default delete result limit = %d, want %d", guard.deleteResultLimit, deleteresult.MaxEnvelopeBytes)
-	}
-	canonicalMarshal := guard.marshal
-	guard.marshal = func(result any, limit int) ([]byte, error) {
-		events.add("marshal")
-		return canonicalMarshal(result, limit)
 	}
 	encoded := encodeProposalCommand(t, &command.Command{Op: command.OpDeleteTopic, Target: "topic-1"})
 
 	if _, err := guard.Apply(context.Background(), encoded); err != nil {
 		t.Fatalf("apply ordered delete proposal: %v", err)
 	}
-	want := []string{"barrier", "preview-topic", "marshal", "apply-delete_topic"}
+	want := []string{"barrier", "preflight-topic", "apply-delete_topic"}
 	if got := events.snapshot(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("delete proposal order = %v, want %v", got, want)
+	}
+	if got := preview.recordedLimits(); !reflect.DeepEqual(got, []int{deleteresult.MaxEnvelopeBytes}) {
+		t.Fatalf("preflight limits = %v, want default peer ceiling", got)
+	}
+}
+
+func TestProposalGuardPassesFullQueueRequestToPreflight(t *testing.T) {
+	preflight := &proposalPreviewRecorder{}
+	guard := newProposalGuard(&proposalConsensusRecorder{leader: true}, preflight)
+	input := &v1.DeleteQueueRequest{QueueId: "queue-1", Force: true}
+	payload, err := input.MarshalVT()
+	if err != nil {
+		t.Fatalf("marshal delete queue request: %v", err)
+	}
+	encoded := encodeProposalCommand(t, &command.Command{Op: command.OpDeleteQueue, Payload: payload})
+
+	if _, err := guard.Apply(context.Background(), encoded); err != nil {
+		t.Fatalf("apply queue proposal: %v", err)
+	}
+	preflight.mu.Lock()
+	defer preflight.mu.Unlock()
+	if len(preflight.queueReqs) != 1 || preflight.queueReqs[0].GetQueueId() != "queue-1" || !preflight.queueReqs[0].GetForce() {
+		t.Fatalf("queue preflight requests = %#v, want full Force=true request", preflight.queueReqs)
+	}
+}
+
+func TestProposalGuardAllowsOrdinaryAppliesToOverlap(t *testing.T) {
+	applyStarted := make(chan command.Op, 2)
+	release := make(chan struct{})
+	underlying := &proposalConsensusRecorder{
+		leader:               true,
+		applyStarted:         applyStarted,
+		releaseOrdinaryApply: release,
+	}
+	guard := newProposalGuard(underlying, &proposalPreviewRecorder{})
+	encoded := encodeProposalCommand(t, &command.Command{Op: command.OpSubscribe})
+
+	done := make(chan error, 2)
+	for range 2 {
+		go func() {
+			_, err := guard.Apply(context.Background(), encoded)
+			done <- err
+		}()
+	}
+	for range 2 {
+		select {
+		case <-applyStarted:
+		case <-time.After(time.Second):
+			t.Fatal("ordinary Applies did not overlap in the underlying consensus call")
+		}
+	}
+	close(release)
+	for range 2 {
+		if err := <-done; err != nil {
+			t.Fatalf("ordinary Apply error = %v", err)
+		}
+	}
+}
+
+func TestProposalGuardFairlyOrdersWaitingDeleteBeforeLaterOrdinaryApply(t *testing.T) {
+	applyStarted := make(chan command.Op, 2)
+	releaseDeleteApply := make(chan struct{})
+	underlying := &proposalConsensusRecorder{
+		leader:             true,
+		applyStarted:       applyStarted,
+		releaseDeleteApply: releaseDeleteApply,
+	}
+	guard := newProposalGuard(underlying, &proposalPreviewRecorder{})
+	if err := guard.gate.Acquire(context.Background(), 1); err != nil {
+		t.Fatalf("hold initial reader slot: %v", err)
+	}
+	heldInitialReader := true
+	defer func() {
+		if heldInitialReader {
+			guard.gate.Release(1)
+		}
+	}()
+
+	deleteCommand := encodeProposalCommand(t, &command.Command{Op: command.OpDeleteTopic, Target: "topic-1"})
+	deleteDone := make(chan error, 1)
+	go func() {
+		_, err := guard.Apply(context.Background(), deleteCommand)
+		deleteDone <- err
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for guard.gate.TryAcquire(1) {
+		guard.gate.Release(1)
+		if time.Now().After(deadline) {
+			t.Fatal("delete did not queue for exclusive admission")
+		}
+		runtime.Gosched()
+	}
+
+	ordinaryCommand := encodeProposalCommand(t, &command.Command{Op: command.OpSubscribe})
+	ordinaryDone := make(chan error, 1)
+	go func() {
+		_, err := guard.Apply(context.Background(), ordinaryCommand)
+		ordinaryDone <- err
+	}()
+	guard.gate.Release(1)
+	heldInitialReader = false
+
+	if op := <-applyStarted; op != command.OpDeleteTopic {
+		t.Fatalf("first Apply after held reader = %s, want waiting delete", op)
+	}
+	select {
+	case op := <-applyStarted:
+		t.Fatalf("later %s bypassed delete's exclusive Apply", op)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseDeleteApply)
+	if err := <-deleteDone; err != nil {
+		t.Fatalf("delete Apply error = %v", err)
+	}
+	if op := <-applyStarted; op != command.OpSubscribe {
+		t.Fatalf("Apply after delete = %s, want subscribe", op)
+	}
+	if err := <-ordinaryDone; err != nil {
+		t.Fatalf("ordinary Apply error = %v", err)
 	}
 }
 
 func TestProposalGuardSerializesDeletePreviewAndConcurrentWrite(t *testing.T) {
 	applyStarted := make(chan command.Op, 2)
 	releaseDeleteApply := make(chan struct{})
-	preview := &proposalPreviewRecorder{topicResult: &queue.DeleteTopicResult{}}
+	preview := &proposalPreviewRecorder{}
 	underlying := &proposalConsensusRecorder{
 		leader:             true,
 		applyStarted:       applyStarted,
@@ -235,6 +385,92 @@ func TestProposalGuardSerializesDeletePreviewAndConcurrentWrite(t *testing.T) {
 	}
 	if got := underlying.appliedOperations(); len(got) != 2 || got[0] != command.OpDeleteTopic || got[1] != command.OpSubscribe {
 		t.Fatalf("underlying Apply order = %v, want [delete_topic subscribe]", got)
+	}
+}
+
+func TestProposalGuardCanceledWaiterNeverCallsUnderlyingApply(t *testing.T) {
+	applyStarted := make(chan command.Op, 1)
+	releaseDeleteApply := make(chan struct{})
+	underlying := &proposalConsensusRecorder{
+		leader:             true,
+		applyStarted:       applyStarted,
+		releaseDeleteApply: releaseDeleteApply,
+	}
+	guard := newProposalGuard(underlying, &proposalPreviewRecorder{})
+	deleteCommand := encodeProposalCommand(t, &command.Command{Op: command.OpDeleteTopic, Target: "topic-1"})
+	ordinaryCommand := encodeProposalCommand(t, &command.Command{Op: command.OpSubscribe})
+
+	deleteDone := make(chan error, 1)
+	go func() {
+		_, err := guard.Apply(context.Background(), deleteCommand)
+		deleteDone <- err
+	}()
+	<-applyStarted
+	if guard.gate.TryAcquire(1) {
+		guard.gate.Release(1)
+		t.Fatal("ordinary proposal acquired gate while delete held exclusive admission")
+	}
+
+	waitCtx, cancel := context.WithCancel(context.Background())
+	waiterCalling := make(chan struct{})
+	waiterDone := make(chan error, 1)
+	go func() {
+		close(waiterCalling)
+		_, err := guard.Apply(waitCtx, ordinaryCommand)
+		waiterDone <- err
+	}()
+	<-waiterCalling
+	runtime.Gosched()
+	cancel()
+	if err := <-waiterDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled waiter error = %v, want %v", err, context.Canceled)
+	}
+	if got := underlying.applyCount(); got != 1 {
+		t.Fatalf("underlying Apply calls with canceled waiter = %d, want one delete only", got)
+	}
+	close(releaseDeleteApply)
+	if err := <-deleteDone; err != nil {
+		t.Fatalf("delete Apply error = %v", err)
+	}
+}
+
+func TestProposalGuardCancellationAfterPreflightStopsBeforeApply(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	preflight := &proposalPreviewRecorder{afterCall: cancel}
+	underlying := &proposalConsensusRecorder{leader: true}
+	guard := newProposalGuard(underlying, preflight)
+	encoded := encodeProposalCommand(t, &command.Command{Op: command.OpDeleteTopic, Target: "topic-1"})
+
+	result, err := guard.Apply(ctx, encoded)
+	if result != nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("post-preflight cancellation = %#v, %v; want nil %v", result, err, context.Canceled)
+	}
+	if got := underlying.applyCount(); got != 0 {
+		t.Fatalf("underlying Apply calls after preflight cancellation = %d, want zero", got)
+	}
+}
+
+func TestProposalGuardFailedPreconditionPrecedesCapacity(t *testing.T) {
+	ctx := context.Background()
+	storage, _, queueID := newProposalDeleteFixture(t, "force-precedence")
+	if _, err := storage.Send(ctx, &v1.SendRequest{
+		QueueId:  queueID,
+		Messages: []*v1.SendMessage{{Body: []byte("message")}},
+	}); err != nil {
+		t.Fatalf("send precondition fixture message: %v", err)
+	}
+	underlying := &proposalConsensusRecorder{leader: true}
+	guard := newProposalGuard(underlying, storage)
+	guard.deleteResultLimit = 1
+	store := NewStore(storage, guard, nil, WithApplyTimeout(time.Second))
+
+	result, err := store.DeleteQueue(ctx, &v1.DeleteQueueRequest{QueueId: queueID})
+	var capacityErr *deleteresult.CapacityError
+	if result != nil || !errors.Is(err, pqerr.ErrFailedPrecondition) || errors.As(err, &capacityErr) {
+		t.Fatalf("guarded unforced delete = %#v, %v; want failed precondition before capacity", result, err)
+	}
+	if got := underlying.applyCount(); got != 0 {
+		t.Fatalf("underlying Apply calls after precondition failure = %d, want zero", got)
 	}
 }
 
@@ -317,15 +553,16 @@ func encodeProposalCommand(t *testing.T, cmd *command.Command) []byte {
 type proposalConsensusRecorder struct {
 	consensus.Consensus
 
-	mu                 sync.Mutex
-	leader             bool
-	applyCalls         int
-	barrierCalls       int
-	applied            []command.Op
-	barrierErr         error
-	events             *proposalEventLog
-	applyStarted       chan<- command.Op
-	releaseDeleteApply <-chan struct{}
+	mu                   sync.Mutex
+	leader               bool
+	applyCalls           int
+	barrierCalls         int
+	applied              []command.Op
+	barrierErr           error
+	events               *proposalEventLog
+	applyStarted         chan<- command.Op
+	releaseDeleteApply   <-chan struct{}
+	releaseOrdinaryApply <-chan struct{}
 }
 
 func (c *proposalConsensusRecorder) Apply(_ context.Context, data []byte) (any, error) {
@@ -339,6 +576,7 @@ func (c *proposalConsensusRecorder) Apply(_ context.Context, data []byte) (any, 
 	events := c.events
 	applyStarted := c.applyStarted
 	releaseDeleteApply := c.releaseDeleteApply
+	releaseOrdinaryApply := c.releaseOrdinaryApply
 	c.mu.Unlock()
 	if events != nil {
 		events.add("apply-" + cmd.Op.String())
@@ -348,6 +586,9 @@ func (c *proposalConsensusRecorder) Apply(_ context.Context, data []byte) (any, 
 	}
 	if cmd.Op == command.OpDeleteTopic && releaseDeleteApply != nil {
 		<-releaseDeleteApply
+	}
+	if cmd.Op != command.OpDeleteTopic && cmd.Op != command.OpDeleteQueue && releaseOrdinaryApply != nil {
+		<-releaseOrdinaryApply
 	}
 
 	switch cmd.Op {
@@ -363,6 +604,10 @@ func (c *proposalConsensusRecorder) Apply(_ context.Context, data []byte) (any, 
 }
 
 func (c *proposalConsensusRecorder) IsLeader() bool { return c.leader }
+
+func (*proposalConsensusRecorder) Leader() (string, string, error) {
+	return "leader", "leader-address", nil
+}
 
 func (c *proposalConsensusRecorder) Barrier(context.Context) error {
 	c.mu.Lock()
@@ -395,35 +640,53 @@ func (c *proposalConsensusRecorder) appliedOperations() []command.Op {
 }
 
 type proposalPreviewRecorder struct {
-	mu          sync.Mutex
-	calls       int
-	topicResult *queue.DeleteTopicResult
-	queueResult *queue.DeleteQueueResult
-	events      *proposalEventLog
+	mu        sync.Mutex
+	calls     int
+	limits    []int
+	queueReqs []*v1.DeleteQueueRequest
+	topicErr  error
+	queueErr  error
+	events    *proposalEventLog
+	afterCall func()
 }
 
-func (p *proposalPreviewRecorder) PreviewDeleteTopic(context.Context, string) (*queue.DeleteTopicResult, error) {
+func (p *proposalPreviewRecorder) PreflightDeleteTopic(_ context.Context, _ string, limit int) error {
 	p.mu.Lock()
 	p.calls++
+	p.limits = append(p.limits, limit)
 	events := p.events
+	err := p.topicErr
+	afterCall := p.afterCall
 	p.mu.Unlock()
 	if events != nil {
-		events.add("preview-topic")
+		events.add("preflight-topic")
 	}
-	return p.topicResult, nil
+	if afterCall != nil {
+		afterCall()
+	}
+	return err
 }
 
-func (p *proposalPreviewRecorder) PreviewDeleteQueue(context.Context, string) (*queue.DeleteQueueResult, error) {
+func (p *proposalPreviewRecorder) PreflightDeleteQueue(_ context.Context, input *v1.DeleteQueueRequest, limit int) error {
 	p.mu.Lock()
 	p.calls++
+	p.limits = append(p.limits, limit)
+	p.queueReqs = append(p.queueReqs, input)
+	err := p.queueErr
 	p.mu.Unlock()
-	return p.queueResult, nil
+	return err
 }
 
 func (p *proposalPreviewRecorder) callCount() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.calls
+}
+
+func (p *proposalPreviewRecorder) recordedLimits() []int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]int(nil), p.limits...)
 }
 
 type proposalEventLog struct {

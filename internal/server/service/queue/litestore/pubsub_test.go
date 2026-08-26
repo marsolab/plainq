@@ -154,6 +154,50 @@ func TestStorageDeleteQueueReturnsCascadeAndInventoryIncludesEmptyTopics(t *test
 	}
 }
 
+func TestStorageDeleteQueueRequiresForceForMessagesAndRollsBackEffects(t *testing.T) {
+	ctx := context.Background()
+	storage, _ := newPubSubStorage(t)
+	topic, err := storage.CreateTopic(ctx, &queue.CreateTopicRequest{TopicName: "force-safe"})
+	if err != nil {
+		t.Fatalf("create topic: %v", err)
+	}
+	queueID := createQueue(t, ctx, storage, "force-safe")
+	subscription, err := storage.Subscribe(ctx, topic.TopicID, &queue.SubscribeRequest{QueueID: queueID})
+	if err != nil {
+		t.Fatalf("subscribe queue: %v", err)
+	}
+	if _, err := storage.Send(ctx, &v1.SendRequest{
+		QueueId:  queueID,
+		Messages: []*v1.SendMessage{{Body: []byte("must survive rejected delete")}},
+	}); err != nil {
+		t.Fatalf("send message: %v", err)
+	}
+
+	result, err := storage.DeleteQueue(ctx, &v1.DeleteQueueRequest{QueueId: queueID})
+	if result != nil || !errors.Is(err, pqerr.ErrFailedPrecondition) {
+		t.Fatalf("unforced non-empty delete = %#v, %v; want nil %v", result, err, pqerr.ErrFailedPrecondition)
+	}
+	if _, err := storage.DescribeQueue(ctx, &v1.DescribeQueueRequest{QueueId: queueID}); err != nil {
+		t.Fatalf("queue after rejected delete: %v", err)
+	}
+	inventory, err := storage.TopicInventory(ctx)
+	if err != nil || inventory.SubscriptionCounts[topic.TopicID] != 1 {
+		t.Fatalf("bindings after rejected delete = %#v, %v; want intact", inventory, err)
+	}
+	received, err := storage.Receive(ctx, &v1.ReceiveRequest{QueueId: queueID})
+	if err != nil || len(received.GetMessages()) != 1 {
+		t.Fatalf("messages after rejected delete = %#v, %v; want one", received, err)
+	}
+
+	result, err = storage.DeleteQueue(ctx, &v1.DeleteQueueRequest{QueueId: queueID, Force: true})
+	if err != nil {
+		t.Fatalf("forced non-empty delete: %v", err)
+	}
+	if got := subscriptionIDs(result.RemovedSubscriptions); !reflect.DeepEqual(got, []string{subscription.SubscriptionID}) {
+		t.Fatalf("forced delete effects = %v, want [%s]", got, subscription.SubscriptionID)
+	}
+}
+
 func TestStorageRolledBackDeleteCascadeReturnsNoEffects(t *testing.T) {
 	ctx := context.Background()
 	storage, conn := newPubSubStorage(t)
@@ -303,6 +347,9 @@ create table if not exists "topic_subscriptions"
     constraint topic_subscription_queue_fk foreign key (queue_id) references queue_properties (queue_id) on delete cascade,
     constraint topic_subscription_unique unique (topic_id, queue_id)
 );
+
+create index if not exists topic_subscriptions_queue_id_index
+    on topic_subscriptions (queue_id);
 `
 
 	if _, err := conn.ExecContext(ctx, schema); err != nil {

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/marsolab/plainq/internal/cluster/consensus"
 	"github.com/marsolab/plainq/internal/server/config"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
@@ -39,6 +40,24 @@ func TestPubSubHTTPMapsDomainErrors(t *testing.T) {
 				return nil, pqerr.ErrUnavailable
 			}},
 			method: http.MethodPost, target: "/topics/topic/publish", body: `{"messages":[{"body":"eA=="}]}`, want: http.StatusServiceUnavailable,
+		},
+		"non-empty queue needs force": {
+			storage: &mockStorage{deleteQueueFunc: func(context.Context, *v1.DeleteQueueRequest) (*DeleteQueueResult, error) {
+				return nil, pqerr.ErrFailedPrecondition
+			}},
+			method: http.MethodDelete, target: "/c5s8b4p9e8rg5u5fgq10", want: http.StatusConflict,
+		},
+		"commit outcome unknown": {
+			storage: &mockStorage{deleteTopicFunc: func(context.Context, string) (*DeleteTopicResult, error) {
+				return nil, consensus.ErrCommitUnknown
+			}},
+			method: http.MethodDelete, target: "/topics/topic-1", want: http.StatusInternalServerError,
+		},
+		"partial fanout": {
+			storage: &mockStorage{publishFunc: func(context.Context, string, *PublishRequest) (*PublishResponse, error) {
+				return nil, &PartialPublishError{Causes: []error{pqerr.ErrUnavailable}}
+			}},
+			method: http.MethodPost, target: "/topics/topic-1/publish", body: `{"messages":[{"body":"eA=="}]}`, want: http.StatusInternalServerError,
 		},
 	}
 	for name, tc := range tests {

@@ -2,10 +2,14 @@ package queue
 
 import (
 	"context"
+	"errors"
 
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
+	"github.com/marsolab/servekit/ctxkit"
 	"github.com/marsolab/servekit/grpckit"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -46,12 +50,25 @@ func (s *Service) DeleteQueue(ctx context.Context, r *v1.DeleteQueueRequest) (*v
 	}
 
 	if _, err := s.storage.DeleteQueue(ctx, r); err != nil {
+		if errors.Is(err, pqerr.ErrFailedPrecondition) {
+			return failedPreconditionGRPC[*v1.DeleteQueueResponse](ctx, err)
+		}
 		return grpckit.ErrorGRPC[*v1.DeleteQueueResponse](ctx, pqerr.AsTransport(err))
 	}
 
 	s.reconcileTopicSubscriptionCounts(ctx)
 
 	return &v1.DeleteQueueResponse{}, nil
+}
+
+func failedPreconditionGRPC[T any](ctx context.Context, err error) (T, error) {
+	if hook := ctxkit.GetLogErrHook(ctx); hook != nil {
+		hook(err)
+	}
+
+	var zero T
+
+	return zero, status.Error(codes.FailedPrecondition, codes.FailedPrecondition.String())
 }
 
 func (s *Service) PurgeQueue(ctx context.Context, r *v1.PurgeQueueRequest) (*v1.PurgeQueueResponse, error) {
