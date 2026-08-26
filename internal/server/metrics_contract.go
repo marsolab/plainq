@@ -18,7 +18,7 @@ const (
 	defaultMetricsRetentionPeriod    = 14 * 24 * time.Hour
 	metricSourceAggregated           = "aggregated"
 	metricInterpolationLinear        = "linear"
-	metricUnitMessagesPerSecond      = "messages/s"
+	metricUnitMessagesPerSecond      = "messages_per_second"
 )
 
 // MissingRange describes a contiguous interval without usable samples.
@@ -151,7 +151,16 @@ func (q MetricsQuery) ExpectedPointCount() int64 {
 		return 0
 	}
 
-	return rangeSpan(q.EffectiveTimeRange) / q.SampleIntervalMS
+	// Ordered two's-complement endpoints make this modular subtraction the exact
+	// non-negative span, including the full MinInt64..MaxInt64 range.
+	span := uint64(q.EffectiveTimeRange.To) - uint64(q.EffectiveTimeRange.From) //nolint:gosec
+
+	count := span / uint64(q.SampleIntervalMS)
+	if count > math.MaxInt64 {
+		return math.MaxInt64
+	}
+
+	return int64(count)
 }
 
 // MetricsHandlerConfig pins the public raw grid, retention, and response clock.
@@ -216,16 +225,21 @@ func ceilTo(value, interval int64) int64 {
 		return value
 	}
 
-	floor := floorTo(value, interval)
-	if floor == value {
+	remainder := value % interval
+	if remainder == 0 {
 		return value
 	}
 
-	if floor > math.MaxInt64-interval {
+	quotient := value / interval
+	if value < 0 {
+		return quotient * interval
+	}
+
+	if quotient >= math.MaxInt64/interval {
 		return math.MaxInt64
 	}
 
-	return floor + interval
+	return (quotient + 1) * interval
 }
 
 func canonicalEmptyRange(request TimeRange, closedThrough int64) TimeRange {

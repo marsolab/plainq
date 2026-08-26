@@ -22,7 +22,7 @@ function metric(
     metricName,
     topicId: "topic-1",
     kind: interpolation === "stepAfter" ? "gauge" : "rate",
-    unit: interpolation === "stepAfter" ? "subscriptions" : "messages/s",
+    unit: interpolation === "stepAfter" ? "subscriptions" : "messages_per_second",
     interpolation,
     timeRange,
     resolution: "raw",

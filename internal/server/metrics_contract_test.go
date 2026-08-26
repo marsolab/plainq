@@ -37,13 +37,14 @@ func TestMetricsContractSignedAlignment(t *testing.T) {
 
 func TestMetricsContractExtremeRangesNeverOverflowNegative(t *testing.T) {
 	td.Cmp(t, floorTo(math.MinInt64, 3), int64(math.MinInt64))
+	td.Cmp(t, ceilTo(math.MinInt64, 1_000), int64(math.MinInt64+808))
 	td.Cmp(t, ceilTo(math.MaxInt64, 3), int64(math.MaxInt64))
 
 	query := MetricsQuery{
 		EffectiveTimeRange: TimeRange{From: math.MinInt64, To: math.MaxInt64},
 		SampleIntervalMS:   1_000,
 	}
-	td.Cmp(t, query.ExpectedPointCount(), int64(math.MaxInt64/1_000))
+	td.Cmp(t, query.ExpectedPointCount(), int64(18_446_744_073_709_551))
 }
 
 func TestMetricsContractIntegerConversionsRejectRoundedOverflow(t *testing.T) {
@@ -266,7 +267,7 @@ func TestMetricsContractBuildSeriesUsesExactCoverageAndRetention(t *testing.T) {
 
 	series := buildMetricSeries("topic-1", metricSeriesSpec{
 		Name: collector.MetricTopicPublishRate, Kind: collector.MetricKindRate,
-		Unit: "messages/s", Interpolation: "linear",
+		Unit: "messages_per_second", Interpolation: "linear",
 	}, query, result)
 
 	td.Cmp(t, series.Samples, SampleMetadata{
@@ -300,7 +301,7 @@ func TestMetricsContractBuildSeriesPreservesAggregateZeroFields(t *testing.T) {
 
 	series := buildMetricSeries("topic-1", metricSeriesSpec{
 		Name: collector.MetricTopicPublishRate, Kind: collector.MetricKindRate,
-		Unit: "messages/s", Interpolation: "linear",
+		Unit: "messages_per_second", Interpolation: "linear",
 	}, query, result)
 	encoded, err := json.Marshal(series.DataPoints)
 	td.CmpNoError(t, err)
@@ -359,7 +360,7 @@ func TestMetricsContractCanonicalEmptySeriesUsesArrays(t *testing.T) {
 	query := testMetricsQuery(5_000, 5_000, 1_000)
 	series := buildMetricSeries("topic-1", metricSeriesSpec{
 		Name: collector.MetricTopicPublishRate, Kind: collector.MetricKindRate,
-		Unit: "messages/s", Interpolation: "linear",
+		Unit: "messages_per_second", Interpolation: "linear",
 	}, query, collector.SeriesResult{})
 
 	encoded, err := json.Marshal(series)
