@@ -180,7 +180,7 @@ func TestTerminalPendingTopicKeepsFinalCountersRatesAndEventCoverage(t *testing.
 	assertTask9CoverageAbsent(t, batch.Coverage, "topic-1", MetricTopicSubscriptionsCurrent)
 }
 
-func TestTerminalPendingProductionOrderPersistsFinalMetricsThroughZeroAndRollup(t *testing.T) {
+func TestTerminalTopicPersistsZeroAndCoverageBeforeRemoval(t *testing.T) {
 	ctx := context.Background()
 	store, _ := newTelemetryTestStoreWithConn(t)
 	if reset, err := store.ResetRawInterval(ctx, 1_000); err != nil || !reset {
@@ -373,7 +373,7 @@ func recordTerminalPendingDeleteProductionOrder(clock *task9Clock, c *Collector,
 	})
 }
 
-func TestTopicEventAtCutoverBoundaryStaysForNextBucket(t *testing.T) {
+func TestCollectionRetainsFutureBucketEvents(t *testing.T) {
 	clock := newTask9Clock(time.UnixMilli(1_999))
 	store := newTask9Store()
 	c := New(store, WithCollectionInterval(time.Second), WithClock(clock.Now))
@@ -403,7 +403,7 @@ func TestTopicEventAtCutoverBoundaryStaysForNextBucket(t *testing.T) {
 	})
 }
 
-func TestBlockedEnqueueCannotArriveBehindCoverage(t *testing.T) {
+func TestEventAtBoundaryCannotArriveBehindCoverage(t *testing.T) {
 	clock := newTask9Clock(time.UnixMilli(1_500))
 	store := newTask9Store()
 	store.saveStarted = make(chan struct{})
@@ -468,7 +468,7 @@ func TestTopicEventBufferReportsOverflow(t *testing.T) {
 	}
 }
 
-func TestTopicEventDirtyIntervalsStayBoundedAcrossManyBuckets(t *testing.T) {
+func TestDirtyEventIntervalAdvancesWithoutGrowingAcrossCutover(t *testing.T) {
 	clock := newTask9Clock(time.UnixMilli(1_100))
 	c := New(newTask9Store(), WithCollectionInterval(time.Second), WithClock(clock.Now))
 	c.eventBufferLimit = 0
@@ -497,9 +497,51 @@ func TestTopicEventDirtyIntervalsStayBoundedAcrossManyBuckets(t *testing.T) {
 			t.Fatalf("dirty interval %s = %#v, want [1000,100000]", metric, interval)
 		}
 	}
+
+	requireCollectTopicBoundary(t, c, 101_000)
+	if got := len(c.eventDirty); got != 0 {
+		t.Fatalf("committed cutover retained expired dirty families = %#v", c.eventDirty)
+	}
 }
 
-func TestFrozenBoundarySharesEventCapAndRetriesByteForByte(t *testing.T) {
+func TestDirtyEventBucketNeverGetsCoverage(t *testing.T) {
+	clock := newTask9Clock(time.UnixMilli(1_100))
+	store := newTask9Store()
+	c := New(store, WithCollectionInterval(time.Second), WithClock(clock.Now))
+	c.eventBufferLimit = 0
+	c.RecordTopicRequest(telemetry.TopicOperationEvent{
+		Backend: metrics.BackendSQLite, Operation: metrics.OpPublish,
+		Result: metrics.ResultOK, Duration: time.Millisecond,
+	})
+
+	requireCollectTopicBoundary(t, c, 2_000)
+	assertTask9CoverageAbsent(t, store.lastBatch(t).Coverage, "", MetricTopicRequestDuration)
+}
+
+func TestFailedBoundaryRetainsDirtyStateUntilCommit(t *testing.T) {
+	sentinel := errors.New("write failed")
+	clock := newTask9Clock(time.UnixMilli(1_100))
+	store := newTask9Store()
+	store.saveErrors = []error{sentinel}
+	c := New(store, WithCollectionInterval(time.Second), WithClock(clock.Now))
+	c.eventBufferLimit = 0
+	c.RecordTopicPublish(telemetry.TopicPublishEvent{Destinations: 1})
+
+	if err := c.collectTopicBoundary(context.Background(), 2_000); !errors.Is(err, sentinel) {
+		t.Fatalf("failed boundary error = %v, want %v", err, sentinel)
+	}
+	if _, exists := c.eventDirty[MetricTopicFanout]; !exists {
+		t.Fatal("failed boundary cleared live dirty interval")
+	}
+	if err := c.collectTopicBoundary(context.Background(), 2_000); err != nil {
+		t.Fatalf("retry boundary: %v", err)
+	}
+	if _, exists := c.eventDirty[MetricTopicFanout]; exists {
+		t.Fatal("committed boundary retained expired dirty interval")
+	}
+}
+
+func TestSameBoundaryRetryDoesNotDuplicateRawSeriesOrEvents(t *testing.T) {
 	sentinel := errors.New("lost commit acknowledgment")
 	clock := newTask9Clock(time.UnixMilli(1_500))
 	store := newTask9Store()
@@ -917,6 +959,9 @@ func TestTerminalStateSurvivesCollectorRestart(t *testing.T) {
 	}
 
 	restarted := New(store, WithClock(clock.Now))
+	if err := restarted.loadDurableTerminalReservations(context.Background()); err != nil {
+		t.Fatalf("load restart terminal states: %v", err)
+	}
 	if got := restarted.terminalReservationCount(); got != 1 {
 		t.Fatalf("restart terminal reservations = %d, want durable 1", got)
 	}
@@ -961,6 +1006,9 @@ func TestTerminalReappearanceCancelsExactDurableGenerationAndAllowsRedeletion(t 
 
 			if restart {
 				current = New(store, WithCollectionInterval(time.Second), WithClock(clock.Now))
+				if err := current.loadDurableTerminalReservations(ctx); err != nil {
+					t.Fatalf("load restart terminal states: %v", err)
+				}
 			}
 
 			clock.Set(time.UnixMilli(2_600))
@@ -1077,6 +1125,9 @@ func TestTerminalReservationFailsClosedWhenDurableInventoryCannotLoad(t *testing
 	store.listErr = errors.New("cannot inspect durable terminal rows")
 	clock := newTask9Clock(time.UnixMilli(1_100))
 	c := New(store, WithClock(clock.Now))
+	if err := c.loadDurableTerminalReservations(context.Background()); err == nil {
+		t.Fatal("durable inventory load returned nil, want failure")
+	}
 	c.RecordTopicState(telemetry.TopicStateEvent{
 		TopicsExist: 1, Subscriptions: map[string]int64{"topic-1": 2},
 	})
@@ -1119,7 +1170,7 @@ func TestTerminalAssignmentAndCompletionReleaseExactlyOnce(t *testing.T) {
 	}
 }
 
-func TestAssignedTerminalRetrySurvivesRestartRollbackAndMinuteRollup(t *testing.T) {
+func TestTerminalTopicFailureAcrossMinuteDoesNotRetarget(t *testing.T) {
 	ctx := context.Background()
 	store, conn := newTelemetryTestStoreWithConn(t)
 	if reset, err := store.ResetRawInterval(ctx, 1_000); err != nil || !reset {
@@ -1145,6 +1196,9 @@ func TestAssignedTerminalRetrySurvivesRestartRollbackAndMinuteRollup(t *testing.
 	}
 
 	restarted := New(store, WithCollectionInterval(time.Second), WithClock(clock.Now))
+	if err := restarted.loadDurableTerminalReservations(ctx); err != nil {
+		t.Fatalf("load assigned state after restart: %v", err)
+	}
 	due := restarted.terminalStatesDue(60_000)
 	if len(due) != 1 || due[0].TargetBucket == nil || *due[0].TargetBucket != 59_000 {
 		t.Fatalf("assigned state after restart = %#v, want original target 59000", due)
@@ -1171,6 +1225,9 @@ BEGIN SELECT RAISE(ABORT, 'terminal coverage failure'); END;`); err != nil {
 
 	clock.Set(time.UnixMilli(61_500))
 	afterMinute := New(store, WithCollectionInterval(time.Second), WithClock(clock.Now))
+	if err := afterMinute.loadDurableTerminalReservations(ctx); err != nil {
+		t.Fatalf("load retry state after minute advance: %v", err)
+	}
 	due = afterMinute.terminalStatesDue(62_000)
 	if len(due) != 1 || due[0].TargetBucket == nil || *due[0].TargetBucket != 59_000 {
 		t.Fatalf("retry state after minute advance = %#v, want stable target 59000", due)
@@ -1217,7 +1274,7 @@ func TestCleanZeroEventCoverageHasNoFabricatedRow(t *testing.T) {
 	assertTask9Coverage(t, batch.Coverage, "topic-1", MetricTopicFanout, MetricKindEvent)
 }
 
-func TestDelayedTopicEventsPersistWithoutOldCoverage(t *testing.T) {
+func TestDelayedCoordinatorLeavesSkippedRawBucketsUncovered(t *testing.T) {
 	clock := newTask9Clock(time.UnixMilli(1_500))
 	store := newTask9Store()
 	c := New(store, WithCollectionInterval(time.Second), WithClock(clock.Now))

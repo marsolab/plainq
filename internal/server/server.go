@@ -2,7 +2,6 @@ package server
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -51,6 +50,8 @@ type PlainQ struct {
 	metricsStore     *collector.SQLiteStore
 	metricsHandler   *MetricsHandler
 
+	metricsCollectorFactory telemetryCollectorFactory
+
 	// clusterNode is set when this server is a cluster member.
 	clusterNode    ClusterNode
 	clusterHandler *ClusterHandler
@@ -71,6 +72,10 @@ func NewServer(
 	oauthSvc *oauth.Service,
 	opts ...Option,
 ) (*servekit.Server, error) {
+	if err := validateTelemetryConfig(*cfg); err != nil {
+		return nil, fmt.Errorf("validate telemetry config: %w", err)
+	}
+
 	// Create a server which holds and serve all listeners.
 	server := servekit.NewServer(logger)
 
@@ -83,6 +88,8 @@ func NewServer(
 		rbac:         rbacSvc,
 		oauth:        oauthSvc,
 		tokenManager: tokenManager,
+
+		metricsCollectorFactory: newTelemetryCollector,
 	}
 
 	// Apply server options.
@@ -96,7 +103,11 @@ func NewServer(
 
 	// Initialize metrics collector if telemetry database is provided.
 	if pq.metricsStore != nil {
-		pq.metricsCollector = collector.New(pq.metricsStore, collector.WithLogger(logger))
+		pq.metricsCollector = pq.metricsCollectorFactory(pq.metricsStore, logger, telemetryCollectorSettings{
+			collectionInterval: cfg.TelemetryLiteScrapeTimeout,
+			cleanupInterval:    cfg.TelemetryLiteGCTimeout,
+			retentionPeriod:    cfg.TelemetryLiteRetentionPeriod,
+		})
 		pq.metricsHandler = NewMetricsHandler(pq.metricsCollector, pq.metricsStore)
 
 		// The storage observer already emits every queue event to Prometheus.
@@ -106,11 +117,9 @@ func NewServer(
 		attachTelemetryObservers(pq.localObserver, pq.logicalObserver, pq.metricsCollector)
 
 		pq.metricsCollector.RegisterMetrics()
+		server.RegisterListener("telemetry", &telemetryListener{worker: pq.metricsCollector})
 
-		// Start the collector in background.
-		go pq.metricsCollector.Start(context.Background())
-
-		logger.Info("Telemetry metrics collector started")
+		logger.Info("Telemetry metrics collector registered")
 	}
 
 	// Create the HTTP listener.

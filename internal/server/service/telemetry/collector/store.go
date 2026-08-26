@@ -181,23 +181,98 @@ func (s *SQLiteStore) Aggregate1d(ctx context.Context, fromTimestamp, toTimestam
 //
 //nolint:revive // argument-limit: signature matches Store interface
 func (s *SQLiteStore) CleanupOldMetrics(ctx context.Context, rawBefore, m1Before, m5Before, h1Before, d1Before int64) error {
-	queries := []string{
-		`DELETE FROM metrics_raw WHERE timestamp < ?`,
-		`DELETE FROM telemetry_collection_commits WHERE boundary < ?`,
-		`DELETE FROM metrics_1m WHERE bucket_start < ?`,
-		`DELETE FROM metrics_5m WHERE timestamp < ?`,
-		`DELETE FROM metrics_1h WHERE bucket_start < ?`,
-		`DELETE FROM metrics_1d WHERE bucket_start < ?`,
-		`DELETE FROM rate_snapshots WHERE timestamp < ?`,
-		`DELETE FROM queue_stats_snapshot WHERE timestamp < ?`,
+	tx, err := pqlite.BeginTx(ctx, s.db)
+	if err != nil {
+		return fmt.Errorf("cleanup old metrics: begin transaction: %w", err)
+	}
+	defer rollback(tx)
+
+	deletes := []struct {
+		name      string
+		query     string
+		threshold int64
+	}{
+		{
+			name:      "raw metrics",
+			query:     `DELETE FROM metrics_raw WHERE timestamp < ?`,
+			threshold: rawBefore,
+		},
+		{
+			name:      "collection commits",
+			query:     `DELETE FROM telemetry_collection_commits WHERE boundary < ?`,
+			threshold: rawBefore,
+		},
+		{
+			name:      "raw coverage",
+			query:     `DELETE FROM telemetry_coverage WHERE resolution = 'raw' AND bucket_start < ?`,
+			threshold: rawBefore,
+		},
+		{
+			name:      "one-minute metrics",
+			query:     `DELETE FROM metrics_1m WHERE bucket_start < ?`,
+			threshold: m1Before,
+		},
+		{
+			name:      "one-minute coverage",
+			query:     `DELETE FROM telemetry_coverage WHERE resolution = '1m' AND bucket_start < ?`,
+			threshold: m1Before,
+		},
+		{
+			name:      "legacy five-minute metrics",
+			query:     `DELETE FROM metrics_5m WHERE timestamp < ?`,
+			threshold: m5Before,
+		},
+		{
+			name:      "one-hour metrics",
+			query:     `DELETE FROM metrics_1h WHERE bucket_start < ?`,
+			threshold: h1Before,
+		},
+		{
+			name:      "one-hour coverage",
+			query:     `DELETE FROM telemetry_coverage WHERE resolution = '1h' AND bucket_start < ?`,
+			threshold: h1Before,
+		},
+		{
+			name:      "one-day metrics",
+			query:     `DELETE FROM metrics_1d WHERE bucket_start < ?`,
+			threshold: d1Before,
+		},
+		{
+			name:      "one-day coverage",
+			query:     `DELETE FROM telemetry_coverage WHERE resolution = '1d' AND bucket_start < ?`,
+			threshold: d1Before,
+		},
+		{
+			name:      "queue statistics",
+			query:     `DELETE FROM queue_stats_snapshot WHERE timestamp < ?`,
+			threshold: rawBefore,
+		},
+		{
+			name: "rate snapshots",
+			query: `DELETE FROM rate_snapshots AS candidate
+WHERE candidate.timestamp < ?
+  AND EXISTS (
+      SELECT 1
+      FROM rate_snapshots AS newer
+      WHERE newer.queue_id = candidate.queue_id
+        AND newer.metric_name = candidate.metric_name
+        AND (
+            newer.timestamp > candidate.timestamp
+            OR (newer.timestamp = candidate.timestamp AND newer.id > candidate.id)
+        )
+  )`,
+			threshold: rawBefore,
+		},
 	}
 
-	thresholds := []int64{rawBefore, rawBefore, m1Before, m5Before, h1Before, d1Before, rawBefore, rawBefore}
-
-	for i, query := range queries {
-		if _, err := s.db.ExecContext(ctx, query, thresholds[i]); err != nil {
-			return fmt.Errorf("cleanup query %d: %w", i, err)
+	for _, deletion := range deletes {
+		if _, err := tx.ExecContext(ctx, deletion.query, deletion.threshold); err != nil {
+			return fmt.Errorf("cleanup old metrics: delete %s: %w", deletion.name, err)
 		}
+	}
+
+	if err := s.commitTx(tx); err != nil {
+		return fmt.Errorf("cleanup old metrics: commit: %w", err)
 	}
 
 	return nil

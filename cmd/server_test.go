@@ -335,3 +335,74 @@ func TestHelmUsesSeparateLivenessAndReadinessRoutes(t *testing.T) {
 		}
 	}
 }
+
+type telemetryCloserForTest struct {
+	events *[]string
+}
+
+func (c *telemetryCloserForTest) Close() error {
+	*c.events = append(*c.events, "database closed")
+
+	return nil
+}
+
+type contextServerForTest struct {
+	events *[]string
+	err    error
+}
+
+func (s *contextServerForTest) Serve(context.Context) error {
+	*s.events = append(*s.events, "collector stopped")
+
+	return s.err
+}
+
+func TestTelemetryDBClosesAfterCollectorStops(t *testing.T) {
+	t.Run("serve completion", func(t *testing.T) {
+		var events []string
+		serveErr := errors.New("serve stopped")
+		db := &telemetryCloserForTest{events: &events}
+		server := &contextServerForTest{events: &events, err: serveErr}
+
+		err := serveWithTelemetryDB(
+			context.Background(),
+			logkit.NewNop(),
+			db,
+			func() (contextServer, error) { return server, nil },
+		)
+		if !errors.Is(err, serveErr) {
+			t.Fatalf("serve error = %v, want %v", err, serveErr)
+		}
+		assertLifecycleEvents(t, events, []string{"collector stopped", "database closed"})
+	})
+
+	t.Run("construction failure", func(t *testing.T) {
+		var events []string
+		constructionErr := errors.New("construction failed")
+		db := &telemetryCloserForTest{events: &events}
+
+		err := serveWithTelemetryDB(
+			context.Background(),
+			logkit.NewNop(),
+			db,
+			func() (contextServer, error) { return nil, constructionErr },
+		)
+		if !errors.Is(err, constructionErr) {
+			t.Fatalf("construction error = %v, want %v", err, constructionErr)
+		}
+		assertLifecycleEvents(t, events, []string{"database closed"})
+	})
+}
+
+func assertLifecycleEvents(t *testing.T, got, want []string) {
+	t.Helper()
+
+	if len(got) != len(want) {
+		t.Fatalf("lifecycle events = %v, want %v", got, want)
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("lifecycle events = %v, want %v", got, want)
+		}
+	}
+}

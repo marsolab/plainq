@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -146,6 +147,36 @@ type storageBackend struct {
 	sqlite *litekit.Conn
 	turso  *sql.DB
 	pgpool *pgxpool.Pool
+}
+
+type contextServer interface {
+	Serve(ctx context.Context) error
+}
+
+func serveWithTelemetryDB(
+	ctx context.Context,
+	logger *slog.Logger,
+	telemetryDB io.Closer,
+	buildServer func() (contextServer, error),
+) error {
+	if telemetryDB != nil {
+		defer func() {
+			if err := telemetryDB.Close(); err != nil {
+				logger.Error("Failed to close telemetry database", slog.String("error", err.Error()))
+			}
+		}()
+	}
+
+	plainqServer, err := buildServer()
+	if err != nil {
+		return err
+	}
+
+	if err := plainqServer.Serve(ctx); err != nil {
+		return fmt.Errorf("serve PlainQ server: %w", err)
+	}
+
+	return nil
 }
 
 // lite returns the handle for the SQLite-dialect drivers — a local SQLite file
@@ -425,6 +456,10 @@ func serverCommand() *commandSpec {
 
 			logger.Info("Starting plainq server")
 
+			if err := server.ValidateTelemetryConfig(cfg); err != nil {
+				return fmt.Errorf("validate telemetry config: %w", err)
+			}
+
 			var checker hc.HealthChecker = hc.NewNopChecker()
 			var healthServices *hc.MultiServiceChecker
 
@@ -585,7 +620,10 @@ func serverCommand() *commandSpec {
 			oauthService := oauth.NewService(&cfg, logger, oauthStorage)
 
 			// Initialize telemetry database if enabled.
-			var serverOpts []server.Option
+			var (
+				serverOpts      []server.Option
+				telemetryCloser io.Closer
+			)
 
 			serverOpts = append(serverOpts, server.WithTelemetryObservers(telemetryWiring.local, telemetryWiring.logical))
 
@@ -601,23 +639,35 @@ func serverCommand() *commandSpec {
 					)
 				} else {
 					serverOpts = append(serverOpts, server.WithMetricsStore(telemetryDB))
+					telemetryCloser = telemetryDB
 
 					logger.Info("Telemetry metrics database initialized")
 				}
 			}
 
-			plainqServer, serverErr := server.NewServer(&cfg, logger, checker, tokenManager, queueService, accountService,
-				onboardingService, rbacService, oauthService, serverOpts...,
-			)
-			if serverErr != nil {
-				return fmt.Errorf("create PlainQ server: %s", serverErr.Error())
-			}
+			return serveWithTelemetryDB(ctx, logger, telemetryCloser, func() (contextServer, error) {
+				plainqServer, serverErr := server.NewServer(
+					&cfg,
+					logger,
+					checker,
+					tokenManager,
+					queueService,
+					accountService,
+					onboardingService,
+					rbacService,
+					oauthService,
+					serverOpts...,
+				)
+				if serverErr != nil {
+					return nil, fmt.Errorf("create PlainQ server: %w", serverErr)
+				}
 
-			logger.Info("Houston Web UI",
-				slog.String("address", printAddrHTTP(cfg.HTTPAddr)),
-			)
+				logger.Info("Houston Web UI",
+					slog.String("address", printAddrHTTP(cfg.HTTPAddr)),
+				)
 
-			return plainqServer.Serve(ctx)
+				return plainqServer, nil
+			})
 		},
 	}
 }
@@ -1187,12 +1237,22 @@ func initTelemetryDB(cfg *config.Config, logger *slog.Logger) (*litekit.Conn, er
 	// Apply telemetry schema migrations.
 	evolver, evolverErr := litekit.NewEvolver(conn, mutations.TelemetryMutation())
 	if evolverErr != nil {
-		return nil, fmt.Errorf("create telemetry schema evolver: %w", evolverErr)
+		return nil, closeTelemetryConnAfterInitFailure(conn,
+			fmt.Errorf("create telemetry schema evolver: %w", evolverErr))
 	}
 
 	if err := evolver.MutateSchema(); err != nil {
-		return nil, fmt.Errorf("telemetry schema mutation: %w", err)
+		return nil, closeTelemetryConnAfterInitFailure(conn,
+			fmt.Errorf("telemetry schema mutation: %w", err))
 	}
 
 	return conn, nil
+}
+
+func closeTelemetryConnAfterInitFailure(conn io.Closer, initErr error) error {
+	if closeErr := conn.Close(); closeErr != nil {
+		return errors.Join(initErr, fmt.Errorf("close telemetry database after initialization failure: %w", closeErr))
+	}
+
+	return initErr
 }

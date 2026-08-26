@@ -95,14 +95,19 @@ type dirtyInterval struct {
 }
 
 type frozenTopicBoundary struct {
-	boundary       int64
-	batch          CollectionBatch
-	eventCount     int
-	baselines      map[string]topicBaseline
-	rates          map[string]TopicRates
-	accumulators   map[string]*topicAccumulator
-	systemBaseline topicBaseline
-	systemRates    TopicRates
+	boundary         int64
+	batch            CollectionBatch
+	eventCount       int
+	queueBaselines   map[string]queueRateBaselines
+	queueRates       map[string]Rates
+	queueMetrics     map[string]*QueueMetrics
+	systemQueue      queueRateBaselines
+	systemQueueRates Rates
+	baselines        map[string]topicBaseline
+	rates            map[string]TopicRates
+	accumulators     map[string]*topicAccumulator
+	systemBaseline   topicBaseline
+	systemRates      TopicRates
 }
 
 type terminalKey struct {
@@ -653,9 +658,11 @@ func (c *Collector) collectTopicBoundary(ctx context.Context, boundary int64) er
 		}
 
 		c.eventWatermark = boundary
+		c.queueMu.RLock()
 		c.topicMu.Lock()
 		c.frozenBoundary = c.freezeTopicBoundaryLocked(boundary, intervalMS)
 		c.topicMu.Unlock()
+		c.queueMu.RUnlock()
 	}
 
 	frozen := c.frozenBoundary
@@ -680,6 +687,9 @@ func (c *Collector) collectTopicBoundary(ctx context.Context, boundary int64) er
 	c.topicMu.Lock()
 	c.finalizeTopicBoundaryLocked(frozen)
 	c.topicMu.Unlock()
+	c.queueMu.Lock()
+	c.finalizeQueueBoundaryLocked(frozen)
+	c.queueMu.Unlock()
 	c.lastTopicBoundary = frozen.boundary
 	c.frozenBoundary = nil
 	c.advanceDirtyAfterBoundaryLocked(frozen.boundary)
@@ -687,6 +697,7 @@ func (c *Collector) collectTopicBoundary(ctx context.Context, boundary int64) er
 	return nil
 }
 
+//nolint:cyclop // Freezing atomically enumerates events, topics, queues, and coverage in one cutover.
 func (c *Collector) freezeTopicBoundaryLocked(boundary, intervalMS int64) *frozenTopicBoundary {
 	bucketStart := boundary - intervalMS
 	due := make([]MetricSample, 0, len(c.eventQueue))
@@ -708,15 +719,31 @@ func (c *Collector) freezeTopicBoundaryLocked(boundary, intervalMS int64) *froze
 			Boundary: boundary, SampleIntervalMS: intervalMS,
 			Samples: append([]MetricSample(nil), due...),
 		},
-		eventCount:   len(due),
-		baselines:    make(map[string]topicBaseline, len(c.topicMetrics)),
-		rates:        make(map[string]TopicRates, len(c.topicMetrics)),
-		accumulators: make(map[string]*topicAccumulator, len(c.topicMetrics)),
+		eventCount:     len(due),
+		queueBaselines: make(map[string]queueRateBaselines, len(c.queueMetrics)),
+		queueRates:     make(map[string]Rates, len(c.queueMetrics)),
+		queueMetrics:   make(map[string]*QueueMetrics, len(c.queueMetrics)),
+		baselines:      make(map[string]topicBaseline, len(c.topicMetrics)),
+		rates:          make(map[string]TopicRates, len(c.topicMetrics)),
+		accumulators:   make(map[string]*topicAccumulator, len(c.topicMetrics)),
 	}
 
-	c.appendSubjectBoundaryLocked(frozen, "", &c.topicSystem.topicAccumulator,
+	subjectComplete := make(map[string]bool, len(c.topicMetrics)+len(c.queueMetrics)+1)
+	subjectSeen := make(map[string]bool, len(c.topicMetrics)+len(c.queueMetrics)+1)
+	markSubject := func(subjectID string, complete bool) {
+		if subjectSeen[subjectID] {
+			subjectComplete[subjectID] = subjectComplete[subjectID] && complete
+
+			return
+		}
+
+		subjectSeen[subjectID] = true
+		subjectComplete[subjectID] = complete
+	}
+
+	markSubject("", c.appendSubjectBoundaryLocked(frozen, "", &c.topicSystem.topicAccumulator,
 		c.topicSystem.subscriptionsCurrent, c.topicSystem.subscriptionsKnown,
-		true, c.topicSystem.topicsExist, c.topicSystem.topicsKnown, bucketStart, intervalMS)
+		true, c.topicSystem.topicsExist, c.topicSystem.topicsKnown, bucketStart, intervalMS))
 
 	topicIDs := make([]string, 0, len(c.topicMetrics))
 	for topicID := range c.topicMetrics {
@@ -729,9 +756,28 @@ func (c *Collector) freezeTopicBoundaryLocked(boundary, intervalMS int64) *froze
 		current := c.topicMetrics[topicID]
 		activeGauge := !current.terminalPending
 		frozen.accumulators[topicID] = &current.topicAccumulator
-		c.appendSubjectBoundaryLocked(frozen, topicID, &current.topicAccumulator,
+		markSubject(topicID, c.appendSubjectBoundaryLocked(frozen, topicID, &current.topicAccumulator,
 			current.subscriptionsCurrent, current.subscriptionsKnown && activeGauge,
-			current.authoritative && activeGauge, 0, false, bucketStart, intervalMS)
+			current.authoritative && activeGauge, 0, false, bucketStart, intervalMS))
+	}
+
+	c.appendQueueBoundaryLocked(frozen, boundary, bucketStart, intervalMS, markSubject)
+
+	coveredSubjects := make([]string, 0, len(subjectSeen))
+
+	for subjectID, complete := range subjectComplete {
+		if complete {
+			coveredSubjects = append(coveredSubjects, subjectID)
+		}
+	}
+
+	sort.Strings(coveredSubjects)
+
+	for _, subjectID := range coveredSubjects {
+		frozen.batch.Coverage = append(frozen.batch.Coverage, CoverageBucket{
+			Resolution: ResolutionRaw, BucketStart: bucketStart,
+			SubjectID: subjectID, SampleIntervalMS: intervalMS,
+		})
 	}
 
 	return frozen
@@ -748,7 +794,7 @@ func (c *Collector) appendSubjectBoundaryLocked(
 	topicsExist int64,
 	topicsKnown bool,
 	bucketStart, intervalMS int64,
-) {
+) bool {
 	appendCounter := func(metricName, labels string, value uint64) {
 		appendPeriodicSample(&frozen.batch, MetricSample{
 			Timestamp: bucketStart, SubjectID: subjectID, MetricName: metricName,
@@ -820,13 +866,8 @@ func (c *Collector) appendSubjectBoundaryLocked(
 
 	completeSubject = completeSubject && accumulator.baseline.boundary == bucketStart
 
-	if completeSubject && !c.anyEventDirtyAtLocked(bucketStart) &&
-		!c.anyTopicDirtyAtLocked(subjectID, bucketStart) {
-		frozen.batch.Coverage = append(frozen.batch.Coverage, CoverageBucket{
-			Resolution: ResolutionRaw, BucketStart: bucketStart,
-			SubjectID: subjectID, SampleIntervalMS: intervalMS,
-		})
-	}
+	return completeSubject && !c.anyEventDirtyAtLocked(bucketStart) &&
+		!c.anyTopicDirtyAtLocked(subjectID, bucketStart)
 }
 
 func appendPeriodicSample(batch *CollectionBatch, sample MetricSample, intervalMS int64, covered bool) {
@@ -1053,31 +1094,54 @@ func advanceDirtyIntervals(intervals map[string]dirtyInterval, boundary int64) {
 	}
 }
 
-func (c *Collector) loadDurableTerminalReservations() {
+//nolint:cyclop // Loading reconciles a bounded durable generation inventory with live reservations.
+func (c *Collector) loadDurableTerminalReservations(ctx context.Context) error {
+	c.terminalMu.Lock()
+	if c.terminalLoaded {
+		c.terminalMu.Unlock()
+
+		return nil
+	}
+	c.terminalMu.Unlock()
+
 	if c.store == nil {
-		return
+		c.terminalMu.Lock()
+		c.terminalLoaded = true
+		c.terminalLoadFailed = false
+		c.terminalMu.Unlock()
+
+		return nil
 	}
 
-	states, err := c.store.ListTerminalStates(context.Background())
+	states, err := c.store.ListTerminalStates(ctx)
 	if err != nil {
+		c.terminalMu.Lock()
 		c.terminalLoadFailed = true
+		c.terminalMu.Unlock()
 		c.persist(metrics.TelemetryOpTerminalState, err)
 
-		return
+		return fmt.Errorf("load durable terminal states: %w", err)
 	}
 
 	c.terminalMu.Lock()
 	defer c.terminalMu.Unlock()
 
+	newEntries := 0
+
 	for _, state := range states {
-		if len(c.terminalEntries) >= c.terminalLimit {
-			c.terminalLoadFailed = true
-
-			metrics.RecordTelemetryTerminalStateDropped(1)
-
-			break
+		key := terminalKey{subjectID: state.SubjectID, generation: state.Generation}
+		if _, exists := c.terminalEntries[key]; !exists {
+			newEntries++
 		}
+	}
 
+	if c.terminalLimit <= 0 || newEntries > c.terminalLimit-len(c.terminalEntries) {
+		c.terminalLoadFailed = true
+
+		return errors.New("load durable terminal states: inventory exceeds configured limit")
+	}
+
+	for _, state := range states {
 		stateCopy := state
 		reservation := &terminalReservation{state: stateCopy, durable: true}
 		key := terminalKey{subjectID: state.SubjectID, generation: state.Generation}
@@ -1103,6 +1167,11 @@ func (c *Collector) loadDurableTerminalReservations() {
 			c.queueTerminalCancelLocked(reservation)
 		}
 	}
+
+	c.terminalLoadFailed = false
+	c.terminalLoaded = true
+
+	return nil
 }
 
 func (c *Collector) terminalStateBefore(left, right TerminalState) bool {
@@ -1156,15 +1225,19 @@ func (c *Collector) reserveTerminalLocked(subjectID string, topic *TopicMetrics,
 		return true
 	}
 
-	if c.terminalLoadFailed || c.terminalLimit <= 0 || len(c.terminalEntries) >= c.terminalLimit ||
-		c.terminalNextGeneration == math.MaxInt64 {
+	if c.terminalLoadFailed || c.terminalLimit <= 0 || len(c.terminalEntries) >= c.terminalLimit {
 		return false
 	}
 
-	c.terminalNextGeneration++
+	generation, ok := nextTerminalGeneration(c.terminalNextGeneration)
+	if !ok {
+		return false
+	}
+
+	c.terminalNextGeneration = generation
 	reservation := &terminalReservation{
 		state: TerminalState{
-			SubjectID: subjectID, Generation: c.terminalNextGeneration, ObservedAt: observedAt,
+			SubjectID: subjectID, Generation: generation, ObservedAt: observedAt,
 		},
 		operation: terminalEnqueue,
 	}
@@ -1174,6 +1247,21 @@ func (c *Collector) reserveTerminalLocked(subjectID string, topic *TopicMetrics,
 	topic.terminalGeneration = reservation.state.Generation
 
 	return true
+}
+
+func nextTerminalGeneration(after int64) (int64, bool) {
+	for {
+		current := terminalGenerationSequence.Load()
+
+		base := max(current, after)
+		if base == math.MaxInt64 {
+			return 0, false
+		}
+
+		if terminalGenerationSequence.CompareAndSwap(current, base+1) {
+			return base + 1, true
+		}
+	}
 }
 
 // cancelTerminalLocked runs with terminalMu and topicMu held. It excludes the
@@ -1382,7 +1470,6 @@ func (c *Collector) deleteTerminalTopic(state TerminalState) {
 	}
 }
 
-//nolint:unused // Task 10's ordered coordinator consumes this Task 9 terminal seam.
 func (c *Collector) terminalStatesDue(boundary int64) []TerminalState {
 	c.terminalMu.Lock()
 
@@ -1408,8 +1495,6 @@ func (c *Collector) terminalStatesDue(boundary int64) []TerminalState {
 }
 
 // assignTerminalStates freezes the first eligible raw target without moving retries.
-//
-//nolint:unused // Task 10's ordered coordinator consumes this Task 9 terminal seam.
 func (c *Collector) assignTerminalStates(ctx context.Context, boundary int64) error {
 	intervalMS := c.collectionInterval.Milliseconds()
 	if intervalMS <= 0 || boundary%intervalMS != 0 {
@@ -1446,8 +1531,6 @@ func (c *Collector) assignTerminalStates(ctx context.Context, boundary int64) er
 }
 
 // completeTerminalState writes the durable zero and releases its reservation once.
-//
-//nolint:unused // Task 10's ordered coordinator consumes this Task 9 terminal seam.
 func (c *Collector) completeTerminalState(ctx context.Context, state TerminalState) error {
 	if c.store == nil || !isAssignedTerminalState(state) {
 		return errors.New("complete terminal state: assigned durable state is required")
@@ -1478,12 +1561,10 @@ func (c *Collector) completeTerminalState(ctx context.Context, state TerminalSta
 	return nil
 }
 
-//nolint:unused // Task 10 consumes this validation through completeTerminalState.
 func isAssignedTerminalState(state TerminalState) bool {
 	return state.Generation > 0 && state.TargetBucket != nil && state.SampleIntervalMS != nil
 }
 
-//nolint:unused // Task 10 consumes this release through completeTerminalState.
 func (c *Collector) releaseCompletedTerminal(state TerminalState) bool {
 	c.terminalMu.Lock()
 	defer c.terminalMu.Unlock()
@@ -1535,7 +1616,6 @@ func (c *Collector) releaseCompletedTerminal(state TerminalState) bool {
 	return true
 }
 
-//nolint:unused // Task 10 consumes this check through the assignment/completion seams.
 func (c *Collector) terminalStateActive(state TerminalState) bool {
 	c.terminalMu.Lock()
 	defer c.terminalMu.Unlock()

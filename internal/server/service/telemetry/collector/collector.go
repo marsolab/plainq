@@ -6,9 +6,10 @@ package collector
 import (
 	"container/list"
 	"context"
-	"fmt"
+	"errors"
 	"log/slog"
 	"math"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,8 +22,8 @@ const (
 	// Default collection interval for rate calculations.
 	defaultCollectionInterval = 1 * time.Second
 
-	// Default snapshot interval for queue statistics.
-	defaultSnapshotInterval = 5 * time.Second
+	defaultCleanupInterval = 10 * time.Minute
+	defaultRetentionPeriod = 14 * 24 * time.Hour
 
 	// Default aggregation intervals.
 	aggregationInterval1m = 1 * time.Minute
@@ -34,7 +35,6 @@ const (
 	retention1m  = 24 * time.Hour
 	retention5m  = 7 * 24 * time.Hour
 	retention1h  = 30 * 24 * time.Hour
-	retention1d  = 365 * 24 * time.Hour
 
 	// rateWindowMS is the exact compatibility collection window in milliseconds.
 	rateWindowMS int64 = 1000
@@ -49,6 +49,21 @@ const (
 	bucketSize1h = 3600000  // 1 hour in ms.
 	bucketSize1d = 86400000 // 1 day in ms.
 )
+
+var terminalGenerationSequence = newTerminalGenerationSequence()
+
+func newTerminalGenerationSequence() *atomic.Int64 {
+	sequence := &atomic.Int64{}
+
+	seed := time.Now().UnixNano()
+	if seed < 0 {
+		seed = 0
+	}
+
+	sequence.Store(seed)
+
+	return sequence
+}
 
 // MetricType represents the type of metric.
 type MetricType string
@@ -151,15 +166,25 @@ type QueueMetrics struct {
 	// In-flight tracking.
 	messagesInFlight atomic.Int64
 
-	// Previous values for rate calculation.
-	prevSent     uint64
-	prevReceived uint64
-	prevDeleted  uint64
+	// Baselines advance only after the complete boundary transaction commits.
+	baselines queueRateBaselines
 
 	// Calculated rates.
 	sendRate    atomic.Uint64 // Stored as float64 bits.
 	receiveRate atomic.Uint64
 	deleteRate  atomic.Uint64
+}
+
+type counterRateBaseline struct {
+	known      bool
+	value      uint64
+	observedAt int64
+}
+
+type queueRateBaselines struct {
+	sent     counterRateBaseline
+	received counterRateBaseline
+	deleted  counterRateBaseline
 }
 
 type TopicRates struct {
@@ -206,10 +231,8 @@ type SystemMetrics struct {
 	totalReceived atomic.Uint64
 	totalDeleted  atomic.Uint64
 
-	// Previous values for system-wide rates.
-	prevTotalSent     uint64
-	prevTotalReceived uint64
-	prevTotalDeleted  uint64
+	// Baselines advance only after the complete boundary transaction commits.
+	baselines queueRateBaselines
 
 	// System-wide rates.
 	systemSendRate    atomic.Uint64
@@ -259,16 +282,30 @@ type Collector struct {
 	terminalOrder          *btree.BTreeG[*terminalReservation]
 	terminalNextGeneration int64
 	terminalLoadFailed     bool
+	terminalLoaded         bool
 	terminalPromoteMu      sync.Mutex
 	terminalVisit          func()
 
 	// Configuration.
 	collectionInterval time.Duration
-	snapshotInterval   time.Duration
+	cleanupInterval    time.Duration
+	retentionPeriod    time.Duration
 
 	// Control.
-	stop     chan struct{}
-	stopOnce sync.Once
+	stop         chan struct{}
+	stopOnce     sync.Once
+	controlMu    sync.Mutex
+	workerCancel context.CancelFunc
+	workerWG     sync.WaitGroup
+	started      bool
+	stopped      bool
+
+	coordinatorMu          sync.Mutex
+	coordinatorInitialized bool
+	lastRollup1m           int64
+	lastRollup1h           int64
+	lastRollup1d           int64
+	nextCleanup            time.Time
 }
 
 // Store interface for persisting metrics.
@@ -358,9 +395,14 @@ func WithCollectionInterval(d time.Duration) Option {
 	return func(c *Collector) { c.collectionInterval = d }
 }
 
-// WithSnapshotInterval sets the snapshot interval.
-func WithSnapshotInterval(d time.Duration) Option {
-	return func(c *Collector) { c.snapshotInterval = d }
+// WithCleanupInterval sets the ordered retention worker interval.
+func WithCleanupInterval(d time.Duration) Option {
+	return func(c *Collector) { c.cleanupInterval = d }
+}
+
+// WithRetentionPeriod sets the maximum telemetry history retained on disk.
+func WithRetentionPeriod(d time.Duration) Option {
+	return func(c *Collector) { c.retentionPeriod = d }
 }
 
 // WithClock replaces the collector clock for deterministic cutover tests.
@@ -382,7 +424,8 @@ func New(store Store, opts ...Option) *Collector {
 		topicCache:           newTopicCache(),
 		topicLimit:           defaultTopicLimit,
 		collectionInterval:   defaultCollectionInterval,
-		snapshotInterval:     defaultSnapshotInterval,
+		cleanupInterval:      defaultCleanupInterval,
+		retentionPeriod:      defaultRetentionPeriod,
 		now:                  time.Now,
 		eventBufferLimit:     defaultEventBufferLimit,
 		eventDirty:           make(map[string]dirtyInterval, 3),
@@ -402,23 +445,35 @@ func New(store Store, opts ...Option) *Collector {
 		opt(c)
 	}
 
-	c.loadDurableTerminalReservations()
-
 	return c
 }
 
+// CollectionInterval returns the configured raw wall-clock grid interval.
+func (c *Collector) CollectionInterval() time.Duration { return c.collectionInterval }
+
+// RetentionPeriod returns the configured maximum telemetry history.
+func (c *Collector) RetentionPeriod() time.Duration { return c.retentionPeriod }
+
 // Start begins the metrics collection background workers.
 func (c *Collector) Start(ctx context.Context) {
-	// Rate calculation worker.
-	go c.rateCalculationWorker(ctx)
+	c.controlMu.Lock()
+	if c.started || c.stopped {
+		c.controlMu.Unlock()
 
-	// Aggregation workers.
-	go c.aggregationWorker(ctx, aggregationInterval1m, "1m", c.aggregate1m)
-	go c.aggregationWorker(ctx, aggregationInterval1h, "1h", c.aggregate1h)
-	go c.aggregationWorker(ctx, aggregationInterval1d, "1d", c.aggregate1d)
+		return
+	}
 
-	// Cleanup worker.
-	go c.cleanupWorker(ctx)
+	workerCtx, cancel := context.WithCancel(ctx)
+	c.workerCancel = cancel
+	c.started = true
+	c.workerWG.Add(1)
+	c.controlMu.Unlock()
+
+	go func() {
+		defer c.workerWG.Done()
+
+		c.coordinatorWorker(workerCtx)
+	}()
 
 	c.logger.Info("Metrics collector started")
 }
@@ -426,9 +481,19 @@ func (c *Collector) Start(ctx context.Context) {
 // Stop stops the collector.
 func (c *Collector) Stop() {
 	c.stopOnce.Do(func() {
+		c.controlMu.Lock()
+		c.stopped = true
+		cancel := c.workerCancel
+		c.controlMu.Unlock()
+
+		if cancel != nil {
+			cancel()
+		}
+
 		close(c.stop)
-		c.logger.Info("Metrics collector stopped")
 	})
+	c.workerWG.Wait()
+	c.logger.Info("Metrics collector stopped")
 }
 
 // getOrCreateQueueMetrics gets or creates metrics for a queue.
@@ -457,16 +522,19 @@ func (c *Collector) getOrCreateQueueMetrics(queueID string) *QueueMetrics {
 
 // RecordSend records a send operation.
 func (c *Collector) RecordSend(queueID string, count, totalBytes uint64) {
+	c.cutoverMu.Lock()
 	m := c.getOrCreateQueueMetrics(queueID)
 	m.messagesSent.Add(count)
 	m.bytesSent.Add(totalBytes)
 	c.system.totalSent.Add(count)
+	c.cutoverMu.Unlock()
 }
 
 // RecordReceive records a receive operation.
 //
 //nolint:revive // isEmpty is a reasonable flag parameter for this API.
 func (c *Collector) RecordReceive(queueID string, count uint64, isEmpty bool) {
+	c.cutoverMu.Lock()
 	m := c.getOrCreateQueueMetrics(queueID)
 	m.messagesReceived.Add(count)
 	m.messagesInFlight.Add(int64(count)) //nolint:gosec // count is a message count that will never approach int64 max
@@ -476,22 +544,29 @@ func (c *Collector) RecordReceive(queueID string, count uint64, isEmpty bool) {
 		m.emptyReceives.Add(1)
 	}
 
+	inFlight := m.messagesInFlight.Load()
+	c.cutoverMu.Unlock()
+
 	// Update in-flight count in store.
 	if c.store != nil {
-		_ = c.store.UpdateInFlightCount(context.Background(), queueID, m.messagesInFlight.Load()) //nolint:errcheck // best-effort metrics
+		_ = c.store.UpdateInFlightCount(context.Background(), queueID, inFlight) //nolint:errcheck // best-effort metrics
 	}
 }
 
 // RecordDelete records a delete operation.
 func (c *Collector) RecordDelete(queueID string, count uint64) {
+	c.cutoverMu.Lock()
 	m := c.getOrCreateQueueMetrics(queueID)
 	m.messagesDeleted.Add(count)
 	m.messagesInFlight.Add(-int64(count)) //nolint:gosec // count is a message count that will never approach int64 max
 	c.system.totalDeleted.Add(count)
 
+	inFlight := m.messagesInFlight.Load()
+	c.cutoverMu.Unlock()
+
 	// Update in-flight count in store.
 	if c.store != nil {
-		_ = c.store.UpdateInFlightCount(context.Background(), queueID, m.messagesInFlight.Load()) //nolint:errcheck // best-effort metrics
+		_ = c.store.UpdateInFlightCount(context.Background(), queueID, inFlight) //nolint:errcheck // best-effort metrics
 	}
 }
 
@@ -501,21 +576,27 @@ func (c *Collector) RecordDelete(queueID string, count uint64) {
 // reason they do on the Prometheus side: the receive that carried them already
 // counted them, and they were counted once already on their first delivery.
 func (c *Collector) RecordRedelivery(queueID string, count uint64) {
+	c.cutoverMu.Lock()
 	m := c.getOrCreateQueueMetrics(queueID)
 	m.messagesRedelivered.Add(count)
 	m.messagesInFlight.Add(-int64(count)) //nolint:gosec // a redelivery count cannot approach int64 max.
+	c.cutoverMu.Unlock()
 }
 
 // RecordDrop records dropped messages.
 func (c *Collector) RecordDrop(queueID string, count uint64) {
+	c.cutoverMu.Lock()
 	m := c.getOrCreateQueueMetrics(queueID)
 	m.messagesDropped.Add(count)
+	c.cutoverMu.Unlock()
 }
 
 // RecordDLQ records messages moved to DLQ.
 func (c *Collector) RecordDLQ(queueID string, count uint64) {
+	c.cutoverMu.Lock()
 	m := c.getOrCreateQueueMetrics(queueID)
 	m.messagesToDLQ.Add(count)
+	c.cutoverMu.Unlock()
 }
 
 // The collector used to accumulate batch sizes, message sizes, processing
@@ -528,17 +609,23 @@ func (c *Collector) RecordDLQ(queueID string, count uint64) {
 
 // SetQueuesExist sets the current queue count.
 func (c *Collector) SetQueuesExist(count int64) {
+	c.cutoverMu.Lock()
 	c.system.queuesExist.Store(count)
+	c.cutoverMu.Unlock()
 }
 
 // IncrementQueues increments the queue count.
 func (c *Collector) IncrementQueues() {
+	c.cutoverMu.Lock()
 	c.system.queuesExist.Add(1)
+	c.cutoverMu.Unlock()
 }
 
 // DecrementQueues decrements the queue count.
 func (c *Collector) DecrementQueues() {
+	c.cutoverMu.Lock()
 	c.system.queuesExist.Add(-1)
+	c.cutoverMu.Unlock()
 }
 
 // GetInFlightCount returns the current in-flight count for a queue.
@@ -635,219 +722,223 @@ func (c *Collector) GetAllQueueIDs() []string {
 	return ids
 }
 
-// rateCalculationWorker calculates rates periodically.
-func (c *Collector) rateCalculationWorker(ctx context.Context) {
-	ticker := time.NewTicker(c.collectionInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-
-		case <-c.stop:
-			return
-
-		case <-ticker.C:
-			c.calculateRates(ctx)
-		}
-	}
-}
-
-// calculateRates calculates rates for all queues.
-func (c *Collector) calculateRates(ctx context.Context) {
+// calculateRatesAt atomically persists queue, system, topic, event, and rate
+// history at one exact closed boundary.
+func (c *Collector) calculateRatesAt(ctx context.Context, boundary time.Time) error {
 	start := time.Now()
 	defer func() { c.observeCollection(start) }()
 
-	now := start.UnixMilli()
-
-	c.queueMu.RLock()
-	defer c.queueMu.RUnlock()
-
-	for queueID, m := range c.queueMetrics {
-		currentSent := m.messagesSent.Load()
-		currentReceived := m.messagesReceived.Load()
-		currentDeleted := m.messagesDeleted.Load()
-
-		// Calculate rates.
-		sendRate := float64(currentSent - m.prevSent)
-		receiveRate := float64(currentReceived - m.prevReceived)
-		deleteRate := float64(currentDeleted - m.prevDeleted)
-
-		// Store rates atomically.
-		m.sendRate.Store(float64ToBits(sendRate))
-		m.receiveRate.Store(float64ToBits(receiveRate))
-		m.deleteRate.Store(float64ToBits(deleteRate))
-
-		// Update previous values.
-		m.prevSent = currentSent
-		m.prevReceived = currentReceived
-		m.prevDeleted = currentDeleted
-
-		// Persist rates to the telemetry store. Failures are recorded rather
-		// than returned: telemetry must never fail a queue operation.
-		c.saveRate(ctx, now, queueID, MetricSendRate, sendRate)
-		c.saveRate(ctx, now, queueID, MetricReceiveRate, receiveRate)
-		c.saveRate(ctx, now, queueID, MetricDeleteRate, deleteRate)
-		c.saveRaw(ctx, now, queueID, MetricMessagesSentTotal, float64(currentSent))
-		c.saveRaw(ctx, now, queueID, MetricMessagesReceivedTotal, float64(currentReceived))
-		c.saveRaw(ctx, now, queueID, MetricMessagesDeletedTotal, float64(currentDeleted))
-		c.saveRaw(ctx, now, queueID, MetricMessagesInFlight, float64(m.messagesInFlight.Load()))
-	}
-
-	c.calculateTopicRates(ctx, now)
-
-	// Calculate system-wide rates.
-	currentTotalSent := c.system.totalSent.Load()
-	currentTotalReceived := c.system.totalReceived.Load()
-	currentTotalDeleted := c.system.totalDeleted.Load()
-
-	systemSendRate := float64(currentTotalSent - c.system.prevTotalSent)
-	systemReceiveRate := float64(currentTotalReceived - c.system.prevTotalReceived)
-	systemDeleteRate := float64(currentTotalDeleted - c.system.prevTotalDeleted)
-
-	c.system.systemSendRate.Store(float64ToBits(systemSendRate))
-	c.system.systemReceiveRate.Store(float64ToBits(systemReceiveRate))
-	c.system.systemDeleteRate.Store(float64ToBits(systemDeleteRate))
-
-	c.system.prevTotalSent = currentTotalSent
-	c.system.prevTotalReceived = currentTotalReceived
-	c.system.prevTotalDeleted = currentTotalDeleted
-
-	// Persist system-wide metrics, on the same terms.
-	c.saveRate(ctx, now, "", MetricSendRate, systemSendRate)
-	c.saveRate(ctx, now, "", MetricReceiveRate, systemReceiveRate)
-	c.saveRate(ctx, now, "", MetricDeleteRate, systemDeleteRate)
-	c.saveRaw(ctx, now, "", MetricQueuesExist, float64(c.system.queuesExist.Load()))
-}
-
-func (c *Collector) calculateTopicRates(ctx context.Context, now int64) {
 	intervalMS := c.collectionInterval.Milliseconds()
 	if intervalMS <= 0 {
-		return
+		return errors.New("calculate rates: positive collection interval is required")
 	}
 
-	boundary := now - now%intervalMS
-	if boundary <= 0 {
-		return
+	boundaryMS := boundary.UTC().UnixMilli()
+	if boundaryMS <= 0 || boundaryMS%intervalMS != 0 {
+		return errors.New("calculate rates: boundary must align to the collection interval")
 	}
 
-	if err := c.collectTopicBoundary(ctx, boundary); err != nil {
-		c.logger.Debug("Topic telemetry boundary failed", slog.String("error", err.Error()))
+	return c.collectTopicBoundary(ctx, boundaryMS)
+}
+
+func counterDelta(current, previous uint64) uint64 {
+	if current >= previous {
+		return current - previous
 	}
 
-	if err := c.promoteTerminalStates(ctx); err != nil {
-		c.logger.Debug("Terminal telemetry promotion failed", slog.String("error", err.Error()))
+	return current
+}
+
+func rate(delta uint64, elapsed time.Duration) float64 {
+	seconds := elapsed.Seconds()
+	if seconds <= 0 {
+		return 0
+	}
+
+	return float64(delta) / seconds
+}
+
+type namedCounter struct {
+	metricName string
+	value      uint64
+}
+
+type namedGauge struct {
+	metricName string
+	value      float64
+}
+
+func (c *Collector) appendQueueBoundaryLocked(
+	frozen *frozenTopicBoundary,
+	boundary, bucketStart, intervalMS int64,
+	markSubject func(string, bool),
+) {
+	queueIDs := make([]string, 0, len(c.queueMetrics))
+	systemCounters := map[string]uint64{
+		MetricMessagesSentTotal:     c.system.totalSent.Load(),
+		MetricMessagesReceivedTotal: c.system.totalReceived.Load(),
+		MetricMessagesDeletedTotal:  c.system.totalDeleted.Load(),
+	}
+
+	var systemInFlight int64
+
+	for queueID, current := range c.queueMetrics {
+		queueIDs = append(queueIDs, queueID)
+		systemCounters[MetricMessagesDroppedTotal] += current.messagesDropped.Load()
+		systemCounters[MetricEmptyReceivesTotal] += current.emptyReceives.Load()
+		systemCounters[MetricMessagesRedelivered] += current.messagesRedelivered.Load()
+		systemCounters[MetricMessagesToDLQ] += current.messagesToDLQ.Load()
+		systemCounters[MetricBytesSentTotal] += current.bytesSent.Load()
+		systemInFlight += current.messagesInFlight.Load()
+	}
+
+	systemBaseline, systemRates, systemComplete := appendQueueSubjectBoundary(
+		frozen, "", c.system.baselines,
+		[]namedCounter{
+			{MetricMessagesSentTotal, systemCounters[MetricMessagesSentTotal]},
+			{MetricMessagesReceivedTotal, systemCounters[MetricMessagesReceivedTotal]},
+			{MetricMessagesDeletedTotal, systemCounters[MetricMessagesDeletedTotal]},
+			{MetricMessagesDroppedTotal, systemCounters[MetricMessagesDroppedTotal]},
+			{MetricEmptyReceivesTotal, systemCounters[MetricEmptyReceivesTotal]},
+			{MetricMessagesRedelivered, systemCounters[MetricMessagesRedelivered]},
+			{MetricMessagesToDLQ, systemCounters[MetricMessagesToDLQ]},
+			{MetricBytesSentTotal, systemCounters[MetricBytesSentTotal]},
+		},
+		[]namedGauge{
+			{MetricMessagesInFlight, float64(systemInFlight)},
+			{MetricQueuesExist, float64(c.system.queuesExist.Load())},
+		},
+		boundary, bucketStart, intervalMS,
+	)
+	frozen.systemQueue = systemBaseline
+	frozen.systemQueueRates = systemRates
+
+	markSubject("", systemComplete)
+
+	sort.Strings(queueIDs)
+
+	for _, queueID := range queueIDs {
+		current := c.queueMetrics[queueID]
+		baseline, rates, complete := appendQueueSubjectBoundary(
+			frozen, queueID, current.baselines,
+			[]namedCounter{
+				{MetricMessagesSentTotal, current.messagesSent.Load()},
+				{MetricMessagesReceivedTotal, current.messagesReceived.Load()},
+				{MetricMessagesDeletedTotal, current.messagesDeleted.Load()},
+				{MetricMessagesDroppedTotal, current.messagesDropped.Load()},
+				{MetricEmptyReceivesTotal, current.emptyReceives.Load()},
+				{MetricMessagesRedelivered, current.messagesRedelivered.Load()},
+				{MetricMessagesToDLQ, current.messagesToDLQ.Load()},
+				{MetricBytesSentTotal, current.bytesSent.Load()},
+			},
+			[]namedGauge{{MetricMessagesInFlight, float64(current.messagesInFlight.Load())}},
+			boundary, bucketStart, intervalMS,
+		)
+		frozen.queueBaselines[queueID] = baseline
+		frozen.queueRates[queueID] = rates
+		frozen.queueMetrics[queueID] = current
+		markSubject(queueID, complete)
 	}
 }
 
-// aggregationWorker runs periodic aggregation.
-func (c *Collector) aggregationWorker(ctx context.Context, interval time.Duration, name string, aggregateFn func(context.Context) error) {
-	// Align to interval boundary.
-	now := time.Now()
-	nextRun := now.Truncate(interval).Add(interval)
-	time.Sleep(nextRun.Sub(now))
+func appendQueueSubjectBoundary(
+	frozen *frozenTopicBoundary,
+	subjectID string,
+	previous queueRateBaselines,
+	counters []namedCounter,
+	gauges []namedGauge,
+	boundary, bucketStart, intervalMS int64,
+) (queueRateBaselines, Rates, bool) {
+	for _, counter := range counters {
+		appendPeriodicSample(&frozen.batch, MetricSample{
+			Timestamp: bucketStart, SubjectID: subjectID,
+			MetricName: counter.metricName, Kind: MetricKindCounter, Value: float64(counter.value),
+		}, intervalMS, true)
+	}
 
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	for _, gauge := range gauges {
+		appendPeriodicSample(&frozen.batch, MetricSample{
+			Timestamp: bucketStart, SubjectID: subjectID,
+			MetricName: gauge.metricName, Kind: MetricKindGauge, Value: gauge.value,
+		}, intervalMS, true)
+	}
 
-	for {
-		select {
-		case <-ctx.Done():
+	current := queueRateBaselines{
+		sent: counterRateBaseline{
+			known: true, value: counterValue(counters, MetricMessagesSentTotal), observedAt: boundary,
+		},
+		received: counterRateBaseline{
+			known: true, value: counterValue(counters, MetricMessagesReceivedTotal), observedAt: boundary,
+		},
+		deleted: counterRateBaseline{
+			known: true, value: counterValue(counters, MetricMessagesDeletedTotal), observedAt: boundary,
+		},
+	}
+	rates := Rates{}
+	complete := true
+
+	appendRate := func(metricName string, baseline counterRateBaseline, value uint64, assign func(float64)) {
+		if !baseline.known || boundary <= baseline.observedAt {
+			complete = false
+
 			return
-		case <-c.stop:
-			return
-		case <-ticker.C:
-			start := time.Now()
-			err := aggregateFn(ctx)
+		}
 
-			c.observeAggregation(name, start, err)
+		windowMS := boundary - baseline.observedAt
+		valuePerSecond := rate(counterDelta(value, baseline.value), time.Duration(windowMS)*time.Millisecond)
+		assign(valuePerSecond)
+		sample := MetricSample{
+			Timestamp: bucketStart, SubjectID: subjectID, MetricName: metricName,
+			Kind: MetricKindRate, Value: valuePerSecond, WindowMS: windowMS,
+		}
+		appendPeriodicSample(&frozen.batch, sample, intervalMS, windowMS == intervalMS)
 
-			if err != nil {
-				c.logger.Error("Aggregation failed",
-					slog.String("interval", name),
-					slog.String("error", err.Error()),
-				)
-			}
+		frozen.batch.RateSnapshots = append(frozen.batch.RateSnapshots, RateSnapshot{
+			Timestamp: bucketStart, SubjectID: subjectID, MetricName: metricName,
+			Rate: valuePerSecond, WindowMS: windowMS,
+		})
+		if windowMS != intervalMS {
+			complete = false
 		}
 	}
+
+	appendRate(MetricSendRate, previous.sent, current.sent.value,
+		func(value float64) { rates.SendRate = value })
+	appendRate(MetricReceiveRate, previous.received, current.received.value,
+		func(value float64) { rates.ReceiveRate = value })
+	appendRate(MetricDeleteRate, previous.deleted, current.deleted.value,
+		func(value float64) { rates.DeleteRate = value })
+
+	return current, rates, complete
 }
 
-func (c *Collector) aggregate1m(ctx context.Context) error {
-	if c.store == nil {
-		return nil
-	}
-
-	now := time.Now().UnixMilli()
-	from := now - aggregationInterval1m.Milliseconds() - time.Second.Milliseconds() // 1 extra second buffer.
-
-	if err := c.store.Aggregate1m(ctx, from, now); err != nil {
-		return fmt.Errorf("aggregate 1m: %w", err)
-	}
-
-	return nil
-}
-
-func (c *Collector) aggregate1h(ctx context.Context) error {
-	if c.store == nil {
-		return nil
-	}
-
-	now := time.Now().UnixMilli()
-	from := now - aggregationInterval1h.Milliseconds() - bucketSize1m // 1 extra minute buffer.
-
-	if err := c.store.Aggregate1h(ctx, from, now); err != nil {
-		return fmt.Errorf("aggregate 1h: %w", err)
-	}
-
-	return nil
-}
-
-func (c *Collector) aggregate1d(ctx context.Context) error {
-	if c.store == nil {
-		return nil
-	}
-
-	now := time.Now().UnixMilli()
-	from := now - aggregationInterval1d.Milliseconds() - bucketSize1h // 1 extra hour buffer.
-
-	if err := c.store.Aggregate1d(ctx, from, now); err != nil {
-		return fmt.Errorf("aggregate 1d: %w", err)
-	}
-
-	return nil
-}
-
-// cleanupWorker runs periodic cleanup of old metrics.
-func (c *Collector) cleanupWorker(ctx context.Context) {
-	ticker := time.NewTicker(10 * time.Minute)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-c.stop:
-			return
-		case <-ticker.C:
-			if c.store != nil {
-				now := time.Now().UnixMilli()
-
-				err := c.store.CleanupOldMetrics(ctx,
-					now-retentionRaw.Milliseconds(),
-					now-retention1m.Milliseconds(),
-					now-retention5m.Milliseconds(),
-					now-retention1h.Milliseconds(),
-					now-retention1d.Milliseconds(),
-				)
-
-				c.observeCleanup(err)
-
-				if err != nil {
-					c.logger.Error("Metrics cleanup failed", slog.String("error", err.Error()))
-				}
-			}
+func counterValue(counters []namedCounter, metricName string) uint64 {
+	for _, counter := range counters {
+		if counter.metricName == metricName {
+			return counter.value
 		}
+	}
+
+	return 0
+}
+
+func (c *Collector) finalizeQueueBoundaryLocked(frozen *frozenTopicBoundary) {
+	c.system.baselines = frozen.systemQueue
+	c.system.systemSendRate.Store(float64ToBits(frozen.systemQueueRates.SendRate))
+	c.system.systemReceiveRate.Store(float64ToBits(frozen.systemQueueRates.ReceiveRate))
+	c.system.systemDeleteRate.Store(float64ToBits(frozen.systemQueueRates.DeleteRate))
+
+	for queueID, baseline := range frozen.queueBaselines {
+		current, exists := c.queueMetrics[queueID]
+		if !exists || current != frozen.queueMetrics[queueID] {
+			continue
+		}
+
+		current.baselines = baseline
+		rates := frozen.queueRates[queueID]
+		current.sendRate.Store(float64ToBits(rates.SendRate))
+		current.receiveRate.Store(float64ToBits(rates.ReceiveRate))
+		current.deleteRate.Store(float64ToBits(rates.DeleteRate))
 	}
 }
 

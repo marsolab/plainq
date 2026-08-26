@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/marsolab/servekit/dbkit/litekit"
 )
@@ -460,7 +461,7 @@ func TestTerminalStateCancellationIsGenerationExact(t *testing.T) {
 	}
 }
 
-func TestTerminalStateCompletionIsAtomicAndIdempotent(t *testing.T) {
+func TestTerminalTopicAtomicRetryDoesNotDuplicateZero(t *testing.T) {
 	t.Parallel()
 
 	store, conn := newTelemetryTestStoreWithConn(t)
@@ -501,7 +502,7 @@ BEGIN SELECT RAISE(ABORT, 'terminal coverage failure'); END;`); err != nil {
 	assertTableCount(t, conn, "telemetry_terminal_state", 0)
 }
 
-func TestSaveCollectionBoundaryRollsBackRowsCoverageAndLedgerTogether(t *testing.T) {
+func TestCoverageWritesOnlyAfterSuccessfulCollection(t *testing.T) {
 	tests := []struct {
 		name    string
 		trigger string
@@ -568,7 +569,7 @@ func TestSaveCollectionBoundaryRetryIsIdempotent(t *testing.T) {
 	assertTableCount(t, conn, "telemetry_collection_commits", 1)
 }
 
-func TestSaveCollectionBoundaryLostCommitAckDoesNotDuplicate(t *testing.T) {
+func TestLostBoundaryCommitAcknowledgementUsesCompletionLedger(t *testing.T) {
 	t.Parallel()
 
 	store, conn := newTelemetryTestStoreWithConn(t)
@@ -641,6 +642,244 @@ func TestCleanupOldMetricsPrunesCompletionLedgerAndAllowsRecollection(t *testing
 		t.Fatalf("recollected raw rows = %d, want %d", recollectedRows, len(oldBatch.Samples))
 	}
 	assertTableCount(t, conn, "telemetry_collection_commits", 2)
+}
+
+func TestCleanupOldMetricsDeletesEachTierCoverageLedgerAndQueueStats(t *testing.T) {
+	t.Parallel()
+
+	store, conn := newTelemetryTestStoreWithConn(t)
+	if _, err := conn.Exec(`
+INSERT INTO metrics_raw
+    (timestamp, queue_id, metric_name, metric_value, labels, metric_kind, window_ms)
+VALUES (999, 'queue-1', 'depth', 1, '', 'gauge', 0),
+       (1000, 'queue-1', 'depth', 2, '', 'gauge', 0);
+INSERT INTO metrics_1m
+    (bucket_start, queue_id, metric_name, min_value, max_value, avg_value, sum_value, count, labels)
+VALUES (1999, 'queue-1', 'depth', 1, 1, 1, 1, 1, ''),
+       (2000, 'queue-1', 'depth', 2, 2, 2, 2, 1, '');
+INSERT INTO metrics_5m
+    (timestamp, queue_id, metric_name, metric_value_min, metric_value_max, metric_value_avg, labels)
+VALUES (2999, 'queue-1', 'depth', 1, 1, 1, ''),
+       (3000, 'queue-1', 'depth', 2, 2, 2, '');
+INSERT INTO metrics_1h
+    (bucket_start, queue_id, metric_name, min_value, max_value, avg_value, sum_value, count, labels)
+VALUES (3999, 'queue-1', 'depth', 1, 1, 1, 1, 1, ''),
+       (4000, 'queue-1', 'depth', 2, 2, 2, 2, 1, '');
+INSERT INTO metrics_1d
+    (bucket_start, queue_id, metric_name, min_value, max_value, avg_value, sum_value, count, labels)
+VALUES (4999, 'queue-1', 'depth', 1, 1, 1, 1, 1, ''),
+       (5000, 'queue-1', 'depth', 2, 2, 2, 2, 1, '');
+INSERT INTO telemetry_coverage
+    (resolution, bucket_start, subject_id, metric_name, labels, metric_kind, sample_interval_ms)
+VALUES ('raw', 999, 'queue-1', 'depth', '', 'gauge', 1000),
+       ('raw', 1000, 'queue-1', 'depth', '', 'gauge', 1000),
+       ('1m', 1999, 'queue-1', 'depth', '', 'gauge', 60000),
+       ('1m', 2000, 'queue-1', 'depth', '', 'gauge', 60000),
+       ('1h', 3999, 'queue-1', 'depth', '', 'gauge', 3600000),
+       ('1h', 4000, 'queue-1', 'depth', '', 'gauge', 3600000),
+       ('1d', 4999, 'queue-1', 'depth', '', 'gauge', 86400000),
+       ('1d', 5000, 'queue-1', 'depth', '', 'gauge', 86400000);
+INSERT INTO telemetry_collection_commits (boundary, sample_interval_ms)
+VALUES (999, 1000), (1000, 1000);
+INSERT INTO queue_stats_snapshot (timestamp, queue_id)
+VALUES (999, 'queue-1'), (1000, 'queue-1');`); err != nil {
+		t.Fatalf("seed cleanup tiers: %v", err)
+	}
+
+	if err := store.CleanupOldMetrics(context.Background(), 1000, 2000, 3000, 4000, 5000); err != nil {
+		t.Fatalf("cleanup old metrics: %v", err)
+	}
+
+	for _, table := range []string{
+		"metrics_raw", "metrics_1m", "metrics_5m", "metrics_1h", "metrics_1d",
+		"telemetry_collection_commits", "queue_stats_snapshot",
+	} {
+		assertTableCount(t, conn, table, 1)
+	}
+	assertTableCount(t, conn, "telemetry_coverage", 4)
+
+	var oldCoverage int
+	if err := conn.QueryRow(`SELECT COUNT(*) FROM telemetry_coverage
+WHERE (resolution = 'raw' AND bucket_start < 1000)
+   OR (resolution = '1m' AND bucket_start < 2000)
+   OR (resolution = '1h' AND bucket_start < 4000)
+   OR (resolution = '1d' AND bucket_start < 5000)`).Scan(&oldCoverage); err != nil {
+		t.Fatalf("count old produced-tier coverage: %v", err)
+	}
+	if oldCoverage != 0 {
+		t.Fatalf("old produced-tier coverage rows = %d, want 0", oldCoverage)
+	}
+}
+
+func TestCleanupPreservesLatestRateSnapshotPerSeries(t *testing.T) {
+	t.Parallel()
+
+	store, conn := newTelemetryTestStoreWithConn(t)
+	if _, err := conn.Exec(`
+INSERT INTO rate_snapshots (timestamp, queue_id, metric_name, rate_per_second, window_seconds, window_ms)
+VALUES (100, 'active', 'send_rate', 1, 1, 1000),
+       (1000, 'active', 'send_rate', 2, 1, 1000),
+       (100, 'idle', 'send_rate', 3, 1, 1000),
+       (200, 'idle', 'send_rate', 4, 1, 1000),
+       (200, 'idle', 'send_rate', 5, 1, 1000),
+       (300, 'idle', 'receive_rate', 6, 1, 1000);`); err != nil {
+		t.Fatalf("seed rate snapshots: %v", err)
+	}
+
+	var newestIdleSendID int64
+	if err := conn.QueryRow(`SELECT id FROM rate_snapshots
+WHERE queue_id = 'idle' AND metric_name = 'send_rate'
+ORDER BY timestamp DESC, id DESC LIMIT 1`).Scan(&newestIdleSendID); err != nil {
+		t.Fatalf("read newest idle send snapshot: %v", err)
+	}
+
+	if err := store.CleanupOldMetrics(context.Background(), 1000, 0, 0, 0, 0); err != nil {
+		t.Fatalf("cleanup rate snapshots: %v", err)
+	}
+
+	assertTableCount(t, conn, "rate_snapshots", 3)
+
+	var retainedIdleSendID int64
+	if err := conn.QueryRow(`SELECT id FROM rate_snapshots
+WHERE queue_id = 'idle' AND metric_name = 'send_rate'`).Scan(&retainedIdleSendID); err != nil {
+		t.Fatalf("read retained idle send snapshot: %v", err)
+	}
+	if retainedIdleSendID != newestIdleSendID {
+		t.Fatalf("retained idle send snapshot id = %d, want newest tied id %d", retainedIdleSendID, newestIdleSendID)
+	}
+
+	for name, query := range map[string]string{
+		"active recent snapshot": `SELECT COUNT(*) FROM rate_snapshots
+WHERE queue_id = 'active' AND metric_name = 'send_rate' AND timestamp = 1000`,
+		"idle receive snapshot": `SELECT COUNT(*) FROM rate_snapshots
+WHERE queue_id = 'idle' AND metric_name = 'receive_rate' AND timestamp = 300`,
+	} {
+		var got int
+		if err := conn.QueryRow(query).Scan(&got); err != nil {
+			t.Fatalf("count %s: %v", name, err)
+		}
+		if got != 1 {
+			t.Fatalf("%s count = %d, want 1", name, got)
+		}
+	}
+}
+
+func TestCleanupAndCoverageDeleteAtomically(t *testing.T) {
+	t.Parallel()
+
+	{
+		store, _ := newTelemetryTestStoreWithConn(t)
+		sample := testSample(100, "queue-1", "depth", MetricKindGauge, 1, 0)
+		coverage := testCoverage(ResolutionRaw, 100, sample, 1000)
+		if err := store.SaveMetricAndCoverage(context.Background(), sample, coverage); err != nil {
+			t.Fatalf("seed cleanup snapshot: %v", err)
+		}
+
+		commitReady := make(chan struct{})
+		releaseCommit := make(chan struct{})
+		var releaseOnce sync.Once
+		release := func() { releaseOnce.Do(func() { close(releaseCommit) }) }
+		defer release()
+
+		store.commit = func(tx transaction) error {
+			close(commitReady)
+			<-releaseCommit
+
+			return tx.Commit()
+		}
+
+		cleanupDone := make(chan error, 1)
+		go func() {
+			cleanupDone <- store.CleanupOldMetrics(context.Background(), 1000, 1000, 1000, 1000, 1000)
+		}()
+
+		select {
+		case <-commitReady:
+		case <-time.After(time.Second):
+			t.Fatal("cleanup did not reach its transaction boundary")
+		}
+
+		before := mustQuerySeries(t, store, SeriesQuery{
+			MetricName: "depth", SubjectID: "queue-1", Kind: MetricKindGauge,
+			Resolution: ResolutionRaw, From: 0, To: 1000,
+		})
+		if len(before.DataPoints) != 1 || len(before.Coverage) != 1 {
+			t.Fatalf("reader during cleanup = %d points/%d coverage, want coherent pre-cleanup 1/1",
+				len(before.DataPoints), len(before.Coverage))
+		}
+
+		release()
+
+		select {
+		case err := <-cleanupDone:
+			if err != nil {
+				t.Fatalf("commit cleanup: %v", err)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("cleanup did not finish after commit release")
+		}
+
+		after := mustQuerySeries(t, store, SeriesQuery{
+			MetricName: "depth", SubjectID: "queue-1", Kind: MetricKindGauge,
+			Resolution: ResolutionRaw, From: 0, To: 1000,
+		})
+		if len(after.DataPoints) != 0 || len(after.Coverage) != 0 {
+			t.Fatalf("reader after cleanup = %d points/%d coverage, want coherent post-cleanup 0/0",
+				len(after.DataPoints), len(after.Coverage))
+		}
+	}
+
+	store, conn := newTelemetryTestStoreWithConn(t)
+	if _, err := conn.Exec(`
+INSERT INTO metrics_raw
+    (timestamp, queue_id, metric_name, metric_value, labels, metric_kind, window_ms)
+VALUES (100, 'queue-1', 'depth', 1, '', 'gauge', 0);
+INSERT INTO metrics_1m
+    (bucket_start, queue_id, metric_name, min_value, max_value, avg_value, sum_value, count, labels)
+VALUES (100, 'queue-1', 'depth', 1, 1, 1, 1, 1, '');
+INSERT INTO metrics_5m
+    (timestamp, queue_id, metric_name, metric_value_min, metric_value_max, metric_value_avg, labels)
+VALUES (100, 'queue-1', 'depth', 1, 1, 1, '');
+INSERT INTO metrics_1h
+    (bucket_start, queue_id, metric_name, min_value, max_value, avg_value, sum_value, count, labels)
+VALUES (100, 'queue-1', 'depth', 1, 1, 1, 1, 1, '');
+INSERT INTO metrics_1d
+    (bucket_start, queue_id, metric_name, min_value, max_value, avg_value, sum_value, count, labels)
+VALUES (100, 'queue-1', 'depth', 1, 1, 1, 1, 1, '');
+INSERT INTO telemetry_coverage
+    (resolution, bucket_start, subject_id, metric_name, labels, metric_kind, sample_interval_ms)
+VALUES ('raw', 100, 'queue-1', 'depth', '', 'gauge', 1000),
+       ('1m', 100, 'queue-1', 'depth', '', 'gauge', 60000),
+       ('1h', 100, 'queue-1', 'depth', '', 'gauge', 3600000),
+       ('1d', 100, 'queue-1', 'depth', '', 'gauge', 86400000);
+INSERT INTO telemetry_collection_commits (boundary, sample_interval_ms) VALUES (100, 1000);
+INSERT INTO queue_stats_snapshot (timestamp, queue_id) VALUES (100, 'queue-1');
+INSERT INTO rate_snapshots (timestamp, queue_id, metric_name, rate_per_second, window_seconds, window_ms)
+VALUES (100, 'queue-1', 'send_rate', 1, 1, 1000),
+       (200, 'queue-1', 'send_rate', 2, 1, 1000);
+CREATE TRIGGER fail_late_cleanup BEFORE DELETE ON rate_snapshots
+WHEN OLD.timestamp = 100
+BEGIN SELECT RAISE(ABORT, 'late cleanup failure'); END;`); err != nil {
+		t.Fatalf("seed atomic cleanup failure: %v", err)
+	}
+
+	if err := store.CleanupOldMetrics(context.Background(), 1000, 1000, 1000, 1000, 1000); err == nil {
+		t.Fatal("CleanupOldMetrics returned nil, want late delete failure")
+	}
+
+	for table, want := range map[string]int{
+		"metrics_raw":                  1,
+		"metrics_1m":                   1,
+		"metrics_5m":                   1,
+		"metrics_1h":                   1,
+		"metrics_1d":                   1,
+		"telemetry_coverage":           4,
+		"telemetry_collection_commits": 1,
+		"queue_stats_snapshot":         1,
+		"rate_snapshots":               2,
+	} {
+		assertTableCount(t, conn, table, want)
+	}
 }
 
 func TestCollectorStoreInterfaceCompilesDuringTypedMigration(t *testing.T) {
