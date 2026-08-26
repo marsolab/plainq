@@ -22,7 +22,8 @@ the complete list.
 | `-auth.access.ttl`       | `60m`                       | Access token TTL.                                   |
 | `-auth.refresh.ttl`      | `720h`                      | Refresh token TTL.                                  |
 | `-metrics.route`         | `/metrics`                  | Prometheus-style metrics endpoint.                  |
-| `-health.route`          | `/health`                   | Liveness/readiness endpoint.                        |
+| `-health.route`          | `/health`                   | Storage and cluster readiness endpoint.             |
+| `-health.liveness.route` | `/live`                     | Process liveness endpoint.                          |
 
 ## Storage backends
 
@@ -53,18 +54,37 @@ Use Postgres when you want a shared backend across replicas.
 
 PlainQ exposes two listeners:
 
-- **gRPC** (`-grpc.addr`, default `:8080`) — all queue operations.
+- **gRPC** (`-grpc.addr`, default `:8080`) — queue and stable topic operations.
 - **HTTP** (`-http.addr`, default `:8081`) — the Houston admin UI, plus the
   `/health` and `/metrics` endpoints.
 
 ## Authentication
 
-The JWT secret powers Houston's login/onboarding and the account subsystem. See
-the project's `AUTH.md` and the authentication & RBAC docs in the repository for
-the full story, including OAuth/OIDC provider setup.
+The JWT secret powers Houston sessions and, when authentication is enabled, the
+HTTP topic/admin middleware. It does not add per-topic or per-queue
+authorization, and gRPC has no built-in authentication. See the project's
+`AUTH.md` and authentication & RBAC docs for the full account story.
 
 :::caution
 Treat both the gRPC (`:8080`) and HTTP (`:8081`) ports as privileged and keep
 them on a trusted network. See the
 [Deployment guide](/docs/guides/deployment/#network-exposure).
 :::
+
+## Telemetry
+
+| Flag                                      | Default   | Purpose                                    |
+| ----------------------------------------- | --------- | ------------------------------------------ |
+| `--telemetry.enable`                      | `true`    | Enable typed telemetry and Houston history. |
+| `--telemetry.provider`                    | `sqlite`  | Telemetry storage backend.                 |
+| `--telemetry.log.enable`                  | `false`   | Log telemetry activity.                    |
+| `--telemetry.sqlite.collection.timeout`   | `10s`     | Raw collection interval.                   |
+| `--telemetry.sqlite.gc.timeout`           | `10m`     | Retention-sweep interval.                  |
+| `--telemetry.sqlite.retention.period`     | `336h`    | Maximum history (14 days).                 |
+| `--telemetry.prometheus.baseurl`          | _(empty)_ | Optional Prometheus API base URL.          |
+
+The historical `collection.timeout` name means collection interval. It must be
+at least 1ms, use whole milliseconds, and divide one minute evenly. GC must be
+positive and enabled retention must be at least 24h. An interval change catches
+up completed rollups, resets raw history, and appears as `notRecorded` instead
+of mixing grids.

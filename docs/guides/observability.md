@@ -145,6 +145,23 @@ closed. `backend` is exactly `sqlite`, `turso`, `postgres`, or `cluster`;
 request nor storage-operation families use a `topic` label. Topic IDs appear
 only on the bounded business and current-state families.
 
+Useful pub/sub queries:
+
+```promql
+sum by (topic) (rate(plainq_topic_messages_published_total[5m]))
+sum by (topic) (rate(plainq_topic_delivery_failures_total[5m]))
+sum by (operation, result) (rate(plainq_topic_requests_total[5m]))
+histogram_quantile(0.95, sum by (le, operation) (rate(plainq_topic_request_duration_seconds_bucket[5m])))
+```
+
+Subscription lifecycle counters include explicit unsubscribe plus bindings
+removed by successful topic or queue deletion. Current topic/subscription gauges
+come from authoritative storage reconciliation. On a cluster, `/metrics` and
+Houston describe **This node**: local state and activity observed by the node
+you queried, not a magically aggregated cluster-wide view. Aggregate nodes in
+Prometheus when you need a cluster total and avoid summing replicated exact
+gauges as if each replica were a different topic.
+
 ### HTTP and gRPC
 
 | Metric | Type | Labels | Meaning |
@@ -238,8 +255,16 @@ only on the bounded business and current-state families.
 | `plainq_telemetry_cleanups_total` | counter | `result` | Retention sweeps over the telemetry store, by outcome. |
 | `plainq_telemetry_collection_duration_seconds` | histogram | — | How long one telemetry collection pass took. Approaching the collection interval means it is falling behind. |
 | `plainq_telemetry_collections_total` | counter | `result` | Rate-calculation passes the telemetry collector ran, by outcome. |
+| `plainq_telemetry_event_buffer_dropped_total` | counter | `metric` | Internal telemetry event samples dropped because bounded collector buffers were full. |
 | `plainq_telemetry_store_writes_total` | counter | `operation`, `result` | Writes to the telemetry store, by operation and outcome. A climbing error count means the dashboards are going stale. |
+| `plainq_telemetry_terminal_state_dropped_total` | counter | — | Terminal topic states dropped because the bounded completion ledger was full or unavailable. |
 | `plainq_telemetry_tracked` | gauge | `kind` | Distinct queues and topics the collector is holding metrics for. |
+
+The two dropped counters are process-wide Prometheus health signals. They are
+deliberately not written back into PlainQ's own telemetry store: recursively
+collecting collector failures would make another failure while reporting the
+first one. Alert on any sustained increase and expect affected historical
+buckets to be marked missing.
 
 ### Process
 
@@ -297,7 +322,7 @@ which powers the charts and rate/in-flight views in the
 | `--telemetry.enable`                      | `true`    | Master switch for the telemetry subsystem.           |
 | `--telemetry.provider`                    | `sqlite`  | Telemetry backend.                                   |
 | `--telemetry.sqlite.collection.timeout`   | `10s`     | How often metrics are collected.                     |
-| `--telemetry.sqlite.retention.period`     | `14 days` | How long collected metrics are kept.                 |
+| `--telemetry.sqlite.retention.period`     | `336h`    | How long collected metrics are kept (14 days).       |
 | `--telemetry.sqlite.gc.timeout`           | `10m`     | Telemetry GC sweep interval.                         |
 | `--telemetry.prometheus.baseurl`          | _(empty)_ | Optional external Prometheus API base URL.           |
 | `--telemetry.log.enable`                  | `false`   | Log telemetry-subsystem activity.                    |
@@ -307,11 +332,43 @@ main one (e.g. `plainq_telemetry.db`), created and migrated automatically on
 startup. If telemetry fails to initialize, the server logs a warning and keeps
 running with the metrics dashboard disabled — it never blocks the queue service.
 
+Raw samples use the configured collection interval (10 seconds by default) and
+are rolled into closed 1-minute, 1-hour, and 1-day tiers. The API automatically
+uses raw data for ranges up to 1 hour, 1-minute data up to 24 hours, 1-hour data
+up to 30 days, and 1-day data beyond that, bounded by configured retention.
+Coverage is stored per metric series. Responses expose requested and effective
+half-open ranges, `sampleIntervalMs`, expected/returned point counts, and
+contiguous missing ranges classified as `notRecorded` or `outsideRetention`.
+A real measured zero stays zero; unavailable history stays absent and Houston
+never draws a line across it.
+
+Authenticated topic telemetry routes include:
+
+- `/api/v1/metrics/topic/{id}/rates` for publish, delivery, and failure rates;
+- `/api/v1/metrics/topic/{id}/subscriptions` for active subscriptions and
+  create/remove rates;
+- topic summary and overview responses with range-scoped
+  `operationSummaries` (decoded requests) and
+  `storageOperationSummaries` (storage work).
+
+The two operation fields are independently nullable because validation can fail
+without a storage call. Houston does not conflate them and does not plot the
+storage family. Its two public-subscribe graphs are delivery activity and active
+subscriptions; active counts use step-after interpolation, while rates use
+linear segments only between adjacent known samples.
+
 > The telemetry store and the Prometheus endpoint are fed from the same event
 > stream, so they cannot disagree about what happened. They differ in what they
 > keep: `/metrics` holds counters your monitoring stack scrapes and stores
 > itself, while the telemetry store keeps the rolled-up history Houston's charts
 > draw from without needing a Prometheus at all.
+
+Collection, rollup, or cleanup failures are retried in order and leave honest
+gaps rather than fabricated coverage. Changing the raw interval first catches
+up old completed tiers, then resets retained raw rows; the transition is
+reported as `notRecorded`. The legacy `collection.timeout` option is the
+collection interval and must be a whole-millisecond divisor of one minute;
+enabled retention must be at least 24 hours.
 
 ## Logs
 

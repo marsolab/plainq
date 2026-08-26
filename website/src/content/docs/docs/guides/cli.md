@@ -31,6 +31,12 @@ leading dashes.
 | `plainq send <queue-id>`                   | Send one or more messages (`-message=...` repeatable, or `-file=-` for stdin).                                                                                  |
 | `plainq receive <queue-id>`                | Receive messages (`-batch=N` up to 10, `-ack` to delete after read).                                                                                            |
 | `plainq delete-message <queue-id> <id>...` | Acknowledge (delete) messages by ID.                                                                                                                            |
+| `plainq topic list`                        | List topics and subscription objects.                                                                                                                          |
+| `plainq topic create <name>`               | Create a uniquely named topic.                                                                                                                                 |
+| `plainq topic delete <topic-id>`            | Delete a topic and its subscriptions.                                                                                                                          |
+| `plainq topic subscribe <topic-id> <queue-id>` | Subscribe an existing queue.                                                                                                                               |
+| `plainq topic unsubscribe <topic-id> <subscription-id>` | Remove a subscription.                                                                                                                     |
+| `plainq topic publish <topic-id>`           | Fan a batch out to all subscribed queues.                                                                                                                      |
 | `plainq tui`                               | Launch the interactive terminal UI.                                                                                                                             |
 | `plainq schema`                            | Print the CLI and gRPC surfaces (`-target=all\|cli\|grpc`, text or `-json`).                                                                                    |
 
@@ -78,16 +84,59 @@ plainq receive "$QID"
 plainq delete-message "$QID" <message-id>
 ```
 
+## Stable topic workflow
+
+Topic, queue, and subscription IDs are 20-character XIDs. All six commands
+accept `-grpc.addr` and `-json`, and flags may appear before or after IDs.
+
+### `plainq topic list`
+
+Lists `<topic-id> | <topic-name>` in text. `-json` includes subscriptions and
+timestamps.
+
+### `plainq topic create`
+
+`TID=$(plainq topic create signups)` creates a nonblank, uniquely named topic
+and prints its ID.
+
+### `plainq topic delete`
+
+`plainq topic delete "$TID"` deletes the topic and subscriptions, but preserves
+the queues and messages already delivered to them.
+
+### `plainq topic subscribe`
+
+`SID=$(plainq topic subscribe "$TID" "$QID")` binds an existing queue and
+prints the subscription ID.
+
+### `plainq topic unsubscribe`
+
+`plainq topic unsubscribe "$TID" "$SID"` stops future delivery through that
+subscription. Existing queue messages remain.
+
+### `plainq topic publish`
+
+```shell
+plainq topic publish -message='{"user":42}' "$TID"
+generate-events | plainq topic publish -file=- "$TID"
+```
+
+Repeat `-message`, use newline-delimited `-file`, or combine them. Empty lines
+are ignored and stdin is read only with `-file=-`. Zero subscribers succeeds
+with zero deliveries. A failed fan-out may already have retained copies in some
+queues, so retry can duplicate them. Consume and acknowledge with `plainq
+receive` and `plainq delete-message`.
+
 ### Script-friendly output
 
 Every client command accepts `-json`:
 
-The `-json` output is the JSON encoding of the gRPC response, so its keys are the
-schema's snake_case field names (e.g. `queue_name`, `visibility_timeout_seconds`):
+The `-json` output is protobuf JSON, so field names are lower camel case (for
+example `queueName`, `visibilityTimeoutSeconds`, and `topicId`):
 
 ```shell
-plainq list -json | jq '.queues[].queue_name'
-plainq describe -json "$QID" | jq '.visibility_timeout_seconds'
+plainq list -json | jq '.queues[].queueName'
+plainq describe -json "$QID" | jq '.visibilityTimeoutSeconds'
 ```
 
 ## See also

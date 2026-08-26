@@ -2,8 +2,6 @@ name: Merge to Main
 
 on:
   push:
-    paths-ignore:
-      - internal/houston/ui
     branches:
       - main
 
@@ -21,6 +19,10 @@ jobs:
 
       - name: build houston ui
         run: make houston
+
+      - name: test houston
+        working-directory: internal/houston/ui
+        run: bun test
 
       - name: typecheck houston (astro check)
         working-directory: internal/houston/ui

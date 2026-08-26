@@ -45,7 +45,7 @@ See [Deployment](deployment.md) for choosing a backend.
 
 | Flag                          | Default | Purpose                                              |
 | ----------------------------- | ------- | ---------------------------------------------------- |
-| `--grpc.addr`                 | `:8080` | gRPC listener (queue API, used by the CLI).          |
+| `--grpc.addr`                 | `:8080` | gRPC queue/topic API, used by the CLI.               |
 | `--http.addr`                 | `:8081` | HTTP listener (Houston UI, REST, health, metrics).   |
 | `--http.read-timeout`         | `0`     | HTTP read timeout (`0` = no timeout).                |
 | `--http.read-header-timeout`  | `0`     | HTTP read-header timeout.                            |
@@ -81,11 +81,11 @@ recommended):
 
 See [Authentication & RBAC](../authentication-rbac.md) for the full model.
 
-> **Note:** in the current build the auth/RBAC middleware is not applied to the
-> HTTP API routes, so these settings govern the auth *subsystem* (sessions,
-> account endpoints, Houston login) rather than gating the queue/RBAC/OAuth REST
-> endpoints. Keep the HTTP and gRPC listeners on a trusted network — see
-> [Deployment → network exposure](deployment.md#network-exposure).
+> **Boundary:** when authentication is enabled, the HTTP topic subtree and
+> authenticated admin routes require bearer sessions. There is no per-topic or
+> per-queue authorization decision, and the gRPC listener has no built-in
+> authentication. Keep both listeners behind the appropriate network policy;
+> see [Deployment → network exposure](deployment.md#network-exposure).
 
 ## OAuth & multi-tenancy
 
@@ -102,16 +102,35 @@ has its own guide:
 | Flag                  | Default     | Purpose                                                  |
 | --------------------- | ----------- | -------------------------------------------------------- |
 | `--health`            | `true`      | Enable the health endpoint.                              |
-| `--health.route`      | `/health`   | Health endpoint path.                                    |
+| `--health.route`      | `/health`   | Storage and cluster readiness endpoint.                  |
+| `--health.liveness.route` | `/live` | Process liveness endpoint.                               |
 | `--metrics`           | `true`      | Enable the Prometheus metrics endpoint.                  |
 | `--metrics.route`     | `/metrics`  | Metrics endpoint path.                                   |
 | `--telemetry.enable`  | `true`      | Enable the telemetry subsystem powering Houston's dashboards. |
 | `--profiler`          | `false`     | Enable the profiler endpoint.                            |
 | `--cors`              | `true`      | Enable CORS for Houston's API routes.                    |
 
-Telemetry has finer-grained knobs (provider, retention, scrape/GC timeouts,
-optional Prometheus base URL). See [Observability](observability.md) for the
-details and what each metric means.
+Telemetry uses these stable defaults:
+
+| Flag                                      | Default   | Purpose                                      |
+| ----------------------------------------- | --------- | -------------------------------------------- |
+| `--telemetry.enable`                      | `true`    | Enable typed telemetry and Houston history.  |
+| `--telemetry.provider`                    | `sqlite`  | Telemetry storage backend.                   |
+| `--telemetry.log.enable`                  | `false`   | Log telemetry subsystem activity.            |
+| `--telemetry.sqlite.collection.timeout`   | `10s`     | Raw collection interval.                     |
+| `--telemetry.sqlite.gc.timeout`           | `10m`     | Ordered retention-sweep interval.            |
+| `--telemetry.sqlite.retention.period`     | `336h`    | Maximum history retention (14 days).         |
+| `--telemetry.prometheus.baseurl`          | _(empty)_ | Optional external Prometheus API base URL.   |
+
+The legacy name `collection.timeout` means collection **interval**. When
+telemetry is enabled it must be at least 1ms, exactly representable in whole
+milliseconds, and divide one minute without a remainder. The GC interval must
+be positive and retention must be at least 24 hours. Changing the collection
+interval first catches up completed rollups and then resets retained raw data;
+the transition is shown as `notRecorded`, never as a mixed raw grid.
+
+See [Observability](observability.md) for the stored resolutions, retention
+behavior, Prometheus families, and Houston graphs.
 
 ## Logging
 
@@ -143,7 +162,7 @@ details and what each metric means.
 ```
 
 Note `--grpc.addr=127.0.0.1:8080`: binding gRPC to loopback (or a private
-interface) keeps the currently-unauthenticated queue API off the public network.
+interface) keeps the unauthenticated queue/topic API off the public network.
 
 ## Next steps
 

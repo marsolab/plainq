@@ -18,7 +18,11 @@ need to scale out.
   terminal dashboard. The schema is published to the
   [Buf Schema Registry](https://buf.build/plainq/schema) for client codegen.
 - **Houston admin UI.** An Astro + React dashboard for queues, accounts,
-  RBAC, and metrics — served straight from the same binary.
+  RBAC, and metrics — including pub/sub delivery and active-subscription graphs
+  — served straight from the same binary.
+- **Stable queue-backed pub/sub.** Create topics, subscribe existing queues, and
+  publish through the HTTP API, six gRPC methods, or six `plainq topic`
+  commands. Each queue keeps its own retries, retention, and acknowledgements.
 - **Ship it anywhere.** An optimized multi-stage [Docker image](Dockerfile)
   (distroless, static binary) and a production [Helm chart](deploy/helm/plainq).
 - **Pick your storage.** Embedded SQLite (default) for local and Litestream-friendly
@@ -29,10 +33,10 @@ need to scale out.
   and find each other on Kubernetes, Docker, AWS, GCP, Azure, Consul or DNS.
   Lose a minority of nodes and the queue keeps serving. See the
   [clustering guide](docs/guides/clustering.md).
-- **Auth that's actually built in.** JWT sessions, refresh tokens, RBAC, and
-  OAuth/OIDC hooks (Kinde, Auth0, Okta, WorkOS) ship with the server — not as
-  an afterthought.
-- **Operational basics included.** `/health` and `/metrics` endpoints,
+- **Admin authentication built in.** JWT sessions, refresh tokens, RBAC, and
+  OAuth/OIDC hooks (Kinde, Auth0, Okta, WorkOS) ship with the server. The gRPC
+  listener and resource-level topic access still require network policy.
+- **Operational basics included.** `/live`, `/health`, and `/metrics` endpoints,
   structured logs, and per-queue knobs for retention, visibility timeout,
   max-receive attempts, and dead-letter / drop eviction.
 
@@ -61,6 +65,7 @@ Full documentation lives in [`docs/`](docs/README.md):
 - **Examples** — [Examples & recipes](docs/examples/README.md)
 - **Reference** — [CLI](docs/reference/cli.md) ·
   [Configuration](docs/reference/configuration.md)
+- **Releases** — [Release notes](docs/release-notes.md)
 
 ## Table of contents
 
@@ -89,7 +94,7 @@ make build
 # Start the server (SQLite at ./plainq.db, gRPC on :8080, Houston on :8081).
 ./plainq serve --auth.jwt.secret="$(openssl rand -hex 32)"
 
-# In another shell (flags go BEFORE the queue id):
+# In another shell (flags can go before or after the queue id):
 QID=$(./plainq create my-queue)
 ./plainq send -message='hello, plainq' "$QID"
 ./plainq receive -ack "$QID"
@@ -149,10 +154,8 @@ It deploys a StatefulSet + PVC for SQLite (or a Deployment + HPA when
 See the [chart README](deploy/helm/plainq/README.md) and the
 [Deployment guide](docs/guides/deployment.md).
 
-A [Kubernetes operator](deploy/operator/README.md) — declarative servers,
-clusters, queues, topics, backups, and restores — is
-[designed](docs/superpowers/specs/2026-07-26-kubernetes-operator-design.md) and
-not yet built. The chart remains the supported install path.
+The [Kubernetes operator](deploy/operator/README.md) manages declarative PlainQ
+servers and clusters. The Helm chart remains the simplest install path.
 
 ## Usage
 
@@ -177,6 +180,12 @@ arguments, so `plainq send -message hi <queue-id>` and
 | `plainq send <queue-id>`         | Send one or more messages (`-message=...` repeatable, or `-file=-` for stdin). |
 | `plainq receive <queue-id>`      | Receive messages (`-batch=N` up to 10, `-ack` to delete after read). |
 | `plainq delete-message <queue-id> <id>...` | Acknowledge (delete) messages by ID.       |
+| `plainq topic list`              | List topics and subscriptions.              |
+| `plainq topic create <name>`     | Create a uniquely named topic.              |
+| `plainq topic delete <topic-id>` | Delete a topic and its subscriptions.       |
+| `plainq topic subscribe <topic-id> <queue-id>` | Subscribe an existing queue.      |
+| `plainq topic unsubscribe <topic-id> <subscription-id>` | Remove a binding.       |
+| `plainq topic publish <topic-id>` | Fan a batch out to subscribed queues.      |
 | `plainq tui`                     | Launch the interactive terminal UI.                  |
 | `plainq schema`                  | Print the CLI and gRPC surfaces (text or `-json`).   |
 | `plainq cluster status`          | Show this node's view of the cluster.                |
@@ -200,7 +209,7 @@ examples — without contacting a server. See
 The wire API is defined in [`schema/v1/schema.proto`](schema/v1/schema.proto)
 and published to the Buf Registry at
 [`buf.build/plainq/schema`](https://buf.build/plainq/schema). The service
-exposes eight RPCs:
+exposes queue/message RPCs plus stable pub/sub:
 
 - `ListQueues` — paginated queue list with optional prefix and sort.
 - `DescribeQueue` — fetch queue settings by ID or name.
@@ -210,6 +219,9 @@ exposes eight RPCs:
 - `Send` — enqueue one or more messages.
 - `Receive` — dequeue a batch (1–10) with visibility-timeout semantics.
 - `Delete` — acknowledge and remove messages by ID.
+- `ListTopics`, `CreateTopic`, `DeleteTopic` — manage topics.
+- `Subscribe`, `Unsubscribe` — manage queue bindings.
+- `Publish` — synchronously attempt one batch for every selected queue.
 
 Use `buf generate` (or your language's Buf workflow) to produce a client SDK
 directly from the registry.
@@ -241,7 +253,8 @@ Every flag below is set on the `serve` subcommand. The most useful ones:
 | `--auth.access.ttl`           | `60m`         | Access token TTL.                                                  |
 | `--auth.refresh.ttl`          | `720h`        | Refresh token TTL.                                                 |
 | `--metrics.route`             | `/metrics`    | Prometheus-style metrics endpoint.                                 |
-| `--health.route`              | `/health`     | Liveness/readiness endpoint.                                       |
+| `--health.route`              | `/health`     | Storage and cluster readiness endpoint.                            |
+| `--health.liveness.route`     | `/live`       | Process liveness endpoint.                                         |
 
 Run `./plainq serve -h` for the complete list. For the full authentication
 and RBAC story, see [`AUTH.md`](AUTH.md) and

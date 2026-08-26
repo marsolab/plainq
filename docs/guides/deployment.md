@@ -152,15 +152,12 @@ PlainQ has two listeners with different trust assumptions:
   it as privileged: bind it to loopback or a private interface
   (`--grpc.addr=127.0.0.1:8080`) and reach it over a trusted network, a service
   mesh, or a TLS-terminating proxy.
-- **HTTP (`:8081`)** — Houston, REST APIs, `/health`, `/metrics`. PlainQ ships a
-  full JWT/RBAC subsystem and Houston uses it for its login and onboarding flow,
-  **but as currently wired the server does not apply auth middleware to the HTTP
-  API routes** — the queue, RBAC, OAuth, and metrics endpoints under `/api/v1`
-  are mounted with logging and CORS only. Treat `:8081` as **privileged too**:
-  keep it on a trusted network and put your own access control (a
-  TLS-terminating, authenticating reverse proxy, network policy, or both) in
-  front of it. Do not rely on PlainQ's built-in auth as the only gate on the
-  HTTP surface today.
+- **HTTP (`:8081`)** — Houston, REST APIs, `/live`, `/health`, `/metrics`. When
+  server authentication is enabled, the topic subtree and authenticated admin
+  routes use bearer sessions. PlainQ does not make per-topic or per-queue
+  authorization decisions, and health/Prometheus are intentionally available to
+  infrastructure. Keep the listener behind TLS and an appropriate network or
+  proxy policy; do not treat login alone as tenant isolation.
 
 A typical layout:
 
@@ -184,14 +181,18 @@ operators reach Houston through the proxy.
 
 - [ ] `--auth.jwt.secret` supplied from a secret manager, not the command line history.
 - [ ] gRPC bound to a private interface or fronted by mTLS/proxy.
-- [ ] HTTP behind a TLS-terminating reverse proxy with timeouts **and access
-      control** — the `/api/v1` routes are not auth-gated at the server today, so
-      enforce authn/authz at the proxy or network layer.
+- [ ] HTTP behind a TLS-terminating reverse proxy with timeouts and network
+      policy; built-in authentication is not per-resource authorization.
 - [ ] Persistent volume for the SQLite file (or a managed PostgreSQL).
 - [ ] Backups: Litestream (SQLite) or your PostgreSQL backup tooling.
-- [ ] `/health` wired to your orchestrator's liveness/readiness probes.
+- [ ] `/live` wired as liveness and `/health` wired as readiness.
 - [ ] `/metrics` scraped by Prometheus.
 - [ ] Onboarding completed (first admin created) — see [Houston](houston.md).
+
+A quarantined replica deliberately stays live while `/health` returns 503, so
+orchestration drains it without restart-looping over the evidence. Quarantine
+survives restart. Recover only through a verified snapshot restore or a complete
+replica wipe and reseed; never create or delete apply-guard files individually.
 
 ## Next steps
 

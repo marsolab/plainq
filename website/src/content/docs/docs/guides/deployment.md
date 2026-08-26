@@ -51,19 +51,19 @@ repository for the full set of values.
 ## Network exposure
 
 :::danger
-In the current wiring, neither the gRPC API nor the HTTP API routes are gated by
-auth middleware at the server. The JWT secret powers Houston's login and the
-account subsystem, but the queue, RBAC, and OAuth REST endpoints are reachable
-without a token.
-
-**Treat both the gRPC (`:8080`) and HTTP (`:8081`) ports as privileged.** Keep
-them on a trusted network — behind a VPN, service mesh, or an authenticating
-reverse proxy — and never expose them directly to the public internet.
+The gRPC listener has no built-in authentication. When server authentication is
+enabled, HTTP topic/admin routes use bearer sessions, but PlainQ does not make
+per-topic or per-queue authorization decisions. Treat both ports as privileged,
+terminate TLS, and apply network or proxy policy; login is not tenant isolation.
 :::
 
 ## Health & metrics
 
-- `GET /health` — liveness/readiness probe (configurable via `-health.route`).
+- `GET /live` — process liveness (configurable via `-health.liveness.route`).
+- `GET /health` — storage and cluster readiness (configurable via `-health.route`).
 - `GET /metrics` — Prometheus-style metrics (configurable via `-metrics.route`).
 
-Wire these into your orchestrator's probes and your monitoring stack.
+Wire `/live` and `/health` to separate orchestrator probes. A quarantined replica
+stays live but not ready and keeps its durable guard across restart. Recover it
+only by verified snapshot restore or full replica wipe/reseed; never edit guard
+files individually.

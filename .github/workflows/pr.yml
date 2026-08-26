@@ -87,6 +87,10 @@ jobs:
         working-directory: internal/houston/ui
         run: bun install --frozen-lockfile
 
+      - name: test houston
+        working-directory: internal/houston/ui
+        run: bun test
+
       - name: typecheck houston (astro check)
         working-directory: internal/houston/ui
         run: bun run check

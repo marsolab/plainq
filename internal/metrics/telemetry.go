@@ -2,8 +2,6 @@ package metrics
 
 import (
 	"time"
-
-	vm "github.com/VictoriaMetrics/metrics"
 )
 
 // labelInterval names the aggregation window a telemetry roll-up covers.
@@ -55,6 +53,18 @@ var (
 		Labels: []string{labelResult},
 	})
 
+	telemetryEventBufferDropped = NewCounterVec(Definition{
+		Name:   Namespace + "_telemetry_event_buffer_dropped_total",
+		Help:   "Internal telemetry event samples dropped because bounded collector buffers were full.",
+		Labels: []string{labelMetric},
+	})
+
+	telemetryTerminalStateDropped = NewCounterVec(Definition{
+		Name:   Namespace + "_telemetry_terminal_state_dropped_total",
+		Help:   "Terminal topic states dropped because the bounded completion ledger was full or unavailable.",
+		Labels: []string{},
+	})
+
 	telemetryTrackedDef = define(Definition{
 		Kind:   KindGauge,
 		Name:   Namespace + "_telemetry_tracked",
@@ -100,17 +110,12 @@ func RecordTelemetryEventBufferDropped(metric string) {
 
 // RecordTelemetryEventBufferDrops reports a bounded batch of lost internal event samples.
 func RecordTelemetryEventBufferDrops(metric string, count uint64) {
-	vm.GetOrCreateCounter(render(
-		Namespace+"_telemetry_event_buffer_dropped_total",
-		[]string{labelMetric},
-		[]string{metric},
-	)).AddInt64(int64(min(count, maxCounterAdd)))
+	telemetryEventBufferDropped.With(metric).AddInt64(int64(min(count, maxCounterAdd)))
 }
 
 // RecordTelemetryTerminalStateDropped reports terminal transitions that cannot be retained.
 func RecordTelemetryTerminalStateDropped(count uint64) {
-	vm.GetOrCreateCounter(Namespace + "_telemetry_terminal_state_dropped_total").
-		AddInt64(int64(min(count, maxCounterAdd)))
+	telemetryTerminalStateDropped.With().AddInt64(int64(min(count, maxCounterAdd)))
 }
 
 // RegisterTelemetryCollector publishes how many queues and topics the

@@ -90,8 +90,9 @@ blob elsewhere and enqueue a pointer.
 
 ### Can I send more than one message at once?
 
-Yes — the gRPC `Send` RPC takes a batch. The CLI `send` sends one at a time; use
-the [gRPC API](grpc-api.md) or [Go SDK](../examples/README.md#go-sdk) for batches.
+Yes — the gRPC `Send` RPC takes a batch, and the CLI accepts repeated
+`-message` flags or newline-delimited `-file` input. See the
+[CLI guide](cli.md) or [Go SDK example](../examples/README.md#go-sdk).
 
 ### Why does the CLI `receive` not delete messages?
 
@@ -101,17 +102,27 @@ failure possible.
 
 ### Is the HTTP/REST API authenticated?
 
-Not at the server today. PlainQ ships a JWT/RBAC subsystem (used by Houston's
-login), but the middleware isn't wired onto the `/api/v1` routes in the current
-build. Treat both the HTTP and gRPC listeners as privileged and front them with
-your own access control. See
+When authentication is enabled, the HTTP topic subtree uses the existing bearer
+token middleware. PlainQ does not make per-topic or per-queue authorization
+decisions, so an authenticated caller is not tenant-isolated by resource. The
+gRPC listener has no built-in authentication and remains a privileged-network
+endpoint. Protect both listeners accordingly; see
 [Deployment → network exposure](deployment.md#network-exposure).
 
 ### Is pub/sub ready for production?
 
-It's **experimental** and HTTP-only (no gRPC/CLI yet). The fan-out model works
-(see [Advanced → pub/sub](advanced.md#pubsub-topics--fan-out)), but pin to the
-documented behavior and expect the surface to evolve.
+Yes. Queue-backed pub/sub v1 has stable HTTP, gRPC, and CLI contracts. Discover
+the six commands with `plainq topic -h` or `plainq schema -target=cli`; the six
+RPCs are `ListTopics`, `CreateTopic`, `DeleteTopic`, `Subscribe`, `Unsubscribe`,
+and `Publish`.
+
+The operational boundary matters: publish synchronously attempts every selected
+queue but is non-atomic. A failed command can be a partial delivery, and retry
+can duplicate copies already retained. Zero subscribers is a successful zero.
+Use `plainq topic list -json` to inspect subscription IDs, then receive and
+acknowledge each queue with `plainq receive` and `plainq delete-message`. See
+[Advanced → pub/sub](advanced.md#pubsub-topics--fan-out) for cascade and
+at-least-once details.
 
 ### How do I move from SQLite to PostgreSQL?
 

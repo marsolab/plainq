@@ -35,7 +35,7 @@ const queueCommand = `plainq send -message='{"job":"resize"}' "$QID"`;
 
       <article class="pattern-card">
         <div class="pattern-copy">
-          <div class="pattern-kicker"><span>Topic fan-out</span><code class="experimental">experimental</code></div>
+          <div class="pattern-kicker"><span>Topic fan-out</span><code>stable v1</code></div>
           <h3>Publish once. Deliver independently.</h3>
           <p>Every subscribed queue gets its own durable copy, with its own retries, retention, and dead-letter policy.</p>
         </div>
@@ -44,7 +44,7 @@ const queueCommand = `plainq send -message='{"job":"resize"}' "$QID"`;
           <div class="topic-node">order.created</div><span class="branch-line"></span>
           <div class="subscriber-list"><span>email-q</span><span>analytics-q</span><span>audit-q</span></div>
         </div>
-        <code class="pattern-code">POST /api/v1/queue/topics/:id/publish</code>
+        <code class="pattern-code">plainq topic publish -message=... "$TID"</code>
       </article>
     </div>
   </div>
@@ -55,7 +55,6 @@ const queueCommand = `plainq send -message='{"job":"resize"}' "$QID"`;
   .pattern-copy { padding:28px 28px 22px; }
   .pattern-kicker { display:flex; align-items:center; justify-content:space-between; gap:16px; font:500 10px/1 var(--font-mono); letter-spacing:.08em; text-transform:uppercase; color:var(--color-muted-foreground); }
   .pattern-kicker code { padding:5px 7px; background:#e9f8f2; color:#08734f; font:500 9px/1 var(--font-mono); letter-spacing:.05em; }
-  .pattern-kicker .experimental { background:#fff7e7; color:#9a6000; }
   .pattern-copy h3 { margin-top:42px; max-width:460px; font:600 clamp(1.8rem,3vw,2.65rem)/1.04 var(--font-display); letter-spacing:-.045em; }
   .pattern-copy p { margin-top:16px; max-width:520px; font-size:14px; line-height:1.75; color:var(--color-muted-foreground); }
   .work-diagram,.topic-diagram { display:grid; grid-template-columns:auto 1fr auto 1fr minmax(110px,1.2fr); align-items:center; min-height:230px; margin-top:auto; padding:36px 28px; border-top:1px solid var(--color-border); background-image:radial-gradient(var(--color-border) .7px,transparent .7px); background-size:18px 18px; }

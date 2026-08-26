@@ -238,6 +238,38 @@ func TestTelemetryCollectorDroppedCountersExposeExactDeltas(t *testing.T) {
 	td.Cmp(t, terminalCounter.Get()-terminalBefore, uint64(4))
 }
 
+func TestTelemetryCollectorHealthMetricsCatalogAndMetadata(t *testing.T) {
+	want := map[string]Definition{
+		Namespace + "_telemetry_event_buffer_dropped_total": {
+			Name: Namespace + "_telemetry_event_buffer_dropped_total", Kind: KindCounter,
+			Help:   "Internal telemetry event samples dropped because bounded collector buffers were full.",
+			Labels: []string{labelMetric},
+		},
+		Namespace + "_telemetry_terminal_state_dropped_total": {
+			Name: Namespace + "_telemetry_terminal_state_dropped_total", Kind: KindCounter,
+			Help:   "Terminal topic states dropped because the bounded completion ledger was full or unavailable.",
+			Labels: []string{},
+		},
+	}
+
+	got := make(map[string]Definition, len(want))
+	for _, definition := range Catalog() {
+		if _, expected := want[definition.Name]; expected {
+			got[definition.Name] = definition
+		}
+	}
+	td.Cmp(t, got, want)
+
+	RecordTelemetryEventBufferDropped("plainq_topic_fanout")
+	RecordTelemetryTerminalStateDropped(1)
+	exposeMetadataForTest(t)
+	out := scrape()
+	for name := range want {
+		td.Cmp(t, strings.Contains(out, "# HELP "+name+"\n"), true)
+		td.Cmp(t, strings.Contains(out, "# TYPE "+name+" counter"), true)
+	}
+}
+
 func TestRecordTopicRequestIsSeparateFromStorageOperation(t *testing.T) {
 	request := topicRequests.With(BackendCluster, OpCreateTopic, ResultOK)
 	storage := topicOperations.With(BackendCluster, OpCreateTopic, ResultOK)
