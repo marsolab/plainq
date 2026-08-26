@@ -31,17 +31,18 @@ func TestPostgresDeadLetterSweepMovesMessagesExactlyOnce(t *testing.T) {
 	var (
 		movedCreatedAt time.Time
 		movedVisibleAt time.Time
+		visibleNow     bool
 	)
 	if err := pool.QueryRow(ctx, fmt.Sprintf(
-		`SELECT created_at, visible_at FROM %s`, quoteIdent(targetID),
-	)).Scan(&movedCreatedAt, &movedVisibleAt); err != nil {
+		`SELECT created_at, visible_at, visible_at <= now() FROM %s`, quoteIdent(targetID),
+	)).Scan(&movedCreatedAt, &movedVisibleAt, &visibleNow); err != nil {
 		t.Fatalf("read moved message timestamps: %v", err)
 	}
 	if !movedCreatedAt.Equal(createdAt) {
 		t.Fatalf("moved created_at = %s, want %s", movedCreatedAt, createdAt)
 	}
-	if movedVisibleAt.After(time.Now()) {
-		t.Fatalf("moved visible_at = %s, want immediately visible", movedVisibleAt)
+	if !visibleNow {
+		t.Fatalf("moved visible_at = %s, want immediately visible according to PostgreSQL", movedVisibleAt)
 	}
 
 	repeated, err := storage.sweep(ctx, sourceID)
