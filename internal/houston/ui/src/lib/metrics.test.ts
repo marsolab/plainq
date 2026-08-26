@@ -60,7 +60,7 @@ describe("transformRateMetrics", () => {
 });
 
 describe("transformTopicSeries", () => {
-  test("accepts every topic sample source and preserves declared missing buckets", () => {
+  test("preserves honest raw samples and overlays every declared missing bucket", () => {
     const timeRange = { from: 1000, to: 5000 };
     const response: TopicSeriesResponse = {
       topicId: "topic-1",
@@ -82,9 +82,9 @@ describe("transformTopicSeries", () => {
             missingRanges: [{ from: 3000, to: 5000, reason: "notRecorded" }],
           },
           dataPoints: [
-            { timestamp: 1000, value: 4, source: "observed" },
-            { timestamp: 2000, value: 0, source: "aggregated" },
-            { timestamp: 3000, value: 8, source: "observed" },
+            { timestamp: 1000, value: 4, source: "observed", count: 1 },
+            { timestamp: 2000, value: 0, source: "observed", count: 1 },
+            { timestamp: 3000, value: 8, source: "observed", count: 1 },
           ],
         },
         {
@@ -105,7 +105,7 @@ describe("transformTopicSeries", () => {
           },
           dataPoints: [
             { timestamp: 1000, value: 2, source: "carriedForward" },
-            { timestamp: 3000, value: 3, source: "observed" },
+            { timestamp: 3000, value: 3, source: "observed", count: 1 },
           ],
         },
       ],
@@ -118,7 +118,13 @@ describe("transformTopicSeries", () => {
 
     expect(
       response.metrics.flatMap((metric) => metric.dataPoints.map((point) => point.source)),
-    ).toEqual(["observed", "aggregated", "observed", "carriedForward", "observed"]);
+    ).toEqual(["observed", "observed", "observed", "carriedForward", "observed"]);
+    expect(
+      response.metrics
+        .flatMap((metric) => metric.dataPoints)
+        .filter((point) => point.source === "observed")
+        .every((point) => point.count === 1),
+    ).toBe(true);
     expect(
       transformTopicSeries(response, {
         plainq_topic_publish_rate: "publish",
@@ -130,6 +136,65 @@ describe("transformTopicSeries", () => {
       { t: 3000, publish: null, active: 3 },
       { t: 4000, publish: null },
     ]);
+  });
+
+  test("accepts complete aggregated points at rollup resolution", () => {
+    const timeRange = { from: 60_000, to: 120_000 };
+    const response: TopicSeriesResponse = {
+      topicId: "topic-1",
+      metrics: [
+        {
+          metricName: "plainq_topic_publish_rate",
+          topicId: "topic-1",
+          kind: "rate",
+          unit: "messages/s",
+          interpolation: "linear",
+          timeRange,
+          resolution: "1m",
+          samples: {
+            expectedPointCount: 1,
+            returnedPointCount: 1,
+            firstSampleAt: 60_000,
+            lastSampleAt: 60_000,
+            complete: true,
+            missingRanges: [],
+          },
+          dataPoints: [
+            {
+              timestamp: 60_000,
+              value: 0,
+              source: "aggregated",
+              min: 0,
+              max: 0,
+              avg: 0,
+              sum: 0,
+              count: 6,
+            },
+          ],
+        },
+      ],
+      timeRange,
+      effectiveTimeRange: timeRange,
+      resolution: "1m",
+      sampleIntervalMs: 60_000,
+      generatedAt: 120_000,
+    };
+
+    expect(response.metrics[0].dataPoints[0]).toEqual({
+      timestamp: 60_000,
+      value: 0,
+      source: "aggregated",
+      min: 0,
+      max: 0,
+      avg: 0,
+      sum: 0,
+      count: 6,
+    });
+    expect(
+      transformTopicSeries(response, {
+        plainq_topic_publish_rate: "publish",
+      }),
+    ).toEqual([{ t: 60_000, publish: 0 }]);
   });
 });
 
