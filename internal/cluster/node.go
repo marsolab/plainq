@@ -1073,25 +1073,7 @@ func (n *Node) Leave(ctx context.Context) error {
 		return nil
 	}
 
-	var errs []error
-
-	// Ask the leader to remove this node first, while it can still be reached
-	// through a healthy cluster.
-	if _, addr, err := n.consensus.Leader(); err == nil {
-		if n.consensus.IsLeader() {
-			if removeErr := n.Remove(ctx, n.cfg.NodeID); removeErr != nil {
-				errs = append(errs, removeErr)
-			}
-		} else if leaveErr := n.peerClient.Leave(ctx, addr, n.cfg.NodeID); leaveErr != nil {
-			errs = append(errs, leaveErr)
-		}
-	}
-
-	if err := n.gossip.Leave(leaveTimeout); err != nil {
-		errs = append(errs, err)
-	}
-
-	return errors.Join(errs...)
+	return leaveNode(ctx, n.cfg.NodeID, nodeLeaveMembership{node: n}, n.gossip.Leave)
 }
 
 // Close stops the node. It does not leave the cluster — a restart is not a

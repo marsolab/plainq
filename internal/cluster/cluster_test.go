@@ -966,9 +966,40 @@ func TestLeaveRemovesTheNodeFromTheConfiguration(t *testing.T) {
 
 	cluster := newTestCluster(t, 3)
 
-	cluster.leader(30 * time.Second)
+	var departing *testNode
 
-	departing := cluster.follower()
+	// Do not race the assertion against bootstrap itself. The selected
+	// follower must see the same leader whose committed configuration contains
+	// all three voters before it begins the leave protocol.
+	cluster.waitFor(30*time.Second, func() bool {
+		var leader *testNode
+
+		for _, node := range cluster.nodes {
+			if node.node.consensus.IsLeader() && node.node.Status().Voters == 3 {
+				leader = node
+
+				break
+			}
+		}
+		if leader == nil {
+			return false
+		}
+
+		for _, node := range cluster.nodes {
+			if node.id == leader.id || node.stopped() {
+				continue
+			}
+
+			leaderID, leaderAddr, err := node.node.consensus.Leader()
+			if err == nil && leaderID == leader.id && leaderAddr != "" {
+				departing = node
+
+				return true
+			}
+		}
+
+		return false
+	}, "a follower observes a leader with all three voters")
 
 	td.Require(t).CmpNoError(departing.node.Leave(ctx), "leave the cluster")
 

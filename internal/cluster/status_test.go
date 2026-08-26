@@ -172,6 +172,11 @@ func TestJoinAndRemoveThroughTheNode(t *testing.T) {
 
 		return true
 	}, "the node is removed again")
+
+	// Removing a member that is already absent is a successful no-op. Leave
+	// may repeat a request after an election changes the leader, so the
+	// membership operation must be idempotent.
+	td.Require(t).CmpNoError(leader.node.Remove(ctx, "node-9"), "remove the absent node again")
 }
 
 // A follower cannot change the configuration, and the error says so in the one
