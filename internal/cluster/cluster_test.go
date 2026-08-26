@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/service/queue"
 	"github.com/marsolab/plainq/internal/server/service/queue/litestore"
+	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/marsolab/servekit/dbkit/litekit"
 	"github.com/maxatome/go-testdeep/td"
 )
@@ -26,10 +28,44 @@ type testCluster struct {
 }
 
 type testNode struct {
-	id      string
-	node    *Node
-	storage *litestore.Storage
-	gossip  string
+	id         string
+	node       *Node
+	storage    *litestore.Storage
+	replicated *testReplicatedStorage
+	gossip     string
+}
+
+type publishFault func(context.Context, string, *queue.PublishRequest) (*queue.PublishResponse, error)
+
+// testReplicatedStorage keeps the normal integration fixture unchanged until
+// a test injects a replica-local publish result. Embedding the concrete store
+// preserves its health and snapshot contracts for NewNode.
+type testReplicatedStorage struct {
+	*litestore.Storage
+
+	mu    sync.RWMutex
+	fault publishFault
+}
+
+func (s *testReplicatedStorage) setPublishFault(fault publishFault) {
+	s.mu.Lock()
+	s.fault = fault
+	s.mu.Unlock()
+}
+
+func (s *testReplicatedStorage) Publish(
+	ctx context.Context,
+	topicID string,
+	request *queue.PublishRequest,
+) (*queue.PublishResponse, error) {
+	s.mu.RLock()
+	fault := s.fault
+	s.mu.RUnlock()
+	if fault != nil {
+		return fault(ctx, topicID, request)
+	}
+
+	return s.Storage.Publish(ctx, topicID, request)
 }
 
 // takenPorts remembers every port this process has handed out. Asking the
@@ -173,6 +209,7 @@ func tryTestCluster(t *testing.T, size int) (*testCluster, error) {
 		dir := t.TempDir()
 
 		storage := newTestStorage(t, dir)
+		replicated := &testReplicatedStorage{Storage: storage}
 
 		// Each node seeds from every node, itself included; a node skips its
 		// own address when it joins.
@@ -203,7 +240,7 @@ func tryTestCluster(t *testing.T, size int) (*testCluster, error) {
 			cfg.Bootstrap = true
 		}
 
-		node, err := NewNode(cfg, storage, nil)
+		node, err := NewNode(cfg, replicated, nil)
 		if err != nil {
 			abandon()
 
@@ -221,7 +258,7 @@ func tryTestCluster(t *testing.T, size int) (*testCluster, error) {
 		t.Cleanup(func() { _ = node.Close() })
 
 		cluster.nodes = append(cluster.nodes, &testNode{
-			id: id, node: node, storage: storage, gossip: gossipAddrs[i],
+			id: id, node: node, storage: storage, replicated: replicated, gossip: gossipAddrs[i],
 		})
 	}
 
@@ -280,6 +317,153 @@ func (c *testCluster) waitFor(timeout time.Duration, condition func() bool, what
 	}
 
 	c.t.Fatalf("timed out after %s waiting for: %s", timeout, what)
+}
+
+func TestReplicaLocalPartialMarksNodeUnhealthy(t *testing.T) {
+	if testing.Short() {
+		t.Skip("starts a raft node")
+	}
+
+	ctx := context.Background()
+	cluster := newTestCluster(t, 1)
+	leader := cluster.leader(10 * time.Second)
+	topicID := createClusterPublishFixture(t, leader.node.Store())
+	leader.replicated.setPublishFault(partialPublishFault("missing-local-queue", errors.New("local delivery failed")))
+
+	response, err := leader.node.Store().Publish(ctx, topicID, &queue.PublishRequest{
+		Messages: []queue.PublishMessage{{Body: []byte("message")}},
+	})
+	if response == nil || response.TopicID != topicID || !errors.Is(err, pqerr.ErrPartialFanout) {
+		t.Fatalf("Publish() = %#v, %v; want preserved partial outcome", response, err)
+	}
+	if err := leader.node.Health(ctx); !errors.Is(err, pqerr.ErrUnavailable) {
+		t.Fatalf("quarantined node Health() = %v, want unavailable", err)
+	}
+	if !leader.node.Status().ReplicaQuarantined {
+		t.Fatal("partial-applying replica did not report quarantine")
+	}
+}
+
+func TestFollowerOnlyNotFoundPartialAlsoQuarantinesReplica(t *testing.T) {
+	if testing.Short() {
+		t.Skip("starts three raft nodes")
+	}
+
+	ctx := context.Background()
+	cluster := newTestCluster(t, 3)
+	leader := cluster.leader(20 * time.Second)
+	topicID := createClusterPublishFixture(t, leader.node.Store())
+	waitForClusterSubscription(t, cluster, topicID)
+	target := cluster.follower()
+	target.replicated.setPublishFault(partialPublishFault("missing-only-on-follower", pqerr.ErrNotFound))
+
+	if _, err := leader.node.Store().Publish(ctx, topicID, &queue.PublishRequest{
+		Messages: []queue.PublishMessage{{Body: []byte("message")}},
+	}); err != nil {
+		t.Fatalf("healthy leader Publish() = %v", err)
+	}
+	cluster.waitFor(10*time.Second, func() bool {
+		return target.node.Status().ReplicaQuarantined
+	}, "follower-only NotFound partial quarantines that follower")
+	if _, err := target.node.Store().ListTopics(ctx); !errors.Is(err, pqerr.ErrUnavailable) {
+		t.Fatalf("quarantined follower ListTopics() = %v, want unavailable", err)
+	}
+	if leader.node.Status().ReplicaQuarantined {
+		t.Fatal("healthy leader inherited another replica's quarantine")
+	}
+}
+
+func TestDifferentReplicaFailuresNeverServeDivergedState(t *testing.T) {
+	if testing.Short() {
+		t.Skip("starts three raft nodes")
+	}
+
+	ctx := context.Background()
+	cluster := newTestCluster(t, 3)
+	leader := cluster.leader(20 * time.Second)
+	topicID := createClusterPublishFixture(t, leader.node.Store())
+	waitForClusterSubscription(t, cluster, topicID)
+
+	failure := 0
+	var quarantined []*testNode
+	for _, node := range cluster.nodes {
+		if node == leader {
+			continue
+		}
+		failure++
+		node.replicated.setPublishFault(partialPublishFault(
+			fmt.Sprintf("replica-local-destination-%d", failure),
+			fmt.Errorf("replica-local-failure-%d", failure),
+		))
+		quarantined = append(quarantined, node)
+	}
+
+	if _, err := leader.node.Store().Publish(ctx, topicID, &queue.PublishRequest{
+		Messages: []queue.PublishMessage{{Body: []byte("message")}},
+	}); err != nil {
+		t.Fatalf("healthy leader Publish() = %v", err)
+	}
+	cluster.waitFor(10*time.Second, func() bool {
+		for _, node := range quarantined {
+			if !node.node.Status().ReplicaQuarantined {
+				return false
+			}
+		}
+		return true
+	}, "both divergent replicas quarantine")
+	for _, node := range quarantined {
+		if _, err := node.node.Store().ListTopics(ctx); !errors.Is(err, pqerr.ErrUnavailable) {
+			t.Fatalf("diverged replica %s ListTopics() = %v, want unavailable", node.id, err)
+		}
+	}
+	if _, err := leader.node.Store().ListTopics(ctx); err != nil {
+		t.Fatalf("healthy replica ListTopics() = %v", err)
+	}
+}
+
+func createClusterPublishFixture(t *testing.T, storage queue.Storage) string {
+	t.Helper()
+	ctx := context.Background()
+	createdQueue, err := storage.CreateQueue(ctx, &v1.CreateQueueRequest{QueueName: "partial-target"})
+	td.Require(t).CmpNoError(err)
+	createdTopic, err := storage.CreateTopic(ctx, &queue.CreateTopicRequest{TopicName: "partial-topic"})
+	td.Require(t).CmpNoError(err)
+	_, err = storage.Subscribe(ctx, createdTopic.TopicID, &queue.SubscribeRequest{QueueID: createdQueue.QueueId})
+	td.Require(t).CmpNoError(err)
+	return createdTopic.TopicID
+}
+
+func waitForClusterSubscription(t *testing.T, cluster *testCluster, topicID string) {
+	t.Helper()
+	cluster.waitFor(10*time.Second, func() bool {
+		for _, node := range cluster.nodes {
+			inventory, err := node.storage.TopicInventory(context.Background())
+			if err != nil || inventory.SubscriptionCounts[topicID] != 1 {
+				return false
+			}
+		}
+		return true
+	}, "publish fixture reaches every replica")
+}
+
+func partialPublishFault(queueID string, cause error) publishFault {
+	return func(_ context.Context, topicID string, request *queue.PublishRequest) (*queue.PublishResponse, error) {
+		response := &queue.PublishResponse{TopicID: topicID}
+		return response, &queue.PartialPublishError{
+			Outcome: queue.PublishOutcome{
+				Response:         response,
+				Partial:          true,
+				SelectedQueues:   1,
+				FailedDeliveries: uint64(len(request.Messages)),
+				DeliveryFailures: []queue.PublishDeliveryFailure{{
+					QueueID:  queueID,
+					Messages: uint64(len(request.Messages)),
+					Cause:    cause.Error(),
+				}},
+			},
+			Causes: []error{cause},
+		}
+	}
 }
 
 // The headline test: three nodes discover each other, elect a leader, and

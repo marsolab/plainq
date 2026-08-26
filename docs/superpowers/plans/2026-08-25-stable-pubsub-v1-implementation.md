@@ -1200,6 +1200,8 @@ Add:
 - `TestStoreLeaderReturnsPartialPublishOutcomeAndError`
 - `TestStoreFollowerPreservesPartialPublishOutcomeAndError`
 - `TestFSMPartialPublishIsCommittedOutcomeNotApplyFailure`
+- `TestFSMZeroCountTypedPartialKeepsExplicitDiscriminator`
+- `TestFSMQuarantineStopsLaterCommittedMutationsWithoutCrashLoop`
 - `TestFSMReconcilesTopicStateAfterEveryMutation`
 - `TestFSMRestoreReconcilesTopicStateWithoutLifecycleEvents`
 - `TestClusterIngressUsesClusterBackend`
@@ -1221,13 +1223,16 @@ Add:
 - `TestExistingRaftGuardVersionWithAllSidecarsMissingQuarantines`
 - `TestPreGuardRaftStoreInitializesVersionExactlyOnce`
 - `TestReplicaQuarantineMarkerWriteFailureStaysUnreadyAfterRestart`
+- `TestReplicaApplyGuardFinishAndDiagnosticFailuresStayQuarantinedAfterRestart`
 - `TestReplicaApplyGuardBeginFailureTerminatesBeforeStorage`
 - `TestReplicaApplyGuardFinishFailureTerminatesWithDirtyGuard`
 - `TestSuccessfulPublishRestoresReplicaApplyGuard`
 - `TestSuccessfulSnapshotRestoreClearsReplicaQuarantine`
+- `TestServingTokenRejectsFailRecoverABA`
 - `TestLivenessStaysHealthyWhileQuarantinedReadinessFails`
 - `TestHelmUsesSeparateLivenessAndReadinessRoutes`
 - `TestOperatorUsesSeparateLivenessAndReadinessRoutes`
+- `TestOperatorHealthDisabledOmitsDefaultProbesAndPreservesOverrides`
 - `TestStartupInventoryReplaysBeforeCollectorAttachment`
 - `TestTursoUsesTursoTelemetryBackend`
 
@@ -1268,7 +1273,9 @@ if err == nil {
 var partial *queue.PartialPublishError
 if errors.As(err, &partial) {
 	_ = f.reportReplicaFault(err)
-	return &partial.Outcome, nil
+	outcome := partial.Outcome
+	outcome.Partial = true
+	return &outcome, nil
 }
 
 if errors.Is(err, pqerr.ErrNotFound) {
@@ -1293,6 +1300,7 @@ type replicaFault struct{ err error }
 
 type replicaHealth struct {
 	fault atomic.Pointer[replicaFault]
+	generation atomic.Uint64
 	cleanPath string
 	dirtyPath string
 	quarantinePath string
@@ -1303,6 +1311,8 @@ func (h *replicaHealth) BeginPublishApply() error
 func (h *replicaHealth) FinishPublishApply() error
 func (h *replicaHealth) Fail(error) error
 func (h *replicaHealth) Check() error
+func (h *replicaHealth) ServingToken() (uint64, error)
+func (h *replicaHealth) CheckServingToken(uint64) error
 func (h *replicaHealth) Recover() error
 ```
 
@@ -1310,7 +1320,7 @@ The sidecar files are `<cluster.DataDir>/replica-apply-clean`, `<cluster.DataDir
 
 `NewNode` uses that pre-start callback to construct `newReplicaHealth(dataDir, stableStore)` before creating the FSM or consensus engine. If the stable key is absent, this is the one pre-guard upgrade initialization: while no FSM apply can run, reject dirty/quarantine sidecars, write/fsync/rename clean, sync the directory, then set the stable key. If clean exists because a crash interrupted the stable-key write, repeat only the key step. Once the Raft-stable key exists, a missing clean sidecar or presence of dirty/quarantine always means quarantined startup; recovery never removes the stable key. Unknown key values and any `Get`/`Set`/`Stat` error fail startup. Because the version survives in `raft.db`, loss of all three sidecars while existing Raft state remains cannot masquerade as a first upgrade. Tests seed a Raft stable key plus log metadata, delete every sidecar, and assert quarantine/startup refusal rather than clean reinitialization.
 
-Immediately before the FSM calls replicated storage for a publish, `BeginPublishApply` atomically renames clean to dirty and syncs the parent directory. Storage mutation is forbidden until that succeeds. On a deterministic full success, or on a contractually non-mutating domain error, `FinishPublishApply` atomically renames dirty back to clean and syncs before the apply returns. A partial outcome or an unknown storage error never calls `FinishPublishApply`; the missing clean marker is already durable, so restart quarantines even if every later diagnostic write fails.
+Immediately before the FSM calls replicated storage for a publish, `BeginPublishApply` atomically renames clean to dirty and syncs the parent directory. Storage mutation is forbidden until that succeeds. On a deterministic full success, or on a contractually non-mutating domain error, `FinishPublishApply` atomically renames dirty back to clean and syncs before the apply returns. If that clean-directory sync fails, it immediately rolls clean back to dirty and durably syncs the rollback before invoking the fatal path; a diagnostic-marker failure cannot turn that uncertain finish into a clean restart. A partial outcome or an unknown storage error never calls `FinishPublishApply`; the missing clean marker is already durable, so restart quarantines even if every later diagnostic write fails.
 
 A begin/finish durability failure is not returned as an ordinary `FSM.Apply` value, because Raft could continue later log entries. Add a required, production-owned `FatalApply(error)` callback to the FSM: it latches health, logs the exact guard phase, and terminates the process without returning from `Apply`; tests inject a panic sentinel instead of exiting. If begin failed before rename, no storage call occurred and the unreturned committed entry is replayed after restart. If rename or mutation occurred, dirty is present and restart quarantines. This fatal callback is safety wiring constructed by `NewNode` and cannot be replaced by callers.
 
@@ -1320,7 +1330,7 @@ Centralize this path as `f.abortApply(err)`: call the required callback and imme
 
 `Recover` runs only after verified snapshot commit and inventory. It writes and syncs a fresh clean marker, removes the quarantine/dirty markers, syncs the parent directory, and only then clears the in-memory latch. If any write, removal, or directory sync fails, it returns an error and remains quarantined. A normal restart with a quarantine marker or without the clean marker stays unready; a successful snapshot restore is the only in-process path to `Recover`. The markers share the Raft data directory's durability boundary—operators must place that directory on durable storage and wipe/reseed the entire replica, not create/delete individual markers, for manual recovery.
 
-`NewNode` creates exactly one `replicaHealth` and shares it with the FSM, cluster `Store`, peer server, `Node.Health`, and `Node.Status`. The first fault wins until recovery. Add an internal `WithReplicaHealth(*replicaHealth)` store option and a small `ensureServing()` helper. Start `Store.readBarrier`, `Store.apply`, and `Store.countSubscribers` with `ensureServing`; make Task 3's `TopicInventory` use `readBarrier` too. After every local read (`DescribeQueue`, `ListQueues`, `Peek`, `ListTopics`, `TopicInventory`, and the subscriber-count read), call `ensureServing` again before returning/using the result so a concurrent fault cannot leak local state after the latch closes. This covers every public read, every local/forwarded write entry, publish's preliminary subscriber count, and the leader sweeper. A call already applying when the fault is discovered may return its conservative partial result; every call that begins after the latch closes returns typed `Unavailable`.
+`NewNode` creates exactly one `replicaHealth` and shares it with the FSM, cluster `Store`, peer server, `Node.Health`, and `Node.Status`. The first fault wins until recovery. Add an internal `WithReplicaHealth(*replicaHealth)` store option and a small `ensureServing()` helper. Start `Store.readBarrier`, `Store.apply`, and `Store.countSubscribers` with `ensureServing`; make Task 3's `TopicInventory` use `readBarrier` too. Every local read (`DescribeQueue`, `ListQueues`, `Peek`, `ListTopics`, `TopicInventory`, and the subscriber-count read) captures `ServingToken()` before storage and requires `CheckServingToken(token)` afterward. The token is a monotonic generation, not only a nil health check, so a blocked read spanning Fail then Recover still returns typed `Unavailable`. This covers every public read, every local/forwarded write entry, publish's preliminary subscriber count, and the leader sweeper. A call already applying when the fault is discovered may return its conservative partial result; every call that begins after the latch closes returns typed `Unavailable`.
 
 The peer server bypasses `Store`, so add `ForwardGate func() error` to
 `peer.ServerConfig` and check it at the start of `/v1/forward`, before decoding
@@ -1333,7 +1343,7 @@ application writes. Tests race a read completion with `Fail`, exercise every
 Store entry point plus follower forwarding, and prove that no successful local
 result escapes after the latch closes.
 
-Change cluster `Store.Publish` to decode `queue.PublishOutcome`. When `FailedDeliveries > 0`, return `outcome.Response` plus a reconstructed `PartialPublishError` that matches `pqerr.ErrPartialFanout`; otherwise return the successful response.
+Change cluster `Store.Publish` to decode `queue.PublishOutcome` with a required boolean `Partial` discriminator serialized as JSON field `partial`. When `Partial` is true, return `outcome.Response` plus a reconstructed `PartialPublishError` that matches `pqerr.ErrPartialFanout`; otherwise return the successful response. Never infer the typed partial class from `FailedDeliveries > 0`: a conservative typed partial may carry a zero count, and a non-partial outcome may carry diagnostic counts in future versions.
 
 - [ ] **Step 4: Verify delete effects survive cluster responses**
 
@@ -1346,6 +1356,7 @@ Add:
 ```go
 type TopicStateReconciler func(*queue.TopicInventory)
 type ReplicaApplyGuard interface {
+	Check() error
 	BeginPublishApply() error
 	FinishPublishApply() error
 }
@@ -1388,6 +1399,8 @@ func WithTopicStateReconciler(reconcile fsm.TopicStateReconciler) NodeOption
 `NewNode` constructs the durable health latch before the FSM/consensus engine, passes it through the required `applyGuard` constructor parameter, passes the production terminator through required `fatalApply`, always passes `replicaHealth.Fail` and `replicaHealth.Recover` into the FSM, and returns an error if marker initialization fails. There is no option or default that can omit/replace the guard or terminator; direct FSM tests must supply explicit fakes. `initClusterNode` passes only the topic-state node option. After successful create topic, delete topic, subscribe, unsubscribe, and delete queue dispatch, call `storage.TopicInventory` and invoke the callback with `&inventory`. On a reconciliation read failure, log and invoke the callback with `nil` without changing the committed command response. After `CommitRestore`, run the same reconciliation before reporting restore completion. Call `Recover` only after both `CommitRestore` and this exact inventory read succeed, and propagate a recovery-marker error from restore; a failed restore, failed inventory, or failed marker removal leaves the node quarantined.
 
 `NewNode` also installs its non-replaceable `replicaHealth` as the FSM `ReplicaApplyGuard` and its production process terminator as `FatalApply`. The publish apply branch calls `BeginPublishApply` before `storage.Publish`; it calls `FinishPublishApply` only after a full success or a typed, contractually non-mutating precondition error. Partial/unknown outcomes call `Fail` and deliberately leave the clean guard absent. Tests assert begin happens before the first storage mutation, finish happens after the last mutation, a begin failure performs no storage call or ordinary Apply return, and diagnostic-marker failure still produces a quarantined restart.
+
+At the start of every decoded committed entry, `FSM.Apply` calls `ReplicaApplyGuard.Check`. Once quarantined, later publish and non-publish entries return typed unavailable outcomes without invoking storage or the fatal callback, so an unhealthy voter neither mutates further nor crash-loops while Raft advances. `FSM.Restore` deliberately does not use this apply gate: it stages and commits the snapshot, verifies `TopicInventory`, and only then calls `Recover`. Tests execute partial → non-publish → publish → restore and prove only the verified restore reopens mutation.
 
 The callback maps non-nil inventory only to `Observer.ReconcileTopicState`; nil calls `Observer.TopicStateUnavailable`. It never calls request, operation, publish, or lifecycle methods.
 
@@ -1489,7 +1502,7 @@ Keep the concrete `*hc.MultiServiceChecker` in `cmd/server.go` when health is en
 
 Preserve `--health.route=/health` as the dependency/readiness endpoint and add `--health.liveness.route=/live` with `HealthLivenessRoute` in config. Validate that both enabled routes start with `/`, are non-empty, and differ. Mount both routes on the returned `httpkit.ListenerHTTP` rather than using Servekit's built-in health reporter: the pinned JSON/HTML reporter writes HTTP 200 on checker failure. A local `readinessHandler` preserves plain/JSON/HTML bodies but always writes 503 before the body when `checker.Health` fails; GET and HEAD must have the same status. A separate liveness handler always returns 200 once the HTTP process is serving and never calls the dependency checker. Preserve health access-log/self-metric flags as middleware on both routes.
 
-Update Helm args/config and set only `livenessProbe.httpGet.path=/live`; readiness stays `/health`. Add `DefaultLivenessRoute = "/live"` to the operator defaults, emit `-health.liveness.route=/live`, and render distinct default probes while preserving explicit pod probe overrides. Test default/plain/JSON/HTML readiness failures plus both Helm and operator routes. This prevents orchestration from erasing a quarantine through a liveness restart. Task 14 documents both routes and the durable-recovery rule.
+Update Helm args/config so `-health.route` and the default readiness probe derive from the same `config.healthRoute` value, while `-health.liveness.route` and the default liveness probe derive from the same `config.healthLivenessRoute` value; defaults remain `/health` and `/live`. Add `DefaultLivenessRoute = "/live"` to the operator defaults, emit `-health.liveness.route=/live`, and render distinct default probes while preserving explicit pod probe overrides. When operator `health.enabled=false`, omit both default HTTP probes but keep any explicit liveness/readiness overrides. Test default/plain/JSON/HTML readiness failures, customized Helm routes, operator defaults, disabled health, and explicit overrides. This prevents orchestration from erasing a quarantine through a liveness restart. Task 14 documents both routes and the durable-recovery rule.
 
 - [ ] **Step 8: Run cluster and server wiring tests**
 

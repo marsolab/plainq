@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -27,20 +29,22 @@ import (
 	"github.com/marsolab/servekit/authkit/jwtkit"
 	"github.com/marsolab/servekit/grpckit"
 	"github.com/marsolab/servekit/httpkit"
+	"github.com/marsolab/servekit/httpkit/statuspage"
 	_ "google.golang.org/grpc/encoding/proto"
 )
 
 // PlainQ represents plainq logic.
 type PlainQ struct {
-	cfg          *config.Config
-	logger       *slog.Logger
-	queue        *queue.Service
-	account      *account.Service
-	onboarding   *onboarding.Service
-	rbac         *rbac.Service
-	oauth        *oauth.Service
-	observer     *telemetry.Observer
-	tokenManager jwtkit.TokenManager
+	cfg             *config.Config
+	logger          *slog.Logger
+	queue           *queue.Service
+	account         *account.Service
+	onboarding      *onboarding.Service
+	rbac            *rbac.Service
+	oauth           *oauth.Service
+	localObserver   *telemetry.Observer
+	logicalObserver *telemetry.Observer
+	tokenManager    jwtkit.TokenManager
 
 	// Telemetry components.
 	metricsCollector *collector.Collector
@@ -99,9 +103,7 @@ func NewServer(
 		// Attaching the collector to the same observer means Houston's
 		// dashboards are fed from that one stream rather than a second,
 		// separately-wired one that can silently drift out of agreement with it.
-		if pq.observer != nil {
-			pq.observer.SetRecorder(pq.metricsCollector)
-		}
+		attachTelemetryObservers(pq.localObserver, pq.logicalObserver, pq.metricsCollector)
 
 		pq.metricsCollector.RegisterMetrics()
 
@@ -372,6 +374,9 @@ func (s *PlainQ) serveHoustonNotFound(w http.ResponseWriter, r *http.Request, bu
 }
 
 func listenerHTTP(cfg *config.Config, logger *slog.Logger, checker hc.HealthChecker) (*httpkit.ListenerHTTP, error) {
+	if err := cfg.ValidateHealthRoutes(); err != nil {
+		return nil, fmt.Errorf("validate health routes: %w", err)
+	}
 	httpListenerOpts := httpkit.NewListenerOption(
 		httpkit.WithLogger(logger),
 		httpkit.WithHTTPServerTimeouts(
@@ -381,24 +386,6 @@ func listenerHTTP(cfg *config.Config, logger *slog.Logger, checker hc.HealthChec
 			httpkit.HTTPServerIdleTimeout(cfg.HTTPIdleTimeout),
 		),
 	)
-
-	if cfg.HealthEnable {
-		healthOptions := []httpkit.ListenerOption[httpkit.HealthConfig]{
-			httpkit.HealthCheckRoute(cfg.HealthRoute),
-			httpkit.HealthCheckAccessLog(cfg.HealthRouteLogs),
-			httpkit.HealthChecker(checker),
-		}
-
-		switch cfg.HealthReporter {
-		case "json":
-			healthOptions = append(healthOptions, httpkit.HealthCheckReportJSON())
-
-		case "html":
-			healthOptions = append(healthOptions, httpkit.HealthCheckReportHTML())
-		}
-
-		httpListenerOpts = append(httpListenerOpts, httpkit.WithHealthCheck(healthOptions...))
-	}
 
 	if cfg.MetricsEnable {
 		httpListenerOpts = append(httpListenerOpts, httpkit.WithMetrics(
@@ -413,7 +400,88 @@ func listenerHTTP(cfg *config.Config, logger *slog.Logger, checker hc.HealthChec
 		return nil, fmt.Errorf("create HTTP listener: %w", err)
 	}
 
+	if cfg.HealthEnable {
+		middlewares := make([]httpkit.Middleware, 0, 2)
+		if cfg.HealthRouteLogs {
+			middlewares = append(middlewares, httpkit.LoggingMiddleware(logger))
+		} else {
+			middlewares = append(middlewares, httpkit.NoAccessLogMiddleware())
+		}
+		if cfg.HealthRouteMetrics {
+			middlewares = append(middlewares, httpkit.MetricsMiddleware())
+		}
+		httpListener.Mount(cfg.HealthRoute, readinessHandler(checker, cfg.HealthReporter), middlewares...)
+		httpListener.Mount(cfg.HealthLivenessRoute, livenessHandler(), middlewares...)
+	}
+
 	return httpListener, nil
+}
+
+func readinessHandler(checker hc.HealthChecker, reporter string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		healthErr := checker.Health(r.Context())
+		status := http.StatusOK
+		if healthErr != nil {
+			status = http.StatusServiceUnavailable
+		}
+
+		switch reporter {
+		case "json":
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(status)
+			if r.Method == http.MethodHead {
+				return
+			}
+			message := "Service is healthy"
+			if healthErr != nil {
+				message = "Service is temporarily unavailable. Please try again later."
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"status":  fmt.Sprintf("%d %s", status, http.StatusText(status)),
+				"message": message,
+			})
+
+		case "html":
+			report := hc.NewServiceReport()
+			if services, ok := checker.(*hc.MultiServiceChecker); ok {
+				report = services.Report()
+			}
+			var body bytes.Buffer
+			if err := statuspage.RenderStatus(&body, report); err != nil {
+				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(status)
+			if r.Method != http.MethodHead {
+				_, _ = w.Write(body.Bytes())
+			}
+
+		default:
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(status)
+			if r.Method == http.MethodHead || healthErr == nil {
+				return
+			}
+			_, _ = w.Write([]byte(http.StatusText(status) + "\n"))
+		}
+	})
+}
+
+func livenessHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+	})
 }
 
 // Option configures the PlainQ server.
@@ -432,11 +500,22 @@ func WithClusterNode(node ClusterNode) Option {
 	return func(pq *PlainQ) { pq.clusterNode = node }
 }
 
-// WithObserver hands the server the observer the storage layer records
-// through, so the telemetry collector — created here, once the telemetry
-// store is open — can be attached to the same event stream.
-func WithObserver(observer *telemetry.Observer) Option {
-	return func(pq *PlainQ) { pq.observer = observer }
+// WithTelemetryObservers supplies the physical replica and ingress logical
+// event streams. Standalone mode passes the same pointer for both.
+func WithTelemetryObservers(local, logical *telemetry.Observer) Option {
+	return func(pq *PlainQ) {
+		pq.localObserver = local
+		pq.logicalObserver = logical
+	}
+}
+
+func attachTelemetryObservers(local, logical *telemetry.Observer, sink telemetry.Recorder) {
+	if local != nil {
+		local.SetRecorder(sink)
+	}
+	if logical != nil && logical != local {
+		logical.SetRecorder(telemetry.NewStateSuppressingRecorder(sink))
+	}
 }
 
 // GetMetricsCollector returns the metrics collector for external use.

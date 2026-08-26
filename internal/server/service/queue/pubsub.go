@@ -80,6 +80,7 @@ type PublishDeliveryFailure struct {
 
 type PublishOutcome struct {
 	Response         *PublishResponse         `json:"response"`
+	Partial          bool                     `json:"partial"`
 	SelectedQueues   uint64                   `json:"selectedQueues"`
 	FailedDeliveries uint64                   `json:"failedDeliveries"`
 	DeliveryFailures []PublishDeliveryFailure `json:"deliveryFailures"`

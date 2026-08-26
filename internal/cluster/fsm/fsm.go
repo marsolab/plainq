@@ -21,6 +21,7 @@ import (
 	"github.com/marsolab/plainq/internal/metrics"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/service/queue"
+	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/marsolab/servekit/logkit"
 )
 
@@ -32,10 +33,50 @@ const applyTimeout = 60 * time.Second
 // Compilation time check that FSM implements raft's state machine contract.
 var _ hraft.FSM = (*FSM)(nil)
 
+// TopicStateReconciler installs exact topic/subscription gauges after a
+// replicated state change. A nil inventory marks the exact state unknown.
+type TopicStateReconciler func(*queue.TopicInventory)
+
+// ReplicaApplyGuard is the durable write-ahead marker around local publish
+// mutation.
+type ReplicaApplyGuard interface {
+	BeginPublishApply() error
+	FinishPublishApply() error
+	Check() error
+}
+
+// FatalApply terminates the process when the durable apply protocol cannot be
+// completed. Returning is a programming error and abortApply panics.
+type FatalApply func(error)
+
+type ReplicaFaultReporter func(error) error
+type ReplicaRecoveryReporter func() error
+
+// Option configures non-safety FSM callbacks. The apply guard and fatal path
+// are required constructor arguments and cannot be omitted through options.
+type Option func(*FSM)
+
+func WithTopicStateReconciler(reconcile TopicStateReconciler) Option {
+	return func(f *FSM) { f.reconcileTopicState = reconcile }
+}
+
+func WithReplicaFaultReporter(report ReplicaFaultReporter) Option {
+	return func(f *FSM) { f.reportReplicaFault = report }
+}
+
+func WithReplicaRecoveryReporter(report ReplicaRecoveryReporter) Option {
+	return func(f *FSM) { f.reportReplicaRecovery = report }
+}
+
 // FSM applies committed commands to a queue store.
 type FSM struct {
-	storage queue.ReplicatedStorage
-	logger  *slog.Logger
+	storage               queue.ReplicatedStorage
+	logger                *slog.Logger
+	applyGuard            ReplicaApplyGuard
+	fatalApply            FatalApply
+	reconcileTopicState   TopicStateReconciler
+	reportReplicaFault    ReplicaFaultReporter
+	reportReplicaRecovery ReplicaRecoveryReporter
 
 	// appliedIndex is the last log index applied, for status reporting.
 	appliedIndex atomic.Uint64
@@ -50,12 +91,36 @@ type FSM struct {
 }
 
 // New returns an FSM over the given local store.
-func New(storage queue.ReplicatedStorage, logger *slog.Logger) *FSM {
+func New(
+	storage queue.ReplicatedStorage,
+	logger *slog.Logger,
+	applyGuard ReplicaApplyGuard,
+	fatalApply FatalApply,
+	opts ...Option,
+) *FSM {
 	if logger == nil {
 		logger = logkit.NewNop()
 	}
+	if applyGuard == nil {
+		panic("cluster FSM requires a replica apply guard")
+	}
+	if fatalApply == nil {
+		panic("cluster FSM requires a fatal apply callback")
+	}
 
-	return &FSM{storage: storage, logger: logger}
+	f := &FSM{
+		storage:               storage,
+		logger:                logger,
+		applyGuard:            applyGuard,
+		fatalApply:            fatalApply,
+		reportReplicaFault:    func(error) error { return nil },
+		reportReplicaRecovery: func() error { return nil },
+	}
+	for _, opt := range opts {
+		opt(f)
+	}
+
+	return f
 }
 
 // AppliedIndex returns the last log index this state machine applied.
@@ -108,7 +173,13 @@ func (f *FSM) Apply(entry *hraft.Log) any {
 	ctx = queue.WithDeterminism(ctx, determinism)
 
 	start := time.Now()
-	response, err := f.dispatch(ctx, cmd)
+	var response any
+	var err error
+	if gateErr := f.applyGuard.Check(); gateErr != nil {
+		err = fmt.Errorf("replica is quarantined before applying %s: %w", cmd.Op, gateErr)
+	} else {
+		response, err = f.dispatch(ctx, cmd)
+	}
 
 	metrics.RecordFSMApply(cmd.Op.String(), start, err)
 
@@ -161,7 +232,11 @@ func (f *FSM) dispatch(ctx context.Context, cmd *command.Command) (any, error) {
 
 	case command.OpDeleteQueue:
 		return decodeAnd(cmd, &v1.DeleteQueueRequest{}, func(req *v1.DeleteQueueRequest) (any, error) {
-			return f.storage.DeleteQueue(ctx, req)
+			response, err := f.storage.DeleteQueue(ctx, req)
+			if err == nil {
+				f.reconcileTopics(ctx)
+			}
+			return response, err
 		})
 
 	case command.OpPurgeQueue:
@@ -186,7 +261,11 @@ func (f *FSM) dispatch(ctx context.Context, cmd *command.Command) (any, error) {
 
 	case command.OpCreateTopic:
 		return decodeJSONAnd(cmd, func(req *queue.CreateTopicRequest) (any, error) {
-			return f.storage.CreateTopic(ctx, req)
+			response, err := f.storage.CreateTopic(ctx, req)
+			if err == nil {
+				f.reconcileTopics(ctx)
+			}
+			return response, err
 		})
 
 	case command.OpDeleteTopic:
@@ -194,12 +273,17 @@ func (f *FSM) dispatch(ctx context.Context, cmd *command.Command) (any, error) {
 		if err != nil {
 			return nil, fmt.Errorf("delete topic %q: %w", cmd.Target, err)
 		}
+		f.reconcileTopics(ctx)
 
 		return result, nil
 
 	case command.OpSubscribe:
 		return decodeJSONAnd(cmd, func(req *queue.SubscribeRequest) (any, error) {
-			return f.storage.Subscribe(ctx, cmd.Target, req)
+			response, err := f.storage.Subscribe(ctx, cmd.Target, req)
+			if err == nil {
+				f.reconcileTopics(ctx)
+			}
+			return response, err
 		})
 
 	case command.OpUnsubscribe:
@@ -210,12 +294,13 @@ func (f *FSM) dispatch(ctx context.Context, cmd *command.Command) (any, error) {
 		if err := f.storage.Unsubscribe(ctx, cmd.Target, cmd.IDs[0]); err != nil {
 			return nil, fmt.Errorf("unsubscribe %q from topic %q: %w", cmd.IDs[0], cmd.Target, err)
 		}
+		f.reconcileTopics(ctx)
 
 		return nil, nil //nolint:nilnil // an unsubscribe has no response to return.
 
 	case command.OpPublish:
 		return decodeJSONAnd(cmd, func(req *queue.PublishRequest) (any, error) {
-			return f.storage.Publish(ctx, cmd.Target, req)
+			return f.publish(ctx, cmd.Target, req)
 		})
 
 	case command.OpSweep:
@@ -227,6 +312,83 @@ func (f *FSM) dispatch(ctx context.Context, cmd *command.Command) (any, error) {
 	default:
 		return nil, fmt.Errorf("unhandled operation %q", cmd.Op)
 	}
+}
+
+func (f *FSM) publish(ctx context.Context, topicID string, request *queue.PublishRequest) (any, error) {
+	if err := f.applyGuard.BeginPublishApply(); err != nil {
+		f.abortApply(fmt.Errorf("begin publish apply guard: %w", err))
+	}
+
+	response, err := f.storage.Publish(ctx, topicID, request)
+	if err == nil {
+		if guardErr := f.applyGuard.FinishPublishApply(); guardErr != nil {
+			f.abortApply(fmt.Errorf("finish publish apply guard: %w", guardErr))
+		}
+
+		selected := uint64(0)
+		if response != nil {
+			selected = uint64(len(response.QueueIDs))
+		}
+		return &queue.PublishOutcome{Response: response, SelectedQueues: selected}, nil
+	}
+
+	var partial *queue.PartialPublishError
+	if errors.As(err, &partial) {
+		f.reportFault(err)
+		outcome := partial.Outcome
+		outcome.Partial = true
+		return &outcome, nil
+	}
+
+	if errors.Is(err, pqerr.ErrNotFound) {
+		if guardErr := f.applyGuard.FinishPublishApply(); guardErr != nil {
+			f.abortApply(fmt.Errorf("finish non-mutating publish apply guard: %w", guardErr))
+		}
+		return nil, err
+	}
+
+	f.reportFault(err)
+	return nil, err
+}
+
+func (f *FSM) reportFault(err error) {
+	if reportErr := f.reportReplicaFault(err); reportErr != nil {
+		f.logger.Error("Failed to persist replica quarantine diagnostic",
+			slog.String("error", reportErr.Error()),
+		)
+	}
+}
+
+func (f *FSM) abortApply(err error) {
+	f.fatalApply(err)
+	panic("cluster FatalApply returned")
+}
+
+func (f *FSM) reconcileTopics(ctx context.Context) error {
+	if f.reconcileTopicState == nil {
+		return nil
+	}
+
+	return f.verifyTopicState(ctx)
+}
+
+func (f *FSM) verifyTopicState(ctx context.Context) error {
+
+	inventory, err := f.storage.TopicInventory(ctx)
+	if err != nil {
+		f.logger.Error("Failed to reconcile replica topic state",
+			slog.String("error", err.Error()),
+		)
+		if f.reconcileTopicState != nil {
+			f.reconcileTopicState(nil)
+		}
+		return fmt.Errorf("read replica topic inventory: %w", err)
+	}
+
+	if f.reconcileTopicState != nil {
+		f.reconcileTopicState(&inventory)
+	}
+	return nil
 }
 
 // sweeper is the optional eviction entry point on a store. Sweeping is not

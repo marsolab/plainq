@@ -1,15 +1,22 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
 	"reflect"
 	"sync"
 	"testing"
 	"time"
 
+	hraft "github.com/hashicorp/raft"
 	"github.com/marsolab/plainq/internal/cluster/consensus"
 	"github.com/marsolab/plainq/internal/cluster/deletewire"
+	"github.com/marsolab/plainq/internal/cluster/peer"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/service/queue"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
@@ -21,6 +28,200 @@ type commitUnknownConsensus struct {
 
 	mu         sync.Mutex
 	applyCalls int
+}
+
+type outcomeConsensus struct {
+	consensus.Consensus
+	leader   bool
+	address  string
+	response any
+	err      error
+}
+
+func (c *outcomeConsensus) IsLeader() bool { return c.leader }
+func (c *outcomeConsensus) Apply(context.Context, []byte) (any, error) {
+	return c.response, c.err
+}
+func (c *outcomeConsensus) Leader() (string, string, error) {
+	address := c.address
+	if address == "" {
+		address = "leader-address"
+	}
+	return "leader", address, nil
+}
+
+type topicListStorage struct {
+	queue.ReplicatedStorage
+	topics *queue.ListTopicsResponse
+}
+
+func (s *topicListStorage) ListTopics(context.Context) (*queue.ListTopicsResponse, error) {
+	return s.topics, nil
+}
+
+func newHealthyReplicaForStoreTest(t *testing.T) *replicaHealth {
+	t.Helper()
+	health, err := newReplicaHealth(t.TempDir(), hraft.NewInmemStore())
+	if err != nil {
+		t.Fatalf("newReplicaHealth() = %v", err)
+	}
+	return health
+}
+
+func TestStoreLeaderReturnsPartialPublishOutcomeAndError(t *testing.T) {
+	health := newHealthyReplicaForStoreTest(t)
+	response := &queue.PublishResponse{TopicID: "topicone", QueueIDs: []string{"queueone"}}
+	engine := &outcomeConsensus{leader: true, response: &queue.PublishOutcome{
+		Response: response,
+		Partial:  true,
+		// A typed partial may conservatively carry no count. The discriminator,
+		// not FailedDeliveries, is the contract.
+		FailedDeliveries: 0,
+	}}
+	local := &topicListStorage{topics: &queue.ListTopicsResponse{Topics: []queue.Topic{{
+		TopicID: "topicone", Subscriptions: []queue.Subscription{{QueueID: "queueone"}},
+	}}}}
+	store := NewStore(local, engine, nil, WithReplicaHealth(health))
+
+	got, err := store.Publish(context.Background(), "topicone", &queue.PublishRequest{})
+	if got != response {
+		t.Fatalf("Publish response = %#v, want %#v", got, response)
+	}
+	var partial *queue.PartialPublishError
+	if !errors.As(err, &partial) || !errors.Is(err, pqerr.ErrPartialFanout) {
+		t.Fatalf("Publish error = %v, want typed partial fanout", err)
+	}
+	if !partial.Outcome.Partial || partial.Outcome.FailedDeliveries != 0 {
+		t.Fatalf("partial outcome = %#v, want explicit zero-count partial", partial.Outcome)
+	}
+}
+
+type httpPeerForwarder struct{}
+
+func (httpPeerForwarder) Forward(ctx context.Context, addr string, payload []byte) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+addr+"/v1/forward", bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("peer returned %s: %s", resp.Status, body)
+	}
+	return body, nil
+}
+
+func TestStoreFollowerPreservesPartialPublishOutcomeAndError(t *testing.T) {
+	response := &queue.PublishResponse{TopicID: "topicone", QueueIDs: []string{"queueone"}}
+	server := peer.NewServer(peer.ServerConfig{Applier: &outcomeConsensus{response: &queue.PublishOutcome{
+		Response: response,
+		Partial:  true,
+	}}})
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = listener.Close()
+		_ = server.Shutdown(context.Background())
+	})
+	go func() { _ = server.Serve(listener) }()
+
+	health := newHealthyReplicaForStoreTest(t)
+	engine := &outcomeConsensus{leader: false, address: listener.Addr().String()}
+	local := &topicListStorage{topics: &queue.ListTopicsResponse{Topics: []queue.Topic{{TopicID: "topicone"}}}}
+	store := NewStore(local, engine, httpPeerForwarder{}, WithReplicaHealth(health))
+
+	got, err := store.Publish(context.Background(), "topicone", &queue.PublishRequest{})
+	if got == nil || got.TopicID != response.TopicID {
+		t.Fatalf("follower Publish response = %#v, want %#v", got, response)
+	}
+	var partial *queue.PartialPublishError
+	if !errors.As(err, &partial) || !partial.Outcome.Partial || partial.Outcome.FailedDeliveries != 0 {
+		t.Fatalf("follower Publish error = %v, want explicit zero-count partial", err)
+	}
+}
+
+type blockingDescribeStorage struct {
+	queue.ReplicatedStorage
+	started chan struct{}
+	release chan struct{}
+}
+
+func (s *blockingDescribeStorage) DescribeQueue(context.Context, *v1.DescribeQueueRequest) (*v1.DescribeQueueResponse, error) {
+	close(s.started)
+	<-s.release
+	return &v1.DescribeQueueResponse{}, nil
+}
+
+func TestQuarantineRaceCannotReturnACompletedLocalRead(t *testing.T) {
+	health := newHealthyReplicaForStoreTest(t)
+	local := &blockingDescribeStorage{started: make(chan struct{}), release: make(chan struct{})}
+	store := NewStore(local, &outcomeConsensus{}, nil, WithReplicaHealth(health))
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := store.DescribeQueue(context.Background(), &v1.DescribeQueueRequest{QueueId: "queueone"})
+		done <- err
+	}()
+	<-local.started
+	if err := health.Fail(errors.New("replica partial")); err != nil {
+		t.Fatalf("Fail() = %v", err)
+	}
+	if err := health.Recover(); err != nil {
+		t.Fatalf("Recover() = %v", err)
+	}
+	close(local.release)
+
+	if err := <-done; !errors.Is(err, pqerr.ErrUnavailable) {
+		t.Fatalf("DescribeQueue spanning Fail/Recover = %v, want unavailable", err)
+	}
+}
+
+func TestQuarantinedStoreRejectsEveryPublicOperation(t *testing.T) {
+	health := newHealthyReplicaForStoreTest(t)
+	if err := health.Fail(errors.New("replica partial")); err != nil {
+		t.Fatalf("Fail() = %v", err)
+	}
+	store := NewStore(&topicListStorage{}, &outcomeConsensus{leader: true}, nil, WithReplicaHealth(health))
+	ctx := context.Background()
+
+	tests := []struct {
+		name string
+		call func() error
+	}{
+		{name: "create queue", call: func() error { _, err := store.CreateQueue(ctx, &v1.CreateQueueRequest{}); return err }},
+		{name: "delete queue", call: func() error { _, err := store.DeleteQueue(ctx, &v1.DeleteQueueRequest{}); return err }},
+		{name: "purge queue", call: func() error { _, err := store.PurgeQueue(ctx, &v1.PurgeQueueRequest{}); return err }},
+		{name: "send", call: func() error { _, err := store.Send(ctx, &v1.SendRequest{}); return err }},
+		{name: "receive", call: func() error { _, err := store.Receive(ctx, &v1.ReceiveRequest{}); return err }},
+		{name: "delete messages", call: func() error { _, err := store.Delete(ctx, &v1.DeleteRequest{}); return err }},
+		{name: "describe queue", call: func() error { _, err := store.DescribeQueue(ctx, &v1.DescribeQueueRequest{}); return err }},
+		{name: "list queues", call: func() error { _, err := store.ListQueues(ctx, &v1.ListQueuesRequest{}); return err }},
+		{name: "peek", call: func() error { _, err := store.Peek(ctx, &queue.PeekRequest{}); return err }},
+		{name: "list topics", call: func() error { _, err := store.ListTopics(ctx); return err }},
+		{name: "create topic", call: func() error { _, err := store.CreateTopic(ctx, &queue.CreateTopicRequest{}); return err }},
+		{name: "delete topic", call: func() error { _, err := store.DeleteTopic(ctx, "topicone"); return err }},
+		{name: "topic inventory", call: func() error { _, err := store.TopicInventory(ctx); return err }},
+		{name: "subscribe", call: func() error { _, err := store.Subscribe(ctx, "topicone", &queue.SubscribeRequest{}); return err }},
+		{name: "unsubscribe", call: func() error { return store.Unsubscribe(ctx, "topicone", "subone") }},
+		{name: "publish", call: func() error { _, err := store.Publish(ctx, "topicone", &queue.PublishRequest{}); return err }},
+		{name: "sweep", call: func() error { _, err := store.Sweep(ctx, "queueone"); return err }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.call(); !errors.Is(err, pqerr.ErrUnavailable) {
+				t.Fatalf("operation error = %v, want unavailable", err)
+			}
+		})
+	}
 }
 
 func (c *commitUnknownConsensus) IsLeader() bool { return true }

@@ -2,6 +2,10 @@ package server
 
 import (
 	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/marsolab/plainq/internal/metrics"
@@ -21,6 +25,91 @@ import (
 type healthCheckerStub struct{}
 
 func (healthCheckerStub) Health(context.Context) error { return nil }
+
+type failingHealthChecker struct {
+	calls int
+}
+
+func (c *failingHealthChecker) Health(context.Context) error {
+	c.calls++
+	return errors.New("replica quarantined")
+}
+
+func TestLivenessStaysHealthyWhileQuarantinedReadinessFails(t *testing.T) {
+	for _, reporter := range []string{"", "json", "html"} {
+		for _, method := range []string{http.MethodGet, http.MethodHead} {
+			t.Run(reporter+"/"+method, func(t *testing.T) {
+				checker := new(failingHealthChecker)
+				readiness := httptest.NewRecorder()
+				readinessHandler(checker, reporter).ServeHTTP(
+					readiness,
+					httptest.NewRequest(method, "/health", nil),
+				)
+				if readiness.Code != http.StatusServiceUnavailable {
+					t.Fatalf("readiness status = %d, want 503", readiness.Code)
+				}
+				if method == http.MethodGet && reporter == "json" && !strings.Contains(readiness.Body.String(), `"status":"503 Service Unavailable"`) {
+					t.Fatalf("JSON readiness body = %q", readiness.Body.String())
+				}
+				if method == http.MethodGet && reporter == "html" && !strings.Contains(readiness.Header().Get("Content-Type"), "text/html") {
+					t.Fatalf("HTML readiness content type = %q", readiness.Header().Get("Content-Type"))
+				}
+
+				live := httptest.NewRecorder()
+				livenessHandler().ServeHTTP(live, httptest.NewRequest(method, "/live", nil))
+				if live.Code != http.StatusOK {
+					t.Fatalf("liveness status = %d, want 200", live.Code)
+				}
+				if checker.calls != 1 {
+					t.Fatalf("dependency checker calls = %d, want readiness only", checker.calls)
+				}
+			})
+		}
+	}
+}
+
+type telemetryRecorderStub struct {
+	sends     int
+	queueSets int
+}
+
+func (r *telemetryRecorderStub) RecordSend(string, uint64, uint64) { r.sends++ }
+func (*telemetryRecorderStub) RecordReceive(string, uint64, bool)  {}
+func (*telemetryRecorderStub) RecordDelete(string, uint64)         {}
+func (*telemetryRecorderStub) RecordRedelivery(string, uint64)     {}
+func (*telemetryRecorderStub) RecordDrop(string, uint64)           {}
+func (*telemetryRecorderStub) RecordDLQ(string, uint64)            {}
+func (*telemetryRecorderStub) IncrementQueues()                    {}
+func (*telemetryRecorderStub) DecrementQueues()                    {}
+func (r *telemetryRecorderStub) SetQueuesExist(int64)              { r.queueSets++ }
+
+func TestAttachTelemetryObserversDeduplicatesStandaloneAndSuppressesClusterState(t *testing.T) {
+	t.Run("standalone pointer is attached once with full state", func(t *testing.T) {
+		observer := telemetry.NewObserver(metrics.BackendSQLite)
+		recorder := new(telemetryRecorderStub)
+		attachTelemetryObservers(observer, observer, recorder)
+		observer.SetQueues(3)
+		if recorder.queueSets != 1 {
+			t.Fatalf("queue exact-state calls = %d, want 1", recorder.queueSets)
+		}
+	})
+
+	t.Run("cluster logical state is suppressed but events forward", func(t *testing.T) {
+		local := telemetry.NewObserver(metrics.BackendSQLite)
+		logical := telemetry.NewObserver(metrics.BackendCluster)
+		recorder := new(telemetryRecorderStub)
+		attachTelemetryObservers(local, logical, recorder)
+		local.SetQueues(3)
+		logical.SetQueues(99)
+		logical.Sent("queueone", 1, 1)
+		if recorder.queueSets != 1 {
+			t.Fatalf("queue exact-state calls = %d, want only local state", recorder.queueSets)
+		}
+		if recorder.sends != 1 {
+			t.Fatalf("logical send events = %d, want 1", recorder.sends)
+		}
+	})
+}
 
 // Storage stubs. Each embeds the interface it stands in for, which satisfies
 // the contract without implementing it — building the route tree never calls
@@ -57,12 +146,13 @@ func Test_NewServer_mountsRoutes(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			cfg := config.Config{
 				// Port zero, so two subtests never fight over an address.
-				HTTPAddr:      "127.0.0.1:0",
-				GRPCAddr:      "127.0.0.1:0",
-				MetricsEnable: true,
-				MetricsRoute:  "/metrics",
-				HealthEnable:  true,
-				HealthRoute:   "/health",
+				HTTPAddr:            "127.0.0.1:0",
+				GRPCAddr:            "127.0.0.1:0",
+				MetricsEnable:       true,
+				MetricsRoute:        "/metrics",
+				HealthEnable:        true,
+				HealthRoute:         "/health",
+				HealthLivenessRoute: "/live",
 			}
 
 			logger := logkit.NewNop()

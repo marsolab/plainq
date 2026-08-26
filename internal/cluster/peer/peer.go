@@ -90,10 +90,11 @@ type JoinResponse struct {
 
 // Server answers peer RPC on the cluster port.
 type Server struct {
-	applier    Applier
-	membership Membership
-	secret     []byte
-	logger     *slog.Logger
+	applier     Applier
+	membership  Membership
+	forwardGate func() error
+	secret      []byte
+	logger      *slog.Logger
 
 	http   *http.Server
 	router chi.Router
@@ -106,6 +107,10 @@ type ServerConfig struct {
 
 	// Membership admits and removes nodes.
 	Membership Membership
+
+	// ForwardGate rejects data-plane forwarding while this replica is not
+	// safe to serve. Membership and status RPCs remain available for repair.
+	ForwardGate func() error
 
 	// Secret authenticates peers. An empty secret leaves the cluster port
 	// unauthenticated, which is only acceptable on a trusted network — the
@@ -124,11 +129,12 @@ func NewServer(cfg ServerConfig) *Server {
 	}
 
 	s := Server{
-		applier:    cfg.Applier,
-		membership: cfg.Membership,
-		secret:     []byte(cfg.Secret),
-		logger:     logger,
-		router:     chi.NewRouter(),
+		applier:     cfg.Applier,
+		membership:  cfg.Membership,
+		forwardGate: cfg.ForwardGate,
+		secret:      []byte(cfg.Secret),
+		logger:      logger,
+		router:      chi.NewRouter(),
 	}
 
 	s.router.Route("/v1", func(r chi.Router) {
@@ -247,6 +253,13 @@ func (r *statusRecorder) WriteHeader(status int) {
 
 // forwardHandler commits a command a follower could not commit itself.
 func (s *Server) forwardHandler(w http.ResponseWriter, r *http.Request) {
+	if s.forwardGate != nil {
+		if err := s.forwardGate(); err != nil {
+			s.writeApplyError(w, err)
+			return
+		}
+	}
+
 	payload, readErr := io.ReadAll(io.LimitReader(r.Body, maxRequestBytes))
 	if readErr != nil {
 		http.Error(w, "read forwarded command: "+readErr.Error(), http.StatusBadRequest)

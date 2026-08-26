@@ -15,6 +15,7 @@ const (
 	DefaultClusterDataDir  = "/data/cluster"
 	DefaultVolumeSize      = "8Gi"
 	DefaultHealthRoute     = "/health"
+	DefaultLivenessRoute   = "/live"
 	DefaultMetricsRoute    = "/metrics"
 	DefaultLogLevel        = "info"
 	DefaultClusterReplicas = 3

@@ -146,6 +146,7 @@ func observabilityArgs(spec plainqv1alpha1.PlainQSpec) []string {
 	args := []string{
 		flag("health", boolString(plainqv1alpha1.BoolValue(spec.Observability.Health.Enabled, true))),
 		flag("health.route", spec.Observability.Health.Route),
+		flag("health.liveness.route", plainqv1alpha1.DefaultLivenessRoute),
 		flag("metrics", boolString(plainqv1alpha1.BoolValue(spec.Observability.Metrics.Enabled, true))),
 		flag("metrics.route", spec.Observability.Metrics.Route),
 	}

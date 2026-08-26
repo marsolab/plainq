@@ -62,10 +62,11 @@ const (
 // leads, through the leader if it does not. Nothing above this layer knows
 // which of those happened.
 type Store struct {
-	local     queue.ReplicatedStorage
-	consensus consensus.Consensus
-	forwarder Forwarder
-	logger    *slog.Logger
+	local         queue.ReplicatedStorage
+	consensus     consensus.Consensus
+	forwarder     Forwarder
+	logger        *slog.Logger
+	replicaHealth *replicaHealth
 
 	// consistency decides where reads are answered.
 	consistency ConsistencyMode
@@ -115,6 +116,11 @@ func WithStoreIDs(newULID, newXID func() string) StoreOption {
 		s.newULID = newULID
 		s.newXID = newXID
 	}
+}
+
+// WithReplicaHealth installs the node-wide fail-closed serving latch.
+func WithReplicaHealth(health *replicaHealth) StoreOption {
+	return func(s *Store) { s.replicaHealth = health }
 }
 
 // NewStore wraps a local store in the cluster's write path.
@@ -208,7 +214,8 @@ func (s *Store) Delete(ctx context.Context, input *v1.DeleteRequest) (*v1.Delete
 
 // DescribeQueue implements queue.Storage.
 func (s *Store) DescribeQueue(ctx context.Context, input *v1.DescribeQueueRequest) (*v1.DescribeQueueResponse, error) {
-	if err := s.readBarrier(ctx); err != nil {
+	token, err := s.readBarrier(ctx)
+	if err != nil {
 		return nil, err
 	}
 
@@ -216,13 +223,17 @@ func (s *Store) DescribeQueue(ctx context.Context, input *v1.DescribeQueueReques
 	if err != nil {
 		return nil, fmt.Errorf("describe queue on the local replica: %w", err)
 	}
+	if err := s.finishRead(token); err != nil {
+		return nil, err
+	}
 
 	return response, nil
 }
 
 // ListQueues implements queue.Storage.
 func (s *Store) ListQueues(ctx context.Context, input *v1.ListQueuesRequest) (*v1.ListQueuesResponse, error) {
-	if err := s.readBarrier(ctx); err != nil {
+	token, err := s.readBarrier(ctx)
+	if err != nil {
 		return nil, err
 	}
 
@@ -230,13 +241,17 @@ func (s *Store) ListQueues(ctx context.Context, input *v1.ListQueuesRequest) (*v
 	if err != nil {
 		return nil, fmt.Errorf("list queues on the local replica: %w", err)
 	}
+	if err := s.finishRead(token); err != nil {
+		return nil, err
+	}
 
 	return response, nil
 }
 
 // Peek implements queue.Storage.
 func (s *Store) Peek(ctx context.Context, input *queue.PeekRequest) (*queue.PeekResponse, error) {
-	if err := s.readBarrier(ctx); err != nil {
+	token, err := s.readBarrier(ctx)
+	if err != nil {
 		return nil, err
 	}
 
@@ -244,19 +259,26 @@ func (s *Store) Peek(ctx context.Context, input *queue.PeekRequest) (*queue.Peek
 	if err != nil {
 		return nil, fmt.Errorf("browse queue on the local replica: %w", err)
 	}
+	if err := s.finishRead(token); err != nil {
+		return nil, err
+	}
 
 	return response, nil
 }
 
 // ListTopics implements queue.Storage.
 func (s *Store) ListTopics(ctx context.Context) (*queue.ListTopicsResponse, error) {
-	if err := s.readBarrier(ctx); err != nil {
+	token, err := s.readBarrier(ctx)
+	if err != nil {
 		return nil, err
 	}
 
 	response, err := s.local.ListTopics(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list topics on the local replica: %w", err)
+	}
+	if err := s.finishRead(token); err != nil {
+		return nil, err
 	}
 
 	return response, nil
@@ -276,12 +298,16 @@ func (s *Store) DeleteTopic(ctx context.Context, topicID string) (*queue.DeleteT
 
 // TopicInventory implements queue.Storage using the configured read barrier.
 func (s *Store) TopicInventory(ctx context.Context) (queue.TopicInventory, error) {
-	if err := s.readBarrier(ctx); err != nil {
+	token, err := s.readBarrier(ctx)
+	if err != nil {
 		return queue.TopicInventory{}, err
 	}
 	inventory, err := s.local.TopicInventory(ctx)
 	if err != nil {
 		return queue.TopicInventory{}, fmt.Errorf("read topic inventory on the local replica: %w", err)
+	}
+	if err := s.finishRead(token); err != nil {
+		return queue.TopicInventory{}, err
 	}
 	return inventory, nil
 }
@@ -322,7 +348,20 @@ func (s *Store) Publish(
 
 	ids := s.batchIDs(subscribers * len(input.Messages))
 
-	return jsonResponse[queue.PublishResponse](s.applyJSON(ctx, command.OpPublish, input, topicID, ids))
+	outcome, err := jsonResponse[queue.PublishOutcome](
+		s.applyJSON(ctx, command.OpPublish, input, topicID, ids),
+	)
+	if err != nil {
+		return nil, err
+	}
+	if outcome == nil {
+		return nil, nil
+	}
+	if outcome.Partial {
+		return outcome.Response, &queue.PartialPublishError{Outcome: *outcome}
+	}
+
+	return outcome.Response, nil
 }
 
 // Sweep proposes eviction for one queue. Only the leader calls it — see the
@@ -344,9 +383,16 @@ func (s *Store) Sweep(ctx context.Context, queueID string) (uint64, error) {
 }
 
 func (s *Store) countSubscribers(ctx context.Context, topicID string) (int, error) {
+	token, err := s.servingToken()
+	if err != nil {
+		return 0, err
+	}
 	topics, err := s.local.ListTopics(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("count subscribers of topic %q: %w", topicID, err)
+	}
+	if err := s.finishRead(token); err != nil {
+		return 0, err
 	}
 
 	for _, topic := range topics.Topics {
@@ -360,22 +406,50 @@ func (s *Store) countSubscribers(ctx context.Context, topicID string) (int, erro
 
 // readBarrier makes a read as strong as the configured mode requires. In local
 // mode it does nothing, which is the point.
-func (s *Store) readBarrier(ctx context.Context) error {
+func (s *Store) readBarrier(ctx context.Context) (uint64, error) {
+	token, err := s.servingToken()
+	if err != nil {
+		return 0, err
+	}
 	if s.consistency != ConsistencyStrong {
-		return nil
+		return token, nil
 	}
 
 	// A strong read on a follower would still be answered from local state, so
 	// there is nothing honest to do but say the read cannot be served here.
 	if !s.consensus.IsLeader() {
-		return fmt.Errorf("%w: strong reads are served by the leader", consensus.ErrNotLeader)
+		return 0, fmt.Errorf("%w: strong reads are served by the leader", consensus.ErrNotLeader)
 	}
 
 	if err := s.consensus.Barrier(ctx); err != nil {
-		return fmt.Errorf("strong read barrier: %w", err)
+		return 0, fmt.Errorf("strong read barrier: %w", err)
+	}
+	if err := s.finishRead(token); err != nil {
+		return 0, err
 	}
 
-	return nil
+	return token, nil
+}
+
+func (s *Store) ensureServing() error {
+	if s.replicaHealth == nil {
+		return nil
+	}
+	return s.replicaHealth.Check()
+}
+
+func (s *Store) servingToken() (uint64, error) {
+	if s.replicaHealth == nil {
+		return 0, nil
+	}
+	return s.replicaHealth.ServingToken()
+}
+
+func (s *Store) finishRead(token uint64) error {
+	if s.replicaHealth == nil {
+		return nil
+	}
+	return s.replicaHealth.CheckServingToken(token)
 }
 
 // apply commits a command: locally when this node leads, through the leader
@@ -391,6 +465,9 @@ func (s *Store) readBarrier(ctx context.Context) error {
 // ErrCommitUnknown and transport failures may follow a commit, so re-sending
 // either could enqueue the same message twice.
 func (s *Store) apply(ctx context.Context, cmd *command.Command) (any, error) {
+	if err := s.ensureServing(); err != nil {
+		return nil, err
+	}
 	// The timer covers the whole write, retries included, because that is the
 	// latency the client actually waited: a write that spent 400ms waiting out
 	// an election was a 400ms write, however briefly the winning attempt took.

@@ -58,6 +58,10 @@ type Status struct {
 	// Healthy reports whether the cluster can currently commit a write.
 	Healthy bool `json:"healthy"`
 
+	// ReplicaQuarantined reports the distinct local fail-closed safety state.
+	// Healthy deliberately retains only its consensus/quorum meaning.
+	ReplicaQuarantined bool `json:"replicaQuarantined"`
+
 	// AppliedCommands and FailedCommands count what the state machine did.
 	AppliedCommands uint64 `json:"appliedCommands"`
 	FailedCommands  uint64 `json:"failedCommands"`
@@ -102,18 +106,19 @@ func (n *Node) Status() Status {
 	applied, failed := n.fsm.Stats()
 
 	status := Status{
-		Enabled:         true,
-		NodeID:          n.cfg.NodeID,
-		State:           consensusStatus.State,
-		LeaderID:        consensusStatus.LeaderID,
-		LeaderAddr:      consensusStatus.LeaderAddr,
-		Term:            consensusStatus.Term,
-		CommitIndex:     consensusStatus.CommitIndex,
-		AppliedIndex:    consensusStatus.AppliedIndex,
-		LastIndex:       consensusStatus.LastIndex,
-		Engine:          consensusStatus.Engine,
-		AppliedCommands: applied,
-		FailedCommands:  failed,
+		Enabled:            true,
+		NodeID:             n.cfg.NodeID,
+		State:              consensusStatus.State,
+		LeaderID:           consensusStatus.LeaderID,
+		LeaderAddr:         consensusStatus.LeaderAddr,
+		Term:               consensusStatus.Term,
+		CommitIndex:        consensusStatus.CommitIndex,
+		AppliedIndex:       consensusStatus.AppliedIndex,
+		LastIndex:          consensusStatus.LastIndex,
+		Engine:             consensusStatus.Engine,
+		AppliedCommands:    applied,
+		FailedCommands:     failed,
+		ReplicaQuarantined: n.replicaHealth.Quarantined(),
 	}
 
 	if contact := n.consensus.LastContact(); contact > 0 {

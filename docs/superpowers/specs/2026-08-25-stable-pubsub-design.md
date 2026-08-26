@@ -354,16 +354,28 @@ a clean sidecar beside the Raft log to dirty. It restores clean only after
 deterministic full success or a known non-mutating precondition failure. Every
 typed partial result, regardless of its nested cause or which destination
 failed, and every unclassified replica-local result leaves the guard dirty and
-quarantines that replica. The same health latch gates cluster Store reads and
-writes, subscriber preflights, and peer-forwarded applies; successful calls
-recheck it before returning local state. The durable dirty guard is the safety
-record even if writing a secondary diagnostic quarantine marker fails, and a
+quarantines that replica. The internal Raft response carries an explicit
+`Partial` discriminator; delivery counts are diagnostic and a typed partial
+remains partial even when its failed-delivery count is zero. The same health
+latch gates cluster Store reads and writes, subscriber preflights, and
+peer-forwarded applies. Local reads capture a monotonic health generation and
+must return only if the replica is still healthy at the same generation, so a
+Fail/Recover ABA cannot release data observed across a quarantine boundary.
+After quarantine, later committed publish and non-publish entries return
+unavailable without mutating or terminating again; snapshot restore bypasses
+that apply gate and is the only in-process recovery path. If finishing a clean
+transition cannot sync its directory, the guard rolls clean back to dirty and
+the process fails stop; restart must remain quarantined even if the diagnostic
+marker also fails. The durable dirty guard is the primary safety record, and a
 restart never clears it. Verified snapshot restore plus exact inventory, or a
 full replica wipe/reseed, is required to recover. `/live` remains process
 liveness and stays 200 for a quarantined process; `/health` is readiness and
 returns 503 for physical storage failure, lost write quorum, or quarantine.
 Cluster status and `plainq_cluster_healthy` retain their consensus meaning while
-the separate quarantine status/metric reports this fail-closed state.
+the separate quarantine status/metric reports this fail-closed state. Helm
+derives endpoint flags and default probe paths from the same route values. The
+operator omits default HTTP probes when health is disabled, while preserving
+explicit pod probe overrides.
 
 Every binding removed by a commit whose outcome/effects are known to ingress
 increments the subscription-deleted lifecycle counter, whether removal came

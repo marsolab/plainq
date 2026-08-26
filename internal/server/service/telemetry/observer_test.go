@@ -461,6 +461,43 @@ func TestObserverRecorderAttachAndReplayIsLinearizedWithEvents(t *testing.T) {
 	old.mu.Unlock()
 }
 
+func TestStateSuppressingRecorderForwardsEventsButNotExactState(t *testing.T) {
+	inner := newTopicRecorderSpy()
+	recorder := NewStateSuppressingRecorder(inner)
+	recorder.RecordSend("queueone", 2, 10)
+	recorder.IncrementQueues()
+	recorder.DecrementQueues()
+	recorder.SetQueuesExist(7)
+
+	topicRecorder, ok := recorder.(TopicRecorder)
+	if !ok {
+		t.Fatalf("state suppressing recorder = %T, want TopicRecorder", recorder)
+	}
+	topicRecorder.RecordTopicRequest(TopicOperationEvent{Operation: metrics.OpPublish})
+	topicRecorder.RecordTopicOperation(TopicOperationEvent{Operation: metrics.OpPublish})
+	topicRecorder.RecordTopicPublish(TopicPublishEvent{TopicID: "topicone", Messages: 1})
+	topicRecorder.RecordTopicSubscriptionCreated("topicone")
+	topicRecorder.RecordTopicSubscriptionDeleted("topicone")
+	topicRecorder.RecordTopicState(TopicStateEvent{TopicsExist: 9})
+	topicRecorder.RecordTopicStateUnavailable()
+
+	inner.queueRecorderSpy.mu.Lock()
+	td.Cmp(t, inner.sent, uint64(2))
+	td.Cmp(t, inner.queueIncrements, 0)
+	td.Cmp(t, inner.queueDecrements, 0)
+	td.Cmp(t, inner.queueSetCalls, 0)
+	inner.queueRecorderSpy.mu.Unlock()
+	inner.mu.Lock()
+	defer inner.mu.Unlock()
+	td.Cmp(t, inner.requests, td.Len(1))
+	td.Cmp(t, inner.operations, td.Len(1))
+	td.Cmp(t, inner.publishes, td.Len(1))
+	td.Cmp(t, inner.subscriptionsCreated, []string{"topicone"})
+	td.Cmp(t, inner.subscriptionsDeleted, []string{"topicone"})
+	td.Cmp(t, inner.states, []TopicStateEvent(nil))
+	td.Cmp(t, inner.unavailable, 0)
+}
+
 func TestObserverUnavailableRetainsPriorMapForLaterRemoval(t *testing.T) {
 	const (
 		kept    = "TOBSERVERKEPT"

@@ -109,6 +109,31 @@ func TestDisabledClusterStatusShape(t *testing.T) {
 	td.Cmp(t, status.Members, td.Nil())
 }
 
+func TestNodeHealthAndStatusFailWhileReplicaIsQuarantined(t *testing.T) {
+	cluster := newTestCluster(t, 1)
+	leader := cluster.leader(10 * time.Second)
+	if err := leader.node.Health(context.Background()); err != nil {
+		t.Fatalf("healthy node Health() = %v", err)
+	}
+	if err := leader.node.replicaHealth.Fail(errors.New("replica-local partial")); err != nil {
+		t.Fatalf("replica Fail() = %v", err)
+	}
+
+	if err := leader.node.Health(context.Background()); err == nil {
+		t.Fatal("quarantined node Health() = nil, want failure")
+	}
+	status := leader.node.Status()
+	if !status.ReplicaQuarantined {
+		t.Fatal("Status().ReplicaQuarantined = false, want true")
+	}
+	if !status.Healthy {
+		t.Fatal("Status().Healthy changed with quarantine; it must retain consensus/quorum meaning")
+	}
+	if !leader.node.sample().ReplicaQuarantined {
+		t.Fatal("metrics sample does not expose replica quarantine")
+	}
+}
+
 func TestJoinAndRemoveThroughTheNode(t *testing.T) {
 	if testing.Short() {
 		t.Skip("starts three raft nodes")

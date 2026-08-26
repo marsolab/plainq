@@ -88,6 +88,16 @@ func TestConfigReportsTheRunningInstance(t *testing.T) {
 	td.CmpNot(t, response.ReadAt, td.Zero(), "the answer states when it was read")
 }
 
+func TestConfigReportsSeparateReadinessAndLivenessRoutes(t *testing.T) {
+	response := readConfig(t, config.Config{
+		HealthEnable:        true,
+		HealthRoute:         "/ready",
+		HealthLivenessRoute: "/alive",
+	})
+	td.Cmp(t, factIn(t, response, "Observability", "Readiness route").Value, "/ready")
+	td.Cmp(t, factIn(t, response, "Observability", "Liveness route").Value, "/alive")
+}
+
 func TestConfigNeverReturnsSecrets(t *testing.T) {
 	cfg := config.Config{
 		StorageDriver:      "postgres",

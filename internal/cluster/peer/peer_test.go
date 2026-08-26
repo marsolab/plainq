@@ -224,6 +224,32 @@ func TestPeerClientRoundTripsTerminalWriteClassesWithoutRetryMarkers(t *testing.
 	}
 }
 
+func TestPeerForwardGateRunsBeforeApplyAndPreservesUnavailableClass(t *testing.T) {
+	applier := new(stubApplier)
+	gateCalls := 0
+	server := httptest.NewServer(NewServer(ServerConfig{
+		Applier:    applier,
+		Membership: &stubMembership{},
+		ForwardGate: func() error {
+			gateCalls++
+			return pqerr.ErrUnavailable
+		},
+	}).router)
+	t.Cleanup(server.Close)
+
+	client := &Client{http: server.Client()}
+	_, err := client.Forward(context.Background(), strings.TrimPrefix(server.URL, "http://"), []byte("not-even-a-command"))
+	if !errors.Is(err, pqerr.ErrUnavailable) {
+		t.Fatalf("Forward() error = %v, want unavailable", err)
+	}
+	if gateCalls != 1 {
+		t.Fatalf("forward gate calls = %d, want 1", gateCalls)
+	}
+	if applier.seen != nil {
+		t.Fatalf("applier saw payload %q after gate rejection", applier.seen)
+	}
+}
+
 func TestPartialFanoutTakesPrecedenceOverNestedUnavailableAcrossPeer(t *testing.T) {
 	partial := &queue.PartialPublishError{
 		Outcome: queue.PublishOutcome{

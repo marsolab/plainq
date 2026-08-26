@@ -621,14 +621,15 @@ func Test_exposition_carriesTypeMetadata(t *testing.T) {
 func Test_RegisterClusterNode_exportsTheClusterView(t *testing.T) {
 	RegisterClusterNode("node-a", "v1.2.3", "raft", func() ClusterSample {
 		return ClusterSample{
-			Leader:      true,
-			Healthy:     true,
-			Term:        7,
-			CommitIndex: 42,
-			Voters:      3,
-			Quorum:      2,
-			Reachable:   3,
-			LastContact: 250 * time.Millisecond,
+			Leader:             true,
+			Healthy:            true,
+			ReplicaQuarantined: true,
+			Term:               7,
+			CommitIndex:        42,
+			Voters:             3,
+			Quorum:             2,
+			Reachable:          3,
+			LastContact:        250 * time.Millisecond,
 		}
 	})
 
@@ -638,6 +639,7 @@ func Test_RegisterClusterNode_exportsTheClusterView(t *testing.T) {
 		`plainq_cluster_node_info{node_id="node-a",version="v1.2.3",engine="raft"} 1`,
 		`plainq_cluster_leader{node_id="node-a"} 1`,
 		`plainq_cluster_healthy{node_id="node-a"} 1`,
+		`plainq_cluster_replica_quarantined{node_id="node-a"} 1`,
 		`plainq_cluster_term{node_id="node-a"} 7`,
 		`plainq_cluster_commit_index{node_id="node-a"} 42`,
 		`plainq_cluster_quorum{node_id="node-a"} 2`,
@@ -645,6 +647,35 @@ func Test_RegisterClusterNode_exportsTheClusterView(t *testing.T) {
 	} {
 		td.Cmp(t, strings.Contains(out, want), true, "scrape should contain "+want)
 	}
+}
+
+func TestReplicaQuarantineMetricCatalogAndMetadata(t *testing.T) {
+	const (
+		name = "plainq_cluster_replica_quarantined"
+		help = "1 when this replica is quarantined after a non-deterministic state-machine result and must not serve data; 0 otherwise."
+	)
+	var found *Definition
+	for _, definition := range Catalog() {
+		if definition.Name == name {
+			copy := definition
+			found = &copy
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("%s missing from catalog", name)
+	}
+	td.Cmp(t, found.Kind, KindGauge)
+	td.Cmp(t, found.Help, help)
+	td.Cmp(t, found.Labels, []string{labelNodeID})
+
+	RegisterClusterNode("metadata-node", "test", "raft", func() ClusterSample {
+		return ClusterSample{}
+	})
+	exposeMetadataForTest(t)
+	out := scrape()
+	td.Cmp(t, strings.Contains(out, "# HELP "+name+"\n"), true)
+	td.Cmp(t, strings.Contains(out, "# TYPE "+name+" gauge"), true)
 }
 
 // Test_RegisterPoolCollector_readsThroughAtScrapeTime proves the pool gauges

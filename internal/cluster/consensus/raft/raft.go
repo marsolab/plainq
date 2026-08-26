@@ -101,6 +101,38 @@ type Engine struct {
 	done      chan struct{}
 }
 
+// WithStableStore opens the same fsynced Bolt stable store used by New, runs
+// callback before any Raft apply goroutine can start, and closes the store.
+// Replica safety metadata uses this hook so it is initialized in the same
+// durability boundary as the consensus log.
+func WithStableStore(dataDir string, callback func(hraft.StableStore) error) (retErr error) {
+	if dataDir == "" {
+		return errors.New("raft: data directory is required")
+	}
+	if callback == nil {
+		return errors.New("raft: stable store callback is required")
+	}
+	if err := os.MkdirAll(dataDir, 0o750); err != nil {
+		return fmt.Errorf("create raft data directory %q: %w", dataDir, err)
+	}
+
+	store, err := boltstore.NewBoltStore(filepath.Join(dataDir, "raft.db"))
+	if err != nil {
+		return fmt.Errorf("open raft stable store: %w", err)
+	}
+	defer func() {
+		if err := store.Close(); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("close raft stable store: %w", err))
+		}
+	}()
+
+	if err := callback(store); err != nil {
+		return fmt.Errorf("initialize raft stable store: %w", err)
+	}
+
+	return nil
+}
+
 // New starts the engine. The node begins as a follower with no configuration:
 // it neither leads nor votes until it is bootstrapped or joined to a cluster.
 func New(cfg Config) (*Engine, error) {

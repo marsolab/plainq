@@ -17,6 +17,7 @@ import (
 	"github.com/heartwilltell/scotty"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/marsolab/plainq/internal/cluster"
+	"github.com/marsolab/plainq/internal/metrics"
 	"github.com/marsolab/plainq/internal/server"
 	"github.com/marsolab/plainq/internal/server/config"
 	"github.com/marsolab/plainq/internal/server/mutations"
@@ -51,6 +52,47 @@ const (
 	storageDriverPostgres = "postgres"
 	storageDriverTurso    = "turso"
 )
+
+func telemetryBackend(driver string) string {
+	switch driver {
+	case storageDriverSQLite:
+		return metrics.BackendSQLite
+	case storageDriverTurso:
+		return metrics.BackendTurso
+	case storageDriverPostgres:
+		return metrics.BackendPostgres
+	default:
+		panic("unsupported storage driver: " + driver)
+	}
+}
+
+func newTelemetryObservers(driver string, clustered bool) (*telemetry.Observer, *telemetry.Observer) {
+	local := telemetry.NewObserver(telemetryBackend(driver))
+	if !clustered {
+		return local, local
+	}
+
+	return local, telemetry.NewObserver(metrics.BackendCluster)
+}
+
+func replayStartupTopicInventory(
+	ctx context.Context,
+	storage queue.Storage,
+	observer *telemetry.Observer,
+) error {
+	inventory, err := storage.TopicInventory(ctx)
+	if err != nil {
+		observer.TopicStateUnavailable()
+		observer.StorageError("topic_inventory")
+		return fmt.Errorf("read startup topic inventory: %w", err)
+	}
+	observer.ReconcileTopicState(telemetry.TopicStateEvent{
+		TopicsExist:   inventory.TopicsExist,
+		Subscriptions: inventory.SubscriptionCounts,
+	})
+
+	return nil
+}
 
 // storageBackend holds the underlying connection handle for whichever
 // driver was selected. Exactly one of its fields is non-nil after
@@ -303,6 +345,10 @@ func serverCommand() *commandSpec {
 				"set given route as health endpoint route",
 			)
 
+			f.StringVar(&cfg.HealthLivenessRoute, "health.liveness.route", "/live",
+				"set given route as process liveness endpoint route",
+			)
+
 			f.StringVar(&cfg.HealthReporter, "health.reporter", "",
 				"set health endpoint reporter",
 			)
@@ -336,10 +382,12 @@ func serverCommand() *commandSpec {
 			logger.Info("Starting plainq server")
 
 			var checker hc.HealthChecker = hc.NewNopChecker()
+			var healthServices *hc.MultiServiceChecker
 
 			if cfg.HealthEnable {
 				reporter := hc.NewServiceReport()
-				checker = hc.NewMultiServiceChecker(reporter)
+				healthServices = hc.NewMultiServiceChecker(reporter)
+				checker = healthServices
 			}
 
 			// Storage initialization.
@@ -370,11 +418,7 @@ func serverCommand() *commandSpec {
 				return backendErr
 			}
 
-			// One observer, shared by the storage layer and — once the
-			// telemetry store is open — by the collector behind Houston's
-			// dashboards. Both then describe the same events instead of two
-			// independently-wired approximations of them.
-			observer := telemetry.NewObserver(backend.driver)
+			localObserver, logicalObserver := newTelemetryObservers(backend.driver, clusterCfg.Enabled)
 
 			registerRuntimeMetrics(backend)
 
@@ -386,10 +430,13 @@ func serverCommand() *commandSpec {
 				}
 			}()
 
-			queueStorage, queueClose, queueStorageInitErr := initQueueStorage(&cfg, &clusterCfg, logger, backend, observer)
+			queueStorage, queueClose, queueStorageInitErr := initQueueStorage(
+				&cfg, &clusterCfg, logger, backend, localObserver,
+			)
 			if queueStorageInitErr != nil {
 				return queueStorageInitErr
 			}
+			physicalQueueStorage := queueStorage
 
 			defer func() {
 				if err := queueClose(); err != nil {
@@ -405,7 +452,23 @@ func serverCommand() *commandSpec {
 			var clusterNode *cluster.Node
 
 			if clusterCfg.Enabled {
-				node, nodeErr := initClusterNode(&cfg, &clusterCfg, clusterDiscovery, logger, queueStorage)
+				node, nodeErr := initClusterNode(
+					&cfg,
+					&clusterCfg,
+					clusterDiscovery,
+					logger,
+					queueStorage,
+					func(inventory *queue.TopicInventory) {
+						if inventory == nil {
+							localObserver.TopicStateUnavailable()
+							return
+						}
+						localObserver.ReconcileTopicState(telemetry.TopicStateEvent{
+							TopicsExist:   inventory.TopicsExist,
+							Subscriptions: inventory.SubscriptionCounts,
+						})
+					},
+				)
 				if nodeErr != nil {
 					return nodeErr
 				}
@@ -426,13 +489,29 @@ func serverCommand() *commandSpec {
 				}
 			}
 
+			if err := replayStartupTopicInventory(ctx, physicalQueueStorage, localObserver); err != nil {
+				return err
+			}
+
+			if healthServices != nil {
+				if clusterNode != nil {
+					healthServices.AddService("cluster", clusterNode)
+				} else {
+					physicalHealth, ok := physicalQueueStorage.(hc.HealthChecker)
+					if !ok {
+						return fmt.Errorf("queue storage %T must implement health checking", physicalQueueStorage)
+					}
+					healthServices.AddService("storage", physicalHealth)
+				}
+			}
+
 			// Wrapping here, after the cluster layer, means one seam measures
 			// every backend: SQLite, Postgres and the replicated store alike.
 			queueService := queue.NewService(
 				&cfg,
 				logger,
-				queue.NewObservedStorage(queueStorage, observer),
-				observer,
+				queue.NewObservedStorage(queueStorage, logicalObserver),
+				logicalObserver,
 			)
 
 			accountStorage, accountStorageInitErr := initAccountStorage(&cfg, logger, backend)
@@ -473,7 +552,7 @@ func serverCommand() *commandSpec {
 			// Initialize telemetry database if enabled.
 			var serverOpts []server.Option
 
-			serverOpts = append(serverOpts, server.WithObserver(observer))
+			serverOpts = append(serverOpts, server.WithTelemetryObservers(localObserver, logicalObserver))
 
 			if clusterNode != nil {
 				serverOpts = append(serverOpts, server.WithClusterNode(clusterNode))
@@ -827,6 +906,7 @@ func initClusterNode(
 	discovery string,
 	logger *slog.Logger,
 	local queue.Storage,
+	reconcile func(*queue.TopicInventory),
 ) (*cluster.Node, error) {
 	replicated, ok := local.(queue.ReplicatedStorage)
 	if !ok {
@@ -847,7 +927,7 @@ func initClusterNode(
 		clusterCfg.Version = Commit
 	}
 
-	node, err := cluster.NewNode(*clusterCfg, replicated, logger)
+	node, err := cluster.NewNode(*clusterCfg, replicated, logger, cluster.WithTopicStateReconciler(reconcile))
 	if err != nil {
 		return nil, fmt.Errorf("create cluster node: %w", err)
 	}

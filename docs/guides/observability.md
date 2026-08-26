@@ -193,6 +193,7 @@ only on the bounded business and current-state families.
 | `plainq_cluster_gossip_joins_total` | counter | `result` | Attempts to join the gossip pool, by outcome. |
 | `plainq_cluster_gossip_members` | gauge | `state` | Members in the gossip view, by state. |
 | `plainq_cluster_healthy` | gauge | `node_id` | 1 when the cluster can commit a write. Alert on 0 — this is the metric that means the queue is down. |
+| `plainq_cluster_replica_quarantined` | gauge | `node_id` | 1 when this replica is quarantined after a non-deterministic state-machine result and must not serve data; 0 otherwise. |
 | `plainq_cluster_last_index` | gauge | `node_id` | Last log index stored locally. |
 | `plainq_cluster_leader` | gauge | `node_id` | 1 on the leader, 0 on followers. Summed across a cluster this should be exactly 1. |
 | `plainq_cluster_leader_last_contact_seconds` | gauge | `node_id` | How long ago this follower heard from the leader. Zero on the leader itself. |

@@ -210,6 +210,13 @@ func (f *FSM) Restore(reader io.ReadCloser) error {
 
 		committed = true
 
+		if err := f.verifyTopicState(ctx); err != nil {
+			return fmt.Errorf("verify restored topic state: %w", err)
+		}
+		if err := f.reportReplicaRecovery(); err != nil {
+			return fmt.Errorf("recover replica health after verified snapshot: %w", err)
+		}
+
 		metrics.RecordRestoreRecords(stats.queues, stats.messages, stats.topics, stats.subscriptions)
 
 		f.logger.Info("Restored cluster state from snapshot",

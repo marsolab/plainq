@@ -50,6 +50,10 @@ type ClusterSample struct {
 	// Healthy reports whether the cluster can currently commit a write.
 	Healthy bool
 
+	// ReplicaQuarantined reports the local fail-closed safety state without
+	// changing Healthy's consensus meaning.
+	ReplicaQuarantined bool
+
 	// Term is the current consensus term.
 	Term uint64
 
@@ -89,6 +93,13 @@ var (
 		Kind:   KindGauge,
 		Name:   Namespace + "_cluster_healthy",
 		Help:   "1 when the cluster can commit a write. Alert on 0 — this is the metric that means the queue is down.",
+		Labels: []string{labelNodeID},
+	})
+
+	clusterReplicaQuarantinedDef = define(Definition{
+		Kind:   KindGauge,
+		Name:   Namespace + "_cluster_replica_quarantined",
+		Help:   "1 when this replica is quarantined after a non-deterministic state-machine result and must not serve data; 0 otherwise.",
 		Labels: []string{labelNodeID},
 	})
 
@@ -398,6 +409,7 @@ func RegisterClusterNode(nodeID, version, engine string, sample func() ClusterSa
 
 	gauge(clusterLeaderDef, func(s ClusterSample) float64 { return boolValue(s.Leader) })
 	gauge(clusterHealthyDef, func(s ClusterSample) float64 { return boolValue(s.Healthy) })
+	gauge(clusterReplicaQuarantinedDef, func(s ClusterSample) float64 { return boolValue(s.ReplicaQuarantined) })
 	gauge(clusterTermDef, func(s ClusterSample) float64 { return float64(s.Term) })
 	gauge(clusterCommitIndexDef, func(s ClusterSample) float64 { return float64(s.CommitIndex) })
 	gauge(clusterAppliedIndexDef, func(s ClusterSample) float64 { return float64(s.AppliedIndex) })

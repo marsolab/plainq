@@ -38,18 +38,19 @@ func (n *Node) sample() metrics.ClusterSample {
 	status := n.Status()
 
 	sample := metrics.ClusterSample{
-		Leader:          status.State == consensus.StateLeader,
-		Healthy:         status.Healthy,
-		Term:            status.Term,
-		CommitIndex:     status.CommitIndex,
-		AppliedIndex:    status.AppliedIndex,
-		LastIndex:       status.LastIndex,
-		Voters:          status.Voters,
-		Members:         len(status.Members),
-		Quorum:          status.Quorum,
-		AppliedCommands: status.AppliedCommands,
-		FailedCommands:  status.FailedCommands,
-		LastContact:     n.consensus.LastContact(),
+		Leader:             status.State == consensus.StateLeader,
+		Healthy:            status.Healthy,
+		ReplicaQuarantined: status.ReplicaQuarantined,
+		Term:               status.Term,
+		CommitIndex:        status.CommitIndex,
+		AppliedIndex:       status.AppliedIndex,
+		LastIndex:          status.LastIndex,
+		Voters:             status.Voters,
+		Members:            len(status.Members),
+		Quorum:             status.Quorum,
+		AppliedCommands:    status.AppliedCommands,
+		FailedCommands:     status.FailedCommands,
+		LastContact:        n.consensus.LastContact(),
 	}
 
 	for _, member := range status.Members {

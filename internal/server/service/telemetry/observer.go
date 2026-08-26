@@ -69,6 +69,77 @@ type TopicStateEvent struct {
 	Subscriptions map[string]int64
 }
 
+// stateSuppressingRecorder lets a logical cluster observer feed request and
+// activity history into the collector without overwriting the exact local
+// replica state maintained by FSM reconciliation.
+type stateSuppressingRecorder struct {
+	inner Recorder
+}
+
+// NewStateSuppressingRecorder forwards activity and lifecycle events while
+// suppressing every exact queue/topic state mutation.
+func NewStateSuppressingRecorder(inner Recorder) Recorder {
+	if inner == nil {
+		return nil
+	}
+	return &stateSuppressingRecorder{inner: inner}
+}
+
+func (r *stateSuppressingRecorder) RecordSend(queueID string, count, totalBytes uint64) {
+	r.inner.RecordSend(queueID, count, totalBytes)
+}
+func (r *stateSuppressingRecorder) RecordReceive(queueID string, count uint64, empty bool) {
+	r.inner.RecordReceive(queueID, count, empty)
+}
+func (r *stateSuppressingRecorder) RecordDelete(queueID string, count uint64) {
+	r.inner.RecordDelete(queueID, count)
+}
+func (r *stateSuppressingRecorder) RecordRedelivery(queueID string, count uint64) {
+	r.inner.RecordRedelivery(queueID, count)
+}
+func (r *stateSuppressingRecorder) RecordDrop(queueID string, count uint64) {
+	r.inner.RecordDrop(queueID, count)
+}
+func (r *stateSuppressingRecorder) RecordDLQ(queueID string, count uint64) {
+	r.inner.RecordDLQ(queueID, count)
+}
+func (*stateSuppressingRecorder) IncrementQueues()     {}
+func (*stateSuppressingRecorder) DecrementQueues()     {}
+func (*stateSuppressingRecorder) SetQueuesExist(int64) {}
+
+func (r *stateSuppressingRecorder) topic() TopicRecorder {
+	topic, _ := r.inner.(TopicRecorder)
+	return topic
+}
+
+func (r *stateSuppressingRecorder) RecordTopicRequest(event TopicOperationEvent) {
+	if topic := r.topic(); topic != nil {
+		topic.RecordTopicRequest(event)
+	}
+}
+func (r *stateSuppressingRecorder) RecordTopicOperation(event TopicOperationEvent) {
+	if topic := r.topic(); topic != nil {
+		topic.RecordTopicOperation(event)
+	}
+}
+func (r *stateSuppressingRecorder) RecordTopicPublish(event TopicPublishEvent) {
+	if topic := r.topic(); topic != nil {
+		topic.RecordTopicPublish(event)
+	}
+}
+func (r *stateSuppressingRecorder) RecordTopicSubscriptionCreated(topicID string) {
+	if topic := r.topic(); topic != nil {
+		topic.RecordTopicSubscriptionCreated(topicID)
+	}
+}
+func (r *stateSuppressingRecorder) RecordTopicSubscriptionDeleted(topicID string) {
+	if topic := r.topic(); topic != nil {
+		topic.RecordTopicSubscriptionDeleted(topicID)
+	}
+}
+func (*stateSuppressingRecorder) RecordTopicState(TopicStateEvent) {}
+func (*stateSuppressingRecorder) RecordTopicStateUnavailable()     {}
+
 // Observer is the seam storage and application boundaries record activity
 // through. Prometheus is always updated; an attached recorder receives the same
 // logical event for PlainQ's internal telemetry.

@@ -245,6 +245,8 @@ config:
   logLevel: info
   # -- HTTP route for the health endpoint (on the http port).
   healthRoute: /health
+  # -- HTTP route for process liveness (on the http port).
+  healthLivenessRoute: /live
   # -- HTTP route for the metrics endpoint (on the http port).
   metricsRoute: /metrics
 
@@ -265,7 +267,6 @@ envFrom: []
 
 livenessProbe:
   httpGet:
-    path: /health
     port: http
   initialDelaySeconds: 10
   periodSeconds: 15
@@ -274,7 +275,6 @@ livenessProbe:
 
 readinessProbe:
   httpGet:
-    path: /health
     port: http
   initialDelaySeconds: 5
   periodSeconds: 10

@@ -27,6 +27,7 @@ appears in the rendered manifest, only the variable reference does.
 {{- end }}
 - -log.level={{ .Values.config.logLevel }}
 - -health.route={{ .Values.config.healthRoute }}
+- -health.liveness.route={{ .Values.config.healthLivenessRoute }}
 - -metrics.route={{ .Values.config.metricsRoute }}
 {{- if .Values.cluster.enabled }}
 {{- include "plainq.clusterArgs" . | nindent 0 }}
@@ -144,6 +145,14 @@ plainq.containerSpec renders the shared PlainQ container definition for both the
 StatefulSet (sqlite) and the Deployment (postgres).
 */}}
 {{- define "plainq.containerSpec" -}}
+{{- $livenessProbe := deepCopy .Values.livenessProbe -}}
+{{- if and $livenessProbe.httpGet (not (hasKey $livenessProbe.httpGet "path")) -}}
+{{- $_ := set $livenessProbe.httpGet "path" .Values.config.healthLivenessRoute -}}
+{{- end -}}
+{{- $readinessProbe := deepCopy .Values.readinessProbe -}}
+{{- if and $readinessProbe.httpGet (not (hasKey $readinessProbe.httpGet "path")) -}}
+{{- $_ := set $readinessProbe.httpGet "path" .Values.config.healthRoute -}}
+{{- end -}}
 - name: {{ .Chart.Name }}
   securityContext:
     {{- toYaml .Values.securityContext | nindent 4 }}
@@ -180,9 +189,9 @@ StatefulSet (sqlite) and the Deployment (postgres).
       protocol: UDP
     {{- end }}
   livenessProbe:
-    {{- toYaml .Values.livenessProbe | nindent 4 }}
+    {{- toYaml $livenessProbe | nindent 4 }}
   readinessProbe:
-    {{- toYaml .Values.readinessProbe | nindent 4 }}
+    {{- toYaml $readinessProbe | nindent 4 }}
   resources:
     {{- toYaml .Values.resources | nindent 4 }}
   volumeMounts:

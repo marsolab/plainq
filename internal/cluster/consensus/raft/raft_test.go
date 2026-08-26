@@ -79,3 +79,27 @@ func TestBarrierWithPastDeadlineNeverTouchesRaft(t *testing.T) {
 		t.Fatalf("Barrier(past deadline) = %v, want %v", err, context.DeadlineExceeded)
 	}
 }
+
+func TestWithStableStorePersistsBeforeEngineStartup(t *testing.T) {
+	dir := t.TempDir()
+	key := []byte("plainq/test-guard")
+
+	if err := WithStableStore(dir, func(stable hraft.StableStore) error {
+		return stable.Set(key, []byte("1"))
+	}); err != nil {
+		t.Fatalf("WithStableStore(set) = %v", err)
+	}
+
+	if err := WithStableStore(dir, func(stable hraft.StableStore) error {
+		value, err := stable.Get(key)
+		if err != nil {
+			return err
+		}
+		if string(value) != "1" {
+			t.Fatalf("stable value = %q, want 1", value)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("WithStableStore(read) = %v", err)
+	}
+}

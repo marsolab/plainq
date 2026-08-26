@@ -3,6 +3,7 @@ package cluster
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -93,6 +94,7 @@ func TestClusterMetricsDescribeARealCluster(t *testing.T) {
 	// callback that produces them.
 	for _, series := range []string{
 		"plainq_cluster_healthy",
+		"plainq_cluster_replica_quarantined",
 		"plainq_cluster_leader",
 		"plainq_cluster_term",
 		"plainq_cluster_commit_index",
@@ -130,6 +132,28 @@ func TestClusterMetricsDescribeARealCluster(t *testing.T) {
 	// Gossip and transport are exercised by the cluster simply existing.
 	td.Cmp(t, strings.Contains(out, `plainq_cluster_gossip_members{state="alive"}`), true)
 	td.Cmp(t, strings.Contains(out, `plainq_cluster_transport_connections_total{protocol="raft"`), true)
+}
+
+func TestReplicaQuarantineHasDistinctPrometheusGauge(t *testing.T) {
+	if testing.Short() {
+		t.Skip("starts a raft node")
+	}
+
+	leader := newTestCluster(t, 1).leader(10 * time.Second)
+	before := leader.node.sample()
+	if !before.Healthy || before.ReplicaQuarantined {
+		t.Fatalf("healthy sample = %#v, want consensus healthy without quarantine", before)
+	}
+	if err := leader.node.replicaHealth.Fail(errors.New("replica-local divergence")); err != nil {
+		t.Fatalf("Fail() = %v", err)
+	}
+	after := leader.node.sample()
+	if !after.Healthy || !after.ReplicaQuarantined {
+		t.Fatalf("quarantined sample = %#v, want consensus healthy and replica quarantine", after)
+	}
+	if !strings.Contains(scrape(), `plainq_cluster_replica_quarantined{node_id="`) {
+		t.Fatal("replica quarantine gauge is absent from Prometheus exposition")
+	}
 }
 
 // counterValue reads a counter out of a scrape, treating a missing series as
