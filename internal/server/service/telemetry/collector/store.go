@@ -183,6 +183,7 @@ func (s *SQLiteStore) Aggregate1d(ctx context.Context, fromTimestamp, toTimestam
 func (s *SQLiteStore) CleanupOldMetrics(ctx context.Context, rawBefore, m1Before, m5Before, h1Before, d1Before int64) error {
 	queries := []string{
 		`DELETE FROM metrics_raw WHERE timestamp < ?`,
+		`DELETE FROM telemetry_collection_commits WHERE boundary < ?`,
 		`DELETE FROM metrics_1m WHERE bucket_start < ?`,
 		`DELETE FROM metrics_5m WHERE timestamp < ?`,
 		`DELETE FROM metrics_1h WHERE bucket_start < ?`,
@@ -191,7 +192,7 @@ func (s *SQLiteStore) CleanupOldMetrics(ctx context.Context, rawBefore, m1Before
 		`DELETE FROM queue_stats_snapshot WHERE timestamp < ?`,
 	}
 
-	thresholds := []int64{rawBefore, m1Before, m5Before, h1Before, d1Before, rawBefore, rawBefore}
+	thresholds := []int64{rawBefore, rawBefore, m1Before, m5Before, h1Before, d1Before, rawBefore, rawBefore}
 
 	for i, query := range queries {
 		if _, err := s.db.ExecContext(ctx, query, thresholds[i]); err != nil {

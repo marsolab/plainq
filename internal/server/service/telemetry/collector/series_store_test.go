@@ -562,6 +562,56 @@ func TestSaveCollectionBoundaryLostCommitAckDoesNotDuplicate(t *testing.T) {
 	assertTableCount(t, conn, "telemetry_collection_commits", 1)
 }
 
+func TestCleanupOldMetricsPrunesCompletionLedgerAndAllowsRecollection(t *testing.T) {
+	t.Parallel()
+
+	store, conn := newTelemetryTestStoreWithConn(t)
+	ctx := context.Background()
+	oldBatch := shiftedCollectionBatch(-1000)
+	retainedBoundaryBatch := testCollectionBatch()
+	for _, batch := range []CollectionBatch{oldBatch, retainedBoundaryBatch} {
+		if err := store.SaveCollectionBoundary(ctx, batch); err != nil {
+			t.Fatalf("seed collection boundary %d: %v", batch.Boundary, err)
+		}
+	}
+
+	if err := store.CleanupOldMetrics(ctx, 2000, 0, 0, 0, 0); err != nil {
+		t.Fatalf("clean old metrics: %v", err)
+	}
+
+	rows, err := conn.Query(`SELECT boundary FROM telemetry_collection_commits ORDER BY boundary`)
+	if err != nil {
+		t.Fatalf("query retained completion ledger: %v", err)
+	}
+	defer rows.Close()
+	var boundaries []int64
+	for rows.Next() {
+		var boundary int64
+		if err := rows.Scan(&boundary); err != nil {
+			t.Fatalf("scan retained completion boundary: %v", err)
+		}
+		boundaries = append(boundaries, boundary)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate retained completion boundaries: %v", err)
+	}
+	if len(boundaries) != 1 || boundaries[0] != 2000 {
+		t.Fatalf("retained completion boundaries = %v, want [2000]", boundaries)
+	}
+
+	if err := store.SaveCollectionBoundary(ctx, oldBatch); err != nil {
+		t.Fatalf("recollect cleaned boundary: %v", err)
+	}
+	var recollectedRows int
+	if err := conn.QueryRow(`SELECT COUNT(*) FROM metrics_raw WHERE timestamp < 1000`).Scan(&recollectedRows); err != nil {
+		t.Fatalf("count recollected raw rows: %v", err)
+	}
+	if recollectedRows != len(oldBatch.Samples) {
+		t.Fatalf("recollected raw rows = %d, want %d", recollectedRows, len(oldBatch.Samples))
+	}
+	assertTableCount(t, conn, "telemetry_collection_commits", 2)
+}
+
 func TestCollectorStoreInterfaceCompilesDuringTypedMigration(t *testing.T) {
 	t.Parallel()
 
@@ -600,6 +650,22 @@ func testCollectionBatch() CollectionBatch {
 			{Resolution: ResolutionRaw, BucketStart: 1000, SubjectID: "queue-1", SampleIntervalMS: 1000},
 		},
 	}
+}
+
+func shiftedCollectionBatch(delta int64) CollectionBatch {
+	batch := testCollectionBatch()
+	batch.Boundary += delta
+	for index := range batch.Samples {
+		batch.Samples[index].Timestamp += delta
+	}
+	for index := range batch.RateSnapshots {
+		batch.RateSnapshots[index].Timestamp += delta
+	}
+	for index := range batch.Coverage {
+		batch.Coverage[index].BucketStart += delta
+	}
+
+	return batch
 }
 
 func assertTableCount(t *testing.T, conn *litekit.Conn, table string, want int) {
