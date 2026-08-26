@@ -219,6 +219,25 @@ func Test_RecordOperation_labelsTheOutcome(t *testing.T) {
 	)
 }
 
+func TestTelemetryCollectorDroppedCountersExposeExactDeltas(t *testing.T) {
+	const metricName = "plainq_topic_fanout"
+	eventCounter := vm.GetOrCreateCounter(render(
+		Namespace+"_telemetry_event_buffer_dropped_total",
+		[]string{labelMetric},
+		[]string{metricName},
+	))
+	terminalCounter := vm.GetOrCreateCounter(Namespace + "_telemetry_terminal_state_dropped_total")
+	eventBefore := eventCounter.Get()
+	terminalBefore := terminalCounter.Get()
+
+	RecordTelemetryEventBufferDropped(metricName)
+	RecordTelemetryEventBufferDrops(metricName, 2)
+	RecordTelemetryTerminalStateDropped(4)
+
+	td.Cmp(t, eventCounter.Get()-eventBefore, uint64(3))
+	td.Cmp(t, terminalCounter.Get()-terminalBefore, uint64(4))
+}
+
 func TestRecordTopicRequestIsSeparateFromStorageOperation(t *testing.T) {
 	request := topicRequests.With(BackendCluster, OpCreateTopic, ResultOK)
 	storage := topicOperations.With(BackendCluster, OpCreateTopic, ResultOK)

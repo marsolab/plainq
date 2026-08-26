@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -37,6 +36,10 @@ const (
 
 	// rateWindowMS is the exact compatibility collection window in milliseconds.
 	rateWindowMS int64 = 1000
+
+	defaultTopicLimit         = 65_536
+	defaultEventBufferLimit   = 65_536
+	defaultTerminalStateLimit = 65_536
 
 	// Bucket sizes in milliseconds for time-series aggregation.
 	bucketSize1m = 60000    // 1 minute in ms.
@@ -75,21 +78,39 @@ const (
 
 // Metric names for topic rate metrics (calculated per second).
 const (
-	MetricTopicPublishRate  = "plainq_topic_publish_rate"
-	MetricTopicDeliveryRate = "plainq_topic_delivery_rate"
+	MetricTopicPublishRate              = "plainq_topic_publish_rate"
+	MetricTopicDeliveryRate             = "plainq_topic_delivery_rate"
+	MetricTopicDeliveryFailureRate      = "plainq_topic_delivery_failure_rate"
+	MetricTopicPublishedBytesRate       = "plainq_topic_published_bytes_rate"
+	MetricTopicSubscriptionsCreatedRate = "plainq_topic_subscriptions_created_rate"
+	MetricTopicSubscriptionsDeletedRate = "plainq_topic_subscriptions_deleted_rate"
 )
 
 // Metric names for topic counter metrics (cumulative).
 const (
+	MetricTopicRequestsTotal             = "plainq_topic_requests_total"
+	MetricTopicOperationsTotal           = "plainq_topic_operations_total"
 	MetricTopicMessagesPublishedTotal    = "plainq_topic_messages_published_total"
+	MetricTopicPublishedBytesTotal       = "plainq_topic_published_bytes_total"
 	MetricTopicDeliveriesTotal           = "plainq_topic_deliveries_total"
+	MetricTopicDeliveryFailuresTotal     = "plainq_topic_delivery_failures_total"
 	MetricTopicSubscriptionsCreatedTotal = "plainq_topic_subscriptions_created_total"
 	MetricTopicSubscriptionsDeletedTotal = "plainq_topic_subscriptions_deleted_total"
+)
+
+// Metric names for topic event metrics.
+const (
+	MetricTopicRequestDuration          = "plainq_topic_request_duration_seconds"
+	MetricTopicOperationDuration        = "plainq_topic_operation_duration_seconds"
+	MetricTopicFanout                   = "plainq_topic_fanout"
+	MetricTelemetryEventBufferDropped   = "plainq_telemetry_event_buffer_dropped_total"
+	MetricTelemetryTerminalStateDropped = "plainq_telemetry_terminal_state_dropped_total"
 )
 
 // Metric names for topic gauge metrics (current value).
 const (
 	MetricTopicSubscriptionsCurrent = "plainq_topic_subscriptions_current"
+	MetricTopicsExist               = "plainq_topics_exist"
 )
 
 // Metric names for gauge metrics (current value).
@@ -138,61 +159,37 @@ type QueueMetrics struct {
 	deleteRate  atomic.Uint64
 }
 
-// TopicMetrics holds metrics for a specific topic.
-type TopicMetrics struct {
-	// Counters (atomic for thread safety).
-	messagesPublished    atomic.Uint64
-	deliveries           atomic.Uint64
-	subscriptionsCreated atomic.Uint64
-	subscriptionsDeleted atomic.Uint64
-	subscriptionsCurrent atomic.Int64
-	subscriptionsKnown   atomic.Bool
-	lastUpdated          atomic.Int64
-
-	// Previous values for rate calculation.
-	prevMessagesPublished uint64
-	prevDeliveries        uint64
-
-	// Calculated rates.
-	publishRate  atomic.Uint64 // Stored as float64 bits.
-	deliveryRate atomic.Uint64
-}
-
-// TopicSystemMetrics holds system-wide topic metrics.
-type TopicSystemMetrics struct {
-	totalMessagesPublished    atomic.Uint64
-	totalDeliveries           atomic.Uint64
-	totalSubscriptionsCreated atomic.Uint64
-	totalSubscriptionsDeleted atomic.Uint64
-	subscriptionsCurrent      atomic.Int64
-	subscriptionsKnown        atomic.Bool
-
-	// Previous values for system-wide rates.
-	prevTotalMessagesPublished uint64
-	prevTotalDeliveries        uint64
-
-	// System-wide rates.
-	systemPublishRate  atomic.Uint64
-	systemDeliveryRate atomic.Uint64
-}
-
 type TopicRates struct {
-	PublishRate  float64
-	DeliveryRate float64
+	PublishRate              float64
+	DeliveryRate             float64
+	DeliveryFailureRate      float64
+	PublishedBytesRate       float64
+	SubscriptionsCreatedRate float64
+	SubscriptionsDeletedRate float64
 }
 
 type TopicCounters struct {
+	Requests             uint64
+	Operations           uint64
 	MessagesPublished    uint64
+	PublishedBytes       uint64
 	Deliveries           uint64
+	DeliveryFailures     uint64
 	SubscriptionsCreated uint64
 	SubscriptionsDeleted uint64
 }
 
 type TopicSystemCounters struct {
+	Requests                  uint64
+	Operations                uint64
 	MessagesPublished         uint64
+	PublishedBytes            uint64
 	Deliveries                uint64
+	DeliveryFailures          uint64
 	SubscriptionsCurrent      int64
 	SubscriptionsCurrentKnown bool
+	TopicsExist               int64
+	TopicsExistKnown          bool
 	SubscriptionsCreated      uint64
 	SubscriptionsDeleted      uint64
 }
@@ -227,12 +224,34 @@ type Collector struct {
 	queueMu      sync.RWMutex
 
 	// Per-topic metrics.
-	topicMetrics map[string]*TopicMetrics
-	topicMu      sync.RWMutex
+	topicMetrics      map[string]*TopicMetrics
+	topicMu           sync.RWMutex
+	topicCache        *topicCache
+	topicLimit        int
+	lastEnsureEvicted bool
 
 	// System-wide metrics.
 	system      SystemMetrics
 	topicSystem TopicSystemMetrics
+
+	// cutoverMu orders every topic callback with closed-boundary snapshots.
+	// The only nested lock order is cutoverMu then topicMu.
+	cutoverMu sync.Mutex
+	now       func() time.Time
+
+	eventWatermark    int64
+	eventQueue        []MetricSample
+	eventBufferLimit  int
+	eventDirty        map[string]dirtyInterval
+	frozenBoundary    *frozenTopicBoundary
+	lastTopicBoundary int64
+
+	terminalLimit        int
+	terminalReservations map[string]*terminalReservation
+	preDurableTerminals  map[string]*terminalReservation
+	preDurableOrder      []string
+	terminalLoadFailed   bool
+	terminalPromoteMu    sync.Mutex
 
 	// Configuration.
 	collectionInterval time.Duration
@@ -332,21 +351,40 @@ func WithSnapshotInterval(d time.Duration) Option {
 	return func(c *Collector) { c.snapshotInterval = d }
 }
 
+// WithClock replaces the collector clock for deterministic cutover tests.
+func WithClock(now func() time.Time) Option {
+	return func(c *Collector) {
+		if now != nil {
+			c.now = now
+		}
+	}
+}
+
 // New creates a new Collector.
 func New(store Store, opts ...Option) *Collector {
 	c := &Collector{
-		logger:             logkit.NewNop(),
-		store:              store,
-		queueMetrics:       make(map[string]*QueueMetrics),
-		topicMetrics:       make(map[string]*TopicMetrics),
-		collectionInterval: defaultCollectionInterval,
-		snapshotInterval:   defaultSnapshotInterval,
-		stop:               make(chan struct{}),
+		logger:               logkit.NewNop(),
+		store:                store,
+		queueMetrics:         make(map[string]*QueueMetrics),
+		topicMetrics:         make(map[string]*TopicMetrics),
+		topicCache:           newTopicCache(),
+		topicLimit:           defaultTopicLimit,
+		collectionInterval:   defaultCollectionInterval,
+		snapshotInterval:     defaultSnapshotInterval,
+		now:                  time.Now,
+		eventBufferLimit:     defaultEventBufferLimit,
+		eventDirty:           make(map[string]dirtyInterval, 3),
+		terminalLimit:        defaultTerminalStateLimit,
+		terminalReservations: make(map[string]*terminalReservation),
+		preDurableTerminals:  make(map[string]*terminalReservation),
+		stop:                 make(chan struct{}),
 	}
 
 	for _, opt := range opts {
 		opt(c)
 	}
+
+	c.loadDurableTerminalReservations()
 
 	return c
 }
@@ -397,234 +435,6 @@ func (c *Collector) getOrCreateQueueMetrics(queueID string) *QueueMetrics {
 	c.queueMetrics[queueID] = m
 
 	return m
-}
-
-// getOrCreateTopicMetrics gets or creates metrics for a topic.
-func (c *Collector) getOrCreateTopicMetrics(topicID string) *TopicMetrics {
-	c.topicMu.RLock()
-	m, ok := c.topicMetrics[topicID]
-	c.topicMu.RUnlock()
-
-	if ok {
-		return m
-	}
-
-	c.topicMu.Lock()
-	defer c.topicMu.Unlock()
-
-	if m, ok = c.topicMetrics[topicID]; ok {
-		return m
-	}
-
-	m = &TopicMetrics{}
-	c.topicMetrics[topicID] = m
-
-	return m
-}
-
-func (c *Collector) topicMetricsForRead(topicID string) (*TopicMetrics, bool) {
-	c.topicMu.RLock()
-	defer c.topicMu.RUnlock()
-
-	m, ok := c.topicMetrics[topicID]
-
-	return m, ok
-}
-
-// RecordTopicPublish records topic publish and delivery counts.
-func (c *Collector) RecordTopicPublish(topicID string, messagesPublished, deliveries uint64) {
-	m := c.getOrCreateTopicMetrics(topicID)
-	m.messagesPublished.Add(messagesPublished)
-	m.deliveries.Add(deliveries)
-	m.lastUpdated.Store(time.Now().UnixMilli())
-	c.topicSystem.totalMessagesPublished.Add(messagesPublished)
-	c.topicSystem.totalDeliveries.Add(deliveries)
-}
-
-// RecordTopicSubscriptionCreated records a topic subscription creation.
-func (c *Collector) RecordTopicSubscriptionCreated(topicID string, currentCount int64) {
-	m := c.getOrCreateTopicMetrics(topicID)
-	m.subscriptionsCreated.Add(1)
-	m.lastUpdated.Store(time.Now().UnixMilli())
-	c.topicSystem.totalSubscriptionsCreated.Add(1)
-	c.setTopicSubscriptionsCurrent(m, currentCount)
-}
-
-// RecordTopicSubscriptionDeleted records a topic subscription deletion.
-func (c *Collector) RecordTopicSubscriptionDeleted(topicID string, currentCount int64) {
-	m := c.getOrCreateTopicMetrics(topicID)
-	m.subscriptionsDeleted.Add(1)
-	m.lastUpdated.Store(time.Now().UnixMilli())
-	c.topicSystem.totalSubscriptionsDeleted.Add(1)
-	c.setTopicSubscriptionsCurrent(m, currentCount)
-}
-
-// ReconcileTopicSubscriptionCounts refreshes topic subscription gauges from an authoritative topic list.
-func (c *Collector) ReconcileTopicSubscriptionCounts(countsByTopic map[string]int64) {
-	now := time.Now().UnixMilli()
-
-	c.topicMu.Lock()
-	defer c.topicMu.Unlock()
-
-	for topicID, currentCount := range countsByTopic {
-		if currentCount < 0 {
-			continue
-		}
-
-		m, ok := c.topicMetrics[topicID]
-		if !ok {
-			m = &TopicMetrics{}
-			c.topicMetrics[topicID] = m
-			m.lastUpdated.Store(now)
-		}
-
-		if m.subscriptionsCurrent.Load() != currentCount {
-			m.subscriptionsCurrent.Store(currentCount)
-			m.lastUpdated.Store(now)
-		}
-
-		m.subscriptionsKnown.Store(true)
-	}
-
-	for topicID := range c.topicMetrics {
-		if _, ok := countsByTopic[topicID]; !ok {
-			delete(c.topicMetrics, topicID)
-		}
-	}
-
-	var total int64
-	for _, m := range c.topicMetrics {
-		total += m.subscriptionsCurrent.Load()
-	}
-
-	c.topicSystem.subscriptionsCurrent.Store(total)
-	c.topicSystem.subscriptionsKnown.Store(true)
-}
-
-func (c *Collector) setTopicSubscriptionsCurrent(m *TopicMetrics, currentCount int64) {
-	if currentCount < 0 {
-		m.subscriptionsKnown.Store(false)
-		c.recalculateTopicSystemSubscriptionsCurrent()
-
-		return
-	}
-
-	m.subscriptionsCurrent.Store(currentCount)
-	m.subscriptionsKnown.Store(true)
-	c.recalculateTopicSystemSubscriptionsCurrent()
-}
-
-func (c *Collector) recalculateTopicSystemSubscriptionsCurrent() {
-	c.topicMu.RLock()
-	defer c.topicMu.RUnlock()
-
-	var total int64
-
-	for _, m := range c.topicMetrics {
-		if !m.subscriptionsKnown.Load() {
-			c.topicSystem.subscriptionsKnown.Store(false)
-
-			return
-		}
-
-		total += m.subscriptionsCurrent.Load()
-	}
-
-	c.topicSystem.subscriptionsCurrent.Store(total)
-	c.topicSystem.subscriptionsKnown.Store(true)
-}
-
-// GetTopicRates returns current topic rates for one topic.
-func (c *Collector) GetTopicRates(topicID string) TopicRates {
-	m, ok := c.topicMetricsForRead(topicID)
-	if !ok {
-		return TopicRates{}
-	}
-
-	return TopicRates{
-		PublishRate:  float64FromBits(m.publishRate.Load()),
-		DeliveryRate: float64FromBits(m.deliveryRate.Load()),
-	}
-}
-
-// GetTopicSystemRates returns current system-wide topic rates.
-func (c *Collector) GetTopicSystemRates() TopicRates {
-	return TopicRates{
-		PublishRate:  float64FromBits(c.topicSystem.systemPublishRate.Load()),
-		DeliveryRate: float64FromBits(c.topicSystem.systemDeliveryRate.Load()),
-	}
-}
-
-// GetTopicCounters returns current counters for one topic.
-func (c *Collector) GetTopicCounters(topicID string) TopicCounters {
-	m, ok := c.topicMetricsForRead(topicID)
-	if !ok {
-		return TopicCounters{}
-	}
-
-	return TopicCounters{
-		MessagesPublished:    m.messagesPublished.Load(),
-		Deliveries:           m.deliveries.Load(),
-		SubscriptionsCreated: m.subscriptionsCreated.Load(),
-		SubscriptionsDeleted: m.subscriptionsDeleted.Load(),
-	}
-}
-
-// GetTopicSystemCounters returns current system-wide topic counters.
-func (c *Collector) GetTopicSystemCounters() TopicSystemCounters {
-	return TopicSystemCounters{
-		MessagesPublished:         c.topicSystem.totalMessagesPublished.Load(),
-		Deliveries:                c.topicSystem.totalDeliveries.Load(),
-		SubscriptionsCurrent:      c.topicSystem.subscriptionsCurrent.Load(),
-		SubscriptionsCurrentKnown: c.topicSystem.subscriptionsKnown.Load(),
-		SubscriptionsCreated:      c.topicSystem.totalSubscriptionsCreated.Load(),
-		SubscriptionsDeleted:      c.topicSystem.totalSubscriptionsDeleted.Load(),
-	}
-}
-
-// GetTopicSubscriptionsCurrent returns current subscription count for one topic.
-func (c *Collector) GetTopicSubscriptionsCurrent(topicID string) int64 {
-	m, ok := c.topicMetricsForRead(topicID)
-	if !ok {
-		return 0
-	}
-
-	return m.subscriptionsCurrent.Load()
-}
-
-// GetTopicSubscriptionsCurrentKnown returns the current subscription count only when it is known.
-func (c *Collector) GetTopicSubscriptionsCurrentKnown(topicID string) (int64, bool) {
-	m, ok := c.topicMetricsForRead(topicID)
-	if !ok || !m.subscriptionsKnown.Load() {
-		return 0, false
-	}
-
-	return m.subscriptionsCurrent.Load(), true
-}
-
-// GetTopicLastUpdated returns the latest metric activity timestamp for one topic.
-func (c *Collector) GetTopicLastUpdated(topicID string) int64 {
-	m, ok := c.topicMetricsForRead(topicID)
-	if !ok {
-		return 0
-	}
-
-	return m.lastUpdated.Load()
-}
-
-// GetAllTopicIDs returns all tracked topic IDs.
-func (c *Collector) GetAllTopicIDs() []string {
-	c.topicMu.RLock()
-	defer c.topicMu.RUnlock()
-
-	ids := make([]string, 0, len(c.topicMetrics))
-	for id := range c.topicMetrics {
-		ids = append(ids, id)
-	}
-
-	sort.Strings(ids)
-
-	return ids
 }
 
 // RecordSend records a send operation.
@@ -894,59 +704,23 @@ func (c *Collector) calculateRates(ctx context.Context) {
 }
 
 func (c *Collector) calculateTopicRates(ctx context.Context, now int64) {
-	c.topicMu.RLock()
-	defer c.topicMu.RUnlock()
-
-	for topicID, m := range c.topicMetrics {
-		currentPublished := m.messagesPublished.Load()
-		currentDeliveries := m.deliveries.Load()
-
-		publishRate := float64(currentPublished - m.prevMessagesPublished)
-		deliveryRate := float64(currentDeliveries - m.prevDeliveries)
-
-		m.publishRate.Store(float64ToBits(publishRate))
-		m.deliveryRate.Store(float64ToBits(deliveryRate))
-		m.prevMessagesPublished = currentPublished
-		m.prevDeliveries = currentDeliveries
-
-		c.saveRate(ctx, now, topicID, MetricTopicPublishRate, publishRate)
-		c.saveRate(ctx, now, topicID, MetricTopicDeliveryRate, deliveryRate)
-		c.saveRaw(ctx, now, topicID, MetricTopicMessagesPublishedTotal, float64(currentPublished))
-		c.saveRaw(ctx, now, topicID, MetricTopicDeliveriesTotal, float64(currentDeliveries))
-
-		// A subscription count is only written once it has been reconciled
-		// from the store: writing a zero we have not yet confirmed would draw a
-		// cliff on the dashboard where there was only a restart.
-		if m.subscriptionsKnown.Load() {
-			c.saveRaw(ctx, now, topicID, MetricTopicSubscriptionsCurrent, float64(m.subscriptionsCurrent.Load()))
-		}
-
-		c.saveRaw(ctx, now, topicID, MetricTopicSubscriptionsCreatedTotal, float64(m.subscriptionsCreated.Load()))
-		c.saveRaw(ctx, now, topicID, MetricTopicSubscriptionsDeletedTotal, float64(m.subscriptionsDeleted.Load()))
+	intervalMS := c.collectionInterval.Milliseconds()
+	if intervalMS <= 0 {
+		return
 	}
 
-	currentSystemPublished := c.topicSystem.totalMessagesPublished.Load()
-	currentSystemDeliveries := c.topicSystem.totalDeliveries.Load()
-
-	systemPublishRate := float64(currentSystemPublished - c.topicSystem.prevTotalMessagesPublished)
-	systemDeliveryRate := float64(currentSystemDeliveries - c.topicSystem.prevTotalDeliveries)
-
-	c.topicSystem.systemPublishRate.Store(float64ToBits(systemPublishRate))
-	c.topicSystem.systemDeliveryRate.Store(float64ToBits(systemDeliveryRate))
-	c.topicSystem.prevTotalMessagesPublished = currentSystemPublished
-	c.topicSystem.prevTotalDeliveries = currentSystemDeliveries
-
-	c.saveRate(ctx, now, "", MetricTopicPublishRate, systemPublishRate)
-	c.saveRate(ctx, now, "", MetricTopicDeliveryRate, systemDeliveryRate)
-	c.saveRaw(ctx, now, "", MetricTopicMessagesPublishedTotal, float64(currentSystemPublished))
-	c.saveRaw(ctx, now, "", MetricTopicDeliveriesTotal, float64(currentSystemDeliveries))
-
-	if c.topicSystem.subscriptionsKnown.Load() {
-		c.saveRaw(ctx, now, "", MetricTopicSubscriptionsCurrent, float64(c.topicSystem.subscriptionsCurrent.Load()))
+	boundary := now - now%intervalMS
+	if boundary <= 0 {
+		return
 	}
 
-	c.saveRaw(ctx, now, "", MetricTopicSubscriptionsCreatedTotal, float64(c.topicSystem.totalSubscriptionsCreated.Load()))
-	c.saveRaw(ctx, now, "", MetricTopicSubscriptionsDeletedTotal, float64(c.topicSystem.totalSubscriptionsDeleted.Load()))
+	if err := c.collectTopicBoundary(ctx, boundary); err != nil {
+		c.logger.Debug("Topic telemetry boundary failed", slog.String("error", err.Error()))
+	}
+
+	if err := c.promoteTerminalStates(ctx); err != nil {
+		c.logger.Debug("Terminal telemetry promotion failed", slog.String("error", err.Error()))
+	}
 }
 
 // aggregationWorker runs periodic aggregation.

@@ -10,15 +10,19 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/marsolab/plainq/internal/server/service/telemetry"
 	"github.com/marsolab/plainq/internal/server/service/telemetry/collector"
 )
 
 func TestGetTopicDashboardOverview(t *testing.T) {
 	c := collector.New(nil)
-	c.RecordTopicPublish("topic-1", 4, 8)
-	c.RecordTopicSubscriptionCreated("topic-1", 2)
-	c.RecordTopicPublish("topic-2", 1, 1)
-	c.RecordTopicSubscriptionCreated("topic-2", 1)
+	c.RecordTopicPublish(telemetry.TopicPublishEvent{TopicID: "topic-1", Messages: 4, Delivered: 8})
+	c.RecordTopicSubscriptionCreated("topic-1")
+	c.RecordTopicPublish(telemetry.TopicPublishEvent{TopicID: "topic-2", Messages: 1, Delivered: 1})
+	c.RecordTopicSubscriptionCreated("topic-2")
+	c.RecordTopicState(telemetry.TopicStateEvent{
+		TopicsExist: 2, Subscriptions: map[string]int64{"topic-1": 2, "topic-2": 1},
+	})
 	time.Sleep(2 * time.Millisecond)
 
 	h := NewMetricsHandler(c, &fakeMetricsStore{})
@@ -63,7 +67,11 @@ func TestGetTopicDashboardOverview(t *testing.T) {
 
 func TestGetTopicDashboardOverviewReturnsNullForUnknownSubscriptions(t *testing.T) {
 	c := collector.New(nil)
-	c.RecordTopicSubscriptionCreated("topic-1", -1)
+	c.RecordTopicSubscriptionCreated("topic-1")
+	c.RecordTopicState(telemetry.TopicStateEvent{
+		TopicsExist: 1, Subscriptions: map[string]int64{"topic-1": 0},
+	})
+	c.RecordTopicStateUnavailable()
 
 	h := NewMetricsHandler(c, &fakeMetricsStore{})
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/metrics/topics/overview", nil)
@@ -93,8 +101,11 @@ func TestGetTopicDashboardOverviewReturnsNullForUnknownSubscriptions(t *testing.
 
 func TestGetTopicMetrics(t *testing.T) {
 	c := collector.New(nil)
-	c.RecordTopicPublish("topic-1", 4, 8)
-	c.RecordTopicSubscriptionCreated("topic-1", 2)
+	c.RecordTopicPublish(telemetry.TopicPublishEvent{TopicID: "topic-1", Messages: 4, Delivered: 8})
+	c.RecordTopicSubscriptionCreated("topic-1")
+	c.RecordTopicState(telemetry.TopicStateEvent{
+		TopicsExist: 1, Subscriptions: map[string]int64{"topic-1": 2},
+	})
 	subscriptions := int64(2)
 
 	h := NewMetricsHandler(c, &fakeMetricsStore{
@@ -170,7 +181,9 @@ func TestGetTopicMetricsReturnsNullForUnknownSubscriptions(t *testing.T) {
 
 func TestGetTopicMetricsUsesKnownCollectorSubscriptions(t *testing.T) {
 	c := collector.New(nil)
-	c.ReconcileTopicSubscriptionCounts(map[string]int64{"topic-1": 0})
+	c.RecordTopicState(telemetry.TopicStateEvent{
+		TopicsExist: 1, Subscriptions: map[string]int64{"topic-1": 0},
+	})
 	h := NewMetricsHandler(c, &fakeMetricsStore{
 		topicSummary: &collector.TopicMetricsSummary{
 			TopicID:         "topic-1",
