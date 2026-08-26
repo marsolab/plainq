@@ -155,6 +155,150 @@ func TestTopicStateUnavailableWithholdsGaugeCoverage(t *testing.T) {
 	assertTask9CoverageAbsent(t, batch.Coverage, "topic-1", MetricTopicSubscriptionsCurrent)
 }
 
+func TestTerminalPendingTopicKeepsFinalCountersRatesAndEventCoverage(t *testing.T) {
+	clock := newTask9Clock(time.UnixMilli(1_100))
+	store := newTask9Store()
+	c := New(store, WithCollectionInterval(time.Second), WithClock(clock.Now))
+	c.RecordTopicState(telemetry.TopicStateEvent{
+		TopicsExist: 1, Subscriptions: map[string]int64{"topic-1": 2},
+	})
+	requireCollectTopicBoundary(t, c, 2_000)
+
+	recordTerminalPendingDeleteProductionOrder(clock, c, 2_000)
+	requireCollectTopicBoundary(t, c, 3_000)
+
+	batch := store.lastBatch(t)
+	assertTask9MetricValue(t, batch.Samples, "topic-1", MetricTopicOperationsTotal, 1)
+	assertTask9MetricValue(t, batch.Samples, "topic-1", MetricTopicRequestsTotal, 1)
+	assertTask9MetricValue(t, batch.Samples, "topic-1", MetricTopicSubscriptionsDeletedTotal, 2)
+	assertTask9MetricValue(t, batch.Samples, "topic-1", MetricTopicSubscriptionsDeletedRate, 2)
+	assertTask9MetricValue(t, batch.Samples, "topic-1", MetricTopicOperationDuration, 0.01)
+	assertTask9MetricValue(t, batch.Samples, "topic-1", MetricTopicRequestDuration, 0.02)
+	assertTask9Coverage(t, batch.Coverage, "topic-1", MetricTopicOperationDuration, MetricKindEvent)
+	assertTask9Coverage(t, batch.Coverage, "topic-1", MetricTopicRequestDuration, MetricKindEvent)
+	assertTask9MetricAbsent(t, batch.Samples, "topic-1", MetricTopicSubscriptionsCurrent)
+	assertTask9CoverageAbsent(t, batch.Coverage, "topic-1", MetricTopicSubscriptionsCurrent)
+}
+
+func TestTerminalPendingProductionOrderPersistsFinalMetricsThroughZeroAndRollup(t *testing.T) {
+	ctx := context.Background()
+	store, _ := newTelemetryTestStoreWithConn(t)
+	if reset, err := store.ResetRawInterval(ctx, 1_000); err != nil || !reset {
+		t.Fatalf("reset raw interval = %t, %v; want true, nil", reset, err)
+	}
+
+	clock := newTask9Clock(time.UnixMilli(58_100))
+	c := New(store, WithCollectionInterval(time.Second), WithClock(clock.Now))
+	c.RecordTopicState(telemetry.TopicStateEvent{
+		TopicsExist: 1, Subscriptions: map[string]int64{"topic-1": 2},
+	})
+	requireCollectTopicBoundary(t, c, 59_000)
+
+	recordTerminalPendingDeleteProductionOrder(clock, c, 59_000)
+	requireCollectTopicBoundary(t, c, 60_000)
+
+	operationLabels := canonicalResultLabels(metrics.BackendSQLite, metrics.OpDeleteTopic, metrics.ResultOK)
+	durationLabels := canonicalDurationLabels(metrics.BackendSQLite, metrics.OpDeleteTopic)
+	assertSQLiteSeriesPoint := func(
+		resolution Resolution, metricName, labels string, kind MetricKind,
+		from, to int64, wantValue float64, wantCoverage int,
+	) DataPoint {
+		t.Helper()
+		result := mustQuerySeries(t, store, SeriesQuery{
+			SubjectID: "topic-1", MetricName: metricName, Labels: labels,
+			Kind: kind, Resolution: resolution, From: from, To: to,
+		})
+		if len(result.DataPoints) != 1 || result.DataPoints[0].Value != wantValue {
+			t.Fatalf("%s %s points = %#v, want one value %v", resolution, metricName, result.DataPoints, wantValue)
+		}
+		if wantCoverage >= 0 && len(result.Coverage) != wantCoverage {
+			t.Fatalf("%s %s coverage = %#v, want %d", resolution, metricName, result.Coverage, wantCoverage)
+		}
+
+		return result.DataPoints[0]
+	}
+
+	preTerminalGauge := mustQuerySeries(t, store, SeriesQuery{
+		SubjectID: "topic-1", MetricName: MetricTopicSubscriptionsCurrent,
+		Kind: MetricKindGauge, Resolution: ResolutionRaw, From: 59_000, To: 60_000,
+	})
+	if len(preTerminalGauge.DataPoints) != 0 || len(preTerminalGauge.Coverage) != 0 {
+		t.Fatalf("terminal-pending active gauge = %#v, want no point or coverage", preTerminalGauge)
+	}
+
+	assertSQLiteSeriesPoint(ResolutionRaw, MetricTopicOperationsTotal, operationLabels,
+		MetricKindCounter, 59_000, 60_000, 1, 1)
+	assertSQLiteSeriesPoint(ResolutionRaw, MetricTopicRequestsTotal, operationLabels,
+		MetricKindCounter, 59_000, 60_000, 1, 1)
+	assertSQLiteSeriesPoint(ResolutionRaw, MetricTopicSubscriptionsDeletedTotal, "",
+		MetricKindCounter, 59_000, 60_000, 2, 1)
+	assertSQLiteSeriesPoint(ResolutionRaw, MetricTopicSubscriptionsDeletedRate, "",
+		MetricKindRate, 59_000, 60_000, 2, 1)
+	assertSQLiteSeriesPoint(ResolutionRaw, MetricTopicOperationDuration, durationLabels,
+		MetricKindEvent, 59_000, 60_000, 0.01, 1)
+	assertSQLiteSeriesPoint(ResolutionRaw, MetricTopicRequestDuration, durationLabels,
+		MetricKindEvent, 59_000, 60_000, 0.02, 1)
+
+	if err := c.promoteTerminalStates(ctx); err != nil {
+		t.Fatalf("promote terminal state: %v", err)
+	}
+	if err := c.assignTerminalStates(ctx, 60_000); err != nil {
+		t.Fatalf("assign terminal state: %v", err)
+	}
+	due := c.terminalStatesDue(60_000)
+	if len(due) != 1 || due[0].TargetBucket == nil || *due[0].TargetBucket != 59_000 {
+		t.Fatalf("terminal due = %#v, want target 59000", due)
+	}
+	if err := c.completeTerminalState(ctx, due[0]); err != nil {
+		t.Fatalf("complete terminal state: %v", err)
+	}
+
+	terminalPoint := assertSQLiteSeriesPoint(ResolutionRaw, MetricTopicSubscriptionsCurrent, "",
+		MetricKindGauge, 59_000, 60_000, 0, 1)
+	if terminalPoint.Timestamp != 59_000 {
+		t.Fatalf("terminal zero timestamp = %d, want 59000", terminalPoint.Timestamp)
+	}
+
+	if err := store.Rollup(ctx, Resolution1m, 60_000); err != nil {
+		t.Fatalf("roll up terminal production order: %v", err)
+	}
+	coarseGauge := assertSQLiteSeriesPoint(Resolution1m, MetricTopicSubscriptionsCurrent, "",
+		MetricKindGauge, 0, 60_000, 0, -1)
+	if coarseGauge.Last != 0 {
+		t.Fatalf("coarse terminal gauge = %#v, want last zero", coarseGauge)
+	}
+	assertSQLiteSeriesPoint(Resolution1m, MetricTopicOperationsTotal, operationLabels,
+		MetricKindCounter, 0, 60_000, 1, -1)
+	assertSQLiteSeriesPoint(Resolution1m, MetricTopicRequestsTotal, operationLabels,
+		MetricKindCounter, 0, 60_000, 1, -1)
+	assertSQLiteSeriesPoint(Resolution1m, MetricTopicSubscriptionsDeletedTotal, "",
+		MetricKindCounter, 0, 60_000, 2, -1)
+	assertSQLiteSeriesPoint(Resolution1m, MetricTopicSubscriptionsDeletedRate, "",
+		MetricKindRate, 0, 60_000, 2, -1)
+	assertSQLiteSeriesPoint(Resolution1m, MetricTopicOperationDuration, durationLabels,
+		MetricKindEvent, 0, 60_000, 0.01, -1)
+	assertSQLiteSeriesPoint(Resolution1m, MetricTopicRequestDuration, durationLabels,
+		MetricKindEvent, 0, 60_000, 0.02, -1)
+}
+
+func recordTerminalPendingDeleteProductionOrder(clock *task9Clock, c *Collector, bucketStart int64) {
+	clock.Set(time.UnixMilli(bucketStart + 100))
+	c.RecordTopicOperation(telemetry.TopicOperationEvent{
+		Backend: metrics.BackendSQLite, Operation: metrics.OpDeleteTopic,
+		Result: metrics.ResultOK, TopicID: "topic-1", Duration: 10 * time.Millisecond,
+	})
+	clock.Set(time.UnixMilli(bucketStart + 200))
+	c.RecordTopicSubscriptionDeleted("topic-1")
+	c.RecordTopicSubscriptionDeleted("topic-1")
+	clock.Set(time.UnixMilli(bucketStart + 300))
+	c.RecordTopicState(telemetry.TopicStateEvent{TopicsExist: 0, Subscriptions: map[string]int64{}})
+	clock.Set(time.UnixMilli(bucketStart + 400))
+	c.RecordTopicRequest(telemetry.TopicOperationEvent{
+		Backend: metrics.BackendSQLite, Operation: metrics.OpDeleteTopic,
+		Result: metrics.ResultOK, TopicID: "topic-1", Duration: 20 * time.Millisecond,
+	})
+}
+
 func TestTopicEventAtCutoverBoundaryStaysForNextBucket(t *testing.T) {
 	clock := newTask9Clock(time.UnixMilli(1_999))
 	store := newTask9Store()

@@ -719,20 +719,19 @@ func (c *Collector) freezeTopicBoundaryLocked(boundary, intervalMS int64) *froze
 		true, c.topicSystem.topicsExist, c.topicSystem.topicsKnown, bucketStart, intervalMS)
 
 	topicIDs := make([]string, 0, len(c.topicMetrics))
-	for topicID, current := range c.topicMetrics {
-		if !current.terminalPending {
-			topicIDs = append(topicIDs, topicID)
-		}
+	for topicID := range c.topicMetrics {
+		topicIDs = append(topicIDs, topicID)
 	}
 
 	sort.Strings(topicIDs)
 
 	for _, topicID := range topicIDs {
 		current := c.topicMetrics[topicID]
+		activeGauge := !current.terminalPending
 		frozen.accumulators[topicID] = &current.topicAccumulator
 		c.appendSubjectBoundaryLocked(frozen, topicID, &current.topicAccumulator,
-			current.subscriptionsCurrent, current.subscriptionsKnown,
-			current.authoritative, 0, false, bucketStart, intervalMS)
+			current.subscriptionsCurrent, current.subscriptionsKnown && activeGauge,
+			current.authoritative && activeGauge, 0, false, bucketStart, intervalMS)
 	}
 
 	return frozen
