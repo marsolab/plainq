@@ -24,7 +24,7 @@ This documentation is organized so you can move from "never heard of it" to
 | [Terminal UI (TUI)](guides/tui.md)                             | The interactive Bubble Tea queue browser.                           |
 | [User stories](user-stories.md)                                | What each role can do, with a traceability matrix.                  |
 | [Queues & messages](guides/queues-and-messages.md)             | Visibility timeout, retries, retention, eviction, dead-letter.      |
-| [gRPC API](guides/grpc-api.md)                                 | The wire protocol, the eight RPCs, generating clients.              |
+| [gRPC API](guides/grpc-api.md)                                 | Queue/message and six stable pub/sub RPCs, generating clients.      |
 | [Configuration](guides/configuration.md)                       | Every `serve` flag, grouped and explained.                          |
 | [Advanced topics](guides/advanced.md)                          | Pub/sub fan-out, throughput tuning, scaling, GC, delivery guarantees. |
 | [Deployment](guides/deployment.md)                             | SQLite + Litestream, PostgreSQL, containers, hardening.             |
@@ -34,6 +34,7 @@ This documentation is organized so you can move from "never heard of it" to
 | [Troubleshooting & FAQ](guides/troubleshooting.md)             | Common errors, fixes, and frequent questions.                       |
 | [Authentication & RBAC](authentication-rbac.md)                | JWT sessions, roles, queue permissions, onboarding.                 |
 | [OAuth, organizations & teams](oauth-organizations-teams.md)   | External identity providers and multi-tenancy.                      |
+| [Release notes](release-notes.md)                              | Compatibility and upgrade-visible behavior changes.                 |
 
 ## Examples
 
@@ -63,10 +64,10 @@ Specs for the bigger pieces, written before they were built.
                     ┌──────────────────────────────────────────┐
                     │                plainq serve              │
                     │                                          │
-  CLI / gRPC  ─────▶│  gRPC :8080 ── Queue service             │
+  CLI / gRPC  ─────▶│  gRPC :8080 ── Queue + topic service     │
   clients           │                                          │
                     │  HTTP :8081 ── Houston UI                │
-  Browser     ─────▶│              ── /health  /metrics        │
+  Browser     ─────▶│              ── /live /health /metrics  │
                     │              ── REST: account, rbac,     │
                     │                 oauth, onboarding        │
                     │                                          │
@@ -75,6 +76,8 @@ Specs for the bigger pieces, written before they were built.
 ```
 
 - **Producers** `Send` messages to a **queue**.
+- **Publishers** `Publish` to a **topic**; each subscribed queue receives its
+  own at-least-once copy.
 - **Consumers** `Receive` a batch, do their work, then `Delete` (acknowledge).
 - If a consumer never deletes, the message reappears after the **visibility
   timeout** — delivery is **at-least-once**.

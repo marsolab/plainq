@@ -135,14 +135,15 @@ For the full behavioral details, timing, and worked examples, see
 PlainQ exposes the same queue model through several surfaces:
 
 - **gRPC API** (`:8080`) — the canonical wire protocol; the CLI is a thin client
-  over it. Eight RPCs cover queue management and message operations. See the
+  over it. Queue/message RPCs and six stable pub/sub RPCs share the same
+  application behavior. See the
   [gRPC API guide](../guides/grpc-api.md).
 - **CLI** (`plainq <command>`) — interactive and scriptable. See the
   [CLI guide](../guides/cli.md).
 - **Houston** (`:8081`) — the web admin UI for queues, accounts, RBAC, and
   metrics. See the [Houston guide](../guides/houston.md).
-- **HTTP REST** (`:8081`) — account/auth, RBAC, OAuth, onboarding, and a metrics
-  API used by Houston.
+- **HTTP REST** (`:8081`) — stable topic/subscription routes plus account/auth,
+  RBAC, OAuth, onboarding, and the metrics API used by Houston.
 
 ## Storage backends
 
@@ -168,10 +169,10 @@ PlainQ has authentication and RBAC built in, not bolted on:
 - External identity providers (Kinde, Auth0, Okta, WorkOS) plug in via OAuth/OIDC,
   with optional organization and team multi-tenancy.
 
-> **Current limitation:** the auth/RBAC middleware is **not** yet wired onto the
-> HTTP API routes — the REST endpoints under `/api/v1` (and the gRPC API) accept
-> requests without a token in the current build. Don't rely on built-in auth as
-> your only access control; see
+> **Security boundary:** when authentication is enabled, the HTTP topic subtree
+> and authenticated admin routes use bearer sessions. PlainQ does not make
+> per-topic or per-queue authorization decisions, and the gRPC listener has no
+> built-in authentication. Do not treat a session as tenant isolation; see
 > [Deployment → network exposure](../guides/deployment.md#network-exposure).
 
 See [Authentication & RBAC](../authentication-rbac.md) and

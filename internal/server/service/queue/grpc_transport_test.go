@@ -15,6 +15,7 @@ import (
 	"github.com/marsolab/plainq/internal/server/principal"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
+	"github.com/marsolab/servekit/idkit"
 	"github.com/maxatome/go-testdeep/td"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -106,9 +107,7 @@ func TestServer_ListQueues(t *testing.T) {
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			server := &Service{
-				storage: tc.storage,
-			}
+			server := newTestService(tc.storage)
 
 			res, err := server.ListQueues(context.Background(), tc.req)
 			td.CmpErrorIs(t, err, tc.wantErr)
@@ -166,7 +165,7 @@ func TestServer_DescribeQueue(t *testing.T) {
 
 	for name, tc := range tests {
 		t.Run(name, func(t *testing.T) {
-			client := newTestGRPCClient(t, &Service{storage: tc.storage})
+			client := newTestGRPCClient(t, newTestService(tc.storage))
 
 			got, err := client.DescribeQueue(context.Background(), tc.request)
 			if tc.wantCode != codes.OK {
@@ -184,11 +183,11 @@ func TestServer_DescribeQueue(t *testing.T) {
 }
 
 func TestServer_DeleteQueueFailedPrecondition(t *testing.T) {
-	server := &Service{storage: &mockStorage{
-		deleteQueueFunc: func(context.Context, *v1.DeleteQueueRequest) (*v1.DeleteQueueResponse, error) {
+	server := newTestService(&mockStorage{
+		deleteQueueFunc: func(context.Context, *v1.DeleteQueueRequest) (*DeleteQueueResult, error) {
 			return nil, pqerr.ErrFailedPrecondition
 		},
-	}}
+	})
 
 	_, err := server.DeleteQueue(context.Background(), &v1.DeleteQueueRequest{QueueId: validXID})
 	if got := status.Code(err); got != codes.FailedPrecondition {
@@ -251,9 +250,10 @@ func TestProtectedLegacyGRPCQueueOperationsUseTenantRBAC(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			service := &Service{
-				cfg: &config.Config{GRPCProtectLegacy: true}, storage: authorizedLegacyStorage(queueID, "topic-a"),
-			}
+			service := newTestServiceWithConfig(
+				&config.Config{GRPCProtectLegacy: true},
+				authorizedLegacyStorage(queueID, "topic-a"),
+			)
 			service.SetPermissionChecker(testPermissionCheckerFunc(func(
 				_ context.Context,
 				userID, gotQueueID string,
@@ -275,10 +275,9 @@ func TestProtectedLegacyGRPCQueueOperationsUseTenantRBAC(t *testing.T) {
 }
 
 func TestEveryGeneratedProtectedLegacyRPCIsAuthorized(t *testing.T) {
-	const (
-		queueID = "c5s8b4p9e8rg5u5fgq10"
-		topicID = "topic-a"
-	)
+	const queueID = "c5s8b4p9e8rg5u5fgq10"
+	topicID := idkit.XID()
+	subscriptionID := idkit.XID()
 	ctx := principal.With(context.Background(), principal.Principal{
 		Kind: principal.KindHuman, ID: "human-a", TenantID: "tenant-a", Roles: []string{"member"},
 	})
@@ -345,12 +344,16 @@ func TestEveryGeneratedProtectedLegacyRPCIsAuthorized(t *testing.T) {
 			return err
 		},
 		v1.PlainQService_Unsubscribe_FullMethodName: func(service *Service) error {
-			_, err := service.Unsubscribe(ctx, &v1.UnsubscribeRequest{TopicId: topicID, SubscriptionId: "sub-a"})
+			_, err := service.Unsubscribe(ctx, &v1.UnsubscribeRequest{
+				TopicId: topicID, SubscriptionId: subscriptionID,
+			})
 
 			return err
 		},
 		v1.PlainQService_Publish_FullMethodName: func(service *Service) error {
-			_, err := service.Publish(ctx, &v1.PublishRequest{TopicId: topicID})
+			_, err := service.Publish(ctx, &v1.PublishRequest{
+				TopicId: topicID, Messages: []*v1.PublishMessage{{Body: []byte("payload")}},
+			})
 
 			return err
 		},
@@ -377,7 +380,7 @@ func TestEveryGeneratedProtectedLegacyRPCIsAuthorized(t *testing.T) {
 	for method, invoke := range invocations {
 		t.Run(method, func(t *testing.T) {
 			storage := authorizedLegacyStorage(queueID, topicID)
-			service := &Service{cfg: &config.Config{GRPCProtectLegacy: true}, storage: storage}
+			service := newTestServiceWithConfig(&config.Config{GRPCProtectLegacy: true}, storage)
 			service.SetPermissionChecker(testPermissionCheckerFunc(func(
 				context.Context, string, string, middleware.PermissionType,
 			) (bool, error) {
@@ -394,12 +397,14 @@ func TestEveryGeneratedProtectedLegacyRPCIsAuthorized(t *testing.T) {
 
 func TestProtectedLegacyCrossTenantResourcesAreHidden(t *testing.T) {
 	const queueID = "c5s8b4p9e8rg5u5fgq10"
+	crossTenantTopicID := idkit.XID()
+	crossTenantSubscriptionID := idkit.XID()
 	ctx := principal.With(context.Background(), principal.Principal{
 		Kind: principal.KindHuman, ID: "admin-a", TenantID: "tenant-a", Roles: []string{"admin"},
 	})
-	service := &Service{
-		cfg: &config.Config{GRPCProtectLegacy: true},
-		storage: &mockStorage{
+	service := newTestServiceWithConfig(
+		&config.Config{GRPCProtectLegacy: true},
+		&mockStorage{
 			describeQueueFunc: func(context.Context, *v1.DescribeQueueRequest) (*v1.DescribeQueueResponse, error) {
 				return nil, pqerr.ErrNotFound
 			},
@@ -410,7 +415,7 @@ func TestProtectedLegacyCrossTenantResourcesAreHidden(t *testing.T) {
 				return &ListTopicsResponse{}, nil
 			},
 		},
-	}
+	)
 	service.SetPermissionChecker(testPermissionCheckerFunc(func(
 		context.Context, string, string, middleware.PermissionType,
 	) (bool, error) {
@@ -449,22 +454,26 @@ func TestProtectedLegacyCrossTenantResourcesAreHidden(t *testing.T) {
 			return err
 		},
 		"delete topic": func() error {
-			_, err := service.DeleteTopic(ctx, &v1.DeleteTopicRequest{TopicId: "topic-b"})
+			_, err := service.DeleteTopic(ctx, &v1.DeleteTopicRequest{TopicId: crossTenantTopicID})
 
 			return err
 		},
 		"subscribe": func() error {
-			_, err := service.Subscribe(ctx, &v1.SubscribeRequest{TopicId: "topic-b", QueueId: queueID})
+			_, err := service.Subscribe(ctx, &v1.SubscribeRequest{TopicId: crossTenantTopicID, QueueId: queueID})
 
 			return err
 		},
 		"unsubscribe": func() error {
-			_, err := service.Unsubscribe(ctx, &v1.UnsubscribeRequest{TopicId: "topic-b", SubscriptionId: "sub-b"})
+			_, err := service.Unsubscribe(ctx, &v1.UnsubscribeRequest{
+				TopicId: crossTenantTopicID, SubscriptionId: crossTenantSubscriptionID,
+			})
 
 			return err
 		},
 		"publish": func() error {
-			_, err := service.Publish(ctx, &v1.PublishRequest{TopicId: "topic-b"})
+			_, err := service.Publish(ctx, &v1.PublishRequest{
+				TopicId: crossTenantTopicID, Messages: []*v1.PublishMessage{{Body: []byte("payload")}},
+			})
 
 			return err
 		},
@@ -481,15 +490,13 @@ func TestProtectedLegacyCrossTenantResourcesAreHidden(t *testing.T) {
 }
 
 func TestProtectedLegacySameTenantPoliciesAllowGrantedOperations(t *testing.T) {
-	const (
-		queueID = "c5s8b4p9e8rg5u5fgq10"
-		topicID = "topic-a"
-	)
+	const queueID = "c5s8b4p9e8rg5u5fgq10"
+	topicID := idkit.XID()
 	storage := authorizedLegacyStorage(queueID, topicID)
 	memberContext := principal.With(context.Background(), principal.Principal{
 		Kind: principal.KindHuman, ID: "human-a", TenantID: "tenant-a", Roles: []string{"member"},
 	})
-	service := &Service{cfg: &config.Config{GRPCProtectLegacy: true}, storage: storage}
+	service := newTestServiceWithConfig(&config.Config{GRPCProtectLegacy: true}, storage)
 	service.SetPermissionChecker(testPermissionCheckerFunc(func(
 		_ context.Context, userID, gotQueueID string, permission middleware.PermissionType,
 	) (bool, error) {
@@ -503,7 +510,9 @@ func TestProtectedLegacySameTenantPoliciesAllowGrantedOperations(t *testing.T) {
 	adminContext := principal.With(context.Background(), principal.Principal{
 		Kind: principal.KindHuman, ID: "admin-a", TenantID: "tenant-a", Roles: []string{"admin"},
 	})
-	if _, err := service.Publish(adminContext, &v1.PublishRequest{TopicId: topicID}); err != nil {
+	if _, err := service.Publish(adminContext, &v1.PublishRequest{
+		TopicId: topicID, Messages: []*v1.PublishMessage{{Body: []byte("payload")}},
+	}); err != nil {
 		t.Fatalf("same-tenant admin topic publish: %v", err)
 	}
 }
@@ -522,8 +531,8 @@ func authorizedLegacyStorage(queueID, topicID string) *mockStorage {
 		purgeQueueFunc: func(context.Context, *v1.PurgeQueueRequest) (*v1.PurgeQueueResponse, error) {
 			return &v1.PurgeQueueResponse{}, nil
 		},
-		deleteQueueFunc: func(context.Context, *v1.DeleteQueueRequest) (*v1.DeleteQueueResponse, error) {
-			return &v1.DeleteQueueResponse{}, nil
+		deleteQueueFunc: func(context.Context, *v1.DeleteQueueRequest) (*DeleteQueueResult, error) {
+			return &DeleteQueueResult{}, nil
 		},
 		sendFunc: func(context.Context, *v1.SendRequest) (*v1.SendResponse, error) {
 			return &v1.SendResponse{}, nil
@@ -542,13 +551,15 @@ func authorizedLegacyStorage(queueID, topicID string) *mockStorage {
 
 func TestServer_TopicRPCs(t *testing.T) {
 	createdAt := time.Unix(1_709_000_000, 0).UTC()
+	topicID := idkit.XID()
+	subscriptionID := idkit.XID()
 	topic := Topic{
-		TopicID:   "topic-1",
+		TopicID:   topicID,
 		TopicName: "platform.events",
 		CreatedAt: createdAt,
 		Subscriptions: []Subscription{{
-			SubscriptionID: "subscription-1",
-			TopicID:        "topic-1",
+			SubscriptionID: subscriptionID,
+			TopicID:        topicID,
 			QueueID:        "c5s8b4p9e8rg5u5fgq10",
 			QueueName:      "platform.events",
 			CreatedAt:      createdAt,
@@ -565,10 +576,10 @@ func TestServer_TopicRPCs(t *testing.T) {
 
 			return &CreateTopicResponse{TopicID: topic.TopicID}, nil
 		},
-		deleteTopicFunc: func(_ context.Context, topicID string) error {
+		deleteTopicFunc: func(_ context.Context, topicID string) (*DeleteTopicResult, error) {
 			td.Cmp(t, topicID, topic.TopicID)
 
-			return nil
+			return &DeleteTopicResult{}, nil
 		},
 		subscribeFunc: func(_ context.Context, topicID string, input *SubscribeRequest) (*SubscribeResponse, error) {
 			td.Cmp(t, topicID, topic.TopicID)
@@ -594,7 +605,7 @@ func TestServer_TopicRPCs(t *testing.T) {
 			}, nil
 		},
 	}
-	server := &Service{storage: storage}
+	server := newTestService(storage)
 	ctx := context.Background()
 
 	listed, err := server.ListTopics(ctx, &v1.ListTopicsRequest{})

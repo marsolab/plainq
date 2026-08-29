@@ -22,6 +22,11 @@ var magic = [2]byte{'P', 'Q'}
 // understand rather than guessing at its meaning.
 const Version uint8 = 1
 
+// MaxEncodedBytes is the cluster-wide ceiling for one complete encoded
+// command. Store and peer transport both enforce this exact value before a
+// command can reach consensus.
+const MaxEncodedBytes = 64 << 20
+
 // maxFieldLen caps any single length-prefixed field. It exists to turn a
 // corrupt length into an error instead of an allocation the process cannot
 // satisfy.

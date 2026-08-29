@@ -64,7 +64,7 @@ func (s *Storage) DeleteQueuePolicy(
 	ctx context.Context,
 	input *v1.DeleteQueueRequest,
 	mutation policytx.Mutation,
-) (*v1.DeleteQueueResponse, error) {
+) (*queue.DeleteQueueResult, error) {
 	return s.DeleteQueue(withPostgresQueueMutation(ctx, mutation), input)
 }
 
@@ -100,7 +100,11 @@ func (s *Storage) CreateTopicPolicy(
 	return s.CreateTopic(withPostgresQueueMutation(ctx, mutation), input)
 }
 
-func (s *Storage) DeleteTopicPolicy(ctx context.Context, topicID string, mutation policytx.Mutation) error {
+func (s *Storage) DeleteTopicPolicy(
+	ctx context.Context,
+	topicID string,
+	mutation policytx.Mutation,
+) (*queue.DeleteTopicResult, error) {
 	return s.DeleteTopic(withPostgresQueueMutation(ctx, mutation), topicID)
 }
 
@@ -509,6 +513,8 @@ func replayPostgresQueuePolicy[T any](
 		return zero, false, fmt.Errorf("decode postgres queue idempotency result: %w", err)
 	}
 
+	queue.MarkPolicyReplay(ctx)
+
 	return zero, true, nil
 }
 
@@ -580,39 +586,6 @@ func rollbackPostgresQueuePolicy(ctx context.Context, tx pgx.Tx, returnErr *erro
 			*returnErr = errors.Join(*returnErr, fmt.Errorf("rollback postgres queue policy transaction: %w", err))
 		}
 	}
-}
-
-func deletePostgresSubscriptionsForQueue(
-	ctx context.Context,
-	tx pgx.Tx,
-	tenantID, queueID string,
-) (uint64, error) {
-	rows, err := tx.Query(ctx, `DELETE FROM topic_subscriptions
-		WHERE queue_id = $1 AND EXISTS (
-		 SELECT 1 FROM topic_properties t
-		 WHERE t.topic_id = topic_subscriptions.topic_id AND t.tenant_id = $2
-		) RETURNING subscription_id`, queueID, tenantID)
-	if err != nil {
-		return 0, fmt.Errorf("delete postgres queue subscriptions: %w", err)
-	}
-	defer rows.Close()
-
-	var count uint64
-
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return 0, fmt.Errorf("scan deleted postgres queue subscription: %w", err)
-		}
-
-		count++
-	}
-
-	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("iterate deleted postgres queue subscriptions: %w", err)
-	}
-
-	return count, nil
 }
 
 //nolint:nonamedreturns // The deferred rollback joins cleanup failures into the returned error.
@@ -898,55 +871,74 @@ func (s *Storage) deleteTopicWithPolicy(
 	topicID string,
 	scope queue.AccessScope,
 	mutation policytx.Mutation,
-) (err error) {
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
+) (_ *queue.DeleteTopicResult, err error) {
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
-		return fmt.Errorf("begin postgres delete topic transaction: %w", err)
+		return nil, fmt.Errorf("begin postgres delete topic transaction: %w", err)
 	}
 	defer rollbackPostgresQueuePolicy(ctx, tx, &err)()
 
-	_, found, err := replayPostgresQueuePolicy[struct{}](ctx, tx, mutation, authz.ActionTopicDelete, topicID)
-	if err != nil || found {
-		return err
+	replayed, found, err := replayPostgresQueuePolicy[queue.DeleteTopicResult](
+		ctx, tx, mutation, authz.ActionTopicDelete, topicID,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if found {
+		return &replayed, nil
 	}
 
 	policyTransaction, err := reservePostgresQueuePolicy(ctx, tx, mutation)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	removedSubscriptions, err := deletePostgresSubscriptionsForTopic(ctx, tx, scope.TenantID, topicID)
+	if err := lockTopicForDeleteInScope(ctx, tx, topicID, scope); err != nil {
+		return nil, err
+	}
+
+	removedSubscriptions, err := querySubscriptions(
+		ctx,
+		tx,
+		captureTopicSubscriptionsQuery,
+		pubSubDeleteTopic,
+		topicID,
+		scope.TenantID,
+		scope.Compatibility,
+	)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("capture postgres topic subscriptions in policy transaction: %w", err)
 	}
 
 	tag, err := tx.Exec(ctx, `DELETE FROM topic_properties WHERE topic_id = $1 AND tenant_id = $2
 		AND (NOT $3::boolean OR (created_by_kind = 'system' AND created_by_id IN ('migration', 'legacy-v1')))`,
 		topicID, scope.TenantID, scope.Compatibility)
 	if err != nil {
-		return fmt.Errorf("delete postgres topic in policy transaction: %w", err)
+		return nil, fmt.Errorf("delete postgres topic in policy transaction: %w", err)
 	}
 
 	if tag.RowsAffected() != 1 {
-		return authz.ErrNotFound
+		return nil, authz.ErrNotFound
 	}
 
 	if err := quota.ApplyActualUsageTx(ctx, policyTransaction, quota.UsageDelta{
 		TenantID: mutation.TenantID, TopicCountRemoved: 1,
-		SubscriptionCountRemoved: removedSubscriptions,
+		SubscriptionCountRemoved: uint64(len(removedSubscriptions)),
 	}); err != nil {
-		return fmt.Errorf("apply deleted postgres topic usage: %w", err)
+		return nil, fmt.Errorf("apply deleted postgres topic usage: %w", err)
 	}
 
-	if err := finishPostgresQueuePolicy(ctx, policyTransaction, mutation, &struct{}{}); err != nil {
-		return err
+	output := queue.DeleteTopicResult{RemovedSubscriptions: removedSubscriptions}
+	if err := finishPostgresQueuePolicy(ctx, policyTransaction, mutation, &output); err != nil {
+		return nil, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit postgres delete topic transaction: %w", err)
+		return nil, fmt.Errorf("commit postgres delete topic transaction: %w", err)
 	}
 
-	return nil
+	return &output, nil
 }
 
 //nolint:nonamedreturns // The deferred rollback joins cleanup failures into the returned error.
@@ -1078,15 +1070,9 @@ func (s *Storage) publishWithPolicy(
 	}
 	defer rollbackPostgresQueuePolicy(ctx, tx, &err)()
 
-	replayed, found, err := replayPostgresQueuePolicy[queue.PublishResponse](
-		ctx, tx, mutation, authz.ActionTopicPublish, topicID,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	if found {
-		return &replayed, nil
+	replayed, found, err := replayPostgresPublishPolicy(ctx, tx, mutation, topicID)
+	if err != nil || found {
+		return replayed, err
 	}
 
 	policyTransaction, err := reservePostgresQueuePolicy(ctx, tx, mutation)
@@ -1103,37 +1089,45 @@ func (s *Storage) publishWithPolicy(
 		return nil, authz.ErrNotFound
 	}
 
-	output := queue.PublishResponse{
-		TopicID: topicID, QueueIDs: make([]string, 0, len(queueIDs)),
-		MessageIDs: make([]string, 0, len(queueIDs)*len(input.Messages)),
-	}
+	successfulQueues := make([]string, 0, len(queueIDs))
+
+	subscriptions := make([]queue.Subscription, 0, len(queueIDs))
 	for _, queueID := range queueIDs {
-		args := make([]any, 0, len(input.Messages)*2)
+		subscriptions = append(subscriptions, queue.Subscription{QueueID: queueID})
+	}
 
-		ids := make([]string, 0, len(input.Messages))
-		for _, message := range input.Messages {
-			messageID := idkit.ULID()
-			args = append(args, messageID, message.Body)
-			ids = append(ids, messageID)
+	send := func(ctx context.Context, request *v1.SendRequest) (*v1.SendResponse, error) {
+		sent, sendErr := postgresPublishPolicyDestination(ctx, tx, request)
+		if sendErr != nil {
+			return nil, normalizePubSubError(sendErr, pubSubPublish)
 		}
 
-		for start := 0; start < len(input.Messages); start += maxSendInsertBatch {
-			end := min(start+maxSendInsertBatch, len(input.Messages))
-			if _, err := tx.Exec(ctx, queryInsertMessagesBatch(queueID, end-start), args[start*2:end*2]...); err != nil {
-				return nil, fmt.Errorf("publish postgres policy messages to queue %q: %w", queueID, err)
-			}
+		successfulQueues = append(successfulQueues, request.GetQueueId())
+
+		return sent, nil
+	}
+
+	output, fanoutErr := queue.FanOut(ctx, topicID, subscriptions, input.Messages, send)
+	outcome := queue.PublishOutcome{Response: output, SelectedQueues: uint64(len(queueIDs))}
+
+	if fanoutErr != nil {
+		var partial *queue.PartialPublishError
+		if !errors.As(fanoutErr, &partial) {
+			return nil, fmt.Errorf("fan out postgres policy publish: %w", fanoutErr)
 		}
 
-		output.QueueIDs = append(output.QueueIDs, queueID)
-		output.MessageIDs = append(output.MessageIDs, ids...)
-		output.DeliveredCount += len(ids)
+		outcome = partial.Outcome
+		outcome.Partial = true
+		outcome.Response = output
+		partial.Outcome = outcome
+		fanoutErr = fmt.Errorf("fan out postgres policy publish: %w", fanoutErr)
 	}
 
 	mutation.Audit.Metadata = map[string]string{
 		auditMetadataMessageCount: strconv.Itoa(len(input.Messages)),
 		"delivery_count":          strconv.Itoa(output.DeliveredCount),
 	}
-	if err := finishPostgresQueuePolicy(ctx, policyTransaction, mutation, &output); err != nil {
+	if err := finishPostgresQueuePolicy(ctx, policyTransaction, mutation, &outcome); err != nil {
 		return nil, err
 	}
 
@@ -1141,49 +1135,99 @@ func (s *Storage) publishWithPolicy(
 		return nil, fmt.Errorf("commit postgres publish transaction: %w", err)
 	}
 
-	messages := make([]*v1.SendMessage, 0, len(input.Messages))
-	for _, message := range input.Messages {
-		messages = append(messages, &v1.SendMessage{Body: message.Body})
+	for _, queueID := range successfulQueues {
+		s.observer.Sent(queueID, uint64(len(input.Messages)), publishedMessageBytes(input.Messages))
 	}
 
-	for _, queueID := range queueIDs {
-		s.observer.Sent(queueID, uint64(len(input.Messages)), publishedBytes(messages))
-	}
-
-	return &output, nil
+	return output, fanoutErr
 }
 
-func deletePostgresSubscriptionsForTopic(
+func replayPostgresPublishPolicy(
 	ctx context.Context,
 	tx pgx.Tx,
-	tenantID, topicID string,
-) (uint64, error) {
-	rows, err := tx.Query(ctx, `DELETE FROM topic_subscriptions
-		WHERE topic_id = $1 AND EXISTS (
-		 SELECT 1 FROM topic_properties t
-		 WHERE t.topic_id = topic_subscriptions.topic_id AND t.tenant_id = $2
-		) RETURNING subscription_id`, topicID, tenantID)
-	if err != nil {
-		return 0, fmt.Errorf("delete postgres topic subscriptions: %w", err)
+	mutation policytx.Mutation,
+	topicID string,
+) (*queue.PublishResponse, bool, error) {
+	outcome, found, err := replayPostgresQueuePolicy[queue.PublishOutcome](
+		ctx, tx, mutation, authz.ActionTopicPublish, topicID,
+	)
+	if err != nil || !found {
+		return nil, found, err
 	}
-	defer rows.Close()
 
-	var count uint64
-
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return 0, fmt.Errorf("scan deleted postgres topic subscription: %w", err)
+	if outcome.Response == nil {
+		legacy, legacyFound, legacyErr := replayPostgresQueuePolicy[queue.PublishResponse](
+			ctx, tx, mutation, authz.ActionTopicPublish, topicID,
+		)
+		if legacyErr != nil || !legacyFound {
+			return nil, legacyFound, legacyErr
 		}
 
-		count++
+		return &legacy, true, nil
 	}
 
-	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("iterate deleted postgres topic subscriptions: %w", err)
+	if !outcome.Partial {
+		return outcome.Response, true, nil
 	}
 
-	return count, nil
+	return outcome.Response, true, restoredPolicyPartialPublishError(outcome)
+}
+
+func postgresPublishPolicyDestination(
+	ctx context.Context,
+	tx pgx.Tx,
+	request *v1.SendRequest,
+) (*v1.SendResponse, error) {
+	const savepoint = "plainq_publish_destination"
+	if _, err := tx.Exec(ctx, "SAVEPOINT "+savepoint); err != nil {
+		return nil, fmt.Errorf("create postgres publish destination savepoint: %w", err)
+	}
+
+	messages := request.GetMessages()
+	args := make([]any, 0, len(messages)*2)
+
+	ids := make([]string, 0, len(messages))
+	for _, message := range messages {
+		messageID := idkit.ULID()
+		args = append(args, messageID, message.GetBody())
+		ids = append(ids, messageID)
+	}
+
+	for start := 0; start < len(messages); start += maxSendInsertBatch {
+		end := min(start+maxSendInsertBatch, len(messages))
+		if _, err := tx.Exec(
+			ctx, queryInsertMessagesBatch(request.GetQueueId(), end-start), args[start*2:end*2]...,
+		); err != nil {
+			return nil, rollbackPostgresPublishDestination(ctx, tx, savepoint, err)
+		}
+	}
+
+	if _, err := tx.Exec(ctx, "RELEASE SAVEPOINT "+savepoint); err != nil {
+		return nil, fmt.Errorf("release postgres publish destination savepoint: %w", err)
+	}
+
+	return &v1.SendResponse{MessageIds: ids}, nil
+}
+
+func rollbackPostgresPublishDestination(ctx context.Context, tx pgx.Tx, savepoint string, cause error) error {
+	if _, err := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT "+savepoint); err != nil {
+		cause = errors.Join(cause, fmt.Errorf("rollback postgres publish destination savepoint: %w", err))
+	}
+
+	if _, err := tx.Exec(ctx, "RELEASE SAVEPOINT "+savepoint); err != nil {
+		cause = errors.Join(cause, fmt.Errorf("release failed postgres publish destination savepoint: %w", err))
+	}
+
+	return cause
+}
+
+func restoredPolicyPartialPublishError(outcome queue.PublishOutcome) error {
+	causes := make([]error, 0, len(outcome.DeliveryFailures))
+	for _, failure := range outcome.DeliveryFailures {
+		causes = append(causes, fmt.Errorf("publish to queue %q: %s", failure.QueueID, failure.Cause))
+	}
+
+	return &queue.PartialPublishError{Outcome: outcome, Causes: causes}
 }
 
 func postgresPublishQueueIDs(

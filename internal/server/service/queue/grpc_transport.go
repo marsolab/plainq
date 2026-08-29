@@ -2,10 +2,13 @@ package queue
 
 import (
 	"context"
+	"errors"
+	"fmt"
 
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/service/quota"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
+	"github.com/marsolab/servekit/ctxkit"
 	"github.com/marsolab/servekit/grpckit"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
@@ -45,23 +48,25 @@ func (s *Service) CreateQueue(ctx context.Context, r *v1.CreateQueueRequest) (*v
 	return output, nil
 }
 
-//nolint:wrapcheck // gRPC status values are constructed at the transport boundary.
 func (s *Service) DeleteQueue(ctx context.Context, r *v1.DeleteQueueRequest) (*v1.DeleteQueueResponse, error) {
-	if err := validateQueueIDFromRequest(r); err != nil {
-		return queueGRPCError[*v1.DeleteQueueResponse](ctx, err)
-	}
-
-	if _, err := s.policyOperations().DeleteQueue(ctx, r); err != nil {
-		if pqerr.IsFailedPrecondition(err) {
-			return nil, status.Error(codes.FailedPrecondition, err.Error())
+	if _, err := s.pubsub.deleteQueue(ctx, r); err != nil {
+		if errors.Is(err, pqerr.ErrFailedPrecondition) {
+			return failedPreconditionGRPC(ctx, err)
 		}
 
 		return queueGRPCError[*v1.DeleteQueueResponse](ctx, err)
 	}
 
-	s.reconcileTopicSubscriptionCounts(ctx)
-
 	return &v1.DeleteQueueResponse{}, nil
+}
+
+//nolint:wrapcheck // Wrapping would hide the exact gRPC status required by the public delete contract.
+func failedPreconditionGRPC(ctx context.Context, err error) (*v1.DeleteQueueResponse, error) {
+	if hook := ctxkit.GetLogErrHook(ctx); hook != nil {
+		hook(err)
+	}
+
+	return nil, status.Error(codes.FailedPrecondition, codes.FailedPrecondition.String())
 }
 
 func (s *Service) PurgeQueue(ctx context.Context, r *v1.PurgeQueueRequest) (*v1.PurgeQueueResponse, error) {
@@ -116,8 +121,13 @@ func (s *Service) Delete(ctx context.Context, r *v1.DeleteRequest) (*v1.DeleteRe
 	return output, nil
 }
 
-func (s *Service) ListTopics(ctx context.Context, _ *v1.ListTopicsRequest) (*v1.ListTopicsResponse, error) {
-	output, err := s.policyOperations().ListTopics(ctx)
+func (s *Service) ListTopics(ctx context.Context, r *v1.ListTopicsRequest) (*v1.ListTopicsResponse, error) {
+	var input *ListTopicsRequest
+	if r != nil {
+		input = &ListTopicsRequest{}
+	}
+
+	output, err := s.pubsub.listTopics(ctx, input)
 	if err != nil {
 		return queueGRPCError[*v1.ListTopicsResponse](ctx, pqerr.AsTransport(err))
 	}
@@ -131,11 +141,12 @@ func (s *Service) ListTopics(ctx context.Context, _ *v1.ListTopicsRequest) (*v1.
 }
 
 func (s *Service) CreateTopic(ctx context.Context, r *v1.CreateTopicRequest) (*v1.CreateTopicResponse, error) {
-	if r == nil {
-		return queueGRPCError[*v1.CreateTopicResponse](ctx, pqerr.AsTransport(pqerr.ErrInvalidInput))
+	var input *CreateTopicRequest
+	if r != nil {
+		input = &CreateTopicRequest{TopicName: r.GetTopicName()}
 	}
 
-	output, err := s.policyOperations().CreateTopic(ctx, &CreateTopicRequest{TopicName: r.GetTopicName()})
+	output, err := s.pubsub.createTopic(ctx, input)
 	if err != nil {
 		return queueGRPCError[*v1.CreateTopicResponse](ctx, pqerr.AsTransport(err))
 	}
@@ -144,71 +155,56 @@ func (s *Service) CreateTopic(ctx context.Context, r *v1.CreateTopicRequest) (*v
 }
 
 func (s *Service) DeleteTopic(ctx context.Context, r *v1.DeleteTopicRequest) (*v1.DeleteTopicResponse, error) {
-	if r == nil {
-		return queueGRPCError[*v1.DeleteTopicResponse](ctx, pqerr.AsTransport(pqerr.ErrInvalidInput))
-	}
-
-	if err := s.policyOperations().DeleteTopic(ctx, r.GetTopicId()); err != nil {
+	if err := s.pubsub.deleteTopic(ctx, r.GetTopicId()); err != nil {
 		return queueGRPCError[*v1.DeleteTopicResponse](ctx, pqerr.AsTransport(err))
 	}
-
-	s.reconcileTopicSubscriptionCounts(ctx)
 
 	return &v1.DeleteTopicResponse{}, nil
 }
 
 func (s *Service) Subscribe(ctx context.Context, r *v1.SubscribeRequest) (*v1.SubscribeResponse, error) {
-	if r == nil {
-		return queueGRPCError[*v1.SubscribeResponse](ctx, pqerr.AsTransport(pqerr.ErrInvalidInput))
+	var input *SubscribeRequest
+	if r != nil {
+		input = &SubscribeRequest{QueueID: r.GetQueueId()}
 	}
 
-	if err := validateQueueID(r.GetQueueId()); err != nil {
-		return queueGRPCError[*v1.SubscribeResponse](ctx, err)
-	}
-
-	output, err := s.policyOperations().Subscribe(ctx, r.GetTopicId(), &SubscribeRequest{QueueID: r.GetQueueId()})
+	output, err := s.pubsub.subscribe(ctx, r.GetTopicId(), input)
 	if err != nil {
 		return queueGRPCError[*v1.SubscribeResponse](ctx, pqerr.AsTransport(err))
 	}
-
-	s.recordTopicSubscriptionCreated(ctx, r.GetTopicId())
 
 	return &v1.SubscribeResponse{SubscriptionId: output.SubscriptionID}, nil
 }
 
 func (s *Service) Unsubscribe(ctx context.Context, r *v1.UnsubscribeRequest) (*v1.UnsubscribeResponse, error) {
-	if r == nil {
-		return queueGRPCError[*v1.UnsubscribeResponse](ctx, pqerr.AsTransport(pqerr.ErrInvalidInput))
-	}
-
-	if err := s.policyOperations().Unsubscribe(ctx, r.GetTopicId(), r.GetSubscriptionId()); err != nil {
+	if err := s.pubsub.unsubscribe(ctx, r.GetTopicId(), r.GetSubscriptionId()); err != nil {
 		return queueGRPCError[*v1.UnsubscribeResponse](ctx, pqerr.AsTransport(err))
 	}
-
-	s.recordTopicSubscriptionDeleted(ctx, r.GetTopicId())
 
 	return &v1.UnsubscribeResponse{}, nil
 }
 
 func (s *Service) Publish(ctx context.Context, r *v1.PublishRequest) (*v1.PublishResponse, error) {
-	if r == nil {
-		return queueGRPCError[*v1.PublishResponse](ctx, pqerr.AsTransport(pqerr.ErrInvalidInput))
-	}
+	var input *PublishRequest
 
-	messages := make([]PublishMessage, 0, len(r.GetMessages()))
-	for _, message := range r.GetMessages() {
-		if message != nil {
-			messages = append(messages, PublishMessage{Body: message.GetBody()})
+	if r != nil {
+		messages := make([]PublishMessage, 0, len(r.GetMessages()))
+		for _, message := range r.GetMessages() {
+			if message != nil {
+				messages = append(messages, PublishMessage{Body: message.GetBody()})
+			}
 		}
+
+		input = &PublishRequest{Messages: messages}
 	}
 
-	output, err := s.policyOperations().Publish(ctx, r.GetTopicId(), &PublishRequest{Messages: messages})
+	output, err := s.pubsub.publish(ctx, r.GetTopicId(), input)
 	if err != nil {
-		return queueGRPCError[*v1.PublishResponse](ctx, pqerr.AsTransport(err))
-	}
+		if errors.Is(err, pqerr.ErrCapacityExceeded) {
+			return nil, fmt.Errorf("publish capacity exceeded: %w", status.Error(codes.ResourceExhausted, err.Error()))
+		}
 
-	if s.topicMetrics != nil {
-		s.topicMetrics.RecordTopicPublish(r.GetTopicId(), uint64(len(messages)), deliveredCountToUint64(output.DeliveredCount))
+		return queueGRPCError[*v1.PublishResponse](ctx, pqerr.AsTransport(err))
 	}
 
 	return &v1.PublishResponse{

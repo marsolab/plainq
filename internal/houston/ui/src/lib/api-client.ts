@@ -27,6 +27,8 @@ import type {
   TopicListResponse,
   TopicMetricsOverview,
   TopicMetricsSummary,
+  TopicSeriesResponse,
+  TopicSubscriptionsResponse,
 } from "./types";
 
 /**
@@ -464,7 +466,11 @@ export const api = {
     topic: (id: string, range = "1h") =>
       apiFetch<TopicMetricsSummary>(`/metrics/topic/${id}?range=${range}`),
     topicRates: (id: string, range = "1h") =>
-      apiFetch<MultiMetricsChartResponse>(`/metrics/topic/${id}/rates?range=${range}`),
+      apiFetch<TopicSeriesResponse>(`/metrics/topic/${id}/rates?range=${range}`),
+    topicSubscriptions: (id: string, range = "1h") =>
+      apiFetch<TopicSubscriptionsResponse>(
+        `/metrics/topic/${id}/subscriptions?range=${range}`,
+      ),
   },
   /**
    * The account directory. Reads only: PlainQ has no invite, suspend, delete

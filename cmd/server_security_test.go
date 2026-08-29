@@ -8,12 +8,14 @@ import (
 
 	"github.com/cristalhq/jwt/v5"
 	"github.com/marsolab/plainq/internal/cluster"
+	"github.com/marsolab/plainq/internal/metrics"
 	"github.com/marsolab/plainq/internal/server"
 	"github.com/marsolab/plainq/internal/server/config"
 	"github.com/marsolab/plainq/internal/server/interceptor"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/service/account"
 	"github.com/marsolab/plainq/internal/server/service/queue"
+	"github.com/marsolab/plainq/internal/server/service/telemetry"
 	"github.com/marsolab/servekit/authkit/jwtkit"
 	"github.com/marsolab/servekit/logkit"
 	"google.golang.org/grpc"
@@ -285,7 +287,12 @@ func TestHumanOnlyProtectedLegacyGRPCInitializesAdmission(t *testing.T) {
 		t.Fatalf("NewGRPCListener() error = %v", err)
 	}
 
-	listener.Mount(queue.NewService(&cfg, logkit.NewNop(), protectedLegacyQueueStorage{}))
+	listener.Mount(queue.NewService(
+		&cfg,
+		logkit.NewNop(),
+		protectedLegacyQueueStorage{},
+		telemetry.NewObserver(metrics.BackendSQLite),
+	))
 	ctx, cancel := context.WithCancel(context.Background())
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- listener.Serve(ctx) }()
@@ -347,7 +354,12 @@ func TestDisabledAuthLegacyCompatibilityBypassesAdmission(t *testing.T) {
 		t.Fatalf("NewGRPCListener() error = %v", err)
 	}
 
-	listener.Mount(queue.NewService(&cfg, logkit.NewNop(), protectedLegacyQueueStorage{}))
+	listener.Mount(queue.NewService(
+		&cfg,
+		logkit.NewNop(),
+		protectedLegacyQueueStorage{},
+		telemetry.NewObserver(metrics.BackendSQLite),
+	))
 	ctx, cancel := context.WithCancel(context.Background())
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- listener.Serve(ctx) }()

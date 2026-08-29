@@ -101,6 +101,40 @@ type Engine struct {
 	done      chan struct{}
 }
 
+// WithStableStore opens the same fsynced Bolt stable store used by New, runs
+// callback before any Raft apply goroutine can start, and closes the store.
+// Replica safety metadata uses this hook so it is initialized in the same
+// durability boundary as the consensus log.
+func WithStableStore(dataDir string, callback func(hraft.StableStore) error) (retErr error) {
+	if dataDir == "" {
+		return errors.New("raft: data directory is required")
+	}
+
+	if callback == nil {
+		return errors.New("raft: stable store callback is required")
+	}
+
+	if err := os.MkdirAll(dataDir, 0o750); err != nil {
+		return fmt.Errorf("create raft data directory %q: %w", dataDir, err)
+	}
+
+	store, err := boltstore.NewBoltStore(filepath.Join(dataDir, "raft.db"))
+	if err != nil {
+		return fmt.Errorf("open raft stable store: %w", err)
+	}
+	defer func() {
+		if err := store.Close(); err != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("close raft stable store: %w", err))
+		}
+	}()
+
+	if err := callback(store); err != nil {
+		return fmt.Errorf("initialize raft stable store: %w", err)
+	}
+
+	return nil
+}
+
 // New starts the engine. The node begins as a follower with no configuration:
 // it neither leads nor votes until it is bootstrapped or joined to a cluster.
 func New(cfg Config) (*Engine, error) {
@@ -243,21 +277,22 @@ func (e *Engine) forwardLeadership(notify <-chan bool) {
 
 // Apply implements consensus.Consensus.
 func (e *Engine) Apply(ctx context.Context, data []byte) (any, error) {
+	timeout, err := operationTimeout(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	if e.raft.State() != hraft.Leader {
 		return nil, consensus.ErrNotLeader
 	}
 
-	timeout := applyTimeout
-
-	if deadline, ok := ctx.Deadline(); ok {
-		if remaining := time.Until(deadline); remaining > 0 {
-			timeout = remaining
-		}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	future := e.raft.Apply(data, timeout)
 
-	if err := waitFuture(ctx, future); err != nil {
+	if err := waitApplyFuture(ctx, future); err != nil {
 		return nil, err
 	}
 
@@ -399,16 +434,17 @@ func (e *Engine) Bootstrap(servers []consensus.Server) error {
 
 // Barrier implements consensus.Consensus.
 func (e *Engine) Barrier(ctx context.Context) error {
+	timeout, err := operationTimeout(ctx)
+	if err != nil {
+		return err
+	}
+
 	if !e.IsLeader() {
 		return consensus.ErrNotLeader
 	}
 
-	timeout := applyTimeout
-
-	if deadline, ok := ctx.Deadline(); ok {
-		if remaining := time.Until(deadline); remaining > 0 {
-			timeout = remaining
-		}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	if err := waitFuture(ctx, e.raft.Barrier(timeout)); err != nil {
@@ -416,6 +452,24 @@ func (e *Engine) Barrier(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func operationTimeout(ctx context.Context) (time.Duration, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return applyTimeout, nil
+	}
+
+	remaining := time.Until(deadline)
+	if remaining <= 0 {
+		return 0, context.DeadlineExceeded
+	}
+
+	return remaining, nil
 }
 
 // LeaderCh implements consensus.Consensus.
@@ -476,6 +530,17 @@ func (e *Engine) Close() error {
 // Abandoning a future does not abandon the operation — raft continues with it —
 // so this reports that the caller stopped waiting, not that nothing happened.
 func waitFuture(ctx context.Context, future hraft.Future) error {
+	return waitFutureWithLeadershipLoss(ctx, future, consensus.ErrNotLeader)
+}
+
+// waitApplyFuture keeps a queue-command Apply's indeterminate leadership-loss
+// result distinct from a proposal rejected before commit. Barrier is
+// mutation-free; membership operations retain their existing mapping.
+func waitApplyFuture(ctx context.Context, future hraft.Future) error {
+	return waitFutureWithLeadershipLoss(ctx, future, consensus.ErrCommitUnknown)
+}
+
+func waitFutureWithLeadershipLoss(ctx context.Context, future hraft.Future, leadershipLost error) error {
 	done := make(chan error, 1)
 
 	go func() { done <- future.Error() }()
@@ -492,8 +557,10 @@ func waitFuture(ctx context.Context, future hraft.Future) error {
 		// Translate raft's leadership errors into the package's, so callers
 		// match on one vocabulary and can act on it.
 		switch {
-		case errors.Is(err, hraft.ErrNotLeader), errors.Is(err, hraft.ErrLeadershipLost),
-			errors.Is(err, hraft.ErrLeadershipTransferInProgress):
+		case errors.Is(err, hraft.ErrLeadershipLost):
+			return leadershipLost
+
+		case errors.Is(err, hraft.ErrNotLeader), errors.Is(err, hraft.ErrLeadershipTransferInProgress):
 			return consensus.ErrNotLeader
 
 		case errors.Is(err, hraft.ErrRaftShutdown):

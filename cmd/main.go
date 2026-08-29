@@ -70,6 +70,9 @@ func rootCommand() *commandSpec {
 			receiveCommand(),
 			deleteMessageCommand(),
 
+			// Topics and subscriptions.
+			topicCommand(),
+
 			// Cluster administration.
 			clusterCommand(),
 

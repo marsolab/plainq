@@ -14,6 +14,7 @@ on:
       - 'internal/server/schema/**'
       - 'scripts/check-schema-*.sh'
       - 'Makefile'
+      - 'go.mod'
       - '.github/workflows/schema-pr.yaml'
 
 jobs:
@@ -58,3 +59,14 @@ jobs:
         with:
           input: schema
           against: "https://github.com/${{ github.repository }}.git#branch=main,subdir=schema"
+
+  generated:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: bufbuild/buf-setup-action@v1
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: regenerate bindings, clients, validation, Connect, and docs
+        run: make schema-check

@@ -16,6 +16,7 @@ import (
 	queueservice "github.com/marsolab/plainq/internal/server/service/queue"
 	"github.com/marsolab/plainq/internal/server/service/quota"
 	"github.com/marsolab/plainq/internal/server/service/securityaudit"
+	"github.com/marsolab/plainq/internal/shared/pqerr"
 )
 
 func TestQueuePolicyIdempotentRetryDoesNotConsumeQuotaTwice(t *testing.T) {
@@ -118,6 +119,72 @@ func TestQueuePolicyPublishFanoutIsIdempotentAndAuditedOnce(t *testing.T) {
 		[]any{principal.LegacyTenantID, authz.ActionTopicPublish}, 1)
 	assertSQLiteCount(t, conn, `SELECT count(*) FROM agent_idempotency WHERE tenant_id = ? AND operation = ?`,
 		[]any{principal.LegacyTenantID, authz.ActionTopicPublish}, 1)
+
+	var brokenQueue, survivingQueue string
+	rows, err := conn.QueryContext(ctx, `SELECT queue_id FROM topic_subscriptions
+		WHERE topic_id = ? ORDER BY subscription_id`, topic.TopicID)
+	if err != nil {
+		t.Fatalf("list ordered fanout queues: %v", err)
+	}
+	if !rows.Next() {
+		t.Fatal("ordered fanout queues are empty")
+	}
+	if err := rows.Scan(&brokenQueue); err != nil {
+		t.Fatalf("scan broken fanout queue: %v", err)
+	}
+	if !rows.Next() {
+		t.Fatal("ordered fanout queues contain no surviving destination")
+	}
+	if err := rows.Scan(&survivingQueue); err != nil {
+		t.Fatalf("scan surviving fanout queue: %v", err)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate ordered fanout queues: %v", err)
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatalf("close ordered fanout queues: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, queryDeleteQueueTable(brokenQueue)); err != nil {
+		t.Fatalf("break first policy fanout destination: %v", err)
+	}
+
+	partialRequest := &queueservice.PublishRequest{
+		Messages: []queueservice.PublishMessage{{Body: []byte("partial")}},
+	}
+	partialMutation := queueMutation(
+		authz.ActionTopicPublish, authz.ResourceTopic, topic.TopicID, "fanout-partial", now, 1,
+	)
+	partial, err := store.PublishPolicy(ctx, topic.TopicID, partialRequest, partialMutation)
+	var partialErr *queueservice.PartialPublishError
+	if !errors.As(err, &partialErr) || !errors.Is(err, pqerr.ErrPartialFanout) {
+		t.Fatalf("partial policy publish error = %v, want partial fan-out", err)
+	}
+	if partial == nil || partial.DeliveredCount != 1 ||
+		fmt.Sprint(partial.QueueIDs) != fmt.Sprint([]string{brokenQueue, survivingQueue}) {
+		t.Fatalf("partial policy publish = %#v, want both destinations and one delivery", partial)
+	}
+	if len(partialErr.Outcome.DeliveryFailures) != 1 ||
+		partialErr.Outcome.DeliveryFailures[0].QueueID != brokenQueue ||
+		!partialErr.Outcome.Partial || partialErr.Outcome.SelectedQueues != 2 ||
+		partialErr.Outcome.FailedDestinations != 1 || partialErr.Outcome.FailedDeliveries != 1 {
+		t.Fatalf("partial policy failures = %#v, want broken queue %q", partialErr.Outcome.DeliveryFailures, brokenQueue)
+	}
+	assertSQLiteCount(t, conn, `SELECT count(*) FROM `+survivingQueue, nil, 2)
+
+	replayedPartial, err := store.PublishPolicy(ctx, topic.TopicID, partialRequest, partialMutation)
+	if !errors.As(err, &partialErr) || !errors.Is(err, pqerr.ErrPartialFanout) {
+		t.Fatalf("replayed partial policy publish error = %v, want partial fan-out", err)
+	}
+	if replayedPartial == nil || fmt.Sprint(replayedPartial.MessageIDs) != fmt.Sprint(partial.MessageIDs) {
+		t.Fatalf("replayed partial message IDs = %v, want %v", replayedPartial, partial.MessageIDs)
+	}
+	assertSQLiteCount(t, conn, `SELECT count(*) FROM `+survivingQueue, nil, 2)
+	assertSQLiteCount(t, conn, `SELECT used FROM quota_windows WHERE tenant_id = ? AND action = ?`,
+		[]any{principal.LegacyTenantID, authz.ActionTopicPublish}, 2)
+	assertSQLiteCount(t, conn, `SELECT count(*) FROM security_audit_events WHERE tenant_id = ? AND action = ?`,
+		[]any{principal.LegacyTenantID, authz.ActionTopicPublish}, 2)
+	assertSQLiteCount(t, conn, `SELECT count(*) FROM agent_idempotency WHERE tenant_id = ? AND operation = ?`,
+		[]any{principal.LegacyTenantID, authz.ActionTopicPublish}, 2)
 }
 
 func TestQueuePolicyAuditFailureRollsBackResourceQuotaLedgerAndIdempotency(t *testing.T) {

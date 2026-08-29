@@ -4,18 +4,23 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	hraft "github.com/hashicorp/raft"
 	"github.com/marsolab/plainq/internal/cluster/command"
+	"github.com/marsolab/plainq/internal/cluster/publishwire"
 	"github.com/marsolab/plainq/internal/server/mutations"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/service/queue"
 	"github.com/marsolab/plainq/internal/server/service/queue/litestore"
+	"github.com/marsolab/plainq/internal/shared/deleteresult"
+	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/marsolab/servekit/dbkit/litekit"
 	"github.com/maxatome/go-testdeep/td"
 )
@@ -50,8 +55,16 @@ func newFSM(t *testing.T) (*FSM, *litestore.Storage) {
 
 	storage := newStore(t)
 
-	return New(storage, nil), storage
+	return New(storage, nil, noopApplyGuard{}, panicFatalApply), storage
 }
+
+type noopApplyGuard struct{}
+
+func (noopApplyGuard) BeginPublishApply() error  { return nil }
+func (noopApplyGuard) FinishPublishApply() error { return nil }
+func (noopApplyGuard) Check() error              { return nil }
+
+func panicFatalApply(err error) { panic(err) }
 
 // apply runs one command through the state machine the way raft would.
 func apply(t *testing.T, machine *FSM, index uint64, cmd *command.Command) any {
@@ -79,6 +92,72 @@ func jsonCommand(t *testing.T, op command.Op, target string, value any, ids ...s
 	td.Require(t).CmpNoError(err, "marshal request")
 
 	return &command.Command{Op: op, Timestamp: stamp.UnixNano(), Target: target, IDs: ids, Payload: payload}
+}
+
+func TestNewFollowerAppliesLegacyOversizedDeletesWithoutCapacityCheck(t *testing.T) {
+	machine, storage := newFSM(t)
+	queueID := "queueone"
+	topicID := "topicone"
+	queueName := strings.Repeat(`<legacy & "uncapped">`, 32)
+
+	requireApplied(t, apply(t, machine, 1, protoCommand(t, command.OpCreateQueue,
+		&v1.CreateQueueRequest{QueueName: queueName}, queueID)), "create legacy queue")
+	requireApplied(t, apply(t, machine, 2, jsonCommand(t, command.OpCreateTopic, "",
+		&queue.CreateTopicRequest{TopicName: "legacy-one"}, topicID)), "create legacy topic")
+	requireApplied(t, apply(t, machine, 3, jsonCommand(t, command.OpSubscribe, topicID,
+		&queue.SubscribeRequest{QueueID: queueID}, "subone")), "create legacy subscription")
+
+	response := apply(t, machine, 4, &command.Command{Op: command.OpDeleteTopic, Target: topicID})
+	result, ok := response.(*queue.DeleteTopicResult)
+	if !ok || len(result.RemovedSubscriptions) != 1 {
+		t.Fatalf("legacy committed delete response = %#v, want one removed subscription", response)
+	}
+	_, err := deleteresult.Marshal(result, 128)
+	var capacityErr *deleteresult.CapacityError
+	if !errors.As(err, &capacityErr) {
+		t.Fatalf("legacy committed delete size error = %v, want capacity error at test limit", err)
+	}
+	if _, err := storage.DeleteTopic(context.Background(), topicID); !errors.Is(err, pqerr.ErrNotFound) {
+		t.Fatalf("topic after legacy committed delete error = %v, want not found", err)
+	}
+
+	secondTopicID := "topictwo"
+	requireApplied(t, apply(t, machine, 5, jsonCommand(t, command.OpCreateTopic, "",
+		&queue.CreateTopicRequest{TopicName: "legacy-two"}, secondTopicID)), "create second legacy topic")
+	requireApplied(t, apply(t, machine, 6, jsonCommand(t, command.OpSubscribe, secondTopicID,
+		&queue.SubscribeRequest{QueueID: queueID}, "subtwo")), "create second legacy subscription")
+	response = apply(t, machine, 7, protoCommand(t, command.OpDeleteQueue,
+		&v1.DeleteQueueRequest{QueueId: queueID, Force: true}))
+	queueResult, ok := response.(*queue.DeleteQueueResult)
+	if !ok || len(queueResult.RemovedSubscriptions) != 1 {
+		t.Fatalf("legacy committed queue delete response = %#v, want one removed subscription", response)
+	}
+	_, err = deleteresult.Marshal(queueResult, 128)
+	if !errors.As(err, &capacityErr) {
+		t.Fatalf("legacy committed queue delete size error = %v, want capacity error at test limit", err)
+	}
+	if _, err := storage.DescribeQueue(context.Background(), &v1.DescribeQueueRequest{QueueId: queueID}); !errors.Is(err, pqerr.ErrNotFound) {
+		t.Fatalf("queue after legacy committed delete error = %v, want not found", err)
+	}
+}
+
+func TestNewFollowerAppliesLegacyUnforcedNonEmptyQueueDelete(t *testing.T) {
+	machine, storage := newFSM(t)
+	queueID := "legacyforcequeue"
+	requireApplied(t, apply(t, machine, 1, protoCommand(t, command.OpCreateQueue,
+		&v1.CreateQueueRequest{QueueName: "legacy-force"}, queueID)), "create legacy queue")
+	requireApplied(t, apply(t, machine, 2, protoCommand(t, command.OpSend,
+		&v1.SendRequest{QueueId: queueID, Messages: []*v1.SendMessage{{Body: []byte("legacy")}}},
+		"01K3EZJQ9NK4ZWJ7MFK60JR16P")), "send legacy message")
+
+	response := apply(t, machine, 3, protoCommand(t, command.OpDeleteQueue,
+		&v1.DeleteQueueRequest{QueueId: queueID, Force: false}))
+	if _, ok := response.(*queue.DeleteQueueResult); !ok {
+		t.Fatalf("legacy unforced committed delete response = %#v, want *queue.DeleteQueueResult", response)
+	}
+	if _, err := storage.DescribeQueue(context.Background(), &v1.DescribeQueueRequest{QueueId: queueID}); !errors.Is(err, pqerr.ErrNotFound) {
+		t.Fatalf("queue after legacy committed delete error = %v, want not found", err)
+	}
 }
 
 // This is the property the whole cluster rests on: the same log, applied to
@@ -270,9 +349,10 @@ func TestTopicCommands(t *testing.T) {
 		queue.PublishRequest{Messages: []queue.PublishMessage{{Body: []byte("hello")}}}, "pubmsg1",
 	))
 
-	published, ok := response.(*queue.PublishResponse)
+	outcome, ok := response.(*queue.PublishOutcome)
 	td.Require(t).Cmp(ok, true, "got %T: %v", response, response)
-	td.Cmp(t, published.MessageIDs, []string{"pubmsg1"}, "the fan-out used the leader's identifier")
+	td.Require(t).Cmp(outcome.Response, td.Not(td.Nil()))
+	td.Cmp(t, outcome.Response.MessageIDs, []string{"pubmsg1"}, "the fan-out used the leader's identifier")
 
 	peeked, err := storage.Peek(ctx, &queue.PeekRequest{QueueID: "queueone", Limit: 10})
 	td.Require(t).CmpNoError(err)
@@ -284,16 +364,388 @@ func TestTopicCommands(t *testing.T) {
 		Op: command.OpUnsubscribe, Timestamp: stamp.UnixNano(), Target: "topicone", IDs: []string{"subone"},
 	}), td.Nil())
 
-	td.Cmp(t, apply(t, machine, 6, &command.Command{
+	deleted := apply(t, machine, 6, &command.Command{
 		Op: command.OpDeleteTopic, Timestamp: stamp.UnixNano(), Target: "topicone",
-	}), td.Nil())
+	})
+	deletedResult, ok := deleted.(*queue.DeleteTopicResult)
+	td.Require(t).Cmp(ok, true, "got %T: %v", deleted, deleted)
+	td.Cmp(t, deletedResult.RemovedSubscriptions, td.Len(0))
 
 	topics, listErr := storage.ListTopics(ctx)
 	td.Require(t).CmpNoError(listErr)
 	td.Cmp(t, topics.Topics, td.Len(0))
 }
 
+type publishOnlyStorage struct {
+	queue.ReplicatedStorage
+	response       *queue.PublishResponse
+	err            error
+	inventory      queue.TopicInventory
+	inventoryErr   error
+	inventoryCalls int
+	publishCalls   int
+	publish        func(context.Context, string, *queue.PublishRequest) (*queue.PublishResponse, error)
+}
+
+func (s *publishOnlyStorage) Publish(
+	ctx context.Context,
+	topicID string,
+	request *queue.PublishRequest,
+) (*queue.PublishResponse, error) {
+	s.publishCalls++
+	if s.publish != nil {
+		return s.publish(ctx, topicID, request)
+	}
+	return s.response, s.err
+}
+
+func (s *publishOnlyStorage) TopicInventory(context.Context) (queue.TopicInventory, error) {
+	s.inventoryCalls++
+	if s.inventoryErr != nil {
+		return queue.TopicInventory{}, s.inventoryErr
+	}
+	if s.inventory.SubscriptionCounts == nil {
+		return queue.TopicInventory{TopicsExist: 1, SubscriptionCounts: map[string]int64{"topicone": 1}}, nil
+	}
+	return s.inventory, nil
+}
+
+type recordingApplyGuard struct {
+	beginCalls  int
+	finishCalls int
+	checkCalls  int
+	beginErr    error
+	finishErr   error
+	checkErr    error
+}
+
+func TestFSMCommittedPublishNeverRunsVersionDependentAdmission(t *testing.T) {
+	tests := map[string]*publishOnlyStorage{
+		"oversized local inventory": {
+			inventory: queue.TopicInventory{
+				TopicsExist:        1,
+				SubscriptionCounts: map[string]int64{"topicone": 3_000_000},
+			},
+			response: &queue.PublishResponse{TopicID: "topicone"},
+		},
+		"replica-local inventory failure": {
+			inventoryErr: errors.New("inventory read failed"),
+			response:     &queue.PublishResponse{TopicID: "topicone"},
+		},
+	}
+
+	for name, storage := range tests {
+		t.Run(name, func(t *testing.T) {
+			guard := new(recordingApplyGuard)
+			machine := New(storage, nil, guard, panicFatalApply)
+
+			result := apply(t, machine, 1, jsonCommand(t, command.OpPublish, "topicone",
+				queue.PublishRequest{Messages: []queue.PublishMessage{{Body: []byte("x")}}}))
+			if outcome, ok := result.(*queue.PublishOutcome); !ok || outcome.Response == nil {
+				t.Fatalf("committed publish result = %T %#v, want successful outcome", result, result)
+			}
+			if storage.inventoryCalls != 0 || storage.publishCalls != 1 ||
+				guard.beginCalls != 1 || guard.finishCalls != 1 {
+				t.Fatalf("inventory/publish/guard begin/finish calls = %d/%d/%d/%d, want 0/1/1/1",
+					storage.inventoryCalls, storage.publishCalls, guard.beginCalls, guard.finishCalls)
+			}
+		})
+	}
+}
+
+func TestFSMPublishWithinBudgetMayUseDerivedIdentifiers(t *testing.T) {
+	storage := &publishOnlyStorage{inventory: queue.TopicInventory{
+		TopicsExist:        1,
+		SubscriptionCounts: map[string]int64{"topicone": 2},
+	}}
+	storage.publish = func(ctx context.Context, topicID string, _ *queue.PublishRequest) (*queue.PublishResponse, error) {
+		return &queue.PublishResponse{
+			TopicID:    topicID,
+			QueueIDs:   []string{"c5s8b4p9e8rg5u5fgq10", "c5s8b4p9e8rg5u5fgq11"},
+			MessageIDs: []string{queue.NextID(ctx, panicIDGenerator), queue.NextID(ctx, panicIDGenerator)},
+		}, nil
+	}
+	guard := new(recordingApplyGuard)
+	machine := New(storage, nil, guard, panicFatalApply)
+
+	result := apply(t, machine, 1, jsonCommand(t, command.OpPublish, "topicone",
+		queue.PublishRequest{Messages: []queue.PublishMessage{{Body: []byte("x")}}}))
+	outcome, ok := result.(*queue.PublishOutcome)
+	if !ok || outcome.Response == nil {
+		t.Fatalf("within-budget derived publish result = %T %#v, want outcome", result, result)
+	}
+	if len(outcome.Response.MessageIDs) != 2 || outcome.Response.MessageIDs[0] == outcome.Response.MessageIDs[1] {
+		t.Fatalf("derived message IDs = %#v, want two distinct IDs", outcome.Response.MessageIDs)
+	}
+	for _, messageID := range outcome.Response.MessageIDs {
+		if len(messageID) != publishwire.MessageIDLength {
+			t.Fatalf("derived message ID %q length = %d, want %d", messageID, len(messageID), publishwire.MessageIDLength)
+		}
+	}
+	if storage.inventoryCalls != 0 || storage.publishCalls != 1 || guard.beginCalls != 1 || guard.finishCalls != 1 {
+		t.Fatalf("inventory/publish/guard begin/finish calls = %d/%d/%d/%d, want 0/1/1/1",
+			storage.inventoryCalls, storage.publishCalls, guard.beginCalls, guard.finishCalls)
+	}
+}
+
+func panicIDGenerator() string { panic("replicated publish generated a random identifier") }
+
+func (g *recordingApplyGuard) Check() error {
+	g.checkCalls++
+
+	return g.checkErr
+}
+
+func (g *recordingApplyGuard) BeginPublishApply() error {
+	g.beginCalls++
+	return g.beginErr
+}
+
+func (g *recordingApplyGuard) FinishPublishApply() error {
+	g.finishCalls++
+	return g.finishErr
+}
+
+func TestFSMPartialPublishIsCommittedOutcomeNotApplyFailure(t *testing.T) {
+	response := &queue.PublishResponse{TopicID: "topicone", QueueIDs: []string{"queueone"}, DeliveredCount: 1}
+	partial := &queue.PartialPublishError{
+		Outcome: queue.PublishOutcome{
+			Response:           response,
+			Partial:            true,
+			SelectedQueues:     2,
+			FailedDeliveries:   1,
+			FailedDestinations: 1,
+			DeliveryFailures:   []queue.PublishDeliveryFailure{{QueueID: "queuetwo", Messages: 1, Cause: "not found"}},
+		},
+		Causes: []error{pqerr.ErrNotFound},
+	}
+	storage := &publishOnlyStorage{response: response, err: partial}
+	guard := new(recordingApplyGuard)
+	var reported error
+	machine := New(storage, nil, guard, panicFatalApply, WithReplicaFaultReporter(func(err error) error {
+		reported = err
+		return nil
+	}))
+
+	result := apply(t, machine, 1, jsonCommand(t, command.OpPublish, "topicone",
+		queue.PublishRequest{Messages: []queue.PublishMessage{{Body: []byte("hello")}}}, "messageone"))
+	outcome, ok := result.(*queue.PublishOutcome)
+	if !ok {
+		t.Fatalf("FSM partial result = %T %#v, want *queue.PublishOutcome", result, result)
+	}
+	if outcome.FailedDeliveries != 1 || outcome.Response != response {
+		t.Fatalf("FSM partial outcome = %#v, want preserved response/failure", outcome)
+	}
+	if !errors.Is(reported, pqerr.ErrPartialFanout) {
+		t.Fatalf("reported fault = %v, want partial fanout", reported)
+	}
+	if guard.beginCalls != 1 || guard.finishCalls != 0 {
+		t.Fatalf("guard begin/finish = %d/%d, want 1/0", guard.beginCalls, guard.finishCalls)
+	}
+	applied, failed := machine.Stats()
+	if applied != 1 || failed != 0 {
+		t.Fatalf("FSM stats = %d/%d, want 1/0", applied, failed)
+	}
+}
+
+func TestFSMZeroCountTypedPartialKeepsExplicitDiscriminator(t *testing.T) {
+	partial := &queue.PartialPublishError{Outcome: queue.PublishOutcome{
+		Response: &queue.PublishResponse{TopicID: "topicone"},
+		Partial:  true,
+	}}
+	storage := &publishOnlyStorage{err: partial}
+	guard := new(recordingApplyGuard)
+	machine := New(storage, nil, guard, panicFatalApply, WithReplicaFaultReporter(func(error) error {
+		guard.checkErr = pqerr.ErrUnavailable
+		return nil
+	}))
+
+	result := apply(t, machine, 1, jsonCommand(t, command.OpPublish, "topicone", queue.PublishRequest{}))
+	outcome, ok := result.(*queue.PublishOutcome)
+	if !ok || !outcome.Partial || outcome.FailedDeliveries != 0 {
+		t.Fatalf("FSM zero-count partial = %T %#v, want explicit partial outcome", result, result)
+	}
+}
+
+type postQuarantineStorage struct {
+	queue.ReplicatedStorage
+	publishCalls     int
+	createTopicCalls int
+}
+
+func (s *postQuarantineStorage) Publish(context.Context, string, *queue.PublishRequest) (*queue.PublishResponse, error) {
+	s.publishCalls++
+	return nil, &queue.PartialPublishError{Outcome: queue.PublishOutcome{Partial: true}}
+}
+
+func (s *postQuarantineStorage) CreateTopic(context.Context, *queue.CreateTopicRequest) (*queue.CreateTopicResponse, error) {
+	s.createTopicCalls++
+	return &queue.CreateTopicResponse{TopicID: "must-not-exist"}, nil
+}
+
+func (*postQuarantineStorage) BeginRestore(context.Context) error  { return nil }
+func (*postQuarantineStorage) CommitRestore(context.Context) error { return nil }
+func (*postQuarantineStorage) AbortRestore(context.Context) error  { return nil }
+func (*postQuarantineStorage) TopicInventory(context.Context) (queue.TopicInventory, error) {
+	return queue.TopicInventory{TopicsExist: 1, SubscriptionCounts: map[string]int64{"topicone": 1}}, nil
+}
+
+func TestFSMQuarantineStopsLaterCommittedMutationsWithoutCrashLoop(t *testing.T) {
+	storage := new(postQuarantineStorage)
+	guard := new(recordingApplyGuard)
+	machine := New(storage, nil, guard, panicFatalApply,
+		WithReplicaFaultReporter(func(error) error {
+			guard.checkErr = pqerr.ErrUnavailable
+			return nil
+		}),
+		WithReplicaRecoveryReporter(func() error {
+			guard.checkErr = nil
+			return nil
+		}),
+	)
+
+	first := apply(t, machine, 1, jsonCommand(t, command.OpPublish, "topicone", queue.PublishRequest{}))
+	if outcome, ok := first.(*queue.PublishOutcome); !ok || !outcome.Partial {
+		t.Fatalf("first result = %T %#v, want partial outcome", first, first)
+	}
+	second := apply(t, machine, 2, jsonCommand(t, command.OpCreateTopic, "", queue.CreateTopicRequest{}, "topictwo"))
+	if err, ok := second.(error); !ok || !errors.Is(err, pqerr.ErrUnavailable) {
+		t.Fatalf("post-quarantine create result = %T %v, want unavailable error", second, second)
+	}
+	third := apply(t, machine, 3, jsonCommand(t, command.OpPublish, "topicone", queue.PublishRequest{}))
+	if err, ok := third.(error); !ok || !errors.Is(err, pqerr.ErrUnavailable) {
+		t.Fatalf("post-quarantine publish result = %T %v, want unavailable error", third, third)
+	}
+	if storage.publishCalls != 1 || storage.createTopicCalls != 0 {
+		t.Fatalf("storage calls publish/create = %d/%d, want 1/0", storage.publishCalls, storage.createTopicCalls)
+	}
+
+	emptySource, _ := newFSM(t)
+	if err := machine.Restore(io.NopCloser(bytes.NewReader(persistSnapshot(t, emptySource)))); err != nil {
+		t.Fatalf("Restore() while quarantined = %v", err)
+	}
+	fourth := apply(t, machine, 4, jsonCommand(t, command.OpCreateTopic, "", queue.CreateTopicRequest{}, "topicfour"))
+	if _, ok := fourth.(*queue.CreateTopicResponse); !ok {
+		t.Fatalf("post-restore create result = %T %v, want successful response", fourth, fourth)
+	}
+	if storage.createTopicCalls != 1 {
+		t.Fatalf("post-restore create calls = %d, want 1", storage.createTopicCalls)
+	}
+}
+
+func TestReplicaApplyGuardBeginFailureTerminatesBeforeStorage(t *testing.T) {
+	guardErr := errors.New("cannot persist dirty marker")
+	storage := new(publishOnlyStorage)
+	guard := &recordingApplyGuard{beginErr: guardErr}
+	machine := New(storage, nil, guard, panicFatalApply)
+
+	defer func() {
+		recovered := recover()
+		if !errors.Is(asError(recovered), guardErr) {
+			t.Fatalf("Apply panic = %v, want %v", recovered, guardErr)
+		}
+		if storage.publishCalls != 0 {
+			t.Fatalf("storage Publish calls = %d, want 0", storage.publishCalls)
+		}
+	}()
+	_ = apply(t, machine, 1, jsonCommand(t, command.OpPublish, "topicone", queue.PublishRequest{}))
+}
+
+func TestReplicaApplyGuardFinishFailureTerminatesWithDirtyGuard(t *testing.T) {
+	guardErr := errors.New("cannot persist clean marker")
+	storage := &publishOnlyStorage{response: &queue.PublishResponse{TopicID: "topicone"}}
+	guard := &recordingApplyGuard{finishErr: guardErr}
+	machine := New(storage, nil, guard, panicFatalApply)
+
+	defer func() {
+		recovered := recover()
+		if !errors.Is(asError(recovered), guardErr) {
+			t.Fatalf("Apply panic = %v, want %v", recovered, guardErr)
+		}
+		if storage.publishCalls != 1 {
+			t.Fatalf("storage Publish calls = %d, want 1", storage.publishCalls)
+		}
+		if guard.beginCalls != 1 || guard.finishCalls != 1 {
+			t.Fatalf("guard begin/finish = %d/%d, want 1/1", guard.beginCalls, guard.finishCalls)
+		}
+	}()
+	_ = apply(t, machine, 1, jsonCommand(t, command.OpPublish, "topicone", queue.PublishRequest{}))
+}
+
+func asError(value any) error {
+	err, _ := value.(error)
+	return err
+}
+
+func TestFSMReconcilesTopicStateAfterEveryMutation(t *testing.T) {
+	storage := newStore(t)
+	var inventories []queue.TopicInventory
+	machine := New(storage, nil, noopApplyGuard{}, panicFatalApply, WithTopicStateReconciler(func(inventory *queue.TopicInventory) {
+		if inventory == nil {
+			t.Fatal("reconciler received unknown state")
+		}
+		inventories = append(inventories, *inventory)
+	}))
+
+	requireApplied(t, apply(t, machine, 1, protoCommand(t, command.OpCreateQueue,
+		&v1.CreateQueueRequest{QueueName: "orders"}, "queueone")), "create queue")
+	requireApplied(t, apply(t, machine, 2, jsonCommand(t, command.OpCreateTopic, "",
+		queue.CreateTopicRequest{TopicName: "events"}, "topicone")), "create topic")
+	requireApplied(t, apply(t, machine, 3, jsonCommand(t, command.OpSubscribe, "topicone",
+		queue.SubscribeRequest{QueueID: "queueone"}, "subone")), "subscribe")
+	requireApplied(t, apply(t, machine, 4, &command.Command{
+		Op: command.OpUnsubscribe, Timestamp: stamp.UnixNano(), Target: "topicone", IDs: []string{"subone"},
+	}), "unsubscribe")
+	requireApplied(t, apply(t, machine, 5, protoCommand(t, command.OpDeleteQueue,
+		&v1.DeleteQueueRequest{QueueId: "queueone", Force: true})), "delete queue")
+	requireApplied(t, apply(t, machine, 6, &command.Command{
+		Op: command.OpDeleteTopic, Timestamp: stamp.UnixNano(), Target: "topicone",
+	}), "delete topic")
+
+	if len(inventories) != 5 {
+		t.Fatalf("reconciliations = %d, want 5", len(inventories))
+	}
+	wantTopics := []int64{1, 1, 1, 1, 0}
+	wantSubscriptions := []int64{0, 1, 0, 0, 0}
+	for index, inventory := range inventories {
+		if inventory.TopicsExist != wantTopics[index] || inventory.SubscriptionCounts["topicone"] != wantSubscriptions[index] {
+			t.Fatalf("inventory[%d] = %#v, want topics=%d subscriptions=%d", index, inventory, wantTopics[index], wantSubscriptions[index])
+		}
+	}
+}
+
 // --- Snapshot and restore --------------------------------------------------
+
+type beginCountingSnapshotStorage struct {
+	queue.ReplicatedStorage
+	beginCalls int
+}
+
+func (s *beginCountingSnapshotStorage) BeginSnapshot(ctx context.Context) (queue.StateSnapshot, error) {
+	s.beginCalls++
+
+	return s.ReplicatedStorage.BeginSnapshot(ctx)
+}
+
+func TestFSMSnapshotRejectsQuarantinedReplicaBeforeStorage(t *testing.T) {
+	storage := &beginCountingSnapshotStorage{ReplicatedStorage: newStore(t)}
+	guard := &recordingApplyGuard{checkErr: pqerr.ErrUnavailable}
+	machine := New(storage, nil, guard, panicFatalApply)
+
+	view, err := machine.Snapshot()
+	if view != nil {
+		view.Release()
+	}
+	if !errors.Is(err, pqerr.ErrUnavailable) {
+		t.Fatalf("Snapshot() = %#v, %v; want nil unavailable result", view, err)
+	}
+	if guard.checkCalls != 1 {
+		t.Fatalf("replica health checks = %d, want 1", guard.checkCalls)
+	}
+	if storage.beginCalls != 0 {
+		t.Fatalf("BeginSnapshot calls = %d, want 0", storage.beginCalls)
+	}
+}
 
 // A node joining an established cluster is caught up by snapshot, not by
 // replaying history. If the round trip loses anything, that node is quietly
@@ -367,6 +819,114 @@ func TestSnapshotRestoreRoundTrip(t *testing.T) {
 	td.Require(t).Cmp(claimed, td.Not(td.Nil()), "the in-flight message survived")
 	td.Cmp(t, claimed.Retries, uint32(1))
 	td.Cmp(t, claimed.VisibleAt, stamp.Add(45*time.Second).Format("2006-01-02 15:04:05.000"))
+}
+
+func TestFSMRestoreReconcilesTopicStateWithoutLifecycleEvents(t *testing.T) {
+	source, _ := newFSM(t)
+	requireApplied(t, apply(t, source, 1, protoCommand(t, command.OpCreateQueue,
+		&v1.CreateQueueRequest{QueueName: "orders"}, "queueone")), "create source queue")
+	requireApplied(t, apply(t, source, 2, jsonCommand(t, command.OpCreateTopic, "",
+		queue.CreateTopicRequest{TopicName: "events"}, "topicone")), "create source topic")
+	requireApplied(t, apply(t, source, 3, jsonCommand(t, command.OpSubscribe, "topicone",
+		queue.SubscribeRequest{QueueID: "queueone"}, "subone")), "create source subscription")
+
+	targetStorage := newStore(t)
+	var reconciled *queue.TopicInventory
+	faultCalls := 0
+	recoveryCalls := 0
+	target := New(targetStorage, nil, noopApplyGuard{}, panicFatalApply,
+		WithTopicStateReconciler(func(inventory *queue.TopicInventory) { reconciled = inventory }),
+		WithReplicaFaultReporter(func(error) error {
+			faultCalls++
+			return nil
+		}),
+		WithReplicaRecoveryReporter(func() error {
+			recoveryCalls++
+			return nil
+		}),
+	)
+
+	if err := target.Restore(io.NopCloser(bytes.NewReader(persistSnapshot(t, source)))); err != nil {
+		t.Fatalf("Restore() = %v", err)
+	}
+	if reconciled == nil || reconciled.TopicsExist != 1 || reconciled.SubscriptionCounts["topicone"] != 1 {
+		t.Fatalf("restored topic inventory = %#v, want one topic/subscription", reconciled)
+	}
+	if faultCalls != 1 {
+		t.Fatalf("replica fault calls = %d, want 1 before restore", faultCalls)
+	}
+	if recoveryCalls != 1 {
+		t.Fatalf("replica recovery calls = %d, want 1", recoveryCalls)
+	}
+}
+
+type beginCountingRestoreStorage struct {
+	queue.ReplicatedStorage
+	beginCalls int
+}
+
+func (s *beginCountingRestoreStorage) BeginRestore(context.Context) error {
+	s.beginCalls++
+	return s.ReplicatedStorage.BeginRestore(context.Background())
+}
+
+func TestFSMRestoreAbortsBeforeMutationWhenQuarantinePersistenceFails(t *testing.T) {
+	source, _ := newFSM(t)
+	encoded := persistSnapshot(t, source)
+	storage := &beginCountingRestoreStorage{ReplicatedStorage: newStore(t)}
+	quarantineErr := errors.New("persist restore quarantine")
+	recoveryCalls := 0
+	target := New(storage, nil, noopApplyGuard{}, panicFatalApply,
+		WithReplicaFaultReporter(func(error) error { return quarantineErr }),
+		WithReplicaRecoveryReporter(func() error {
+			recoveryCalls++
+			return nil
+		}),
+	)
+
+	err := target.Restore(io.NopCloser(bytes.NewReader(encoded)))
+	if !errors.Is(err, quarantineErr) {
+		t.Fatalf("Restore() = %v, want %v", err, quarantineErr)
+	}
+	if storage.beginCalls != 0 {
+		t.Fatalf("BeginRestore calls = %d, want 0", storage.beginCalls)
+	}
+	if recoveryCalls != 0 {
+		t.Fatalf("replica recovery calls = %d, want 0", recoveryCalls)
+	}
+}
+
+type inventoryFailStorage struct {
+	queue.ReplicatedStorage
+	err error
+}
+
+func (s *inventoryFailStorage) TopicInventory(context.Context) (queue.TopicInventory, error) {
+	return queue.TopicInventory{}, s.err
+}
+
+func TestFSMRestoreDoesNotRecoverWhenInventoryVerificationFails(t *testing.T) {
+	source, _ := newFSM(t)
+	requireApplied(t, apply(t, source, 1, jsonCommand(t, command.OpCreateTopic, "",
+		queue.CreateTopicRequest{TopicName: "events"}, "topicone")), "create source topic")
+
+	inventoryErr := errors.New("inventory unavailable")
+	targetStorage := &inventoryFailStorage{ReplicatedStorage: newStore(t), err: inventoryErr}
+	recoveryCalls := 0
+	target := New(targetStorage, nil, noopApplyGuard{}, panicFatalApply,
+		WithReplicaRecoveryReporter(func() error {
+			recoveryCalls++
+			return nil
+		}),
+	)
+
+	err := target.Restore(io.NopCloser(bytes.NewReader(persistSnapshot(t, source))))
+	if !errors.Is(err, inventoryErr) {
+		t.Fatalf("Restore() = %v, want inventory error", err)
+	}
+	if recoveryCalls != 0 {
+		t.Fatalf("replica recovery calls = %d, want 0", recoveryCalls)
+	}
 }
 
 // The state machine has to keep working after a restore — the caches it reads

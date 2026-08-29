@@ -14,6 +14,7 @@ import (
 	_ "github.com/marsolab/plainq/internal/server/grpccodec" // Register PlainQ's process-wide protobuf codec at init time.
 	"github.com/marsolab/plainq/internal/server/middleware"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
+	"github.com/marsolab/plainq/internal/server/service/telemetry"
 	"google.golang.org/grpc"
 )
 
@@ -38,7 +39,7 @@ type Storage interface {
 
 	// DeleteQueue deletes a queue if it's not empty. Also supports DeleteQueueInput.Force
 	// to delete queue with messages.
-	DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest) (*v1.DeleteQueueResponse, error)
+	DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest) (*DeleteQueueResult, error)
 
 	// Send sends message to the queue.
 	Send(ctx context.Context, input *v1.SendRequest) (*v1.SendResponse, error)
@@ -55,17 +56,31 @@ type Storage interface {
 
 	ListTopics(ctx context.Context) (*ListTopicsResponse, error)
 	CreateTopic(ctx context.Context, input *CreateTopicRequest) (*CreateTopicResponse, error)
-	DeleteTopic(ctx context.Context, topicID string) error
+	DeleteTopic(ctx context.Context, topicID string) (*DeleteTopicResult, error)
 	Subscribe(ctx context.Context, topicID string, input *SubscribeRequest) (*SubscribeResponse, error)
 	Unsubscribe(ctx context.Context, topicID, subscriptionID string) error
 	Publish(ctx context.Context, topicID string, input *PublishRequest) (*PublishResponse, error)
+	TopicInventory(ctx context.Context) (TopicInventory, error)
 }
 
-type TopicMetricsRecorder interface {
-	RecordTopicPublish(topicID string, messagesPublished, deliveries uint64)
-	RecordTopicSubscriptionCreated(topicID string, currentCount int64)
-	RecordTopicSubscriptionDeleted(topicID string, currentCount int64)
-	ReconcileTopicSubscriptionCounts(countsByTopic map[string]int64)
+func storageSupportsPolicyTransactions(storage Storage) bool {
+	if observed, ok := storage.(*ObservedStorage); ok {
+		storage = observed.Unwrap()
+	}
+
+	_, ok := storage.(PolicyStorage)
+
+	return ok
+}
+
+func storageSupportsSharedPolicy(storage Storage) bool {
+	if observed, ok := storage.(*ObservedStorage); ok {
+		storage = observed.Unwrap()
+	}
+
+	_, ok := storage.(authz.PolicyStore)
+
+	return ok
 }
 
 // Service holds logic of interacting with a queue.
@@ -76,11 +91,64 @@ type Service struct {
 	logger       *slog.Logger
 	router       chi.Router
 	storage      Storage
+	pubsub       *pubSubApplication
 	operations   *Operations
 	operationsMu sync.Mutex
-	topicMetrics TopicMetricsRecorder
 	permissions  middleware.PermissionChecker
 }
+
+// policyPubSubStorage keeps pubSubApplication as the single validation and
+// business-event boundary while routing its storage mutations through the
+// current policy layer. Holding Service rather than an Operations pointer is
+// deliberate: SetPermissionChecker can invalidate the lazy policy instance.
+type policyPubSubStorage struct {
+	Storage
+	service *Service
+}
+
+func (s *policyPubSubStorage) ListTopics(ctx context.Context) (*ListTopicsResponse, error) {
+	return s.service.policyOperations().ListTopics(ctx)
+}
+
+func (s *policyPubSubStorage) CreateTopic(
+	ctx context.Context,
+	input *CreateTopicRequest,
+) (*CreateTopicResponse, error) {
+	return s.service.policyOperations().CreateTopic(ctx, input)
+}
+
+func (s *policyPubSubStorage) DeleteTopic(ctx context.Context, topicID string) (*DeleteTopicResult, error) {
+	return s.service.policyOperations().DeleteTopic(ctx, topicID)
+}
+
+func (s *policyPubSubStorage) Subscribe(
+	ctx context.Context,
+	topicID string,
+	input *SubscribeRequest,
+) (*SubscribeResponse, error) {
+	return s.service.policyOperations().Subscribe(ctx, topicID, input)
+}
+
+func (s *policyPubSubStorage) Unsubscribe(ctx context.Context, topicID, subscriptionID string) error {
+	return s.service.policyOperations().Unsubscribe(ctx, topicID, subscriptionID)
+}
+
+func (s *policyPubSubStorage) Publish(
+	ctx context.Context,
+	topicID string,
+	input *PublishRequest,
+) (*PublishResponse, error) {
+	return s.service.policyOperations().Publish(ctx, topicID, input)
+}
+
+func (s *policyPubSubStorage) DeleteQueue(
+	ctx context.Context,
+	input *v1.DeleteQueueRequest,
+) (*DeleteQueueResult, error) {
+	return s.service.policyOperations().DeleteQueue(ctx, input)
+}
+
+var _ Storage = (*policyPubSubStorage)(nil)
 
 func (s *Service) policyOperations() *Operations {
 	s.operationsMu.Lock()
@@ -88,7 +156,7 @@ func (s *Service) policyOperations() *Operations {
 
 	if s.operations == nil {
 		var authorizer authz.Authorizer
-		if _, shared := s.storage.(authz.PolicyStore); !shared && s.policyProtectionEnabled() {
+		if !storageSupportsSharedPolicy(s.storage) && s.policyProtectionEnabled() {
 			authorizer = legacyServicePolicyAuthorizer{service: s}
 		}
 
@@ -119,7 +187,7 @@ func (s *Service) SetPermissionChecker(checker middleware.PermissionChecker) {
 	defer s.operationsMu.Unlock()
 
 	s.permissions = checker
-	if _, shared := s.storage.(authz.PolicyStore); !shared {
+	if !storageSupportsSharedPolicy(s.storage) {
 		s.operations = nil
 	}
 }
@@ -143,10 +211,20 @@ func (s *Service) HasQueuePermission(
 }
 
 // NewService creates a new queue service.
-func NewService(cfg *config.Config, logger *slog.Logger, storage Storage) *Service {
+func NewService(
+	cfg *config.Config,
+	logger *slog.Logger,
+	storage Storage,
+	observer *telemetry.Observer,
+) *Service {
+	if observer == nil {
+		panic("queue: observer is required")
+	}
+
 	s := Service{
 		cfg: cfg, logger: logger, router: chi.NewRouter(), storage: storage,
 	}
+	s.pubsub = newPubSubApplication(&policyPubSubStorage{Storage: storage, service: &s}, observer, logger)
 
 	s.router.Route("/", func(r chi.Router) {
 		r.Post("/", s.createQueueHandler)
@@ -174,11 +252,6 @@ func NewService(cfg *config.Config, logger *slog.Logger, storage Storage) *Servi
 	})
 
 	return &s
-}
-
-func (s *Service) SetTopicMetricsRecorder(recorder TopicMetricsRecorder) {
-	s.topicMetrics = recorder
-	s.reconcileTopicSubscriptionCounts(context.Background())
 }
 
 func (s *Service) Mount(server *grpc.Server)                        { v1.RegisterPlainQServiceServer(server, s) }

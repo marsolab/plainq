@@ -57,7 +57,7 @@ type PolicyStorage interface {
 		ctx context.Context,
 		input *v1.DeleteQueueRequest,
 		mutation policytx.Mutation,
-	) (*v1.DeleteQueueResponse, error)
+	) (*DeleteQueueResult, error)
 	SendPolicy(ctx context.Context, input *v1.SendRequest, mutation policytx.Mutation) (*v1.SendResponse, error)
 	ReceivePolicy(
 		ctx context.Context,
@@ -70,7 +70,7 @@ type PolicyStorage interface {
 		input *CreateTopicRequest,
 		mutation policytx.Mutation,
 	) (*CreateTopicResponse, error)
-	DeleteTopicPolicy(ctx context.Context, topicID string, mutation policytx.Mutation) error
+	DeleteTopicPolicy(ctx context.Context, topicID string, mutation policytx.Mutation) (*DeleteTopicResult, error)
 	SubscribePolicy(
 		ctx context.Context,
 		topicID string,
@@ -107,13 +107,13 @@ func NewOperations(store Storage, authorizer authz.Authorizer) (*Operations, err
 		return nil, errors.New("queue storage is required")
 	}
 
-	policyStore, ok := store.(PolicyStorage)
-	if !ok {
-		policyStore = nil
+	var policyStore PolicyStorage
+	if candidate, ok := store.(PolicyStorage); ok && storageSupportsPolicyTransactions(store) {
+		policyStore = candidate
 	}
 
 	if authorizer == nil {
-		if policies, ok := store.(authz.PolicyStore); ok {
+		if policies, ok := store.(authz.PolicyStore); ok && storageSupportsSharedPolicy(store) {
 			var err error
 
 			authorizer, err = authz.NewAuthorizer(policies)
@@ -238,7 +238,7 @@ func (o *Operations) PurgeQueue(ctx context.Context, req *v1.PurgeQueueRequest) 
 	return o.policyStore.PurgeQueuePolicy(ctx, req, mutation)
 }
 
-func (o *Operations) DeleteQueue(ctx context.Context, req *v1.DeleteQueueRequest) (*v1.DeleteQueueResponse, error) {
+func (o *Operations) DeleteQueue(ctx context.Context, req *v1.DeleteQueueRequest) (*DeleteQueueResult, error) {
 	p := operationPrincipal(ctx)
 	if o.compatibilityOnly(p) {
 		return o.store.DeleteQueue(ctx, req)
@@ -387,7 +387,7 @@ func (o *Operations) CreateTopic(ctx context.Context, req *CreateTopicRequest) (
 	return o.policyStore.CreateTopicPolicy(ctx, req, mutation)
 }
 
-func (o *Operations) DeleteTopic(ctx context.Context, topicID string) error {
+func (o *Operations) DeleteTopic(ctx context.Context, topicID string) (*DeleteTopicResult, error) {
 	p := operationPrincipal(ctx)
 	if o.compatibilityOnly(p) {
 		return o.store.DeleteTopic(ctx, topicID)
@@ -395,18 +395,18 @@ func (o *Operations) DeleteTopic(ctx context.Context, topicID string) error {
 
 	resource, err := o.resolveTopic(ctx, p, topicID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if err := o.authorize(ctx, p, authz.ActionTopicDelete, resource); err != nil {
-		return err
+		return nil, err
 	}
 
 	mutation, err := o.mutation(ctx, p, authz.ActionTopicDelete, resource, struct {
 		TopicID string `json:"topicId"`
 	}{topicID}, 1, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if o.policyStore == nil {
@@ -882,7 +882,7 @@ func (o *Operations) compatDeleteQueue(
 	ctx context.Context,
 	p principal.Principal,
 	req *v1.DeleteQueueRequest,
-) (*v1.DeleteQueueResponse, error) {
+) (*DeleteQueueResult, error) {
 	if !o.canUseLegacyStore(p) {
 		return nil, authz.ErrPermissionDenied
 	}
@@ -917,9 +917,13 @@ func (o *Operations) compatCreateTopic(ctx context.Context, p principal.Principa
 
 	return o.store.CreateTopic(ctx, req)
 }
-func (o *Operations) compatDeleteTopic(ctx context.Context, p principal.Principal, topicID string) error {
+func (o *Operations) compatDeleteTopic(
+	ctx context.Context,
+	p principal.Principal,
+	topicID string,
+) (*DeleteTopicResult, error) {
 	if !o.canUseLegacyStore(p) {
-		return authz.ErrPermissionDenied
+		return nil, authz.ErrPermissionDenied
 	}
 
 	return o.store.DeleteTopic(ctx, topicID)

@@ -2,7 +2,9 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"math"
+	"strings"
 	"time"
 )
 
@@ -102,11 +104,12 @@ type Config struct {
 
 	CORSEnable bool
 
-	HealthEnable       bool
-	HealthRouteLogs    bool
-	HealthRouteMetrics bool
-	HealthRoute        string
-	HealthReporter     string
+	HealthEnable        bool
+	HealthRouteLogs     bool
+	HealthRouteMetrics  bool
+	HealthRoute         string
+	HealthLivenessRoute string
+	HealthReporter      string
 
 	MetricsEnable       bool
 	MetricsRouteLogs    bool
@@ -114,6 +117,36 @@ type Config struct {
 	MetricsRoute        string
 
 	ProfilerEnabled bool
+}
+
+// ValidateHealthRoutes checks the two process-health endpoints when health
+// reporting is enabled.
+func (c *Config) ValidateHealthRoutes() error {
+	if !c.HealthEnable {
+		return nil
+	}
+
+	if c.HealthRoute == "" {
+		return errors.New("health readiness route is required")
+	}
+
+	if c.HealthLivenessRoute == "" {
+		return errors.New("health liveness route is required")
+	}
+
+	if !strings.HasPrefix(c.HealthRoute, "/") {
+		return fmt.Errorf("health readiness route %q must start with '/'", c.HealthRoute)
+	}
+
+	if !strings.HasPrefix(c.HealthLivenessRoute, "/") {
+		return fmt.Errorf("health liveness route %q must start with '/'", c.HealthLivenessRoute)
+	}
+
+	if c.HealthRoute == c.HealthLivenessRoute {
+		return fmt.Errorf("health readiness and liveness routes must differ: %q", c.HealthRoute)
+	}
+
+	return nil
 }
 
 // ValidateAgentAdmission rejects rates that cannot form a finite token bucket.

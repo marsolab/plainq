@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"net"
@@ -20,6 +21,7 @@ import (
 	"github.com/heartwilltell/scotty"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/marsolab/plainq/internal/cluster"
+	"github.com/marsolab/plainq/internal/metrics"
 	"github.com/marsolab/plainq/internal/server"
 	"github.com/marsolab/plainq/internal/server/config"
 	"github.com/marsolab/plainq/internal/server/interceptor"
@@ -62,7 +64,90 @@ const (
 	storageDriverSQLite   = "sqlite"
 	storageDriverPostgres = "postgres"
 	storageDriverTurso    = "turso"
+	journalModeDelete     = "delete"
+	journalModeWAL        = "wal"
 )
+
+func telemetryBackend(driver string) string {
+	switch driver {
+	case storageDriverSQLite:
+		return metrics.BackendSQLite
+	case storageDriverTurso:
+		return metrics.BackendTurso
+	case storageDriverPostgres:
+		return metrics.BackendPostgres
+	default:
+		panic("unsupported storage driver: " + driver)
+	}
+}
+
+type queueTelemetryWiring struct {
+	local   *telemetry.Observer
+	logical *telemetry.Observer
+}
+
+func newQueueTelemetryWiring(driver string, clustered bool) queueTelemetryWiring {
+	local := telemetry.NewObserver(telemetryBackend(driver))
+	if !clustered {
+		return queueTelemetryWiring{local: local, logical: local}
+	}
+
+	return queueTelemetryWiring{
+		local:   local,
+		logical: telemetry.NewStateSuppressingObserver(metrics.BackendCluster),
+	}
+}
+
+func (w queueTelemetryWiring) reconcileTopicState(inventory *queue.TopicInventory) {
+	if inventory == nil {
+		w.local.TopicStateUnavailable()
+
+		return
+	}
+
+	w.local.ReconcileTopicState(telemetry.TopicStateEvent{
+		TopicsExist:   inventory.TopicsExist,
+		Subscriptions: inventory.SubscriptionCounts,
+	})
+}
+
+func (w queueTelemetryWiring) observePublicStorage(storage queue.Storage) queue.Storage {
+	return queue.NewObservedStorage(storage, w.logical)
+}
+
+func (w queueTelemetryWiring) initPhysicalQueueStorage(
+	cfg *config.Config,
+	clusterCfg *cluster.Config,
+	logger *slog.Logger,
+	backend *storageBackend,
+) (queue.Storage, func() error, error) {
+	return initQueueStorage(cfg, clusterCfg, logger, backend, w.local)
+}
+
+func replayStartupTopicInventory(
+	ctx context.Context,
+	storage queue.Storage,
+	observer *telemetry.Observer,
+) error {
+	err := observer.CaptureTopicState(func() (telemetry.TopicStateEvent, error) {
+		inventory, err := storage.TopicInventory(ctx)
+		if err != nil {
+			return telemetry.TopicStateEvent{}, fmt.Errorf("load topic inventory: %w", err)
+		}
+
+		return telemetry.TopicStateEvent{
+			TopicsExist:   inventory.TopicsExist,
+			Subscriptions: inventory.SubscriptionCounts,
+		}, nil
+	})
+	if err != nil {
+		observer.StorageError("topic_inventory")
+
+		return fmt.Errorf("read startup topic inventory: %w", err)
+	}
+
+	return nil
+}
 
 // storageBackend holds the underlying connection handle for whichever
 // driver was selected. Exactly one of its fields is non-nil after
@@ -72,6 +157,36 @@ type storageBackend struct {
 	sqlite *litekit.Conn
 	turso  *sql.DB
 	pgpool *pgxpool.Pool
+}
+
+type contextServer interface {
+	Serve(ctx context.Context) error
+}
+
+func serveWithTelemetryDB(
+	ctx context.Context,
+	logger *slog.Logger,
+	telemetryDB io.Closer,
+	buildServer func() (contextServer, error),
+) error {
+	if telemetryDB != nil {
+		defer func() {
+			if err := telemetryDB.Close(); err != nil {
+				logger.Error("Failed to close telemetry database", slog.String("error", err.Error()))
+			}
+		}()
+	}
+
+	plainqServer, err := buildServer()
+	if err != nil {
+		return err
+	}
+
+	if err := plainqServer.Serve(ctx); err != nil {
+		return fmt.Errorf("serve PlainQ server: %w", err)
+	}
+
+	return nil
 }
 
 // lite returns the handle for the SQLite-dialect drivers — a local SQLite file
@@ -402,6 +517,10 @@ func serverCommand() *commandSpec {
 				"set given route as health endpoint route",
 			)
 
+			f.StringVar(&cfg.HealthLivenessRoute, "health.liveness.route", "/live",
+				"set given route as process liveness endpoint route",
+			)
+
 			f.StringVar(&cfg.HealthReporter, "health.reporter", "",
 				"set health endpoint reporter",
 			)
@@ -434,6 +553,10 @@ func serverCommand() *commandSpec {
 
 			logger.Info("Starting plainq server")
 
+			if err := server.ValidateTelemetryConfig(cfg); err != nil {
+				return fmt.Errorf("validate telemetry config: %w", err)
+			}
+
 			if err := validateAgentSecurity(&cfg, &clusterCfg); err != nil {
 				return err
 			}
@@ -444,9 +567,12 @@ func serverCommand() *commandSpec {
 
 			var checker hc.HealthChecker = hc.NewNopChecker()
 
+			var healthServices *hc.MultiServiceChecker
+
 			if cfg.HealthEnable {
 				reporter := hc.NewServiceReport()
-				checker = hc.NewMultiServiceChecker(reporter)
+				healthServices = hc.NewMultiServiceChecker(reporter)
+				checker = healthServices
 			}
 
 			// Storage initialization.
@@ -459,9 +585,9 @@ func serverCommand() *commandSpec {
 			if clusterCfg.Enabled {
 				switch strings.ToLower(cfg.StorageJournalMode) {
 				case "":
-					cfg.StorageJournalMode = "wal"
+					cfg.StorageJournalMode = journalModeWAL
 
-				case "wal":
+				case journalModeWAL:
 
 				default:
 					return fmt.Errorf(
@@ -486,11 +612,7 @@ func serverCommand() *commandSpec {
 				)
 			}
 
-			// One observer, shared by the storage layer and — once the
-			// telemetry store is open — by the collector behind Houston's
-			// dashboards. Both then describe the same events instead of two
-			// independently-wired approximations of them.
-			observer := telemetry.NewObserver(backend.driver)
+			telemetryWiring := newQueueTelemetryWiring(backend.driver, clusterCfg.Enabled)
 
 			registerRuntimeMetrics(backend)
 
@@ -502,10 +624,14 @@ func serverCommand() *commandSpec {
 				}
 			}()
 
-			queueStorage, queueClose, queueStorageInitErr := initQueueStorage(&cfg, &clusterCfg, logger, backend, observer)
+			queueStorage, queueClose, queueStorageInitErr := telemetryWiring.initPhysicalQueueStorage(
+				&cfg, &clusterCfg, logger, backend,
+			)
 			if queueStorageInitErr != nil {
 				return queueStorageInitErr
 			}
+
+			physicalQueueStorage := queueStorage
 
 			defer func() {
 				if err := queueClose(); err != nil {
@@ -521,7 +647,14 @@ func serverCommand() *commandSpec {
 			var clusterNode *cluster.Node
 
 			if clusterCfg.Enabled {
-				node, nodeErr := initClusterNode(&cfg, &clusterCfg, clusterDiscovery, logger, queueStorage)
+				node, nodeErr := initClusterNode(
+					&cfg,
+					&clusterCfg,
+					clusterDiscovery,
+					logger,
+					queueStorage,
+					telemetryWiring,
+				)
 				if nodeErr != nil {
 					return nodeErr
 				}
@@ -542,9 +675,31 @@ func serverCommand() *commandSpec {
 				}
 			}
 
+			if err := replayStartupTopicInventory(ctx, physicalQueueStorage, telemetryWiring.local); err != nil {
+				return err
+			}
+
+			if healthServices != nil {
+				if clusterNode != nil {
+					healthServices.AddService("cluster", clusterNode)
+				} else {
+					physicalHealth, ok := physicalQueueStorage.(hc.HealthChecker)
+					if !ok {
+						return fmt.Errorf("queue storage %T must implement health checking", physicalQueueStorage)
+					}
+
+					healthServices.AddService("storage", physicalHealth)
+				}
+			}
+
 			// Wrapping here, after the cluster layer, means one seam measures
 			// every backend: SQLite, Postgres and the replicated store alike.
-			queueService := queue.NewService(&cfg, logger, queue.NewObservedStorage(queueStorage, observer))
+			queueService := queue.NewService(
+				&cfg,
+				logger,
+				telemetryWiring.observePublicStorage(queueStorage),
+				telemetryWiring.logical,
+			)
 
 			accountStorage, accountStorageInitErr := initAccountStorage(&cfg, logger, backend)
 			if accountStorageInitErr != nil {
@@ -583,9 +738,12 @@ func serverCommand() *commandSpec {
 			oauthService := oauth.NewService(&cfg, logger, oauthStorage)
 
 			// Initialize telemetry database if enabled.
-			var serverOpts []server.Option
+			var (
+				serverOpts      []server.Option
+				telemetryCloser io.Closer
+			)
 
-			serverOpts = append(serverOpts, server.WithObserver(observer))
+			serverOpts = append(serverOpts, server.WithTelemetryObservers(telemetryWiring.local, telemetryWiring.logical))
 			serverOpts = append(serverOpts, server.WithServerVersion(Commit))
 
 			auditStorage, auditStorageErr := initSecurityAuditStorage(backend)
@@ -634,23 +792,35 @@ func serverCommand() *commandSpec {
 					)
 				} else {
 					serverOpts = append(serverOpts, server.WithMetricsStore(telemetryDB))
+					telemetryCloser = telemetryDB
 
 					logger.Info("Telemetry metrics database initialized")
 				}
 			}
 
-			plainqServer, serverErr := server.NewServer(&cfg, logger, checker, tokenManager, queueService, accountService,
-				onboardingService, rbacService, oauthService, serverOpts...,
-			)
-			if serverErr != nil {
-				return fmt.Errorf("create PlainQ server: %s", serverErr.Error())
-			}
+			return serveWithTelemetryDB(ctx, logger, telemetryCloser, func() (contextServer, error) {
+				plainqServer, serverErr := server.NewServer(
+					&cfg,
+					logger,
+					checker,
+					tokenManager,
+					queueService,
+					accountService,
+					onboardingService,
+					rbacService,
+					oauthService,
+					serverOpts...,
+				)
+				if serverErr != nil {
+					return nil, fmt.Errorf("create PlainQ server: %w", serverErr)
+				}
 
-			logger.Info("Houston Web UI",
-				slog.String("address", printAddrHTTP(cfg.HTTPAddr)),
-			)
+				logger.Info("Houston Web UI",
+					slog.String("address", printAddrHTTP(cfg.HTTPAddr)),
+				)
 
-			return plainqServer.Serve(ctx)
+				return plainqServer, nil
+			})
 		},
 	}
 }
@@ -950,7 +1120,7 @@ func initSQLiteBackend(cfg *config.Config, logger *slog.Logger) (*litekit.Conn, 
 	}
 
 	if cfg.StorageJournalMode != "" {
-		mode, err := litekit.JournalModeFromString(cfg.StorageJournalMode)
+		mode, err := sqliteJournalMode(cfg.StorageJournalMode)
 		if err != nil {
 			return nil, fmt.Errorf("parse storage journal mode: %w", err)
 		}
@@ -990,6 +1160,25 @@ func initSQLiteBackend(cfg *config.Config, logger *slog.Logger) (*litekit.Conn, 
 	)
 
 	return conn, nil
+}
+
+func sqliteJournalMode(value string) (litekit.JournalMode, error) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case journalModeDelete:
+		return litekit.Delete, nil
+	case "truncate":
+		return litekit.Truncate, nil
+	case "persist":
+		return litekit.Persist, nil
+	case "memory":
+		return litekit.Memory, nil
+	case journalModeWAL:
+		return litekit.WAL, nil
+	case "off":
+		return litekit.Off, nil
+	default:
+		return litekit.Delete, fmt.Errorf("unsupported journal mode: %q", value)
+	}
 }
 
 // tursoMaxIdleConns caps the pooled libSQL connections kept warm between
@@ -1257,6 +1446,7 @@ func initClusterNode(
 	discovery string,
 	logger *slog.Logger,
 	local queue.Storage,
+	telemetryWiring queueTelemetryWiring,
 ) (*cluster.Node, error) {
 	replicated, ok := local.(queue.ReplicatedStorage)
 	if !ok {
@@ -1277,7 +1467,12 @@ func initClusterNode(
 		clusterCfg.Version = Commit
 	}
 
-	node, err := cluster.NewNode(*clusterCfg, replicated, logger)
+	node, err := cluster.NewNode(
+		*clusterCfg,
+		replicated,
+		logger,
+		cluster.WithTopicStateReconciler(telemetryWiring.reconcileTopicState),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("create cluster node: %w", err)
 	}
@@ -1518,12 +1713,22 @@ func initTelemetryDB(cfg *config.Config, logger *slog.Logger) (*litekit.Conn, er
 	// Apply telemetry schema migrations.
 	evolver, evolverErr := litekit.NewEvolver(conn, mutations.TelemetryMutation())
 	if evolverErr != nil {
-		return nil, fmt.Errorf("create telemetry schema evolver: %w", evolverErr)
+		return nil, closeTelemetryConnAfterInitFailure(conn,
+			fmt.Errorf("create telemetry schema evolver: %w", evolverErr))
 	}
 
 	if err := evolver.MutateSchema(); err != nil {
-		return nil, fmt.Errorf("telemetry schema mutation: %w", err)
+		return nil, closeTelemetryConnAfterInitFailure(conn,
+			fmt.Errorf("telemetry schema mutation: %w", err))
 	}
 
 	return conn, nil
+}
+
+func closeTelemetryConnAfterInitFailure(conn io.Closer, initErr error) error {
+	if closeErr := conn.Close(); closeErr != nil {
+		return errors.Join(initErr, fmt.Errorf("close telemetry database after initialization failure: %w", closeErr))
+	}
+
+	return initErr
 }

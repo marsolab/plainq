@@ -6051,15 +6051,16 @@ Leave empty for the first page. </p></td>
                   <td>queue_ids</td>
                   <td><a href="#string">string</a></td>
                   <td>repeated</td>
-                  <td><p>queue_ids represents an array of queue IDs the messages were fanned out to. </p></td>
+                  <td><p>queue_ids is a flattened list of destination queue identifiers with no
+positional relational guarantee to message_ids. </p></td>
                 </tr>
 
                 <tr>
                   <td>message_ids</td>
                   <td><a href="#string">string</a></td>
                   <td>repeated</td>
-                  <td><p>message_ids represents an array of message IDs that has been enqueued
-across all subscribed queues. </p></td>
+                  <td><p>message_ids is a flattened list of enqueued message identifiers with no
+positional relational guarantee to queue_ids. </p></td>
                 </tr>
 
                 <tr>
@@ -6558,7 +6559,7 @@ receive the messages published to the topic. </p></td>
 
 
         <h3 id="v1.Subscription">Subscription</h3>
-        <p>Subscription represents a binding between a topic and a queue.</p>
+        <p>Subscription represents a binding between a topic and a queue. Its</p><p>subscription_id is an XID, and each (topic_id, queue_id) binding is unique.</p>
 
 
           <table class="field-table">
@@ -6571,7 +6572,7 @@ receive the messages published to the topic. </p></td>
                   <td>subscription_id</td>
                   <td><a href="#string">string</a></td>
                   <td></td>
-                  <td><p>subscription_id represents the unique identifier for the subscription. </p></td>
+                  <td><p>subscription_id is the subscription&#39;s XID. </p></td>
                 </tr>
 
                 <tr>
@@ -6611,7 +6612,7 @@ the messages published to the topic. </p></td>
 
 
         <h3 id="v1.Topic">Topic</h3>
-        <p>Topic represents a publish/subscribe topic. A topic owns no storage of its</p><p>own: publishing to it fans the message out to every subscribed queue.</p>
+        <p>Topic represents a publish/subscribe topic. Its topic_id is an XID and its</p><p>topic_name is unique. A topic stores no message bodies: publishing to it</p><p>fans messages out to every subscribed queue.</p>
 
 
           <table class="field-table">
@@ -6624,14 +6625,14 @@ the messages published to the topic. </p></td>
                   <td>topic_id</td>
                   <td><a href="#string">string</a></td>
                   <td></td>
-                  <td><p>topic_id represents the unique identifier for the topic. </p></td>
+                  <td><p>topic_id is the topic&#39;s XID. </p></td>
                 </tr>
 
                 <tr>
                   <td>topic_name</td>
                   <td><a href="#string">string</a></td>
                   <td></td>
-                  <td><p>topic_name represents the name of the topic. </p></td>
+                  <td><p>topic_name is unique. </p></td>
                 </tr>
 
                 <tr>
@@ -6895,8 +6896,10 @@ to the topic is fanned out to that queue.</p></td>
                 <td>Publish</td>
                 <td><a href="#v1.PublishRequest">PublishRequest</a></td>
                 <td><a href="#v1.PublishResponse">PublishResponse</a></td>
-                <td><p>Publish publishes messages to the topic, fanning them out to every
-queue subscribed to it.</p></td>
+                <td><p>Publish publishes messages to the topic. Publishing with zero subscriptions
+succeeds with zero deliveries. Fan-out is synchronous and best-effort: it
+attempts every selected destination but is non-atomic across queues. A
+failed publish may have retained copies, so retry may duplicate them.</p></td>
               </tr>
 
           </tbody>

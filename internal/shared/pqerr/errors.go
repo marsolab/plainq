@@ -17,10 +17,6 @@ const (
 	// it already exists.
 	ErrAlreadyExists Error = "already exist"
 
-	// ErrFailedPrecondition shows that the resource is in a state that does
-	// not permit the requested operation.
-	ErrFailedPrecondition Error = "failed precondition"
-
 	// ErrUnauthenticated indicates the request does not have valid
 	// authentication credentials to perform the operation.
 	ErrUnauthenticated Error = "authentication failed"
@@ -33,6 +29,18 @@ const (
 	// ErrUnavailable indicates that the service is currently unavailable.
 	// This kind of error is retryable. Caller should retry with a backoff.
 	ErrUnavailable Error = "temporarily unavailable"
+
+	// ErrFailedPrecondition indicates that the requested operation is valid
+	// only after the resource reaches a different state.
+	ErrFailedPrecondition Error = "failed precondition"
+
+	// ErrPartialFanout means at least one selected destination rejected a publish
+	// after another destination may already have accepted its queue copies.
+	ErrPartialFanout Error = "partial topic fan-out"
+
+	// ErrCapacityExceeded means the exact encoded request cannot fit within a
+	// stable server or cluster transport limit. Retrying unchanged cannot help.
+	ErrCapacityExceeded Error = "request exceeds capacity"
 
 	// Transport related errors.
 

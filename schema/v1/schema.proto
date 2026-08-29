@@ -48,8 +48,10 @@ service PlainQService {
   // Unsubscribe removes a subscription from the topic.
   rpc Unsubscribe(UnsubscribeRequest) returns (UnsubscribeResponse) {}
 
-  // Publish publishes messages to the topic, fanning them out to every
-  // queue subscribed to it.
+  // Publish publishes messages to the topic. Publishing with zero subscriptions
+  // succeeds with zero deliveries. Fan-out is synchronous and best-effort: it
+  // attempts every selected destination but is non-atomic across queues. A
+  // failed publish may have retained copies, so retry may duplicate them.
   rpc Publish(PublishRequest) returns (PublishResponse) {}
 }
 
@@ -304,13 +306,14 @@ message DeleteFailure {
   string error = 2;
 }
 
-// Topic represents a publish/subscribe topic. A topic owns no storage of its
-// own: publishing to it fans the message out to every subscribed queue.
+// Topic represents a publish/subscribe topic. Its topic_id is an XID and its
+// topic_name is unique. A topic stores no message bodies: publishing to it
+// fans messages out to every subscribed queue.
 message Topic {
-  // topic_id represents the unique identifier for the topic.
+  // topic_id is the topic's XID.
   string topic_id = 1;
 
-  // topic_name represents the name of the topic.
+  // topic_name is unique.
   string topic_name = 2;
 
   // created_at denotes the timestamp when the topic was created.
@@ -320,9 +323,10 @@ message Topic {
   repeated Subscription subscriptions = 4;
 }
 
-// Subscription represents a binding between a topic and a queue.
+// Subscription represents a binding between a topic and a queue. Its
+// subscription_id is an XID, and each (topic_id, queue_id) binding is unique.
 message Subscription {
-  // subscription_id represents the unique identifier for the subscription.
+  // subscription_id is the subscription's XID.
   string subscription_id = 1;
 
   // topic_id represents the unique identifier of the subscribed topic.
@@ -419,11 +423,12 @@ message PublishResponse {
   // topic_id represents the unique identifier of the topic published to.
   string topic_id = 1;
 
-  // queue_ids represents an array of queue IDs the messages were fanned out to.
+  // queue_ids is a flattened list of destination queue identifiers with no
+  // positional relational guarantee to message_ids.
   repeated string queue_ids = 2;
 
-  // message_ids represents an array of message IDs that has been enqueued
-  // across all subscribed queues.
+  // message_ids is a flattened list of enqueued message identifiers with no
+  // positional relational guarantee to queue_ids.
   repeated string message_ids = 3;
 
   // delivered_count represents the total number of deliveries performed,

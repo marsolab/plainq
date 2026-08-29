@@ -36,7 +36,8 @@ PostgreSQL example:
 ./plainq serve \
   --storage.driver=postgres \
   --storage.postgres.dsn='postgres://user:pass@db:5432/plainq?sslmode=require' \
-  --auth.jwt.secret="$JWT_SECRET"
+  --auth.jwt.secret="$JWT_SECRET" \
+  --auth.bootstrap.secret="$BOOTSTRAP_SECRET"
 ```
 
 See [Deployment](deployment.md) for choosing a backend.
@@ -45,7 +46,7 @@ See [Deployment](deployment.md) for choosing a backend.
 
 | Flag                          | Default | Purpose                                              |
 | ----------------------------- | ------- | ---------------------------------------------------- |
-| `--grpc.addr`                 | `:8080` | gRPC listener (queue API, used by the CLI).          |
+| `--grpc.addr`                 | `:8080` | gRPC queue/topic API, used by the CLI.               |
 | `--http.addr`                 | `:8081` | HTTP listener (Houston UI, REST, health, metrics).   |
 | `--http.read-timeout`         | `0`     | HTTP read timeout (`0` = no timeout).                |
 | `--http.read-header-timeout`  | `0`     | HTTP read-header timeout.                            |
@@ -68,23 +69,33 @@ recommended):
 | Flag                                | Default  | Purpose                                                      |
 | ----------------------------------- | -------- | ------------------------------------------------------------ |
 | `--auth.enable`                     | `true`   | Master switch for the JWT auth subsystem (account APIs, Houston login). |
-| `--auth.jwt.secret`                 | _(empty)_| HMAC secret signing access/refresh tokens. **Required** to issue sessions. |
+| `--auth.jwt.secret`                 | _(empty)_| HMAC secret signing access/refresh tokens. **Always required by `serve`.** |
+| `--auth.bootstrap.secret`           | _(empty)_| Shared secret for creating the first remote administrator. **Required** with auth. |
 | `--auth.access.ttl`                 | `60m`    | Access-token lifetime.                                       |
 | `--auth.refresh.ttl`                | `720h`   | Refresh-token lifetime (30 days).                            |
 | `--auth.registration.enable`        | `true`   | Allow new user self-registration.                            |
-| `--auth.email.verification.enable`  | `true`   | Require email verification.                                  |
+| `--auth.email.verification.enable`  | `false`  | Reserved; enabling it fails closed until a verifier/delivery backend is configured. |
 
-> **`--auth.jwt.secret` is required even with auth enabled** — the server needs
-> it to issue and verify sessions, and `serve` will fail fast without it.
-> Generate one with `openssl rand -hex 32` and supply it via your secret manager
-> or an environment variable; don't hardcode it.
+> **The JWT secret is always required by the current `serve` construction, even
+> when `--auth.enable=false`; the bootstrap secret is additionally required when
+> authentication is enabled.** The JWT secret signs sessions; the separate
+> bootstrap secret authorizes creation of the first remote administrator. Each
+> must contain at least 32 bytes. Generate independent values with
+> `openssl rand -hex 32`, inject them from a secret manager, and never hardcode
+> them.
 
 See [Authentication & RBAC](../authentication-rbac.md) for the full model.
 
-> **Note:** in the current build the auth/RBAC middleware is not applied to the
-> HTTP API routes, so these settings govern the auth *subsystem* (sessions,
-> account endpoints, Houston login) rather than gating the queue/RBAC/OAuth REST
-> endpoints. Keep the HTTP and gRPC listeners on a trusted network — see
+> **Boundary:** when authentication is enabled, HTTP queue/topic and admin
+> routes require bearer sessions. Authenticated HTTP and gRPC queue/topic
+> operations are tenant-scoped and pass the shared resource-policy checks.
+> Legacy `schema.v1` gRPC calls may omit a token only while
+> `--grpc.protect-legacy=false`; that compatibility identity is restricted to
+> migrated or legacy-created rows in the fixed legacy tenant. Set the flag to
+> `true` after old clients have credentials. The bundled CLI/TUI currently sends
+> neither bearer metadata nor TLS credentials, so it requires compatibility
+> mode; use a generated/external authenticated client before enabling legacy
+> protection. Keep transport TLS and network policy in place; see
 > [Deployment → network exposure](deployment.md#network-exposure).
 
 ## OAuth & multi-tenancy
@@ -102,16 +113,35 @@ has its own guide:
 | Flag                  | Default     | Purpose                                                  |
 | --------------------- | ----------- | -------------------------------------------------------- |
 | `--health`            | `true`      | Enable the health endpoint.                              |
-| `--health.route`      | `/health`   | Health endpoint path.                                    |
+| `--health.route`      | `/health`   | Storage and cluster readiness endpoint.                  |
+| `--health.liveness.route` | `/live` | Process liveness endpoint.                               |
 | `--metrics`           | `true`      | Enable the Prometheus metrics endpoint.                  |
 | `--metrics.route`     | `/metrics`  | Metrics endpoint path.                                   |
 | `--telemetry.enable`  | `true`      | Enable the telemetry subsystem powering Houston's dashboards. |
 | `--profiler`          | `false`     | Enable the profiler endpoint.                            |
 | `--cors`              | `true`      | Enable CORS for Houston's API routes.                    |
 
-Telemetry has finer-grained knobs (provider, retention, scrape/GC timeouts,
-optional Prometheus base URL). See [Observability](observability.md) for the
-details and what each metric means.
+Telemetry uses these stable defaults:
+
+| Flag                                      | Default   | Purpose                                      |
+| ----------------------------------------- | --------- | -------------------------------------------- |
+| `--telemetry.enable`                      | `true`    | Enable typed telemetry and Houston history.  |
+| `--telemetry.provider`                    | `sqlite`  | Telemetry storage backend.                   |
+| `--telemetry.log.enable`                  | `false`   | Log telemetry subsystem activity.            |
+| `--telemetry.sqlite.collection.timeout`   | `10s`     | Raw collection interval.                     |
+| `--telemetry.sqlite.gc.timeout`           | `10m`     | Ordered retention-sweep interval.            |
+| `--telemetry.sqlite.retention.period`     | `336h`    | Maximum history retention (14 days).         |
+| `--telemetry.prometheus.baseurl`          | _(empty)_ | Optional external Prometheus API base URL.   |
+
+The legacy name `collection.timeout` means collection **interval**. When
+telemetry is enabled it must be at least 1ms, exactly representable in whole
+milliseconds, and divide one minute without a remainder. The GC interval must
+be positive and retention must be at least 24 hours. Changing the collection
+interval first catches up completed rollups and then resets retained raw data;
+the transition is shown as `notRecorded`, never as a mixed raw grid.
+
+See [Observability](observability.md) for the stored resolutions, retention
+behavior, Prometheus families, and Houston graphs.
 
 ## Logging
 
@@ -138,12 +168,15 @@ details and what each metric means.
   --http.write-timeout=30s \
   --http.idle-timeout=120s \
   --auth.jwt.secret="$PLAINQ_JWT_SECRET" \
+  --auth.bootstrap.secret="$PLAINQ_BOOTSTRAP_SECRET" \
   --auth.access.ttl=15m \
   --log.level=info
 ```
 
 Note `--grpc.addr=127.0.0.1:8080`: binding gRPC to loopback (or a private
-interface) keeps the currently-unauthenticated queue API off the public network.
+interface) limits exposure while legacy anonymous compatibility remains
+enabled. Set `--grpc.protect-legacy=true` only after moving the bundled CLI/TUI
+to a client that sends a bearer credential.
 
 ## Next steps
 

@@ -3,6 +3,8 @@ package queue
 import (
 	"context"
 	"time"
+
+	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 )
 
 // The types and interfaces below describe the *whole* contents of a queue
@@ -152,4 +154,12 @@ type ReplicatedStorage interface {
 	Storage
 	StateSnapshotter
 	StateRestorer
+	DeleteEffectPreflighter
+}
+
+// DeleteEffectPreflighter validates a clustered delete and proves that its
+// internal effects fit the peer response envelope without materializing them.
+type DeleteEffectPreflighter interface {
+	PreflightDeleteTopic(ctx context.Context, topicID string, limit int) error
+	PreflightDeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest, limit int) error
 }

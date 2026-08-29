@@ -4,17 +4,28 @@ import "time"
 
 // Topic operation names.
 const (
-	OpCreateTopic  = "create_topic"
-	OpDeleteTopic  = "delete_topic"
-	OpListTopics   = "list_topics"
-	OpPublish      = "publish"
-	OpSubscribe    = "subscribe"
-	OpUnsubscribe  = "unsubscribe"
-	OpListMessages = "list_messages"
+	OpCreateTopic = "create_topic"
+	OpDeleteTopic = "delete_topic"
+	OpListTopics  = "list_topics"
+	OpPublish     = "publish"
+	OpSubscribe   = "subscribe"
+	OpUnsubscribe = "unsubscribe"
 )
 
 // Pub/sub metrics.
 var (
+	topicRequests = NewCounterVec(Definition{
+		Name:   Namespace + "_topic_requests_total",
+		Help:   "Decoded topic requests by outcome.",
+		Labels: []string{labelBackend, labelOperation, labelResult},
+	})
+
+	topicRequestDuration = NewHistogramVec(Definition{
+		Name:   Namespace + "_topic_request_duration_seconds",
+		Help:   "How long a decoded topic request took at the application boundary.",
+		Labels: []string{labelBackend, labelOperation},
+	}, LatencyBuckets)
+
 	topicOperations = NewCounterVec(Definition{
 		Name:   Namespace + "_topic_operations_total",
 		Help:   "Topic operations by outcome.",
@@ -53,7 +64,7 @@ var (
 
 	topicFanout = NewHistogramVec(Definition{
 		Name:   Namespace + "_topic_fanout",
-		Help:   "Distribution of how many subscribers a single publish reached.",
+		Help:   "Distribution of how many subscriber destinations a single publish selected.",
 		Labels: []string{labelTopic},
 	}, CountBuckets)
 
@@ -82,10 +93,20 @@ var (
 	})
 )
 
-// RecordTopicOperation records one topic operation and how long it took.
-func RecordTopicOperation(backend, operation string, start time.Time, err error) {
-	topicOperations.With(backend, operation, resultOf(err)).Inc()
-	topicOperationDuration.ObserveSince(start, backend, operation)
+// RecordTopicRequest records one decoded public topic request and its elapsed
+// application-boundary duration.
+func RecordTopicRequest(backend, operation, result string, elapsed time.Duration) {
+	validateTopicMetricVocabulary(backend, operation, result)
+	topicRequests.With(backend, operation, result).Inc()
+	topicRequestDuration.ObserveDuration(elapsed, backend, operation)
+}
+
+// RecordTopicOperation records one topic storage operation and its elapsed
+// duration.
+func RecordTopicOperation(backend, operation, result string, elapsed time.Duration) {
+	validateTopicMetricVocabulary(backend, operation, result)
+	topicOperations.With(backend, operation, result).Inc()
+	topicOperationDuration.ObserveDuration(elapsed, backend, operation)
 }
 
 // RecordPublish records a publish and its fan-out.
@@ -93,29 +114,22 @@ func RecordTopicOperation(backend, operation string, start time.Time, err error)
 // delivered and failed are counted separately because a publish reports
 // success once it has been accepted, and a subscriber that could not be
 // written to would otherwise vanish without trace.
-func RecordPublish(topicID string, messages, bytes, delivered, failed uint64) {
+func RecordPublish(topicID string, messages, bytes, destinations, delivered, failed uint64) {
 	topicMessagesPublished.Add(messages, topicID)
 	topicPublishBytes.Add(bytes, topicID)
 	topicDeliveries.Add(delivered, topicID)
 	topicDeliveryFailures.Add(failed, topicID)
-
-	if messages > 0 {
-		topicFanout.Observe(float64(delivered+failed)/float64(messages), topicID)
-	}
+	topicFanout.Observe(float64(destinations), topicID)
 }
 
-// RecordSubscriptionCreated records a new subscription and the resulting
-// subscription count for the topic.
-func RecordSubscriptionCreated(topicID string, current int64) {
+// RecordSubscriptionCreated records a new subscription lifecycle event.
+func RecordSubscriptionCreated(topicID string) {
 	topicSubscriptionsCreated.With(topicID).Inc()
-	topicSubscriptions.Set(float64(current), topicID)
 }
 
-// RecordSubscriptionDeleted records a removed subscription and the resulting
-// subscription count for the topic.
-func RecordSubscriptionDeleted(topicID string, current int64) {
+// RecordSubscriptionDeleted records a removed subscription lifecycle event.
+func RecordSubscriptionDeleted(topicID string) {
 	topicSubscriptionsDeleted.With(topicID).Inc()
-	topicSubscriptions.Set(float64(current), topicID)
 }
 
 // SetTopicSubscriptions records a topic's subscription count from an exact
@@ -129,3 +143,35 @@ func SetTopicsExist(count int64) { topicsExist.Set(float64(count)) }
 
 // ResetTopic clears a topic's gauges when it is deleted.
 func ResetTopic(topicID string) { topicSubscriptions.Set(0, topicID) }
+
+func validateTopicMetricVocabulary(backend, operation, result string) {
+	if !validTopicBackend(backend) {
+		panic("metrics: unknown topic backend: " + backend)
+	}
+
+	if !validTopicOperation(operation) {
+		panic("metrics: unknown topic operation: " + operation)
+	}
+
+	if result != ResultOK && result != ResultError {
+		panic("metrics: unknown topic result: " + result)
+	}
+}
+
+func validTopicBackend(backend string) bool {
+	switch backend {
+	case BackendSQLite, BackendTurso, BackendPostgres, BackendCluster:
+		return true
+	default:
+		return false
+	}
+}
+
+func validTopicOperation(operation string) bool {
+	switch operation {
+	case OpCreateTopic, OpDeleteTopic, OpListTopics, OpPublish, OpSubscribe, OpUnsubscribe:
+		return true
+	default:
+		return false
+	}
+}

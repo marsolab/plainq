@@ -1,9 +1,14 @@
 package metrics
 
-import "time"
+import (
+	"time"
+)
 
 // labelInterval names the aggregation window a telemetry roll-up covers.
 const labelInterval = "interval"
+
+// labelMetric identifies the bounded collector family that lost an event.
+const labelMetric = "metric"
 
 // Telemetry-subsystem metrics.
 //
@@ -48,6 +53,18 @@ var (
 		Labels: []string{labelResult},
 	})
 
+	telemetryEventBufferDropped = NewCounterVec(Definition{
+		Name:   Namespace + "_telemetry_event_buffer_dropped_total",
+		Help:   "Internal telemetry event samples dropped because bounded collector buffers were full.",
+		Labels: []string{labelMetric},
+	})
+
+	telemetryTerminalStateDropped = NewCounterVec(Definition{
+		Name:   Namespace + "_telemetry_terminal_state_dropped_total",
+		Help:   "Terminal topic states dropped because the bounded completion ledger was full or unavailable.",
+		Labels: []string{},
+	})
+
 	telemetryTrackedDef = define(Definition{
 		Kind:   KindGauge,
 		Name:   Namespace + "_telemetry_tracked",
@@ -58,10 +75,12 @@ var (
 
 // Telemetry store operations.
 const (
-	TelemetryOpSaveRaw      = "save_raw"
-	TelemetryOpSaveRate     = "save_rate"
-	TelemetryOpSaveStats    = "save_stats"
-	TelemetryOpUpdateInFlgt = "update_in_flight"
+	TelemetryOpSaveRaw            = "save_raw"
+	TelemetryOpSaveRate           = "save_rate"
+	TelemetryOpSaveStats          = "save_stats"
+	TelemetryOpUpdateInFlgt       = "update_in_flight"
+	TelemetryOpCollectionBoundary = "collection_boundary"
+	TelemetryOpTerminalState      = "terminal_state"
 )
 
 // RecordTelemetryCollection records one collection pass.
@@ -83,6 +102,21 @@ func RecordTelemetryAggregation(interval string, start time.Time, err error) {
 
 // RecordTelemetryCleanup records one retention sweep of the telemetry store.
 func RecordTelemetryCleanup(err error) { telemetryCleanups.With(resultOf(err)).Inc() }
+
+// RecordTelemetryEventBufferDropped reports one lost internal event sample.
+func RecordTelemetryEventBufferDropped(metric string) {
+	RecordTelemetryEventBufferDrops(metric, 1)
+}
+
+// RecordTelemetryEventBufferDrops reports a bounded batch of lost internal event samples.
+func RecordTelemetryEventBufferDrops(metric string, count uint64) {
+	telemetryEventBufferDropped.With(metric).AddInt64(int64(min(count, maxCounterAdd)))
+}
+
+// RecordTelemetryTerminalStateDropped reports terminal transitions that cannot be retained.
+func RecordTelemetryTerminalStateDropped(count uint64) {
+	telemetryTerminalStateDropped.With().AddInt64(int64(min(count, maxCounterAdd)))
+}
 
 // RegisterTelemetryCollector publishes how many queues and topics the
 // collector is holding metrics for, read at scrape time.

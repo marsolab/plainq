@@ -189,7 +189,7 @@ func (s *ObservedStorage) PurgeQueue(ctx context.Context, input *v1.PurgeQueueRe
 func (s *ObservedStorage) DeleteQueue(
 	ctx context.Context,
 	input *v1.DeleteQueueRequest,
-) (*v1.DeleteQueueResponse, error) {
+) (*DeleteQueueResult, error) {
 	start := time.Now()
 
 	out, err := s.inner.DeleteQueue(ctx, input)
@@ -298,11 +298,7 @@ func (s *ObservedStorage) ListTopics(ctx context.Context) (*ListTopicsResponse, 
 
 	out, err := s.inner.ListTopics(ctx)
 
-	s.observer.TopicOperation(metrics.OpListTopics, start, err)
-
-	if err == nil {
-		metrics.SetTopicsExist(int64(len(out.Topics)))
-	}
+	s.observer.TopicOperation(metrics.OpListTopics, "", start, err)
 
 	return out, err
 }
@@ -313,24 +309,31 @@ func (s *ObservedStorage) CreateTopic(ctx context.Context, input *CreateTopicReq
 
 	out, err := s.inner.CreateTopic(ctx, input)
 
-	s.observer.TopicOperation(metrics.OpCreateTopic, start, err)
+	var topicID string
+	if err == nil && out != nil {
+		topicID = out.TopicID
+	}
+
+	s.observer.TopicOperation(metrics.OpCreateTopic, topicID, start, err)
 
 	return out, err
 }
 
 // DeleteTopic implements Storage.
-func (s *ObservedStorage) DeleteTopic(ctx context.Context, topicID string) error {
+func (s *ObservedStorage) DeleteTopic(ctx context.Context, topicID string) (*DeleteTopicResult, error) {
 	start := time.Now()
 
-	err := s.inner.DeleteTopic(ctx, topicID)
+	out, err := s.inner.DeleteTopic(ctx, topicID)
 
-	s.observer.TopicOperation(metrics.OpDeleteTopic, start, err)
+	s.observer.TopicOperation(metrics.OpDeleteTopic, topicID, start, err)
 
-	if err == nil {
-		metrics.ResetTopic(topicID)
-	}
+	return out, err
+}
 
-	return err
+// TopicInventory implements Storage. Maintenance reconciliation is deliberately
+// not recorded as a seventh public topic storage operation.
+func (s *ObservedStorage) TopicInventory(ctx context.Context) (TopicInventory, error) {
+	return s.inner.TopicInventory(ctx)
 }
 
 // Subscribe implements Storage.
@@ -339,7 +342,7 @@ func (s *ObservedStorage) Subscribe(ctx context.Context, topicID string, input *
 
 	out, err := s.inner.Subscribe(ctx, topicID, input)
 
-	s.observer.TopicOperation(metrics.OpSubscribe, start, err)
+	s.observer.TopicOperation(metrics.OpSubscribe, topicID, start, err)
 
 	return out, err
 }
@@ -350,7 +353,7 @@ func (s *ObservedStorage) Unsubscribe(ctx context.Context, topicID, subscription
 
 	err := s.inner.Unsubscribe(ctx, topicID, subscriptionID)
 
-	s.observer.TopicOperation(metrics.OpUnsubscribe, start, err)
+	s.observer.TopicOperation(metrics.OpUnsubscribe, topicID, start, err)
 
 	return err
 }
@@ -361,30 +364,7 @@ func (s *ObservedStorage) Publish(ctx context.Context, topicID string, input *Pu
 
 	out, err := s.inner.Publish(ctx, topicID, input)
 
-	s.observer.TopicOperation(metrics.OpPublish, start, err)
-
-	if err != nil {
-		return out, err
-	}
-
-	var bytes uint64
-
-	for _, message := range input.Messages {
-		bytes += uint64(len(message.Body))
-	}
-
-	// A publish reports success once it is accepted, so a subscriber that
-	// could not be written to leaves no other trace. The difference between
-	// the subscribers a topic has and the deliveries it managed is that trace.
-	delivered := uint64(max(out.DeliveredCount, 0))
-
-	var failed uint64
-
-	if expected := uint64(len(out.QueueIDs)) * uint64(len(input.Messages)); expected > delivered {
-		failed = expected - delivered
-	}
-
-	s.observer.Published(topicID, uint64(len(input.Messages)), bytes, delivered, failed)
+	s.observer.TopicOperation(metrics.OpPublish, topicID, start, err)
 
 	return out, err
 }
@@ -417,10 +397,11 @@ func (s *ObservedStorage) PurgeQueuePolicy(
 	}
 
 	start := time.Now()
-	out, err := store.PurgeQueuePolicy(ctx, input, mutation)
+	storageCtx, replay := trackPolicyReplay(ctx)
+	out, err := store.PurgeQueuePolicy(storageCtx, input, mutation)
 	s.observer.Operation(metrics.OpPurgeQueue, start, err)
 
-	if err == nil {
+	if err == nil && !replay.isReplay() {
 		s.observer.QueuePurged(input.GetQueueId())
 	}
 
@@ -431,17 +412,18 @@ func (s *ObservedStorage) DeleteQueuePolicy(
 	ctx context.Context,
 	input *v1.DeleteQueueRequest,
 	mutation policytx.Mutation,
-) (*v1.DeleteQueueResponse, error) {
+) (*DeleteQueueResult, error) {
 	store, err := s.policyStorage()
 	if err != nil {
 		return nil, err
 	}
 
 	start := time.Now()
-	out, err := store.DeleteQueuePolicy(ctx, input, mutation)
+	storageCtx, replay := trackPolicyReplay(ctx)
+	out, err := store.DeleteQueuePolicy(storageCtx, input, mutation)
 	s.observer.Operation(metrics.OpDeleteQueue, start, err)
 
-	if err == nil {
+	if err == nil && !replay.isReplay() {
 		s.observer.QueuePurged(input.GetQueueId())
 	}
 
@@ -459,10 +441,11 @@ func (s *ObservedStorage) SendPolicy(
 	}
 
 	start := time.Now()
-	out, err := store.SendPolicy(ctx, input, mutation)
+	storageCtx, replay := trackPolicyReplay(ctx)
+	out, err := store.SendPolicy(storageCtx, input, mutation)
 	s.observer.Operation(metrics.OpSend, start, err)
 
-	if err != nil {
+	if err != nil || replay.isReplay() {
 		return out, err
 	}
 
@@ -491,10 +474,11 @@ func (s *ObservedStorage) ReceivePolicy(
 	}
 
 	start := time.Now()
-	out, err := store.ReceivePolicy(ctx, input, mutation)
+	storageCtx, replay := trackPolicyReplay(ctx)
+	out, err := store.ReceivePolicy(storageCtx, input, mutation)
 	s.observer.Operation(metrics.OpReceive, start, err)
 
-	if err != nil {
+	if err != nil || replay.isReplay() {
 		return out, err
 	}
 
@@ -519,10 +503,11 @@ func (s *ObservedStorage) DeletePolicy(
 	}
 
 	start := time.Now()
-	out, err := store.DeletePolicy(ctx, input, mutation)
+	storageCtx, replay := trackPolicyReplay(ctx)
+	out, err := store.DeletePolicy(storageCtx, input, mutation)
 	s.observer.Operation(metrics.OpDelete, start, err)
 
-	if err == nil {
+	if err == nil && !replay.isReplay() {
 		s.observer.Deleted(input.GetQueueId(), uint64(len(out.GetSuccessful())))
 	}
 
@@ -541,7 +526,13 @@ func (s *ObservedStorage) CreateTopicPolicy(
 
 	start := time.Now()
 	out, err := store.CreateTopicPolicy(ctx, input, mutation)
-	s.observer.TopicOperation(metrics.OpCreateTopic, start, err)
+
+	var topicID string
+	if err == nil && out != nil {
+		topicID = out.TopicID
+	}
+
+	s.observer.TopicOperation(metrics.OpCreateTopic, topicID, start, err)
 
 	return out, err
 }
@@ -550,21 +541,17 @@ func (s *ObservedStorage) DeleteTopicPolicy(
 	ctx context.Context,
 	topicID string,
 	mutation policytx.Mutation,
-) error {
+) (*DeleteTopicResult, error) {
 	store, err := s.policyStorage()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	start := time.Now()
-	err = store.DeleteTopicPolicy(ctx, topicID, mutation)
-	s.observer.TopicOperation(metrics.OpDeleteTopic, start, err)
+	out, err := store.DeleteTopicPolicy(ctx, topicID, mutation)
+	s.observer.TopicOperation(metrics.OpDeleteTopic, topicID, start, err)
 
-	if err == nil {
-		metrics.ResetTopic(topicID)
-	}
-
-	return err
+	return out, err
 }
 
 func (s *ObservedStorage) SubscribePolicy(
@@ -580,7 +567,7 @@ func (s *ObservedStorage) SubscribePolicy(
 
 	start := time.Now()
 	out, err := store.SubscribePolicy(ctx, topicID, input, mutation)
-	s.observer.TopicOperation(metrics.OpSubscribe, start, err)
+	s.observer.TopicOperation(metrics.OpSubscribe, topicID, start, err)
 
 	return out, err
 }
@@ -597,7 +584,7 @@ func (s *ObservedStorage) UnsubscribePolicy(
 
 	start := time.Now()
 	err = store.UnsubscribePolicy(ctx, topicID, subscriptionID, mutation)
-	s.observer.TopicOperation(metrics.OpUnsubscribe, start, err)
+	s.observer.TopicOperation(metrics.OpUnsubscribe, topicID, start, err)
 
 	return err
 }
@@ -615,25 +602,7 @@ func (s *ObservedStorage) PublishPolicy(
 
 	start := time.Now()
 	out, err := store.PublishPolicy(ctx, topicID, input, mutation)
-	s.observer.TopicOperation(metrics.OpPublish, start, err)
+	s.observer.TopicOperation(metrics.OpPublish, topicID, start, err)
 
-	if err != nil {
-		return out, err
-	}
-
-	var bytes uint64
-	for _, message := range input.Messages {
-		bytes += uint64(len(message.Body))
-	}
-
-	delivered := uint64(max(out.DeliveredCount, 0))
-
-	var failed uint64
-	if expected := uint64(len(out.QueueIDs)) * uint64(len(input.Messages)); expected > delivered {
-		failed = expected - delivered
-	}
-
-	s.observer.Published(topicID, uint64(len(input.Messages)), bytes, delivered, failed)
-
-	return out, nil
+	return out, err
 }

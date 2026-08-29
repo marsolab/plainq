@@ -214,6 +214,12 @@ func podTemplate(pq *plainqv1alpha1.PlainQ, refs SecretRefs) corev1.PodTemplateS
 
 func serverContainerSpec(pq *plainqv1alpha1.PlainQ, refs SecretRefs) corev1.Container {
 	spec := pq.Spec
+	livenessProbe := spec.Pod.LivenessProbe
+	readinessProbe := spec.Pod.ReadinessProbe
+	if plainqv1alpha1.BoolValue(spec.Observability.Health.Enabled, true) {
+		livenessProbe = probeOr(livenessProbe, defaultProbe(plainqv1alpha1.DefaultLivenessRoute, 10, 15))
+		readinessProbe = probeOr(readinessProbe, defaultProbe(spec.Observability.Health.Route, 5, 10))
+	}
 
 	container := corev1.Container{
 		Name:            serverContainer,
@@ -226,8 +232,8 @@ func serverContainerSpec(pq *plainqv1alpha1.PlainQ, refs SecretRefs) corev1.Cont
 		Resources:       spec.Pod.Resources,
 		Ports:           containerPorts(pq),
 		VolumeMounts:    containerMounts(pq),
-		LivenessProbe:   probeOr(spec.Pod.LivenessProbe, defaultProbe(pq, 10, 15)),
-		ReadinessProbe:  probeOr(spec.Pod.ReadinessProbe, defaultProbe(pq, 5, 10)),
+		LivenessProbe:   livenessProbe,
+		ReadinessProbe:  readinessProbe,
 		StartupProbe:    spec.Pod.StartupProbe,
 	}
 
@@ -308,8 +314,7 @@ func podVolumes(pq *plainqv1alpha1.PlainQ) []corev1.Volume {
 	return append(volumes, pq.Spec.Pod.ExtraVolumes...)
 }
 
-func defaultProbe(pq *plainqv1alpha1.PlainQ, initialDelay, period int32) *corev1.Probe {
-	route := pq.Spec.Observability.Health.Route
+func defaultProbe(route string, initialDelay, period int32) *corev1.Probe {
 	if route == "" {
 		route = plainqv1alpha1.DefaultHealthRoute
 	}

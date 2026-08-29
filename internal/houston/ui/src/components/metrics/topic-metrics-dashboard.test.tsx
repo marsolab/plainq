@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { Topic, TopicMetricsOverview } from "@/lib/types";
+import { ApiRequestError } from "@/lib/api-client";
 import {
   buildTopicSelectorOptions,
   loadTopicMetricsOverviewState,
@@ -14,10 +15,15 @@ const overview: TopicMetricsOverview = {
     publishRate: 12.345,
     deliveryRate: 67.89,
     messagesPublished: 3210,
+    publishedBytes: 12_345,
     deliveries: 6540,
+    deliveryFailures: 3,
     subscriptionsCurrent: 5,
     subscriptionsCreated: 7,
     subscriptionsDeleted: 2,
+    topicsExist: 1,
+    operationSummaries: null,
+    storageOperationSummaries: null,
   },
   topicMetrics: [
     {
@@ -36,6 +42,11 @@ const overview: TopicMetricsOverview = {
     from: 1_700_000_000_000,
     to: 1_700_000_360_000,
   },
+  effectiveTimeRange: {
+    from: 1_700_000_000_000,
+    to: 1_700_000_360_000,
+  },
+  resolution: "raw",
   updatedAt: 1_700_000_360_000,
 };
 
@@ -60,7 +71,7 @@ describe("loadTopicMetricsOverviewState", () => {
   test("returns unavailable when telemetry storage is unavailable", async () => {
     const result = await loadTopicMetricsOverviewState({
       topicOverview: async () => {
-        throw new Error("503: telemetry storage unavailable");
+        throw new ApiRequestError(503, "503: telemetry storage unavailable");
       },
     });
 

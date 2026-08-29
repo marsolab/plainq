@@ -25,6 +25,11 @@ var (
 	// forward to; the caller waits or fails.
 	ErrNoLeader = errors.New("consensus: cluster has no leader")
 
+	// ErrCommitUnknown means a proposal lost leadership while it was being
+	// committed. The command may survive into the next leader's term, so the
+	// caller must not retry or forward it.
+	ErrCommitUnknown = errors.New("consensus: command commit outcome is unknown")
+
 	// ErrShutdown means the engine is stopped.
 	ErrShutdown = errors.New("consensus: engine is shut down")
 )
@@ -114,9 +119,9 @@ type Consensus interface {
 	// Apply proposes a command and waits for it to be committed and applied.
 	// It returns whatever the state machine returned for that command.
 	//
-	// It returns ErrNotLeader when this node cannot propose. That is not a
-	// failure — it is routing information, and the caller is expected to use
-	// it.
+	// It returns ErrNotLeader when this node rejected the proposal before its
+	// outcome became ambiguous. That is routing information, and the caller is
+	// expected to use it. ErrCommitUnknown means the caller must not retry.
 	Apply(ctx context.Context, data []byte) (any, error)
 
 	// IsLeader reports whether this node currently leads. It is a hint: by

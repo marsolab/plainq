@@ -66,6 +66,28 @@ func TestNormalizeArgs(t *testing.T) {
 			args: []string{"cluster", "join", "-node-id", "n1", "-non-voter"},
 			want: []string{"cluster", "join", "-node-id", "n1", "-non-voter"},
 		},
+		"nested topic flag after positional": {
+			args: []string{"topic", "publish", "TOPIC", "-message=hello"},
+			want: []string{"topic", "publish", "-message=hello", "TOPIC"},
+		},
+		"nested topic double dash flag with separate value": {
+			args: []string{"topic", "publish", "TOPIC", "--message", "hello"},
+			want: []string{"topic", "publish", "--message", "hello", "TOPIC"},
+		},
+		"nested topic file stdin marker": {
+			args: []string{"topic", "publish", "TOPIC", "-file", "-"},
+			want: []string{"topic", "publish", "-file", "-", "TOPIC"},
+		},
+		"nested topic terminator": {
+			args: []string{"topic", "publish", "--", "-TOPIC", "-message=literal"},
+			want: []string{"topic", "publish", "--", "-TOPIC", "-message=literal"},
+		},
+		// Group flags before a leaf are intentionally unsupported: topic owns no
+		// flags, so leave the invocation untouched for Scotty to reject clearly.
+		"nested topic group flag before leaf is untouched": {
+			args: []string{"topic", "-json", "list"},
+			want: []string{"topic", "-json", "list"},
+		},
 		"lone dash is a value, not a flag": {
 			args: []string{"send", "QID", "-file", "-"},
 			want: []string{"send", "-file", "-", "QID"},
@@ -109,6 +131,8 @@ func TestNormalizeArgs(t *testing.T) {
 func TestNormalizeArgsPreservesArguments(t *testing.T) {
 	inputs := [][]string{
 		{"send", "QID", "-message", "a", "-message", "b", "-json"},
+		{"topic", "publish", "TID", "-message", "a", "--message=b", "-file", "-", "-json"},
+		{"topic", "subscribe", "TID", "QID", "--json"},
 		{"receive", "-batch", "10", "QID", "-ack"},
 		{"cluster", "leave", "-node-id", "n1", "-json"},
 		{"create", "orders", "-visibility-timeout", "300"},

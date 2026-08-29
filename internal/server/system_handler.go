@@ -228,7 +228,8 @@ func observabilityFacts(cfg *config.Config) []ConfigFact {
 
 	if cfg.HealthEnable {
 		facts = append(facts,
-			ConfigFact{Label: "Health route", Value: orUnset(cfg.HealthRoute)},
+			ConfigFact{Label: "Readiness route", Value: orUnset(cfg.HealthRoute)},
+			ConfigFact{Label: "Liveness route", Value: orUnset(cfg.HealthLivenessRoute)},
 			ConfigFact{Label: "Health reporter", Value: orUnset(cfg.HealthReporter)},
 		)
 	}

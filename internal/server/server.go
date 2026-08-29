@@ -1,14 +1,17 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/cors"
@@ -30,22 +33,25 @@ import (
 	"github.com/marsolab/servekit"
 	"github.com/marsolab/servekit/authkit/jwtkit"
 	"github.com/marsolab/servekit/httpkit"
+	"github.com/marsolab/servekit/httpkit/statuspage"
 	"google.golang.org/grpc"
+	_ "google.golang.org/grpc/encoding/proto"
 	"google.golang.org/grpc/health"
 	healthv1 "google.golang.org/grpc/health/grpc_health_v1"
 )
 
 // PlainQ represents plainq logic.
 type PlainQ struct {
-	cfg          *config.Config
-	logger       *slog.Logger
-	queue        *queue.Service
-	account      *account.Service
-	onboarding   *onboarding.Service
-	rbac         *rbac.Service
-	oauth        *oauth.Service
-	observer     *telemetry.Observer
-	tokenManager jwtkit.TokenManager
+	cfg             *config.Config
+	logger          *slog.Logger
+	queue           *queue.Service
+	account         *account.Service
+	onboarding      *onboarding.Service
+	rbac            *rbac.Service
+	oauth           *oauth.Service
+	localObserver   *telemetry.Observer
+	logicalObserver *telemetry.Observer
+	tokenManager    jwtkit.TokenManager
 
 	agentTransport GRPCEndpointRegistrator
 	authenticator  interceptor.Authenticator
@@ -58,6 +64,8 @@ type PlainQ struct {
 	metricsCollector *collector.Collector
 	metricsStore     *collector.SQLiteStore
 	metricsHandler   *MetricsHandler
+
+	metricsCollectorFactory telemetryCollectorFactory
 
 	// clusterNode is set when this server is a cluster member.
 	clusterNode    ClusterNode
@@ -79,6 +87,10 @@ func NewServer(
 	oauthSvc *oauth.Service,
 	opts ...Option,
 ) (*servekit.Server, error) {
+	if err := validateTelemetryConfig(*cfg); err != nil {
+		return nil, fmt.Errorf("validate telemetry config: %w", err)
+	}
+
 	// Create a server which holds and serve all listeners.
 	server := servekit.NewServer(logger)
 
@@ -91,6 +103,8 @@ func NewServer(
 		rbac:         rbacSvc,
 		oauth:        oauthSvc,
 		tokenManager: tokenManager,
+
+		metricsCollectorFactory: newTelemetryCollector,
 	}
 
 	// Apply server options.
@@ -115,24 +129,27 @@ func NewServer(
 
 	// Initialize metrics collector if telemetry database is provided.
 	if pq.metricsStore != nil {
-		pq.metricsCollector = collector.New(pq.metricsStore, collector.WithLogger(logger))
-		pq.queue.SetTopicMetricsRecorder(pq.metricsCollector)
-		pq.metricsHandler = NewMetricsHandler(pq.metricsCollector, pq.metricsStore)
+		pq.metricsCollector = pq.metricsCollectorFactory(pq.metricsStore, logger, telemetryCollectorSettings{
+			collectionInterval: cfg.TelemetryLiteScrapeTimeout,
+			cleanupInterval:    cfg.TelemetryLiteGCTimeout,
+			retentionPeriod:    cfg.TelemetryLiteRetentionPeriod,
+		})
+		pq.metricsHandler = NewMetricsHandler(
+			pq.metricsCollector,
+			pq.metricsStore,
+			metricsHandlerConfigFromCollector(pq.metricsCollector, time.Now),
+		)
 
 		// The storage observer already emits every queue event to Prometheus.
 		// Attaching the collector to the same observer means Houston's
 		// dashboards are fed from that one stream rather than a second,
 		// separately-wired one that can silently drift out of agreement with it.
-		if pq.observer != nil {
-			pq.observer.SetRecorder(pq.metricsCollector)
-		}
+		attachTelemetryObservers(pq.localObserver, pq.logicalObserver, pq.metricsCollector)
 
 		pq.metricsCollector.RegisterMetrics()
+		server.RegisterListener("telemetry", &telemetryListener{worker: pq.metricsCollector})
 
-		// Start the collector in background.
-		go pq.metricsCollector.Start(context.Background())
-
-		logger.Info("Telemetry metrics collector started")
+		logger.Info("Telemetry metrics collector registered")
 	}
 
 	// Create the HTTP listener.
@@ -283,10 +300,7 @@ func NewServer(
 					queueMetrics.Get("/inflight", pq.metricsHandler.GetInFlightMetrics)
 				})
 
-				metrics.Route("/topic/{id}", func(topicMetrics chi.Router) {
-					topicMetrics.Get("/", pq.metricsHandler.GetTopicMetrics)
-					topicMetrics.Get("/rates", pq.metricsHandler.GetTopicRatesChart)
-				})
+				mountTopicMetricsRoutes(metrics, pq.metricsHandler)
 			})
 		})
 	})
@@ -363,6 +377,14 @@ func NewServer(
 	server.RegisterListener("GRPC", grpcListener)
 
 	return server, nil
+}
+
+func mountTopicMetricsRoutes(metrics chi.Router, handler *MetricsHandler) {
+	metrics.Route("/topic/{id}", func(topicMetrics chi.Router) {
+		topicMetrics.Get("/", handler.GetTopicMetrics)
+		topicMetrics.Get("/rates", handler.GetTopicRatesChart)
+		topicMetrics.Get("/subscriptions", handler.GetTopicSubscriptions)
+	})
 }
 
 func (s *PlainQ) houstonStaticHandler(w http.ResponseWriter, r *http.Request) {
@@ -447,6 +469,10 @@ func (s *PlainQ) serveHoustonNotFound(w http.ResponseWriter, r *http.Request, bu
 }
 
 func listenerHTTP(cfg *config.Config, logger *slog.Logger, checker hc.HealthChecker) (*httpkit.ListenerHTTP, error) {
+	if err := cfg.ValidateHealthRoutes(); err != nil {
+		return nil, fmt.Errorf("validate health routes: %w", err)
+	}
+
 	httpListenerOpts := httpkit.NewListenerOption(
 		httpkit.WithLogger(logger),
 		httpkit.WithHTTPServerTimeouts(
@@ -456,24 +482,6 @@ func listenerHTTP(cfg *config.Config, logger *slog.Logger, checker hc.HealthChec
 			httpkit.HTTPServerIdleTimeout(cfg.HTTPIdleTimeout),
 		),
 	)
-
-	if cfg.HealthEnable {
-		healthOptions := []httpkit.ListenerOption[httpkit.HealthConfig]{
-			httpkit.HealthCheckRoute(cfg.HealthRoute),
-			httpkit.HealthCheckAccessLog(cfg.HealthRouteLogs),
-			httpkit.HealthChecker(checker),
-		}
-
-		switch cfg.HealthReporter {
-		case "json":
-			healthOptions = append(healthOptions, httpkit.HealthCheckReportJSON())
-
-		case "html":
-			healthOptions = append(healthOptions, httpkit.HealthCheckReportHTML())
-		}
-
-		httpListenerOpts = append(httpListenerOpts, httpkit.WithHealthCheck(healthOptions...))
-	}
 
 	if cfg.MetricsEnable {
 		httpListenerOpts = append(httpListenerOpts, httpkit.WithMetrics(
@@ -488,7 +496,128 @@ func listenerHTTP(cfg *config.Config, logger *slog.Logger, checker hc.HealthChec
 		return nil, fmt.Errorf("create HTTP listener: %w", err)
 	}
 
+	if cfg.HealthEnable {
+		middlewares := make([]httpkit.Middleware, 0, 2)
+		if cfg.HealthRouteLogs {
+			middlewares = append(middlewares, httpkit.LoggingMiddleware(logger))
+		} else {
+			middlewares = append(middlewares, httpkit.NoAccessLogMiddleware())
+		}
+
+		if cfg.HealthRouteMetrics {
+			middlewares = append(middlewares, httpkit.MetricsMiddleware())
+		}
+
+		httpListener.Mount(cfg.HealthRoute, readinessHandler(checker, cfg.HealthReporter), middlewares...)
+		httpListener.Mount(cfg.HealthLivenessRoute, livenessHandler(), middlewares...)
+	}
+
 	return httpListener, nil
+}
+
+func readinessHandler(checker hc.HealthChecker, reporter string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+
+			return
+		}
+
+		healthErr := checker.Health(r.Context())
+		status := readinessStatus(healthErr)
+
+		switch reporter {
+		case "json":
+			writeJSONReadiness(w, r.Method, status, healthErr)
+
+		case "html":
+			writeHTMLReadiness(w, r.Method, status, checker)
+
+		default:
+			writeTextReadiness(w, r.Method, status, healthErr)
+		}
+	})
+}
+
+func readinessStatus(healthErr error) int {
+	if healthErr != nil {
+		return http.StatusServiceUnavailable
+	}
+
+	return http.StatusOK
+}
+
+func writeJSONReadiness(w http.ResponseWriter, method string, status int, healthErr error) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+
+	if method == http.MethodHead {
+		return
+	}
+
+	message := "Service is healthy"
+	if healthErr != nil {
+		message = "Service is temporarily unavailable. Please try again later."
+	}
+
+	if err := json.NewEncoder(w).Encode(map[string]string{
+		"status":  fmt.Sprintf("%d %s", status, http.StatusText(status)),
+		"message": message,
+	}); err != nil {
+		return
+	}
+}
+
+func writeHTMLReadiness(w http.ResponseWriter, method string, status int, checker hc.HealthChecker) {
+	report := hc.NewServiceReport()
+	if services, ok := checker.(*hc.MultiServiceChecker); ok {
+		report = services.Report()
+	}
+
+	var body bytes.Buffer
+
+	if err := statuspage.RenderStatus(&body, report); err != nil {
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+
+	if method == http.MethodHead {
+		return
+	}
+
+	if _, err := w.Write(body.Bytes()); err != nil {
+		return
+	}
+}
+
+func writeTextReadiness(w http.ResponseWriter, method string, status int, healthErr error) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.WriteHeader(status)
+
+	if method == http.MethodHead || healthErr == nil {
+		return
+	}
+
+	if _, err := w.Write([]byte(http.StatusText(status) + "\n")); err != nil {
+		return
+	}
+}
+
+func livenessHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+	})
 }
 
 // Option configures the PlainQ server.
@@ -548,11 +677,23 @@ func WithClusterNode(node ClusterNode) Option {
 	return func(pq *PlainQ) { pq.clusterNode = node }
 }
 
-// WithObserver hands the server the observer the storage layer records
-// through, so the telemetry collector — created here, once the telemetry
-// store is open — can be attached to the same event stream.
-func WithObserver(observer *telemetry.Observer) Option {
-	return func(pq *PlainQ) { pq.observer = observer }
+// WithTelemetryObservers supplies the physical replica and ingress logical
+// event streams. Standalone mode passes the same pointer for both.
+func WithTelemetryObservers(local, logical *telemetry.Observer) Option {
+	return func(pq *PlainQ) {
+		pq.localObserver = local
+		pq.logicalObserver = logical
+	}
+}
+
+func attachTelemetryObservers(local, logical *telemetry.Observer, sink telemetry.Recorder) {
+	if local != nil {
+		local.SetRecorder(sink)
+	}
+
+	if logical != nil && logical != local {
+		logical.SetRecorder(telemetry.NewStateSuppressingRecorder(sink))
+	}
 }
 
 // GetMetricsCollector returns the metrics collector for external use.

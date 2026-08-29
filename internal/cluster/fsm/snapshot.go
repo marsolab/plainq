@@ -60,6 +60,10 @@ var (
 // replication; the writing out happens later, in Persist, against the pinned
 // view.
 func (f *FSM) Snapshot() (hraft.FSMSnapshot, error) {
+	if err := f.applyGuard.Check(); err != nil {
+		return nil, fmt.Errorf("replica is quarantined before state snapshot: %w", err)
+	}
+
 	// The context outlives this call: it belongs to the pinned view, which is
 	// read later, in Persist. Scoping it to Snapshot with a deferred cancel
 	// hands back a view whose transaction database/sql has already rolled
@@ -179,6 +183,13 @@ func (f *FSM) Restore(reader io.ReadCloser) error {
 	defer cancel()
 
 	restoreErr = func() error {
+		// A restore replaces the complete replica state. Close serving and
+		// durably record that fact before BeginRestore can mutate anything; a
+		// failed or unverifiable restore remains quarantined for a later retry.
+		if err := f.reportReplicaFault(errors.New("replica snapshot restore is in progress")); err != nil {
+			return fmt.Errorf("quarantine replica before state restore: %w", err)
+		}
+
 		if err := f.storage.BeginRestore(ctx); err != nil {
 			return fmt.Errorf("begin state restore: %w", err)
 		}
@@ -209,6 +220,14 @@ func (f *FSM) Restore(reader io.ReadCloser) error {
 		}
 
 		committed = true
+
+		if err := f.verifyTopicState(ctx); err != nil {
+			return fmt.Errorf("verify restored topic state: %w", err)
+		}
+
+		if err := f.reportReplicaRecovery(); err != nil {
+			return fmt.Errorf("recover replica health after verified snapshot: %w", err)
+		}
 
 		metrics.RecordRestoreRecords(stats.queues, stats.messages, stats.topics, stats.subscriptions)
 

@@ -115,7 +115,7 @@ There is deliberately no publish-time arrow from a topic message to every subscr
 
 ### Persistence and clustering
 
-- Rename the existing storage migrations to zero-padded `001_*.sql` through `004_*.sql`, then add `005_agent_messaging.sql`, `006_tenant_security.sql`, `007_legacy_queue_safety.sql`, `008_stream_pubsub.sql`, and `009_agent_operations.sql` to both SQLite and PostgreSQL mutation directories. Stored schema versions remain 1-9; the names prevent version 10 sorting before version 2.
+- Rename the existing storage migrations to zero-padded `001_*.sql` through `004_*.sql`, then add `005_agent_messaging.sql`, `006_tenant_security.sql`, `007_pubsub_queue_index.sql`, `008_legacy_queue_safety.sql`, `009_stream_pubsub.sql`, and `010_agent_operations.sql` to both SQLite and PostgreSQL mutation directories. Stored schema versions remain contiguous from 1 through 10; the names prevent version 10 sorting before version 2.
 - Modify `internal/server/sqlc/sqlite/schema.sql`, `internal/server/sqlc/postgres/schema.sql`, and the root `sqlc.yaml` generation matrix.
 - Modify `internal/cluster/command/command.go`, `internal/cluster/store.go`, `internal/cluster/fsm/fsm.go`, and `internal/cluster/fsm/snapshot.go`.
 - Add agent/pubsub state records to `internal/server/service/agent/state.go` and `internal/server/service/pubsub/state.go`.
@@ -3216,8 +3216,8 @@ git commit -m "feat: add lease-safe agent inbox delivery"
 - Regenerate: `internal/server/schema/v1/schema.pb.json.go`
 - Regenerate: `internal/server/schema/v1/schema_grpc.pb.go`
 - Regenerate: `internal/server/schema/v1/schema_vtproto.pb.go`
-- Add: `internal/server/mutations/storage/sqlite/007_legacy_queue_safety.sql`
-- Add: `internal/server/mutations/storage/postgres/007_legacy_queue_safety.sql`
+- Add: `internal/server/mutations/storage/sqlite/008_legacy_queue_safety.sql`
+- Add: `internal/server/mutations/storage/postgres/008_legacy_queue_safety.sql`
 - Modify: `internal/server/sqlc/sqlite/schema.sql`
 - Modify: `internal/server/sqlc/postgres/schema.sql`
 - Modify: `internal/server/service/queue/litestore/storage.go`
@@ -3351,8 +3351,8 @@ git commit -m "fix: add safe legacy queue delivery semantics"
 ### Task 12: Add first-class topic metadata, append storage, and idempotent publish
 
 **Files:**
-- Add: `internal/server/mutations/storage/sqlite/008_stream_pubsub.sql`
-- Add: `internal/server/mutations/storage/postgres/008_stream_pubsub.sql`
+- Add: `internal/server/mutations/storage/sqlite/009_stream_pubsub.sql`
+- Add: `internal/server/mutations/storage/postgres/009_stream_pubsub.sql`
 - Modify: `internal/server/sqlc/sqlite/schema.sql`
 - Modify: `internal/server/sqlc/postgres/schema.sql`
 - Modify: `sqlc.yaml`
@@ -4230,8 +4230,8 @@ git commit -m "feat: replicate agent messaging state"
 ### Task 16: Wire services, readiness, capabilities, limits, and observability
 
 **Files:**
-- Add: `internal/server/mutations/storage/sqlite/009_agent_operations.sql`
-- Add: `internal/server/mutations/storage/postgres/009_agent_operations.sql`
+- Add: `internal/server/mutations/storage/sqlite/010_agent_operations.sql`
+- Add: `internal/server/mutations/storage/postgres/010_agent_operations.sql`
 - Add: `internal/server/readiness.go`
 - Add: `internal/server/readiness_test.go`
 - Add: `internal/server/lifecycle.go`

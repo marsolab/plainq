@@ -31,7 +31,11 @@ if ! git log --first-parent --diff-merges=first-parent --no-renames --format= --
   "$expected_sha..$remote_main_sha" -- |
   while IFS= read -r -d '' changed_path; do
     case "$changed_path" in
-      (schema/*|internal/server/schema/*|scripts/check-schema-*.sh|Makefile|.github/workflows/schema-release.yaml)
+      # The release workflow publishes only when schema sources change.
+      # Generator and workflow inputs still trigger validation, but must not
+      # stale an older source-changing run because they schedule no replacement
+      # publication of their own.
+      (schema/*)
         echo "newer publication-relevant path: $changed_path" >&2
         exit 1
         ;;

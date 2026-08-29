@@ -1,7 +1,6 @@
 package collector
 
 import (
-	"context"
 	"log/slog"
 	"time"
 
@@ -49,28 +48,9 @@ func (c *Collector) persist(operation string, err error) {
 	}
 }
 
-// saveRaw records one raw metric datapoint. It is a no-op when telemetry has
-// no store, which is what "telemetry disabled" looks like from in here.
-func (c *Collector) saveRaw(ctx context.Context, now int64, id, metric string, value float64) {
-	if c.store == nil {
-		return
-	}
-
-	c.persist(metrics.TelemetryOpSaveRaw, c.store.SaveRawMetric(ctx, now, id, metric, value, ""))
-}
-
-// saveRate records one rate snapshot over the collection window.
-func (c *Collector) saveRate(ctx context.Context, now int64, id, metric string, rate float64) {
-	if c.store == nil {
-		return
-	}
-
-	c.persist(metrics.TelemetryOpSaveRate, c.store.SaveRateSnapshot(ctx, now, id, metric, rate, rateWindowSeconds))
-}
-
 // observeCollection records one rate-calculation pass.
-func (c *Collector) observeCollection(start time.Time) {
-	metrics.RecordTelemetryCollection(start, nil)
+func (c *Collector) observeCollection(start time.Time, err error) {
+	metrics.RecordTelemetryCollection(start, err)
 }
 
 // observeAggregation records one roll-up over a window.

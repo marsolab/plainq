@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	hraft "github.com/hashicorp/raft"
+	"github.com/heartwilltell/hc"
 	"github.com/marsolab/plainq/internal/cluster/consensus"
 	raftengine "github.com/marsolab/plainq/internal/cluster/consensus/raft"
 	"github.com/marsolab/plainq/internal/cluster/discovery"
@@ -23,6 +25,28 @@ import (
 	"github.com/marsolab/plainq/internal/server/service/queue"
 	"github.com/marsolab/servekit/logkit"
 )
+
+var processExit = os.Exit
+
+type nodeOptions struct {
+	reconcileTopicState fsm.TopicStateReconciler
+}
+
+type preparedNode struct {
+	cfg         Config
+	logger      *slog.Logger
+	localHealth hc.HealthChecker
+	options     nodeOptions
+	health      *replicaHealth
+	tlsConfig   *tls.Config
+}
+
+// NodeOption configures callbacks that do not alter the node's safety wiring.
+type NodeOption func(*nodeOptions)
+
+func WithTopicStateReconciler(reconcile fsm.TopicStateReconciler) NodeOption {
+	return func(options *nodeOptions) { options.reconcileTopicState = reconcile }
+}
 
 // bootstrapPoll is how often a node waiting on bootstrap-expect re-counts its
 // peers.
@@ -44,14 +68,17 @@ type Node struct {
 	cfg    Config
 	logger *slog.Logger
 
-	mux        *transport.Mux
-	gossip     *gossip.Memberlist
-	consensus  consensus.Consensus
-	fsm        *fsm.FSM
-	discoverer discovery.Discoverer
-	peerServer *peer.Server
-	peerClient *peer.Client
-	store      *Store
+	mux           *transport.Mux
+	gossip        *gossip.Memberlist
+	consensus     consensus.Consensus
+	fsm           *fsm.FSM
+	discoverer    discovery.Discoverer
+	peerServer    *peer.Server
+	peerClient    *peer.Client
+	store         *Store
+	local         queue.ReplicatedStorage
+	localHealth   hc.HealthChecker
+	replicaHealth *replicaHealth
 
 	// lastSeen records when a member was last observed alive, so the leader
 	// can tell "briefly unreachable" from "gone".
@@ -89,49 +116,54 @@ type Node struct {
 
 // NewNode assembles a cluster node around a local store. Nothing listens or
 // connects until Start is called.
-func NewNode(cfg Config, local queue.ReplicatedStorage, logger *slog.Logger) (*Node, error) {
-	if logger == nil {
-		logger = logkit.NewNop()
-	}
-
-	if err := cfg.Normalize(); err != nil {
+func NewNode(cfg Config, local queue.ReplicatedStorage, logger *slog.Logger, opts ...NodeOption) (*Node, error) {
+	prepared, err := prepareNode(cfg, local, logger, opts)
+	if err != nil {
 		return nil, err
 	}
 
-	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("cluster configuration: %w", err)
-	}
-
-	tlsConfig, tlsErr := buildTLSConfig(cfg)
-	if tlsErr != nil {
-		return nil, tlsErr
-	}
-
 	mux, muxErr := transport.New(transport.Config{
-		BindAddr:      cfg.BindAddr,
-		AdvertiseAddr: cfg.AdvertiseAddr,
-		TLSConfig:     tlsConfig,
-		Logger:        logger,
+		BindAddr:      prepared.cfg.BindAddr,
+		AdvertiseAddr: prepared.cfg.AdvertiseAddr,
+		TLSConfig:     prepared.tlsConfig,
+		Logger:        prepared.logger,
 	})
 	if muxErr != nil {
 		return nil, fmt.Errorf("start cluster transport: %w", muxErr)
 	}
 
-	stateMachine := fsm.New(local, logger)
+	fatalApply := func(err error) {
+		persistErr := prepared.health.Fail(err)
+		prepared.logger.Error("Terminating after a replica apply guard failure",
+			slog.String("error", err.Error()),
+			slog.Any("quarantine_error", persistErr),
+		)
+		processExit(1)
+	}
+
+	fsmOptions := []fsm.Option{
+		fsm.WithReplicaFaultReporter(prepared.health.Fail),
+		fsm.WithReplicaRecoveryReporter(prepared.health.Recover),
+	}
+	if prepared.options.reconcileTopicState != nil {
+		fsmOptions = append(fsmOptions, fsm.WithTopicStateReconciler(prepared.options.reconcileTopicState))
+	}
+
+	stateMachine := fsm.New(local, prepared.logger, prepared.health, fatalApply, fsmOptions...)
 
 	engine, engineErr := raftengine.New(raftengine.Config{
-		NodeID:             cfg.NodeID,
-		DataDir:            cfg.DataDir,
+		NodeID:             prepared.cfg.NodeID,
+		DataDir:            prepared.cfg.DataDir,
 		FSM:                stateMachine,
 		Mux:                mux,
-		HeartbeatTimeout:   cfg.HeartbeatTimeout,
-		ElectionTimeout:    cfg.ElectionTimeout,
-		LeaderLeaseTimeout: cfg.LeaderLeaseTimeout,
-		CommitTimeout:      cfg.CommitTimeout,
-		SnapshotInterval:   cfg.SnapshotInterval,
-		SnapshotThreshold:  cfg.SnapshotThreshold,
-		TrailingLogs:       cfg.TrailingLogs,
-		Logger:             logger,
+		HeartbeatTimeout:   prepared.cfg.HeartbeatTimeout,
+		ElectionTimeout:    prepared.cfg.ElectionTimeout,
+		LeaderLeaseTimeout: prepared.cfg.LeaderLeaseTimeout,
+		CommitTimeout:      prepared.cfg.CommitTimeout,
+		SnapshotInterval:   prepared.cfg.SnapshotInterval,
+		SnapshotThreshold:  prepared.cfg.SnapshotThreshold,
+		TrailingLogs:       prepared.cfg.TrailingLogs,
+		Logger:             prepared.logger,
 	})
 	if engineErr != nil {
 		_ = mux.Close()
@@ -139,41 +171,115 @@ func NewNode(cfg Config, local queue.ReplicatedStorage, logger *slog.Logger) (*N
 		return nil, fmt.Errorf("start consensus engine: %w", engineErr)
 	}
 
-	peerClient := peer.NewClient(mux, cfg.Secret)
+	peerClient := peer.NewClient(mux, prepared.cfg.Secret)
 
 	storeOpts := []StoreOption{
-		WithConsistency(cfg.Consistency),
-		WithStoreLogger(logger),
+		WithConsistency(prepared.cfg.Consistency),
+		WithStoreLogger(prepared.logger),
+		WithReplicaHealth(prepared.health),
 	}
 
-	if cfg.ApplyTimeout > 0 {
-		storeOpts = append(storeOpts, WithApplyTimeout(cfg.ApplyTimeout))
+	if prepared.cfg.ApplyTimeout > 0 {
+		storeOpts = append(storeOpts, WithApplyTimeout(prepared.cfg.ApplyTimeout))
 	}
+
+	proposals := newProposalGuard(engine, local)
 
 	node := Node{
-		cfg:        cfg,
-		logger:     logger,
-		mux:        mux,
-		consensus:  engine,
-		fsm:        stateMachine,
-		peerClient: peerClient,
-		store:      NewStore(local, engine, peerClient, storeOpts...),
-		lastSeen:   make(map[string]time.Time),
-		departed:   make(map[string]time.Time),
-		done:       make(chan struct{}),
+		cfg:           prepared.cfg,
+		logger:        prepared.logger,
+		mux:           mux,
+		consensus:     proposals,
+		fsm:           stateMachine,
+		peerClient:    peerClient,
+		store:         NewStore(local, proposals, peerClient, storeOpts...),
+		local:         local,
+		localHealth:   prepared.localHealth,
+		replicaHealth: prepared.health,
+		lastSeen:      make(map[string]time.Time),
+		departed:      make(map[string]time.Time),
+		done:          make(chan struct{}),
 	}
 
 	// Membership changes are routed through the node rather than straight to
 	// the engine, so a removal asked for by a peer is recorded the same way
 	// one asked for locally is.
 	node.peerServer = peer.NewServer(peer.ServerConfig{
-		Applier:    engine,
-		Membership: &nodeMembership{node: &node},
-		Secret:     cfg.Secret,
-		Logger:     logger,
+		Applier:     proposals,
+		Membership:  &nodeMembership{node: &node},
+		ForwardGate: prepared.health.Check,
+		Secret:      prepared.cfg.Secret,
+		Logger:      prepared.logger,
 	})
 
 	return &node, nil
+}
+
+func prepareNode(
+	cfg Config,
+	local queue.ReplicatedStorage,
+	logger *slog.Logger,
+	opts []NodeOption,
+) (preparedNode, error) {
+	if logger == nil {
+		logger = logkit.NewNop()
+	}
+
+	if err := cfg.Normalize(); err != nil {
+		return preparedNode{}, err
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return preparedNode{}, fmt.Errorf("cluster configuration: %w", err)
+	}
+
+	localHealth, ok := local.(hc.HealthChecker)
+	if !ok {
+		return preparedNode{}, fmt.Errorf("cluster storage %T must implement health checking", local)
+	}
+
+	options := nodeOptions{}
+	for _, opt := range opts {
+		opt(&options)
+	}
+
+	health, err := openReplicaHealth(cfg.DataDir)
+	if err != nil {
+		return preparedNode{}, err
+	}
+
+	tlsConfig, err := buildTLSConfig(cfg)
+	if err != nil {
+		return preparedNode{}, err
+	}
+
+	return preparedNode{
+		cfg:         cfg,
+		logger:      logger,
+		localHealth: localHealth,
+		options:     options,
+		health:      health,
+		tlsConfig:   tlsConfig,
+	}, nil
+}
+
+func openReplicaHealth(dataDir string) (*replicaHealth, error) {
+	var health *replicaHealth
+
+	if err := raftengine.WithStableStore(dataDir, func(stable hraft.StableStore) error {
+		initialized, err := newReplicaHealth(dataDir, stable)
+		if err != nil {
+			return err
+		}
+
+		health = initialized
+
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("initialize replica health: %w", err)
+	}
+
+	return health, nil
 }
 
 // Store returns the queue.Storage the server should use. Every write through
@@ -899,7 +1005,7 @@ func (n *Node) sweep(ctx context.Context) {
 			return
 		}
 
-		queues, err := n.store.local.ListQueues(ctx, listAllQueues(cursor))
+		queues, err := n.store.ListQueues(ctx, listAllQueues(cursor))
 		if err != nil {
 			n.logger.Error("Failed to list queues for cluster eviction",
 				slog.String("error", err.Error()),
@@ -1012,25 +1118,7 @@ func (n *Node) Leave(ctx context.Context) error {
 		return nil
 	}
 
-	var errs []error
-
-	// Ask the leader to remove this node first, while it can still be reached
-	// through a healthy cluster.
-	if _, addr, err := n.consensus.Leader(); err == nil {
-		if n.consensus.IsLeader() {
-			if removeErr := n.Remove(ctx, n.cfg.NodeID); removeErr != nil {
-				errs = append(errs, removeErr)
-			}
-		} else if leaveErr := n.peerClient.Leave(ctx, addr, n.cfg.NodeID); leaveErr != nil {
-			errs = append(errs, leaveErr)
-		}
-	}
-
-	if err := n.gossip.Leave(leaveTimeout); err != nil {
-		errs = append(errs, err)
-	}
-
-	return errors.Join(errs...)
+	return leaveNode(ctx, n.cfg.NodeID, nodeLeaveMembership{node: n}, n.gossip.Leave)
 }
 
 // Close stops the node. It does not leave the cluster — a restart is not a

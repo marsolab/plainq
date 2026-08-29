@@ -1,28 +1,37 @@
 # Observability
 
-PlainQ ships the operational basics in the box: a health endpoint, Prometheus
+PlainQ ships the operational basics in the box: health endpoints, Prometheus
 metrics, an internal telemetry store that powers Houston's dashboards, structured
 logs, and an optional profiler.
 
 ## Health
 
-A liveness/readiness endpoint is served on the HTTP listener:
+Separate liveness and readiness endpoints are served on the HTTP listener:
 
-| Property | Default        |
-| -------- | -------------- |
-| Route    | `/health`      |
-| Flag     | `--health.route` (path), `--health` (enable) |
+| Purpose | Default | Flag |
+| --- | --- | --- |
+| Process liveness | `/live` | `--health.liveness.route` |
+| Storage and cluster readiness | `/health` | `--health.route` |
+| Enable both endpoints | `true` | `--health` |
 
 ```shell
+curl http://localhost:8081/live
 curl http://localhost:8081/health
 ```
+
+`/live` returns 200 while the process can answer HTTP. `/health` returns 503
+when physical storage is unhealthy, a cluster has no write quorum, or the local
+replica is quarantined after an unsafe state-machine outcome. Replica quarantine
+survives process restart; recover it only with a verified snapshot restore or a
+complete replica wipe and reseed. Do not create or delete the apply-guard files
+individually.
 
 Wire this to your orchestrator's probes:
 
 ```yaml
 # Kubernetes
 livenessProbe:
-  httpGet: { path: /health, port: 8081 }
+  httpGet: { path: /live, port: 8081 }
   initialDelaySeconds: 5
   periodSeconds: 10
 readinessProbe:
@@ -30,10 +39,10 @@ readinessProbe:
   periodSeconds: 10
 ```
 
-The health endpoint is intentionally unauthenticated so probes work without
+The health endpoints are intentionally unauthenticated so probes work without
 credentials. Related flags: `--health.route.logs` and `--health.route.metrics`
-toggle access logging and self-metrics for the endpoint itself (both off by
-default to avoid probe noise).
+toggle access logging and self-metrics for both endpoints (both off by default
+to avoid probe noise).
 
 ## Prometheus metrics
 
@@ -72,9 +81,11 @@ histogram_quantile(0.99, sum by (le, route) (rate(plainq_http_request_duration_s
 
 ### The metric catalog
 
-The exposition format carries a metric's *type* but has nowhere to put its
-description, so the descriptions live in an API endpoint that is generated
-from the same declarations the metrics themselves come from:
+The exposition format carries `# TYPE` metadata and a name-only
+`# HELP <family>` line. The pinned VictoriaMetrics writer does not include the
+declaration's prose in that HELP line, so the full descriptions live in an API
+endpoint generated from the same declarations the metrics themselves come
+from:
 
 ```shell
 curl -s localhost:8081/api/v1/metrics/catalog | jq '.[] | select(.name | startswith("plainq_cluster"))'
@@ -114,15 +125,42 @@ first failure rather than after it.
 | ------ | ---- | ------ | ------- |
 | `plainq_topic_deliveries_total` | counter | `topic` | Individual deliveries to subscriber queues. One publish to three subscribers is three deliveries. |
 | `plainq_topic_delivery_failures_total` | counter | `topic` | Deliveries that failed to reach a subscriber queue. Publishing is best-effort per subscriber, so this is the only place a lost fan-out shows up. |
-| `plainq_topic_fanout` | histogram | `topic` | Distribution of how many subscribers a single publish reached. |
+| `plainq_topic_fanout` | histogram | `topic` | Distribution of how many subscriber destinations a single publish selected. |
 | `plainq_topic_messages_published_total` | counter | `topic` | Messages published to a topic, counted once per publish regardless of fan-out. |
 | `plainq_topic_operation_duration_seconds` | histogram | `backend`, `operation` | How long a topic operation took inside the storage layer. |
 | `plainq_topic_operations_total` | counter | `backend`, `operation`, `result` | Topic operations by outcome. |
 | `plainq_topic_published_bytes_total` | counter | `topic` | Message body bytes published to a topic. |
+| `plainq_topic_request_duration_seconds` | histogram | `backend`, `operation` | How long a decoded topic request took at the application boundary. |
+| `plainq_topic_requests_total` | counter | `backend`, `operation`, `result` | Decoded topic requests by outcome. |
 | `plainq_topic_subscriptions` | gauge | `topic` | Subscriptions currently attached to a topic. |
 | `plainq_topic_subscriptions_created_total` | counter | `topic` | Subscriptions created on a topic. |
 | `plainq_topic_subscriptions_deleted_total` | counter | `topic` | Subscriptions removed from a topic. |
 | `plainq_topics_exist` | gauge | — | Topics that currently exist. |
+
+Request and storage-operation families are intentionally separate: a decoded
+request can fail validation before storage is called. Their label vocabulary is
+closed. `backend` is exactly `sqlite`, `turso`, `postgres`, or `cluster`;
+`operation` is exactly `create_topic`, `delete_topic`, `list_topics`, `publish`,
+`subscribe`, or `unsubscribe`; and `result` is exactly `ok` or `error`. Neither
+request nor storage-operation families use a `topic` label. Topic IDs appear
+only on the bounded business and current-state families.
+
+Useful pub/sub queries:
+
+```promql
+sum by (topic) (rate(plainq_topic_messages_published_total[5m]))
+sum by (topic) (rate(plainq_topic_delivery_failures_total[5m]))
+sum by (operation, result) (rate(plainq_topic_requests_total[5m]))
+histogram_quantile(0.95, sum by (le, operation) (rate(plainq_topic_request_duration_seconds_bucket[5m])))
+```
+
+Subscription lifecycle counters include explicit unsubscribe plus bindings
+removed by successful topic or queue deletion. Current topic/subscription gauges
+come from authoritative storage reconciliation. On a cluster, `/metrics` and
+Houston describe **This node**: local state and activity observed by the node
+you queried, not a magically aggregated cluster-wide view. Aggregate nodes in
+Prometheus when you need a cluster total and avoid summing replicated exact
+gauges as if each replica were a different topic.
 
 ### HTTP and gRPC
 
@@ -182,6 +220,7 @@ first failure rather than after it.
 | `plainq_cluster_gossip_joins_total` | counter | `result` | Attempts to join the gossip pool, by outcome. |
 | `plainq_cluster_gossip_members` | gauge | `state` | Members in the gossip view, by state. |
 | `plainq_cluster_healthy` | gauge | `node_id` | 1 when the cluster can commit a write. Alert on 0 — this is the metric that means the queue is down. |
+| `plainq_cluster_replica_quarantined` | gauge | `node_id` | 1 when this replica is quarantined after a non-deterministic state-machine result and must not serve data; 0 otherwise. |
 | `plainq_cluster_last_index` | gauge | `node_id` | Last log index stored locally. |
 | `plainq_cluster_leader` | gauge | `node_id` | 1 on the leader, 0 on followers. Summed across a cluster this should be exactly 1. |
 | `plainq_cluster_leader_last_contact_seconds` | gauge | `node_id` | How long ago this follower heard from the leader. Zero on the leader itself. |
@@ -217,8 +256,16 @@ first failure rather than after it.
 | `plainq_telemetry_cleanups_total` | counter | `result` | Retention sweeps over the telemetry store, by outcome. |
 | `plainq_telemetry_collection_duration_seconds` | histogram | — | How long one telemetry collection pass took. Approaching the collection interval means it is falling behind. |
 | `plainq_telemetry_collections_total` | counter | `result` | Rate-calculation passes the telemetry collector ran, by outcome. |
+| `plainq_telemetry_event_buffer_dropped_total` | counter | `metric` | Internal telemetry event samples dropped because bounded collector buffers were full. |
 | `plainq_telemetry_store_writes_total` | counter | `operation`, `result` | Writes to the telemetry store, by operation and outcome. A climbing error count means the dashboards are going stale. |
+| `plainq_telemetry_terminal_state_dropped_total` | counter | — | Terminal topic states dropped because the bounded completion ledger was full or unavailable. |
 | `plainq_telemetry_tracked` | gauge | `kind` | Distinct queues and topics the collector is holding metrics for. |
+
+The two dropped counters are process-wide Prometheus health signals. They are
+deliberately not written back into PlainQ's own telemetry store: recursively
+collecting collector failures would make another failure while reporting the
+first one. Alert on any sustained increase and expect affected historical
+buckets to be marked missing.
 
 ### Process
 
@@ -276,7 +323,7 @@ which powers the charts and rate/in-flight views in the
 | `--telemetry.enable`                      | `true`    | Master switch for the telemetry subsystem.           |
 | `--telemetry.provider`                    | `sqlite`  | Telemetry backend.                                   |
 | `--telemetry.sqlite.collection.timeout`   | `10s`     | How often metrics are collected.                     |
-| `--telemetry.sqlite.retention.period`     | `14 days` | How long collected metrics are kept.                 |
+| `--telemetry.sqlite.retention.period`     | `336h`    | How long collected metrics are kept (14 days).       |
 | `--telemetry.sqlite.gc.timeout`           | `10m`     | Telemetry GC sweep interval.                         |
 | `--telemetry.prometheus.baseurl`          | _(empty)_ | Optional external Prometheus API base URL.           |
 | `--telemetry.log.enable`                  | `false`   | Log telemetry-subsystem activity.                    |
@@ -286,11 +333,43 @@ main one (e.g. `plainq_telemetry.db`), created and migrated automatically on
 startup. If telemetry fails to initialize, the server logs a warning and keeps
 running with the metrics dashboard disabled — it never blocks the queue service.
 
+Raw samples use the configured collection interval (10 seconds by default) and
+are rolled into closed 1-minute, 1-hour, and 1-day tiers. The API automatically
+uses raw data for ranges up to 1 hour, 1-minute data up to 24 hours, 1-hour data
+up to 30 days, and 1-day data beyond that, bounded by configured retention.
+Coverage is stored per metric series. Responses expose requested and effective
+half-open ranges, `sampleIntervalMs`, expected/returned point counts, and
+contiguous missing ranges classified as `notRecorded` or `outsideRetention`.
+A real measured zero stays zero; unavailable history stays absent and Houston
+never draws a line across it.
+
+Authenticated topic telemetry routes include:
+
+- `/api/v1/metrics/topic/{id}/rates` for publish, delivery, and failure rates;
+- `/api/v1/metrics/topic/{id}/subscriptions` for active subscriptions and
+  create/remove rates;
+- topic summary and overview responses with range-scoped
+  `operationSummaries` (decoded requests) and
+  `storageOperationSummaries` (storage work).
+
+The two operation fields are independently nullable because validation can fail
+without a storage call. Houston does not conflate them and does not plot the
+storage family. Its two public-subscribe graphs are delivery activity and active
+subscriptions; active counts use step-after interpolation, while rates use
+linear segments only between adjacent known samples.
+
 > The telemetry store and the Prometheus endpoint are fed from the same event
 > stream, so they cannot disagree about what happened. They differ in what they
 > keep: `/metrics` holds counters your monitoring stack scrapes and stores
 > itself, while the telemetry store keeps the rolled-up history Houston's charts
 > draw from without needing a Prometheus at all.
+
+Collection, rollup, or cleanup failures are retried in order and leave honest
+gaps rather than fabricated coverage. Changing the raw interval first catches
+up old completed tiers, then resets retained raw rows; the transition is
+reported as `notRecorded`. The legacy `collection.timeout` option is the
+collection interval and must be a whole-millisecond divisor of one minute;
+enabled retention must be at least 24 hours.
 
 ## Logs
 
@@ -400,8 +479,10 @@ is polling an idle queue, and
 says how long a message actually waits — which is the number your users
 experience.
 
-And keep the plain one: a failing `/health` should take the instance out of
-rotation.
+And keep the plain one: a failing readiness `/health` should take the instance
+out of rotation. Do not wire liveness to readiness; `/live` deliberately stays
+healthy during a dependency failure or replica quarantine so orchestration does
+not erase useful recovery state in a restart loop.
 
 ## Next steps
 

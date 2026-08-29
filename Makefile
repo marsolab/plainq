@@ -2,16 +2,33 @@
 deps:
 	go mod tidy && go mod download
 
-.PHONY: schema
-schema:
-	cd internal/server/schema && buf generate buf.build/plainq/schema
+.PHONY: schema schema-local schema-public-check schema-published schema-check schema-breaking
+schema: schema-local
 
-.PHONY: schema-local
 schema-local:
 	cd schema && buf lint && buf generate --template buf.docs.gen.yaml && perl -pi -e 's/[ \t]+$$//' docs/index.html
 	cd internal/server/schema && buf generate ../../../schema --template buf.gen.yaml
 
-.PHONY: schema-breaking
+schema-public-check:
+	@tmp=$$(mktemp -d); \
+	trap 'rm -rf "$$tmp"' EXIT; \
+	buf generate schema --template schema/buf.gen.yaml --output "$$tmp"; \
+	test -s "$$tmp/go/v1/schema.pb.go"; \
+	test -s "$$tmp/go/v1/schema.pb.json.go"; \
+	test -s "$$tmp/go/v1/schema.pb.validate.go"; \
+	test -s "$$tmp/go/v1/schema_grpc.pb.go"; \
+	test -s "$$tmp/go/v1/v1connect/schema.connect.go"; \
+	cd "$$tmp/go"; \
+	go mod init github.com/plainq/go; \
+	go mod tidy; \
+	go test ./...
+
+schema-published:
+	cd internal/server/schema && buf generate buf.build/plainq/schema
+
+schema-check: schema-local schema-public-check
+	git diff --exit-code -- schema/docs internal/server/schema
+
 schema-breaking:
 	cd schema && buf breaking --against 'https://github.com/marsolab/plainq.git#branch=main,subdir=schema'
 
@@ -54,12 +71,12 @@ docker:
 		--build-arg COMMIT=$(shell git rev-parse --short HEAD) \
 		-t $(IMAGE):$(VERSION) .
 
-.PHONY: helm-lint
+.PHONY: helm-lint helm-test
 helm-lint:
 	helm lint deploy/helm/plainq \
 		--set auth.jwtSecret=ci-test-jwt-secret-at-least-32-bytes \
 		--set auth.bootstrap.secret=ci-test-bootstrap-secret-32-bytes
 
-.PHONY: helm-test
 helm-test:
 	deploy/helm/plainq/tests/bootstrap-secret.sh
+	./deploy/helm/plainq/test-health-render.sh

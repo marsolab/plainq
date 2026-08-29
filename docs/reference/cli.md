@@ -20,6 +20,12 @@ always authoritative.
 | `plainq send <queue-id>`       | Send one or more messages.                                |
 | `plainq receive <queue-id>`    | Receive messages.                                          |
 | `plainq delete-message <queue-id> <id>...` | Acknowledge (delete) messages by ID.          |
+| `plainq topic list`             | List topics and their subscription objects.                 |
+| `plainq topic create <name>`    | Create a uniquely named topic.                              |
+| `plainq topic delete <topic-id>` | Delete a topic and its subscriptions.                       |
+| `plainq topic subscribe <topic-id> <queue-id>` | Subscribe an existing queue.                 |
+| `plainq topic unsubscribe <topic-id> <subscription-id>` | Remove a subscription.          |
+| `plainq topic publish <topic-id>` | Publish one batch to every subscribed queue.               |
 | `plainq tui`                   | Launch the interactive terminal UI.                       |
 | `plainq schema`                | Print the CLI and gRPC surfaces (`-target=all\|cli\|grpc`, text or `-json`). |
 
@@ -31,7 +37,7 @@ always authoritative.
 ## Common client flags
 
 Accepted by every client command (`list`, `create`, `describe`, `purge`,
-`delete`, `send`, `receive`, `delete-message`, `tui`):
+`delete`, `send`, `receive`, `delete-message`, every `topic` leaf, and `tui`):
 
 | Flag          | Default          | Meaning                              |
 | ------------- | ---------------- | ------------------------------------ |
@@ -56,9 +62,9 @@ in `-h` output and in `plainq schema -target=cli`.
 
 | Effect        | Commands                                                       |
 | ------------- | -------------------------------------------------------------- |
-| `read-only`   | `list`, `describe`, `schema`, `version`, `ctx list`, `cluster status`, `cluster members` |
-| `mutating`    | `serve`, `create`, `send`, `receive`, `tui`, `ctx init`, `cluster join`, `cluster snapshot` |
-| `destructive` | `purge`, `delete`, `delete-message`, `cluster leave`            |
+| `read-only`   | `list`, `describe`, `topic list`, `schema`, `version`, `ctx list`, `cluster status`, `cluster members` |
+| `mutating`    | `serve`, `create`, `send`, `receive`, `topic create`, `topic subscribe`, `topic publish`, `tui`, `ctx init`, `cluster join`, `cluster snapshot` |
+| `destructive` | `purge`, `delete`, `delete-message`, `topic delete`, `topic unsubscribe`, `cluster leave` |
 
 Destructive commands take effect immediately: no confirmation prompt, no undo.
 `serve` and `tui` are also marked *blocking* — they run until interrupted.
@@ -101,6 +107,55 @@ Destructive commands take effect immediately: no confirmation prompt, no undo.
 | --------- | ------- | ---------------------------------------- |
 | `--force` | `false` | Delete a queue even if it has messages.  |
 
+## Topic commands
+
+Topic names are nonblank and unique. Every topic, queue, and subscription
+identifier below is a 20-character XID. All leaves accept `--grpc.addr` and
+`--json`; flags may appear before or after positional arguments.
+
+### `plainq topic list`
+
+Usage: `plainq topic list [flags]`. Text is one
+`<topic-id> | <topic-name>` line. JSON includes subscriptions and timestamps.
+
+### `plainq topic create`
+
+Usage: `plainq topic create [flags] <topic-name>`. Text output is the created
+topic ID; JSON returns `topicId`.
+
+### `plainq topic delete`
+
+Usage: `plainq topic delete [flags] <topic-id>`. Deletes the topic and its
+subscriptions, not the queues or already-delivered messages. Text output is
+`deleted<TAB><topic-id>`.
+
+### `plainq topic subscribe`
+
+Usage: `plainq topic subscribe [flags] <topic-id> <queue-id>`. The queue must
+exist and can be bound to the topic once. Text output is the subscription ID.
+
+### `plainq topic unsubscribe`
+
+Usage: `plainq topic unsubscribe [flags] <topic-id> <subscription-id>`. Existing
+queue messages are retained. Text output is
+`unsubscribed<TAB><subscription-id>`.
+
+### `plainq topic publish`
+
+Usage: `plainq topic publish [flags] <topic-id>`.
+
+| Flag        | Default   | Meaning                                                        |
+| ----------- | --------- | -------------------------------------------------------------- |
+| `--message` | _(empty)_ | Message body; repeat to publish a batch.                        |
+| `--file`    | _(empty)_ | Newline-delimited bodies; `-` explicitly reads stdin.          |
+
+At least one non-empty body is required. Inline messages and file lines may be
+combined; empty file lines are ignored and every non-empty line is limited to
+4 MiB. Text output is
+`delivered<TAB><count>`. Zero subscribers is a successful zero. Fan-out attempts
+all selected destinations synchronously but is non-atomic, so exit `1` may be a
+partial delivery and a retry may duplicate retained copies.
+
 ## Arguments
 
 | Command    | Positional argument | Notes                                  |
@@ -111,6 +166,11 @@ Destructive commands take effect immediately: no confirmation prompt, no undo.
 | `delete`   | `<queue-id>`        | Required; validated as an XID.         |
 | `send`     | `<queue-id>`        | Required; validated as an XID.         |
 | `receive`  | `<queue-id>`        | Required; validated as an XID.         |
+| `topic create` | `<topic-name>` | Required, nonblank, and unique.        |
+| `topic delete` | `<topic-id>` | Required; validated as an XID.          |
+| `topic subscribe` | `<topic-id> <queue-id>` | Both required XIDs.          |
+| `topic unsubscribe` | `<topic-id> <subscription-id>` | Both required XIDs. |
+| `topic publish` | `<topic-id>` | Required XID plus message input.        |
 
 ## Exit codes
 

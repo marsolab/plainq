@@ -10,9 +10,11 @@ import (
 
 	"github.com/marsolab/plainq/internal/cluster/command"
 	"github.com/marsolab/plainq/internal/cluster/consensus"
+	"github.com/marsolab/plainq/internal/cluster/deletewire"
 	"github.com/marsolab/plainq/internal/metrics"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/service/queue"
+	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/marsolab/servekit/idkit"
 	"github.com/marsolab/servekit/logkit"
 )
@@ -60,10 +62,11 @@ const (
 // leads, through the leader if it does not. Nothing above this layer knows
 // which of those happened.
 type Store struct {
-	local     queue.ReplicatedStorage
-	consensus consensus.Consensus
-	forwarder Forwarder
-	logger    *slog.Logger
+	local         queue.ReplicatedStorage
+	consensus     consensus.Consensus
+	forwarder     Forwarder
+	logger        *slog.Logger
+	replicaHealth *replicaHealth
 
 	// consistency decides where reads are answered.
 	consistency ConsistencyMode
@@ -115,6 +118,11 @@ func WithStoreIDs(newULID, newXID func() string) StoreOption {
 	}
 }
 
+// WithReplicaHealth installs the node-wide fail-closed serving latch.
+func WithReplicaHealth(health *replicaHealth) StoreOption {
+	return func(s *Store) { s.replicaHealth = health }
+}
+
 // NewStore wraps a local store in the cluster's write path.
 func NewStore(
 	local queue.ReplicatedStorage,
@@ -148,8 +156,8 @@ func (s *Store) CreateQueue(ctx context.Context, input *v1.CreateQueueRequest) (
 }
 
 // DeleteQueue implements queue.Storage.
-func (s *Store) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest) (*v1.DeleteQueueResponse, error) {
-	return protoResponse[v1.DeleteQueueResponse](s.applyProto(ctx, command.OpDeleteQueue, input, nil))
+func (s *Store) DeleteQueue(ctx context.Context, input *v1.DeleteQueueRequest) (*queue.DeleteQueueResult, error) {
+	return deleteResultResponse[queue.DeleteQueueResult](s.applyProto(ctx, command.OpDeleteQueue, input, nil))
 }
 
 // PurgeQueue implements queue.Storage.
@@ -206,7 +214,8 @@ func (s *Store) Delete(ctx context.Context, input *v1.DeleteRequest) (*v1.Delete
 
 // DescribeQueue implements queue.Storage.
 func (s *Store) DescribeQueue(ctx context.Context, input *v1.DescribeQueueRequest) (*v1.DescribeQueueResponse, error) {
-	if err := s.readBarrier(ctx); err != nil {
+	token, err := s.readBarrier(ctx)
+	if err != nil {
 		return nil, err
 	}
 
@@ -215,12 +224,17 @@ func (s *Store) DescribeQueue(ctx context.Context, input *v1.DescribeQueueReques
 		return nil, fmt.Errorf("describe queue on the local replica: %w", err)
 	}
 
+	if err := s.finishRead(token); err != nil {
+		return nil, err
+	}
+
 	return response, nil
 }
 
 // ListQueues implements queue.Storage.
 func (s *Store) ListQueues(ctx context.Context, input *v1.ListQueuesRequest) (*v1.ListQueuesResponse, error) {
-	if err := s.readBarrier(ctx); err != nil {
+	token, err := s.readBarrier(ctx)
+	if err != nil {
 		return nil, err
 	}
 
@@ -229,12 +243,17 @@ func (s *Store) ListQueues(ctx context.Context, input *v1.ListQueuesRequest) (*v
 		return nil, fmt.Errorf("list queues on the local replica: %w", err)
 	}
 
+	if err := s.finishRead(token); err != nil {
+		return nil, err
+	}
+
 	return response, nil
 }
 
 // Peek implements queue.Storage.
 func (s *Store) Peek(ctx context.Context, input *queue.PeekRequest) (*queue.PeekResponse, error) {
-	if err := s.readBarrier(ctx); err != nil {
+	token, err := s.readBarrier(ctx)
+	if err != nil {
 		return nil, err
 	}
 
@@ -243,18 +262,27 @@ func (s *Store) Peek(ctx context.Context, input *queue.PeekRequest) (*queue.Peek
 		return nil, fmt.Errorf("browse queue on the local replica: %w", err)
 	}
 
+	if err := s.finishRead(token); err != nil {
+		return nil, err
+	}
+
 	return response, nil
 }
 
 // ListTopics implements queue.Storage.
 func (s *Store) ListTopics(ctx context.Context) (*queue.ListTopicsResponse, error) {
-	if err := s.readBarrier(ctx); err != nil {
+	token, err := s.readBarrier(ctx)
+	if err != nil {
 		return nil, err
 	}
 
 	response, err := s.local.ListTopics(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list topics on the local replica: %w", err)
+	}
+
+	if err := s.finishRead(token); err != nil {
+		return nil, err
 	}
 
 	return response, nil
@@ -268,10 +296,27 @@ func (s *Store) CreateTopic(ctx context.Context, input *queue.CreateTopicRequest
 }
 
 // DeleteTopic implements queue.Storage.
-func (s *Store) DeleteTopic(ctx context.Context, topicID string) error {
-	_, err := s.applyJSON(ctx, command.OpDeleteTopic, struct{}{}, topicID, nil)
+func (s *Store) DeleteTopic(ctx context.Context, topicID string) (*queue.DeleteTopicResult, error) {
+	return deleteResultResponse[queue.DeleteTopicResult](s.applyJSON(ctx, command.OpDeleteTopic, struct{}{}, topicID, nil))
+}
 
-	return err
+// TopicInventory implements queue.Storage using the configured read barrier.
+func (s *Store) TopicInventory(ctx context.Context) (queue.TopicInventory, error) {
+	token, err := s.readBarrier(ctx)
+	if err != nil {
+		return queue.TopicInventory{}, err
+	}
+
+	inventory, err := s.local.TopicInventory(ctx)
+	if err != nil {
+		return queue.TopicInventory{}, fmt.Errorf("read topic inventory on the local replica: %w", err)
+	}
+
+	if err := s.finishRead(token); err != nil {
+		return queue.TopicInventory{}, err
+	}
+
+	return inventory, nil
 }
 
 // Subscribe implements queue.Storage.
@@ -310,7 +355,22 @@ func (s *Store) Publish(
 
 	ids := s.batchIDs(subscribers * len(input.Messages))
 
-	return jsonResponse[queue.PublishResponse](s.applyJSON(ctx, command.OpPublish, input, topicID, ids))
+	outcome, err := jsonResponse[queue.PublishOutcome](
+		s.applyJSON(ctx, command.OpPublish, input, topicID, ids),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if outcome == nil {
+		return nil, nil
+	}
+
+	if outcome.Partial {
+		return outcome.Response, &queue.PartialPublishError{Outcome: *outcome}
+	}
+
+	return outcome.Response, nil
 }
 
 // Sweep proposes eviction for one queue. Only the leader calls it — see the
@@ -332,9 +392,18 @@ func (s *Store) Sweep(ctx context.Context, queueID string) (uint64, error) {
 }
 
 func (s *Store) countSubscribers(ctx context.Context, topicID string) (int, error) {
+	token, err := s.servingToken()
+	if err != nil {
+		return 0, err
+	}
+
 	topics, err := s.local.ListTopics(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("count subscribers of topic %q: %w", topicID, err)
+	}
+
+	if err := s.finishRead(token); err != nil {
+		return 0, err
 	}
 
 	for _, topic := range topics.Topics {
@@ -348,22 +417,55 @@ func (s *Store) countSubscribers(ctx context.Context, topicID string) (int, erro
 
 // readBarrier makes a read as strong as the configured mode requires. In local
 // mode it does nothing, which is the point.
-func (s *Store) readBarrier(ctx context.Context) error {
+func (s *Store) readBarrier(ctx context.Context) (uint64, error) {
+	token, err := s.servingToken()
+	if err != nil {
+		return 0, err
+	}
+
 	if s.consistency != ConsistencyStrong {
-		return nil
+		return token, nil
 	}
 
 	// A strong read on a follower would still be answered from local state, so
 	// there is nothing honest to do but say the read cannot be served here.
 	if !s.consensus.IsLeader() {
-		return fmt.Errorf("%w: strong reads are served by the leader", consensus.ErrNotLeader)
+		return 0, fmt.Errorf("%w: strong reads are served by the leader", consensus.ErrNotLeader)
 	}
 
 	if err := s.consensus.Barrier(ctx); err != nil {
-		return fmt.Errorf("strong read barrier: %w", err)
+		return 0, fmt.Errorf("strong read barrier: %w", err)
 	}
 
-	return nil
+	if err := s.finishRead(token); err != nil {
+		return 0, err
+	}
+
+	return token, nil
+}
+
+func (s *Store) ensureServing() error {
+	if s.replicaHealth == nil {
+		return nil
+	}
+
+	return s.replicaHealth.Check()
+}
+
+func (s *Store) servingToken() (uint64, error) {
+	if s.replicaHealth == nil {
+		return 0, nil
+	}
+
+	return s.replicaHealth.ServingToken()
+}
+
+func (s *Store) finishRead(token uint64) error {
+	if s.replicaHealth == nil {
+		return nil
+	}
+
+	return s.replicaHealth.CheckServingToken(token)
 }
 
 // apply commits a command: locally when this node leads, through the leader
@@ -374,11 +476,14 @@ func (s *Store) readBarrier(ctx context.Context) error {
 // waits it out, up to the apply timeout, and only then gives up.
 //
 // The retry is deliberately narrow. It fires only when this node is certain
-// the command was *not* committed: either no leader was known, so nothing was
-// ever proposed, or the local engine rejected the proposal outright. A
-// forwarded command whose reply was lost may well have been committed, and
-// re-sending that would enqueue the same message twice.
+// the command was *not* committed: either no leader was known, or a local or
+// remote engine rejected the proposal before its outcome became ambiguous.
+// ErrCommitUnknown and transport failures may follow a commit, so re-sending
+// either could enqueue the same message twice.
 func (s *Store) apply(ctx context.Context, cmd *command.Command) (any, error) {
+	if err := s.ensureServing(); err != nil {
+		return nil, err
+	}
 	// The timer covers the whole write, retries included, because that is the
 	// latency the client actually waited: a write that spent 400ms waiting out
 	// an election was a 400ms write, however briefly the winning attempt took.
@@ -394,6 +499,13 @@ func (s *Store) apply(ctx context.Context, cmd *command.Command) (any, error) {
 		encoded, encodeErr := cmd.Encode()
 		if encodeErr != nil {
 			return nil, fmt.Errorf("encode %s command: %w", cmd.Op, encodeErr)
+		}
+
+		if len(encoded) > command.MaxEncodedBytes {
+			return nil, fmt.Errorf(
+				"%w: encoded %s command is %d bytes; limit is %d bytes",
+				pqerr.ErrCapacityExceeded, cmd.Op, len(encoded), command.MaxEncodedBytes,
+			)
 		}
 
 		ctx, cancel := context.WithTimeout(ctx, s.applyTimeout)
@@ -412,7 +524,7 @@ func (s *Store) apply(ctx context.Context, cmd *command.Command) (any, error) {
 			// A transport failure carries neither class — the leader may well have
 			// committed before the reply was lost — and re-sending that would
 			// enqueue the same message twice.
-			if !errors.Is(err, consensus.ErrNoLeader) && !errors.Is(err, consensus.ErrNotLeader) {
+			if !safeToReroute(err) {
 				return nil, err
 			}
 
@@ -449,18 +561,27 @@ func (s *Store) applyOnce(ctx context.Context, cmd *command.Command, encoded []b
 			return response, nil
 		}
 
-		if !errors.Is(err, consensus.ErrNotLeader) {
+		if !safeToReroute(err) || !errors.Is(err, consensus.ErrNotLeader) {
 			return nil, fmt.Errorf("commit %s: %w", cmd.Op, err)
 		}
 
-		// Leadership moved between the check and the proposal. The command was
-		// not committed, so forwarding it is safe rather than a duplicate.
+		// Leadership moved between the hint and a proposal that the engine
+		// definitively rejected. An in-flight leadership loss is reported as
+		// ErrCommitUnknown above and never reaches this forwarding path.
 		s.logger.Debug("Lost leadership mid-write, forwarding to the new leader",
 			slog.String("op", cmd.Op.String()),
 		)
 	}
 
 	return s.forward(ctx, cmd, encoded)
+}
+
+func safeToReroute(err error) bool {
+	if errors.Is(err, consensus.ErrCommitUnknown) || errors.Is(err, pqerr.ErrPartialFanout) {
+		return false
+	}
+
+	return errors.Is(err, consensus.ErrNoLeader) || errors.Is(err, consensus.ErrNotLeader)
 }
 
 func (s *Store) forward(ctx context.Context, cmd *command.Command, encoded []byte) (any, error) {
@@ -605,6 +726,50 @@ func jsonResponse[U any](response any, err error) (*U, error) {
 
 	if unmarshalErr := json.Unmarshal(raw, out); unmarshalErr != nil {
 		return nil, fmt.Errorf("decode forwarded response: %w", unmarshalErr)
+	}
+
+	return out, nil
+}
+
+// deleteResultResponse handles the internal mixed-version delete envelope.
+// A legacy leader returned an empty public protobuf response after committing
+// the delete, so an empty body is a successful, non-nil result with no effects
+// available to report.
+func deleteResultResponse[U any](response any, err error) (*U, error) {
+	if err != nil {
+		return nil, err
+	}
+
+	if response == nil {
+		return new(U), nil
+	}
+
+	if typed, ok := response.(*U); ok {
+		if typed == nil {
+			return new(U), nil
+		}
+
+		return typed, nil
+	}
+
+	raw, ok := response.([]byte)
+	if !ok {
+		return nil, fmt.Errorf("state machine returned %T, want *%T or an encoded delete response", response, *new(U))
+	}
+
+	if len(raw) == 0 {
+		return new(U), nil
+	}
+
+	out := new(U)
+
+	found, decodeErr := deletewire.Decode(raw, out)
+	if decodeErr != nil {
+		return nil, fmt.Errorf("decode forwarded delete response: %w", decodeErr)
+	}
+
+	if !found {
+		return nil, errors.New("decode forwarded delete response: non-empty response has no delete result")
 	}
 
 	return out, nil

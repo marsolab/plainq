@@ -10,7 +10,9 @@ it, and you can generate a client in any gRPC-supported language.
 
 ## The service
 
-`PlainQService` exposes eight RPCs split between queue management and messaging.
+`PlainQService` exposes the complete queue, messaging, and stable pub/sub v1
+surface. The authoritative generated schema documentation is published with the
+[Buf module](https://buf.build/plainq/schema/docs/main:v1).
 
 | RPC             | Kind          | Purpose                                                  |
 | --------------- | ------------- | -------------------------------------------------------- |
@@ -22,6 +24,12 @@ it, and you can generate a client in any gRPC-supported language.
 | `Send`          | Messaging     | Enqueue one or more messages.                            |
 | `Receive`       | Messaging     | Dequeue a batch (1–10) with visibility semantics.        |
 | `Delete`        | Messaging     | Acknowledge (remove) messages by ID.                     |
+| `ListTopics`    | Pub/sub       | List topics with their subscription objects.             |
+| `CreateTopic`   | Pub/sub       | Create a nonblank, uniquely named topic.                  |
+| `DeleteTopic`   | Pub/sub       | Delete a topic and its subscriptions.                     |
+| `Subscribe`     | Pub/sub       | Bind an existing queue to a topic.                        |
+| `Unsubscribe`   | Pub/sub       | Remove one subscription.                                  |
+| `Publish`       | Pub/sub       | Fan one batch out to every selected queue.                |
 
 ## Generating a client
 
@@ -88,6 +96,23 @@ message ReceiveMessage { string id = 1; bytes body = 2; }
   many `ReceiveMessage`s.
 - `Delete` takes a `repeated string message_ids` and returns `successful` and
   `failed` lists (`failed` entries carry a per-message error).
+
+### Stable pub/sub v1
+
+`ListTopics` returns each topic's XID, unique name, creation time, and complete
+subscription objects. `CreateTopic` returns `topic_id`; `Subscribe` takes a
+topic XID plus an existing queue XID and returns `subscription_id`.
+`Unsubscribe` and `DeleteTopic` preserve queue messages already delivered.
+
+`Publish` takes a non-empty `repeated PublishMessage`. Publishing with zero
+subscriptions succeeds with zero deliveries. Otherwise PlainQ snapshots the
+subscriptions and attempts the complete batch for every selected destination,
+continuing after a queue failure. The fan-out is non-atomic: an error can be a
+partial delivery and retry can duplicate copies already retained. The response
+contains a flattened `queue_ids` list, flattened `message_ids`, and
+`delivered_count`; there is no positional relation between the two ID lists.
+Consume each queue through `Receive` and acknowledge through `Delete`, preserving
+the normal at-least-once boundary.
 
 ## End-to-end example (Go)
 
@@ -178,9 +203,14 @@ func main() {
 - The bundled Go client dials with **insecure (plaintext) transport** and a 10s
   dial timeout. The gRPC port is intended to sit on a trusted network or behind a
   proxy that terminates TLS — see [Deployment](deployment.md#network-exposure).
-- Neither the gRPC surface nor the HTTP API routes currently enforce JWT auth at
-  the server (the auth/RBAC subsystem exists but isn't wired onto the routes).
-  Treat `:8080` as a privileged port and restrict who can reach it — see
+- gRPC authentication and authorization are built in. Authenticated queue/topic
+  calls are tenant-scoped and resource-authorized. Agent messaging and
+  management RPCs require a bearer token; the public credential-exchange RPC
+  validates its presented bootstrap credential. Legacy `schema.v1` methods may omit a token while
+  `--grpc.protect-legacy=false`, but that compatibility identity is limited to
+  migrated or legacy-created rows in the fixed legacy tenant. The bundled
+  CLI/TUI has no bearer or TLS client configuration yet, so use a generated or
+  external authenticated client before enabling protection. See
   [Deployment → network exposure](deployment.md#network-exposure).
 - PlainQ registers the
   [vtprotobuf](https://github.com/planetscale/vtprotobuf) codec for faster

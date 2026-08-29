@@ -2,6 +2,8 @@ package litestore
 
 import (
 	"context"
+	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -12,9 +14,70 @@ import (
 	queueservice "github.com/marsolab/plainq/internal/server/service/queue"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/marsolab/servekit/dbkit/litekit"
-	"github.com/marsolab/servekit/errkit"
 	"github.com/maxatome/go-testdeep/td"
 )
+
+func TestTursoCompatibleTopicConflictAndConnectionFailure(t *testing.T) {
+	conflictDB := sql.OpenDB(pubSubFakeConnector{conn: &pubSubFakeConn{}})
+	t.Cleanup(func() { _ = conflictDB.Close() })
+	conflictStorage := &Storage{db: conflictDB}
+
+	_, err := conflictStorage.CreateTopic(context.Background(), &queueservice.CreateTopicRequest{TopicName: "events"})
+	if !errors.Is(err, pqerr.ErrAlreadyExists) {
+		t.Fatalf("zero-row Turso-compatible insert error = %v, want %v", err, pqerr.ErrAlreadyExists)
+	}
+
+	unavailableDB := sql.OpenDB(pubSubFakeConnector{conn: &pubSubFakeConn{beginErr: context.DeadlineExceeded}})
+	t.Cleanup(func() { _ = unavailableDB.Close() })
+	unavailableStorage := &Storage{db: unavailableDB}
+
+	_, err = unavailableStorage.CreateTopic(context.Background(), &queueservice.CreateTopicRequest{TopicName: "events"})
+	if !errors.Is(err, pqerr.ErrUnavailable) {
+		t.Fatalf("exported connection failure error = %v, want %v", err, pqerr.ErrUnavailable)
+	}
+}
+
+type pubSubFakeConnector struct {
+	conn driver.Conn
+}
+
+func (c pubSubFakeConnector) Connect(context.Context) (driver.Conn, error) { return c.conn, nil }
+func (pubSubFakeConnector) Driver() driver.Driver                          { return pubSubFakeDriver{} }
+
+type pubSubFakeDriver struct{}
+
+func (pubSubFakeDriver) Open(string) (driver.Conn, error) { return &pubSubFakeConn{}, nil }
+
+type pubSubFakeConn struct {
+	beginErr error
+}
+
+func (*pubSubFakeConn) Prepare(string) (driver.Stmt, error) { return nil, driver.ErrSkip }
+func (*pubSubFakeConn) Close() error                        { return nil }
+func (c *pubSubFakeConn) Begin() (driver.Tx, error) {
+	return c.BeginTx(context.Background(), driver.TxOptions{})
+}
+func (c *pubSubFakeConn) BeginTx(context.Context, driver.TxOptions) (driver.Tx, error) {
+	if c.beginErr != nil {
+		return nil, c.beginErr
+	}
+	return pubSubFakeTx{}, nil
+}
+func (*pubSubFakeConn) ExecContext(context.Context, string, []driver.NamedValue) (driver.Result, error) {
+	return pubSubFakeResult(0), nil
+}
+
+type pubSubFakeTx struct{}
+
+func (pubSubFakeTx) Commit() error   { return nil }
+func (pubSubFakeTx) Rollback() error { return nil }
+
+type pubSubFakeResult int64
+
+func (pubSubFakeResult) LastInsertId() (int64, error) { return 0, nil }
+func (r pubSubFakeResult) RowsAffected() (int64, error) {
+	return int64(r), nil
+}
 
 func TestTenantScopedQueuesAndLegacyCompatibility(t *testing.T) {
 	ctx := context.Background()
@@ -117,12 +180,12 @@ VALUES ('tenant-b', 'tenant-b', 'Tenant B', TRUE)`); err != nil {
 	}
 	if _, err := store.Publish(humanBCtx, privateTopic.TopicID, &queueservice.PublishRequest{
 		Messages: []queueservice.PublishMessage{{Body: []byte("cross tenant")}},
-	}); !errors.Is(err, errkit.ErrNotFound) {
+	}); !errors.Is(err, pqerr.ErrNotFound) {
 		t.Fatalf("cross-tenant publish error = %v, want not found", err)
 	}
 	if _, err := store.Subscribe(humanBCtx, privateTopic.TopicID, &queueservice.SubscribeRequest{
 		QueueID: privateQueue.GetQueueId(),
-	}); !errors.Is(err, errkit.ErrNotFound) {
+	}); !errors.Is(err, pqerr.ErrNotFound) {
 		t.Fatalf("cross-tenant subscribe error = %v, want not found", err)
 	}
 }

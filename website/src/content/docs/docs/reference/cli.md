@@ -47,8 +47,8 @@ List queues. Supports pagination, an optional name prefix, and sort order.
 
 Create a queue. Prints the new queue ID.
 
-All values are whole numbers of seconds where applicable, and flags must precede
-the positional queue name.
+All values are whole numbers of seconds where applicable. Flags may appear
+before or after the positional queue name.
 
 | Flag                     | Default   | Description                                    |
 | ------------------------ | --------- | ---------------------------------------------- |
@@ -91,6 +91,51 @@ Receive a batch of messages.
 ### `plainq delete-message <queue-id> <id>...`
 
 Acknowledge (delete) one or more messages by ID.
+
+## Stable topic commands
+
+Every leaf accepts `-grpc.addr` and `-json`. Topic, queue, and subscription IDs
+are validated as 20-character XIDs, and topic names must be nonblank and unique.
+
+### `plainq topic list`
+
+`plainq topic list [flags]` prints `<topic-id> | <topic-name>` lines. JSON also
+contains full subscription objects and timestamps.
+
+### `plainq topic create`
+
+`plainq topic create [flags] <topic-name>` prints the new topic ID.
+
+### `plainq topic delete`
+
+`plainq topic delete [flags] <topic-id>` deletes the topic and subscriptions,
+not the queues or already delivered messages. Text output is
+`deleted<TAB><topic-id>`.
+
+### `plainq topic subscribe`
+
+`plainq topic subscribe [flags] <topic-id> <queue-id>` binds an existing queue
+and prints the subscription ID.
+
+### `plainq topic unsubscribe`
+
+`plainq topic unsubscribe [flags] <topic-id> <subscription-id>` removes the
+binding while preserving existing queue messages. Text output is
+`unsubscribed<TAB><subscription-id>`.
+
+### `plainq topic publish`
+
+`plainq topic publish [flags] <topic-id>` requires at least one body.
+
+| Flag       | Default | Description                                                   |
+| ---------- | ------- | ------------------------------------------------------------- |
+| `-message` | —       | Message body; repeat for a batch.                              |
+| `-file`    | —       | Newline-delimited bodies; `-` explicitly reads standard input. |
+
+Inline and file input may be combined; empty file lines are ignored and every
+non-empty line is limited to 4 MiB. Text is `delivered<TAB><count>`. Zero
+subscribers succeeds. Fan-out attempts every selected queue but is not atomic,
+so a failed command may be partial and retry may duplicate retained copies.
 
 ### `plainq tui`
 
@@ -135,7 +180,7 @@ Errors are written to stderr; stdout carries only command output.
 ## gRPC service
 
 The wire API is defined in `schema/v1/schema.proto` and published to the
-[Buf Schema Registry](https://buf.build/plainq/schema). It exposes eight RPCs:
-`ListQueues`, `DescribeQueue`, `CreateQueue`, `PurgeQueue`, `DeleteQueue`,
-`Send`, `Receive`, and `Delete`. Use `buf generate` to produce a client SDK in
-your language of choice.
+[Buf Schema Registry](https://buf.build/plainq/schema). It exposes the eight
+queue/message RPCs plus stable `ListTopics`, `CreateTopic`, `DeleteTopic`,
+`Subscribe`, `Unsubscribe`, and `Publish`. Use `buf generate` to produce a
+client SDK in your language of choice.

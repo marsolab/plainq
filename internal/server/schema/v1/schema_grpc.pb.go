@@ -68,8 +68,10 @@ type PlainQServiceClient interface {
 	Subscribe(ctx context.Context, in *SubscribeRequest, opts ...grpc.CallOption) (*SubscribeResponse, error)
 	// Unsubscribe removes a subscription from the topic.
 	Unsubscribe(ctx context.Context, in *UnsubscribeRequest, opts ...grpc.CallOption) (*UnsubscribeResponse, error)
-	// Publish publishes messages to the topic, fanning them out to every
-	// queue subscribed to it.
+	// Publish publishes messages to the topic. Publishing with zero subscriptions
+	// succeeds with zero deliveries. Fan-out is synchronous and best-effort: it
+	// attempts every selected destination but is non-atomic across queues. A
+	// failed publish may have retained copies, so retry may duplicate them.
 	Publish(ctx context.Context, in *PublishRequest, opts ...grpc.CallOption) (*PublishResponse, error)
 }
 
@@ -254,8 +256,10 @@ type PlainQServiceServer interface {
 	Subscribe(context.Context, *SubscribeRequest) (*SubscribeResponse, error)
 	// Unsubscribe removes a subscription from the topic.
 	Unsubscribe(context.Context, *UnsubscribeRequest) (*UnsubscribeResponse, error)
-	// Publish publishes messages to the topic, fanning them out to every
-	// queue subscribed to it.
+	// Publish publishes messages to the topic. Publishing with zero subscriptions
+	// succeeds with zero deliveries. Fan-out is synchronous and best-effort: it
+	// attempts every selected destination but is non-atomic across queues. A
+	// failed publish may have retained copies, so retry may duplicate them.
 	Publish(context.Context, *PublishRequest) (*PublishResponse, error)
 	mustEmbedUnimplementedPlainQServiceServer()
 }

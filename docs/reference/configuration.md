@@ -21,7 +21,7 @@ guidance on which to set and why, see the
 
 | Flag                          | Default | Purpose                                              |
 | ----------------------------- | ------- | ---------------------------------------------------- |
-| `--grpc.addr`                 | `:8080` | gRPC listener (queue API).                           |
+| `--grpc.addr`                 | `:8080` | gRPC queue/topic listener.                           |
 | `--http.addr`                 | `:8081` | HTTP listener (Houston, REST, health, metrics).      |
 | `--http.read-timeout`         | `0`     | HTTP read timeout (`0` = none).                      |
 | `--http.read-header-timeout`  | `0`     | HTTP read-header timeout.                            |
@@ -32,7 +32,7 @@ guidance on which to set and why, see the
 
 | Flag                                | Default   | Purpose                                                |
 | ----------------------------------- | --------- | ------------------------------------------------------ |
-| `--auth.enable`                     | `true`    | Enable JWT auth on the HTTP/Houston surface.           |
+| `--auth.enable`                     | `true`    | Enable HTTP/Houston JWT sessions, including topic routes. |
 | `--auth.jwt.secret`                 | _(empty)_ | HMAC secret for tokens. Required to issue sessions.    |
 | `--auth.access.ttl`                 | `60m`     | Access-token lifetime.                                 |
 | `--auth.refresh.ttl`                | `720h`    | Refresh-token lifetime (30 days).                      |
@@ -59,12 +59,19 @@ guidance on which to set and why, see the
 | `--telemetry.sqlite.retention.period`     | `336h`    | Telemetry retention (14 days).                   |
 | `--telemetry.prometheus.baseurl`          | _(empty)_ | External Prometheus API base URL.                |
 
+`collection.timeout` is the historical flag name for the collection interval.
+When telemetry is enabled it must be a whole-millisecond duration of at least
+1ms that divides one minute evenly. `gc.timeout` must be positive and retention
+must be at least 24h. Changing the raw interval catches up completed rollups,
+then resets retained raw rows and exposes the transition as `notRecorded`.
+
 ## Health
 
 | Flag                     | Default   | Purpose                                  |
 | ------------------------ | --------- | ---------------------------------------- |
 | `--health`               | `true`    | Enable the health endpoint.              |
-| `--health.route`         | `/health` | Health endpoint path.                    |
+| `--health.route`         | `/health` | Storage and cluster readiness endpoint.  |
+| `--health.liveness.route` | `/live`  | Process liveness endpoint.               |
 | `--health.route.logs`    | `false`   | Access logs for the health endpoint.     |
 | `--health.route.metrics` | `false`   | Self-metrics for the health endpoint.    |
 | `--health.reporter`      | _(empty)_ | Health reporter format.                  |

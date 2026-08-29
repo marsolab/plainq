@@ -17,6 +17,7 @@ import (
 	"github.com/marsolab/plainq/internal/server/service/queue"
 	"github.com/marsolab/plainq/internal/server/service/quota"
 	"github.com/marsolab/plainq/internal/server/service/securityaudit"
+	"github.com/marsolab/plainq/internal/shared/pqerr"
 )
 
 func TestPostgresQueuePolicyIdempotencyAndAtomicRollback(t *testing.T) {
@@ -205,6 +206,72 @@ func TestPostgresQueuePolicyIdempotencyAndAtomicRollback(t *testing.T) {
 		for _, queueID := range queueIDs {
 			assertPostgresCount(t, store, `SELECT count(*) FROM `+quoteIdent(queueID), nil, 0)
 		}
+
+		orderedQueues := make([]string, 0, len(queueIDs))
+		rows, err := store.pool.Query(actorCtx, `SELECT queue_id FROM topic_subscriptions
+			WHERE topic_id = $1 ORDER BY subscription_id`, topic.TopicID)
+		if err != nil {
+			t.Fatalf("list ordered postgres fanout queues: %v", err)
+		}
+		for rows.Next() {
+			var queueID string
+			if err := rows.Scan(&queueID); err != nil {
+				rows.Close()
+				t.Fatalf("scan ordered postgres fanout queue: %v", err)
+			}
+			orderedQueues = append(orderedQueues, queueID)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			t.Fatalf("iterate ordered postgres fanout queues: %v", err)
+		}
+		rows.Close()
+		if len(orderedQueues) != 2 {
+			t.Fatalf("ordered postgres fanout queues = %v, want two", orderedQueues)
+		}
+		brokenQueue, survivingQueue := orderedQueues[0], orderedQueues[1]
+		if _, err := store.pool.Exec(actorCtx, `DROP TABLE `+quoteIdent(brokenQueue)); err != nil {
+			t.Fatalf("break first postgres policy fanout destination: %v", err)
+		}
+
+		partialRequest := &queue.PublishRequest{
+			Messages: []queue.PublishMessage{{Body: []byte("partial")}},
+		}
+		partialMutation := buildPostgresQueueMutation(
+			tenantID, actor.Ref(), authz.ActionTopicPublish, authz.ResourceTopic,
+			topic.TopicID, "pg-fanout-partial", now, 1,
+		)
+		partial, err := store.PublishPolicy(actorCtx, topic.TopicID, partialRequest, partialMutation)
+		var partialErr *queue.PartialPublishError
+		if !errors.As(err, &partialErr) || !errors.Is(err, pqerr.ErrPartialFanout) {
+			t.Fatalf("partial postgres policy publish error = %v, want partial fan-out", err)
+		}
+		if partial == nil || partial.DeliveredCount != 1 || fmt.Sprint(partial.QueueIDs) != fmt.Sprint(orderedQueues) {
+			t.Fatalf("partial postgres policy publish = %#v, want both destinations and one delivery", partial)
+		}
+		if len(partialErr.Outcome.DeliveryFailures) != 1 ||
+			partialErr.Outcome.DeliveryFailures[0].QueueID != brokenQueue ||
+			!partialErr.Outcome.Partial || partialErr.Outcome.SelectedQueues != 2 ||
+			partialErr.Outcome.FailedDestinations != 1 || partialErr.Outcome.FailedDeliveries != 1 {
+			t.Fatalf("partial postgres policy failures = %#v, want broken queue %q",
+				partialErr.Outcome.DeliveryFailures, brokenQueue)
+		}
+		assertPostgresCount(t, store, `SELECT count(*) FROM `+quoteIdent(survivingQueue), nil, 1)
+
+		replayedPartial, err := store.PublishPolicy(actorCtx, topic.TopicID, partialRequest, partialMutation)
+		if !errors.As(err, &partialErr) || !errors.Is(err, pqerr.ErrPartialFanout) {
+			t.Fatalf("replayed partial postgres policy publish error = %v, want partial fan-out", err)
+		}
+		if replayedPartial == nil || fmt.Sprint(replayedPartial.MessageIDs) != fmt.Sprint(partial.MessageIDs) {
+			t.Fatalf("replayed partial postgres message IDs = %v, want %v", replayedPartial, partial.MessageIDs)
+		}
+		assertPostgresCount(t, store, `SELECT count(*) FROM `+quoteIdent(survivingQueue), nil, 1)
+		assertPostgresCount(t, store, `SELECT used FROM quota_windows WHERE tenant_id = $1 AND action = $2`,
+			[]any{tenantID, authz.ActionTopicPublish}, 2)
+		assertPostgresCount(t, store, `SELECT count(*) FROM security_audit_events WHERE tenant_id = $1 AND action = $2`,
+			[]any{tenantID, authz.ActionTopicPublish}, 2)
+		assertPostgresCount(t, store, `SELECT count(*) FROM agent_idempotency WHERE tenant_id = $1 AND operation = $2`,
+			[]any{tenantID, authz.ActionTopicPublish}, 2)
 	})
 }
 

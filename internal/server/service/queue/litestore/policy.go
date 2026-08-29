@@ -62,7 +62,7 @@ func (s *Storage) DeleteQueuePolicy(
 	ctx context.Context,
 	input *v1.DeleteQueueRequest,
 	mutation policytx.Mutation,
-) (*v1.DeleteQueueResponse, error) {
+) (*queue.DeleteQueueResult, error) {
 	return s.DeleteQueue(withSQLiteQueueMutation(ctx, mutation), input)
 }
 
@@ -98,7 +98,11 @@ func (s *Storage) CreateTopicPolicy(
 	return s.CreateTopic(withSQLiteQueueMutation(ctx, mutation), input)
 }
 
-func (s *Storage) DeleteTopicPolicy(ctx context.Context, topicID string, mutation policytx.Mutation) error {
+func (s *Storage) DeleteTopicPolicy(
+	ctx context.Context,
+	topicID string,
+	mutation policytx.Mutation,
+) (*queue.DeleteTopicResult, error) {
 	return s.DeleteTopic(withSQLiteQueueMutation(ctx, mutation), topicID)
 }
 
@@ -520,6 +524,8 @@ func replaySQLiteQueuePolicy[T any](
 		return zero, false, fmt.Errorf("decode queue idempotency result: %w", err)
 	}
 
+	queue.MarkPolicyReplay(ctx)
+
 	return zero, true, nil
 }
 
@@ -582,43 +588,6 @@ func validateSQLiteQueuePolicy(
 	}
 
 	return nil
-}
-
-func deleteSQLiteSubscriptionsForQueue(
-	ctx context.Context,
-	tx *sql.Tx,
-	tenantID, queueID string,
-) (_ uint64, err error) {
-	rows, err := tx.QueryContext(ctx, `DELETE FROM topic_subscriptions
-		WHERE queue_id = ? AND EXISTS (
-			SELECT 1 FROM topic_properties t
-			WHERE t.topic_id = topic_subscriptions.topic_id AND t.tenant_id = ?
-		) RETURNING subscription_id`, queueID, tenantID)
-	if err != nil {
-		return 0, fmt.Errorf("delete queue subscriptions: %w", err)
-	}
-	defer func() {
-		if closeErr := rows.Close(); closeErr != nil && err == nil {
-			err = fmt.Errorf("close deleted queue subscriptions: %w", closeErr)
-		}
-	}()
-
-	var count uint64
-
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return 0, fmt.Errorf("scan deleted queue subscription: %w", err)
-		}
-
-		count++
-	}
-
-	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("iterate deleted queue subscriptions: %w", err)
-	}
-
-	return count, nil
 }
 
 //nolint:cyclop,gocyclo // Exact acknowledgement results, audit, and replay commit in one transaction.
@@ -756,34 +725,59 @@ func (s *Storage) createTopicWithPolicy(
 	return &output, nil
 }
 
-//nolint:cyclop,nonamedreturns // Topic rollback joins cleanup failures while exact rows and policy state remain atomic.
+//nolint:cyclop,gocyclo,nonamedreturns // Topic rollback, locking, typed cascades, usage, audit, and replay remain atomic.
 func (s *Storage) deleteTopicWithPolicy(
 	ctx context.Context,
 	topicID string,
 	scope queue.AccessScope,
 	mutation policytx.Mutation,
-) (err error) {
+) (_ *queue.DeleteTopicResult, err error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("begin delete topic transaction: %w", err)
+		return nil, fmt.Errorf("begin delete topic transaction: %w", err)
 	}
 	defer rollbackSQLiteQueuePolicy(tx, &err)()
 
-	_, found, err := replaySQLiteQueuePolicy[struct{}](
+	replayed, found, err := replaySQLiteQueuePolicy[queue.DeleteTopicResult](
 		ctx, tx, mutation, authz.ActionTopicDelete, topicID,
 	)
-	if err != nil || found {
-		return err
+	if err != nil {
+		return nil, err
+	}
+
+	if found {
+		return &replayed, nil
 	}
 
 	policyTransaction, err := reserveSQLiteQueuePolicy(ctx, tx, mutation)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	removedSubscriptions, err := deleteSQLiteSubscriptionsForTopic(ctx, tx, scope.TenantID, topicID)
+	lockResult, err := tx.ExecContext(ctx, `UPDATE topic_properties SET topic_id = topic_id
+		WHERE topic_id = ? AND tenant_id = ?
+		 AND (? = FALSE OR (created_by_kind = 'system' AND created_by_id IN ('migration', 'legacy-v1')))`,
+		topicID, scope.TenantID, scope.Compatibility)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("lock topic in policy transaction: %w", err)
+	}
+
+	lockedRows, err := lockResult.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("read locked topic rows: %w", err)
+	}
+
+	if lockedRows != 1 {
+		return nil, authz.ErrNotFound
+	}
+
+	removedSubscriptions, err := listSubscriptions(ctx, tx, topicID, pubSubDeleteTopic)
+	if err != nil {
+		return nil, fmt.Errorf("capture topic subscriptions in policy transaction: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM topic_subscriptions WHERE topic_id = ?`, topicID); err != nil {
+		return nil, fmt.Errorf("delete topic subscriptions in policy transaction: %w", err)
 	}
 
 	result, err := tx.ExecContext(ctx, `DELETE FROM topic_properties
@@ -791,34 +785,35 @@ func (s *Storage) deleteTopicWithPolicy(
 		 AND (? = FALSE OR (created_by_kind = 'system' AND created_by_id IN ('migration', 'legacy-v1')))`,
 		topicID, scope.TenantID, scope.Compatibility)
 	if err != nil {
-		return fmt.Errorf("delete topic in policy transaction: %w", err)
+		return nil, fmt.Errorf("delete topic in policy transaction: %w", err)
 	}
 
 	rows, err := result.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("read deleted topic rows: %w", err)
+		return nil, fmt.Errorf("read deleted topic rows: %w", err)
 	}
 
 	if rows != 1 {
-		return authz.ErrNotFound
+		return nil, authz.ErrNotFound
 	}
 
 	if err := quota.ApplyActualUsageTx(ctx, policyTransaction, quota.UsageDelta{
 		TenantID: mutation.TenantID, TopicCountRemoved: 1,
-		SubscriptionCountRemoved: removedSubscriptions,
+		SubscriptionCountRemoved: uint64(len(removedSubscriptions)),
 	}); err != nil {
-		return fmt.Errorf("apply deleted topic usage: %w", err)
+		return nil, fmt.Errorf("apply deleted topic usage: %w", err)
 	}
 
-	if err := finishSQLiteQueuePolicy(ctx, policyTransaction, mutation, &struct{}{}); err != nil {
-		return err
+	output := queue.DeleteTopicResult{RemovedSubscriptions: removedSubscriptions}
+	if err := finishSQLiteQueuePolicy(ctx, policyTransaction, mutation, &output); err != nil {
+		return nil, err
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit delete topic transaction: %w", err)
+		return nil, fmt.Errorf("commit delete topic transaction: %w", err)
 	}
 
-	return nil
+	return &output, nil
 }
 
 //nolint:cyclop,nonamedreturns // Subscription rollback joins cleanup failures while policy state remains atomic.
@@ -963,15 +958,9 @@ func (s *Storage) publishWithPolicy(
 	}
 	defer rollbackSQLiteQueuePolicy(tx, &err)()
 
-	replayed, found, err := replaySQLiteQueuePolicy[queue.PublishResponse](
-		ctx, tx, mutation, authz.ActionTopicPublish, topicID,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	if found {
-		return &replayed, nil
+	replayed, found, err := replaySQLitePublishPolicy(ctx, tx, mutation, topicID)
+	if err != nil || found {
+		return replayed, err
 	}
 
 	policyTransaction, err := reserveSQLiteQueuePolicy(ctx, tx, mutation)
@@ -988,40 +977,46 @@ func (s *Storage) publishWithPolicy(
 		return nil, authz.ErrNotFound
 	}
 
-	output := queue.PublishResponse{
-		TopicID: topicID, QueueIDs: make([]string, 0, len(queueIDs)),
-		MessageIDs: make([]string, 0, len(queueIDs)*len(input.Messages)),
-	}
-
-	messages := make([]*v1.SendMessage, 0, len(input.Messages))
-	for _, message := range input.Messages {
-		messages = append(messages, &v1.SendMessage{Body: message.Body})
-	}
-
 	stamped := queue.Replicated(ctx)
+	successfulQueues := make([]string, 0, len(queueIDs))
 
-	columns := sendInsertColumnsFor(stamped)
+	subscriptions := make([]queue.Subscription, 0, len(queueIDs))
 	for _, queueID := range queueIDs {
-		args, ids := buildSendArgs(ctx, messages, stamped)
-		for start := 0; start < len(messages); start += maxSendInsertBatch {
-			end := min(start+maxSendInsertBatch, len(messages))
+		subscriptions = append(subscriptions, queue.Subscription{QueueID: queueID})
+	}
 
-			chunk := args[start*columns : end*columns]
-			if _, err := tx.ExecContext(ctx, queryInsertMessagesBatch(queueID, end-start, stamped), chunk...); err != nil {
-				return nil, fmt.Errorf("publish to queue %q: %w", queueID, err)
-			}
+	send := func(ctx context.Context, request *v1.SendRequest) (*v1.SendResponse, error) {
+		sent, sendErr := sqlitePublishPolicyDestination(ctx, tx, request, stamped)
+		if sendErr != nil {
+			return nil, normalizePubSubError(sendErr, pubSubPublish)
 		}
 
-		output.QueueIDs = append(output.QueueIDs, queueID)
-		output.MessageIDs = append(output.MessageIDs, ids...)
-		output.DeliveredCount += len(ids)
+		successfulQueues = append(successfulQueues, request.GetQueueId())
+
+		return sent, nil
+	}
+
+	output, fanoutErr := queue.FanOut(ctx, topicID, subscriptions, input.Messages, send)
+	outcome := queue.PublishOutcome{Response: output, SelectedQueues: uint64(len(queueIDs))}
+
+	if fanoutErr != nil {
+		var partial *queue.PartialPublishError
+		if !errors.As(fanoutErr, &partial) {
+			return nil, fmt.Errorf("fan out policy publish: %w", fanoutErr)
+		}
+
+		outcome = partial.Outcome
+		outcome.Partial = true
+		outcome.Response = output
+		partial.Outcome = outcome
+		fanoutErr = fmt.Errorf("fan out policy publish: %w", fanoutErr)
 	}
 
 	mutation.Audit.Metadata = map[string]string{
 		auditMetadataMessageCount: strconv.Itoa(len(input.Messages)),
 		"delivery_count":          strconv.Itoa(output.DeliveredCount),
 	}
-	if err := finishSQLiteQueuePolicy(ctx, policyTransaction, mutation, &output); err != nil {
+	if err := finishSQLiteQueuePolicy(ctx, policyTransaction, mutation, &outcome); err != nil {
 		return nil, err
 	}
 
@@ -1029,11 +1024,96 @@ func (s *Storage) publishWithPolicy(
 		return nil, fmt.Errorf("commit publish transaction: %w", err)
 	}
 
-	for _, queueID := range queueIDs {
-		s.observer.Sent(queueID, uint64(len(input.Messages)), publishedBytes(messages))
+	for _, queueID := range successfulQueues {
+		s.observer.Sent(queueID, uint64(len(input.Messages)), publishedMessageBytes(input.Messages))
 	}
 
-	return &output, nil
+	return output, fanoutErr
+}
+
+func replaySQLitePublishPolicy(
+	ctx context.Context,
+	tx *sql.Tx,
+	mutation policytx.Mutation,
+	topicID string,
+) (*queue.PublishResponse, bool, error) {
+	outcome, found, err := replaySQLiteQueuePolicy[queue.PublishOutcome](
+		ctx, tx, mutation, authz.ActionTopicPublish, topicID,
+	)
+	if err != nil || !found {
+		return nil, found, err
+	}
+
+	if outcome.Response == nil {
+		legacy, legacyFound, legacyErr := replaySQLiteQueuePolicy[queue.PublishResponse](
+			ctx, tx, mutation, authz.ActionTopicPublish, topicID,
+		)
+		if legacyErr != nil || !legacyFound {
+			return nil, legacyFound, legacyErr
+		}
+
+		return &legacy, true, nil
+	}
+
+	if !outcome.Partial {
+		return outcome.Response, true, nil
+	}
+
+	return outcome.Response, true, restoredPolicyPartialPublishError(outcome)
+}
+
+func sqlitePublishPolicyDestination(
+	ctx context.Context,
+	tx *sql.Tx,
+	request *v1.SendRequest,
+	stamped bool,
+) (*v1.SendResponse, error) {
+	const savepoint = "plainq_publish_destination"
+	if _, err := tx.ExecContext(ctx, "SAVEPOINT "+savepoint); err != nil {
+		return nil, fmt.Errorf("create publish destination savepoint: %w", err)
+	}
+
+	messages := request.GetMessages()
+	args, ids := buildSendArgs(ctx, messages, stamped)
+	columns := sendInsertColumnsFor(stamped)
+
+	for start := 0; start < len(messages); start += maxSendInsertBatch {
+		end := min(start+maxSendInsertBatch, len(messages))
+
+		chunk := args[start*columns : end*columns]
+		if _, err := tx.ExecContext(
+			ctx, queryInsertMessagesBatch(request.GetQueueId(), end-start, stamped), chunk...,
+		); err != nil {
+			return nil, rollbackSQLitePublishDestination(ctx, tx, savepoint, err)
+		}
+	}
+
+	if _, err := tx.ExecContext(ctx, "RELEASE SAVEPOINT "+savepoint); err != nil {
+		return nil, fmt.Errorf("release publish destination savepoint: %w", err)
+	}
+
+	return &v1.SendResponse{MessageIds: ids}, nil
+}
+
+func rollbackSQLitePublishDestination(ctx context.Context, tx *sql.Tx, savepoint string, cause error) error {
+	if _, err := tx.ExecContext(ctx, "ROLLBACK TO SAVEPOINT "+savepoint); err != nil {
+		cause = errors.Join(cause, fmt.Errorf("rollback publish destination savepoint: %w", err))
+	}
+
+	if _, err := tx.ExecContext(ctx, "RELEASE SAVEPOINT "+savepoint); err != nil {
+		cause = errors.Join(cause, fmt.Errorf("release failed publish destination savepoint: %w", err))
+	}
+
+	return cause
+}
+
+func restoredPolicyPartialPublishError(outcome queue.PublishOutcome) error {
+	causes := make([]error, 0, len(outcome.DeliveryFailures))
+	for _, failure := range outcome.DeliveryFailures {
+		causes = append(causes, fmt.Errorf("publish to queue %q: %s", failure.QueueID, failure.Cause))
+	}
+
+	return &queue.PartialPublishError{Outcome: outcome, Causes: causes}
 }
 
 //nolint:gocritic // The closure updates the owning function's named error after deferred rollback.
@@ -1043,39 +1123,6 @@ func rollbackSQLiteQueuePolicy(tx *sql.Tx, returnErr *error) func() {
 			*returnErr = errors.Join(*returnErr, fmt.Errorf("rollback queue policy transaction: %w", err))
 		}
 	}
-}
-
-func deleteSQLiteSubscriptionsForTopic(
-	ctx context.Context,
-	tx *sql.Tx,
-	tenantID, topicID string,
-) (uint64, error) {
-	rows, err := tx.QueryContext(ctx, `DELETE FROM topic_subscriptions
-		WHERE topic_id = ? AND EXISTS (
-		 SELECT 1 FROM topic_properties t
-		 WHERE t.topic_id = topic_subscriptions.topic_id AND t.tenant_id = ?
-		) RETURNING subscription_id`, topicID, tenantID)
-	if err != nil {
-		return 0, fmt.Errorf("delete topic subscriptions: %w", err)
-	}
-	defer rows.Close()
-
-	var count uint64
-
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return 0, fmt.Errorf("scan deleted topic subscription: %w", err)
-		}
-
-		count++
-	}
-
-	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("iterate deleted topic subscriptions: %w", err)
-	}
-
-	return count, nil
 }
 
 func sqlitePublishQueueIDs(

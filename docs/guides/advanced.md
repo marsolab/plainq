@@ -16,9 +16,10 @@ you've read [Core concepts](../getting-started/core-concepts.md) and
 
 ## Pub/sub: topics & fan-out
 
-PlainQ has an **experimental** publish/subscribe layer built on top of queues. It
-is exposed only over the **HTTP API** today — there is no gRPC or CLI surface for
-it yet — so treat it as beta and pin to the behavior described here.
+PlainQ's stable publish/subscribe v1 is a queue-backed fan-out layer. The same
+contract is available over HTTP, gRPC, and the `plainq topic` CLI group. Stable
+means the v1 wire shapes and documented semantics are compatibility promises;
+it does not turn a multi-queue fan-out into an atomic transaction.
 
 ### The model
 
@@ -41,7 +42,7 @@ retention, and dead-letter all apply per subscribed queue. Multiple consumers
 draining the same queue form a competing-consumers group; multiple queues
 subscribed to the same topic each get their own copy.
 
-### HTTP API
+### Stable APIs
 
 All routes live under the HTTP listener at `/api/v1/queue/topics`. Bodies are
 JSON; message bodies are bytes and are **base64-encoded** in JSON.
@@ -55,31 +56,33 @@ JSON; message bodies are bytes and are **base64-encoded** in JSON.
 | `DELETE /api/v1/queue/topics/{topicID}/subscriptions/{subscriptionID}`  | Unsubscribe a queue.                       |
 | `POST /api/v1/queue/topics/{topicID}/publish`                           | Publish messages (fan-out).               |
 
+The matching `PlainQService` RPCs are `ListTopics`, `CreateTopic`,
+`DeleteTopic`, `Subscribe`, `Unsubscribe`, and `Publish`. The matching CLI
+commands are `plainq topic list`, `create`, `delete`, `subscribe`,
+`unsubscribe`, and `publish`. HTTP uses camel-case JSON; byte message bodies are
+base64-encoded. gRPC and the CLI use the same application boundary and storage
+semantics.
+
 ### Worked example
 
 ```shell
-BASE=http://localhost:8081/api/v1/queue
-
-# 1. Create two queues (via gRPC/CLI) that will receive the fan-out.
+# 1. Create two queues that will receive independent copies.
 QA=$(plainq create emails)
 QB=$(plainq create analytics)
 
-# 2. Create a topic.
-TID=$(curl -sX POST "$BASE/topics/" \
-  -H 'content-type: application/json' \
-  -d '{"topicName":"signups"}' | jq -r .topicId)
+# 2. Create a uniquely named topic.
+TID=$(plainq topic create signups)
 
 # 3. Subscribe both queues to the topic.
-curl -sX POST "$BASE/topics/$TID/subscriptions" \
-  -H 'content-type: application/json' -d "{\"queueId\":\"$QA\"}"
-curl -sX POST "$BASE/topics/$TID/subscriptions" \
-  -H 'content-type: application/json' -d "{\"queueId\":\"$QB\"}"
+plainq topic subscribe "$TID" "$QA"
+plainq topic subscribe "$TID" "$QB"
 
-# 4. Publish — the message lands in BOTH emails and analytics.
-#    Body is base64: echo -n '{"user":42}' | base64  →  eyJ1c2VyIjo0Mn0=
-curl -sX POST "$BASE/topics/$TID/publish" \
-  -H 'content-type: application/json' \
-  -d '{"messages":[{"body":"eyJ1c2VyIjo0Mn0="}]}' | jq
+# 4. Publish — the message is attempted for BOTH queues.
+plainq topic publish -message='{"user":42}' "$TID"
+
+# 5. Consume and acknowledge each queue independently.
+plainq receive -batch=10 "$QA"
+plainq delete-message "$QA" <message-id>
 ```
 
 The publish response reports the fan-out:
@@ -93,18 +96,29 @@ The publish response reports the fan-out:
 }
 ```
 
-Consume each queue independently with the usual `receive` + delete loop (see the
-[worker loop example](../examples/README.md#a-reliable-worker-loop-go)).
+Publishing with no subscribers succeeds with `deliveredCount: 0`. Otherwise the
+server snapshots the selected subscriptions and synchronously attempts the
+complete batch for every destination, continuing after an individual failure.
+Fan-out is not atomic across queues: an errored publish may already have left
+copies in one or more queues, and retrying the same batch can create duplicates.
+Consumers therefore use the ordinary at-least-once receive/process/delete
+contract and should make their work idempotent.
 
-> Because publish fans out by **copying** into each subscribed queue, delivery
-> cost scales with the number of subscriptions. The
-> [pub/sub design spec](../superpowers/specs/2026-04-13-pubsub-design.md) tracks
-> the roadmap (durable vs ephemeral subscriptions, push delivery, ordering
-> guarantees); the current HTTP surface is the minimal first cut.
+Deleting a topic cascades through its subscriptions but preserves its queues and
+messages already delivered to them. Deleting a queue cascades every
+subscription that points to that queue. Unsubscribing only stops future
+publishes; it does not purge the queue.
 
-> The HTTP API is **not auth-gated at the server** today — keep the topics API on
-> a trusted network. See
-> [Deployment → network exposure](deployment.md#network-exposure).
+Because publish copies into every subscribed queue, work and storage scale with
+`message count × subscription count`. When server authentication is enabled,
+the HTTP topic subtree requires a bearer session. Authenticated HTTP and gRPC
+requests are tenant-scoped and pass the shared queue/topic resource policy.
+Legacy `schema.v1` gRPC clients may omit a token only while
+`--grpc.protect-legacy=false`; that compatibility identity can see only the
+fixed-tenant rows marked as migrated or legacy-created. Set
+`--grpc.protect-legacy=true` once old clients have credentials. Transport TLS
+and network exposure remain separate deployment choices. See
+[Deployment → network exposure](deployment.md#network-exposure).
 
 ---
 

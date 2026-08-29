@@ -8,9 +8,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/marsolab/plainq/internal/metrics"
 	"github.com/marsolab/plainq/internal/server/config"
 	"github.com/marsolab/plainq/internal/server/middleware"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
+	"github.com/marsolab/plainq/internal/server/service/telemetry"
 	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/marsolab/servekit/logkit"
 	"github.com/maxatome/go-testdeep/td"
@@ -20,14 +22,13 @@ import (
 const validXID = "9m4e2mr0ui3e8a215n4g"
 
 func newTestService(storage Storage) *Service {
-	svc := NewService(nil, logkit.NewNop(), storage)
-	svc.SetPermissionChecker(testPermissionCheckerFunc(func(
-		context.Context, string, string, middleware.PermissionType,
-	) (bool, error) {
-		return true, nil
-	}))
+	return newTestServiceWithConfig(&config.Config{AuthEnable: false}, storage)
+}
 
-	return svc
+func newTestServiceWithConfig(cfg *config.Config, storage Storage) *Service {
+	observer := telemetry.NewObserver(metrics.BackendSQLite)
+
+	return NewService(cfg, logkit.NewNop(), NewObservedStorage(storage, observer), observer)
 }
 
 type testPermissionCheckerFunc func(context.Context, string, string, middleware.PermissionType) (bool, error)
@@ -42,9 +43,6 @@ func doRequest(t *testing.T, svc *Service, method, target, body string) *httptes
 	t.Helper()
 
 	req := httptest.NewRequest(method, target, strings.NewReader(body))
-	req = req.WithContext(context.WithValue(req.Context(), middleware.UserContextKey, middleware.UserInfo{
-		UserID: "user-1", Roles: []string{"member"}, TenantID: "tenant-1",
-	}))
 	rec := httptest.NewRecorder()
 	svc.ServeHTTP(rec, req)
 
@@ -53,7 +51,7 @@ func doRequest(t *testing.T, svc *Service, method, target, body string) *httptes
 
 func TestServiceQueueMutationRoutesEnforcePermissionAndResolveAdminTenant(t *testing.T) {
 	storageCalled := false
-	svc := NewService(nil, logkit.NewNop(), &mockStorage{
+	svc := newTestServiceWithConfig(nil, &mockStorage{
 		sendFunc: func(context.Context, *v1.SendRequest) (*v1.SendResponse, error) {
 			storageCalled = true
 
@@ -93,13 +91,14 @@ func TestServiceQueueMutationRoutesEnforcePermissionAndResolveAdminTenant(t *tes
 
 func TestServiceQueueMutationRoutesRemainOpenWhenAuthenticationIsDisabled(t *testing.T) {
 	storageCalled := false
-	svc := NewService(&config.Config{AuthEnable: false}, logkit.NewNop(), &mockStorage{
+	storage := &mockStorage{
 		sendFunc: func(context.Context, *v1.SendRequest) (*v1.SendResponse, error) {
 			storageCalled = true
 
 			return &v1.SendResponse{}, nil
 		},
-	})
+	}
+	svc := newTestServiceWithConfig(&config.Config{AuthEnable: false}, storage)
 
 	req := httptest.NewRequest(http.MethodPost, "/"+validXID+"/messages", strings.NewReader(
 		`{"messages":[{"body":"aGVsbG8="}]}`,
@@ -221,7 +220,7 @@ func TestService_ReceiveMessagesHandler(t *testing.T) {
 
 func TestService_DeleteQueueHandlerFailedPrecondition(t *testing.T) {
 	svc := newTestService(&mockStorage{
-		deleteQueueFunc: func(context.Context, *v1.DeleteQueueRequest) (*v1.DeleteQueueResponse, error) {
+		deleteQueueFunc: func(context.Context, *v1.DeleteQueueRequest) (*DeleteQueueResult, error) {
 			return nil, pqerr.ErrFailedPrecondition
 		},
 	})

@@ -6,9 +6,11 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/marsolab/plainq/internal/metrics"
 	"github.com/marsolab/plainq/internal/server/authz"
 	"github.com/marsolab/plainq/internal/server/config"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
+	"github.com/marsolab/plainq/internal/server/service/telemetry"
 	"github.com/marsolab/servekit/logkit"
 )
 
@@ -26,7 +28,13 @@ func TestRoutePolicyInventory(t *testing.T) {
 		t.Fatalf("gRPC policy inventory has %d entries, descriptor has %d", len(legacyGRPCActionInventory), len(generated))
 	}
 
-	service := NewService(&config.Config{AuthEnable: false}, logkit.NewNop(), &mockStorage{})
+	observer := telemetry.NewObserver(metrics.BackendSQLite)
+	service := NewService(
+		&config.Config{AuthEnable: false},
+		logkit.NewNop(),
+		NewObservedStorage(&mockStorage{}, observer),
+		observer,
+	)
 	routes := make(map[string]struct{})
 	if err := chi.Walk(service.router, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
 		routes[method+" "+route] = struct{}{}

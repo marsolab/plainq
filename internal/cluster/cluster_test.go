@@ -1,9 +1,13 @@
 package cluster
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -11,10 +15,14 @@ import (
 	"testing"
 	"time"
 
+	hraft "github.com/hashicorp/raft"
+	raftengine "github.com/marsolab/plainq/internal/cluster/consensus/raft"
+	clusterfsm "github.com/marsolab/plainq/internal/cluster/fsm"
 	"github.com/marsolab/plainq/internal/server/mutations"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/service/queue"
 	"github.com/marsolab/plainq/internal/server/service/queue/litestore"
+	"github.com/marsolab/plainq/internal/shared/pqerr"
 	"github.com/marsolab/servekit/dbkit/litekit"
 	"github.com/maxatome/go-testdeep/td"
 )
@@ -26,10 +34,62 @@ type testCluster struct {
 }
 
 type testNode struct {
-	id      string
-	node    *Node
-	storage *litestore.Storage
-	gossip  string
+	id         string
+	node       *Node
+	storage    *litestore.Storage
+	replicated *testReplicatedStorage
+	gossip     string
+}
+
+type publishFault func(context.Context, string, *queue.PublishRequest) (*queue.PublishResponse, error)
+
+// testReplicatedStorage keeps the normal integration fixture unchanged until
+// a test injects a replica-local publish result. Embedding the concrete store
+// preserves its health and snapshot contracts for NewNode.
+type testReplicatedStorage struct {
+	*litestore.Storage
+
+	mu           sync.RWMutex
+	fault        publishFault
+	inventoryErr error
+}
+
+func (s *testReplicatedStorage) setInventoryError(err error) {
+	s.mu.Lock()
+	s.inventoryErr = err
+	s.mu.Unlock()
+}
+
+func (s *testReplicatedStorage) TopicInventory(ctx context.Context) (queue.TopicInventory, error) {
+	s.mu.RLock()
+	err := s.inventoryErr
+	s.mu.RUnlock()
+	if err != nil {
+		return queue.TopicInventory{}, err
+	}
+
+	return s.Storage.TopicInventory(ctx)
+}
+
+func (s *testReplicatedStorage) setPublishFault(fault publishFault) {
+	s.mu.Lock()
+	s.fault = fault
+	s.mu.Unlock()
+}
+
+func (s *testReplicatedStorage) Publish(
+	ctx context.Context,
+	topicID string,
+	request *queue.PublishRequest,
+) (*queue.PublishResponse, error) {
+	s.mu.RLock()
+	fault := s.fault
+	s.mu.RUnlock()
+	if fault != nil {
+		return fault(ctx, topicID, request)
+	}
+
+	return s.Storage.Publish(ctx, topicID, request)
 }
 
 // takenPorts remembers every port this process has handed out. Asking the
@@ -173,6 +233,7 @@ func tryTestCluster(t *testing.T, size int) (*testCluster, error) {
 		dir := t.TempDir()
 
 		storage := newTestStorage(t, dir)
+		replicated := &testReplicatedStorage{Storage: storage}
 
 		// Each node seeds from every node, itself included; a node skips its
 		// own address when it joins.
@@ -203,7 +264,7 @@ func tryTestCluster(t *testing.T, size int) (*testCluster, error) {
 			cfg.Bootstrap = true
 		}
 
-		node, err := NewNode(cfg, storage, nil)
+		node, err := NewNode(cfg, replicated, nil)
 		if err != nil {
 			abandon()
 
@@ -221,7 +282,7 @@ func tryTestCluster(t *testing.T, size int) (*testCluster, error) {
 		t.Cleanup(func() { _ = node.Close() })
 
 		cluster.nodes = append(cluster.nodes, &testNode{
-			id: id, node: node, storage: storage, gossip: gossipAddrs[i],
+			id: id, node: node, storage: storage, replicated: replicated, gossip: gossipAddrs[i],
 		})
 	}
 
@@ -280,6 +341,285 @@ func (c *testCluster) waitFor(timeout time.Duration, condition func() bool, what
 	}
 
 	c.t.Fatalf("timed out after %s waiting for: %s", timeout, what)
+}
+
+func TestReplicaLocalPartialMarksNodeUnhealthy(t *testing.T) {
+	if testing.Short() {
+		t.Skip("starts a raft node")
+	}
+
+	ctx := context.Background()
+	cluster := newTestCluster(t, 1)
+	leader := cluster.leader(10 * time.Second)
+	topicID := createClusterPublishFixture(t, leader.node.Store())
+	leader.replicated.setPublishFault(partialPublishFault("missing-local-queue", errors.New("local delivery failed")))
+
+	response, err := leader.node.Store().Publish(ctx, topicID, &queue.PublishRequest{
+		Messages: []queue.PublishMessage{{Body: []byte("message")}},
+	})
+	if response == nil || response.TopicID != topicID || !errors.Is(err, pqerr.ErrPartialFanout) {
+		t.Fatalf("Publish() = %#v, %v; want preserved partial outcome", response, err)
+	}
+	if err := leader.node.Health(ctx); !errors.Is(err, pqerr.ErrUnavailable) {
+		t.Fatalf("quarantined node Health() = %v, want unavailable", err)
+	}
+	if !leader.node.Status().ReplicaQuarantined {
+		t.Fatal("partial-applying replica did not report quarantine")
+	}
+}
+
+func TestFollowerOnlyNotFoundPartialAlsoQuarantinesReplica(t *testing.T) {
+	if testing.Short() {
+		t.Skip("starts three raft nodes")
+	}
+
+	ctx := context.Background()
+	cluster := newTestCluster(t, 3)
+	leader := cluster.leader(20 * time.Second)
+	topicID := createClusterPublishFixture(t, leader.node.Store())
+	waitForClusterSubscription(t, cluster, topicID)
+	target := cluster.follower()
+	target.replicated.setPublishFault(partialPublishFault("missing-only-on-follower", pqerr.ErrNotFound))
+
+	if _, err := leader.node.Store().Publish(ctx, topicID, &queue.PublishRequest{
+		Messages: []queue.PublishMessage{{Body: []byte("message")}},
+	}); err != nil {
+		t.Fatalf("healthy leader Publish() = %v", err)
+	}
+	cluster.waitFor(10*time.Second, func() bool {
+		return target.node.Status().ReplicaQuarantined
+	}, "follower-only NotFound partial quarantines that follower")
+	if _, err := target.node.Store().ListTopics(ctx); !errors.Is(err, pqerr.ErrUnavailable) {
+		t.Fatalf("quarantined follower ListTopics() = %v, want unavailable", err)
+	}
+	if leader.node.Status().ReplicaQuarantined {
+		t.Fatal("healthy leader inherited another replica's quarantine")
+	}
+}
+
+func TestDifferentReplicaFailuresNeverServeDivergedState(t *testing.T) {
+	if testing.Short() {
+		t.Skip("starts three raft nodes")
+	}
+
+	ctx := context.Background()
+	cluster := newTestCluster(t, 3)
+	leader := cluster.leader(20 * time.Second)
+	topicID := createClusterPublishFixture(t, leader.node.Store())
+	waitForClusterSubscription(t, cluster, topicID)
+
+	failure := 0
+	var quarantined []*testNode
+	for _, node := range cluster.nodes {
+		if node == leader {
+			continue
+		}
+		failure++
+		node.replicated.setPublishFault(partialPublishFault(
+			fmt.Sprintf("replica-local-destination-%d", failure),
+			fmt.Errorf("replica-local-failure-%d", failure),
+		))
+		quarantined = append(quarantined, node)
+	}
+
+	if _, err := leader.node.Store().Publish(ctx, topicID, &queue.PublishRequest{
+		Messages: []queue.PublishMessage{{Body: []byte("message")}},
+	}); err != nil {
+		t.Fatalf("healthy leader Publish() = %v", err)
+	}
+	cluster.waitFor(10*time.Second, func() bool {
+		for _, node := range quarantined {
+			if !node.node.Status().ReplicaQuarantined {
+				return false
+			}
+		}
+		return true
+	}, "both divergent replicas quarantine")
+	for _, node := range quarantined {
+		if _, err := node.node.Store().ListTopics(ctx); !errors.Is(err, pqerr.ErrUnavailable) {
+			t.Fatalf("diverged replica %s ListTopics() = %v, want unavailable", node.id, err)
+		}
+	}
+	if _, err := leader.node.Store().ListTopics(ctx); err != nil {
+		t.Fatalf("healthy replica ListTopics() = %v", err)
+	}
+}
+
+func TestVerifiedSnapshotRestoreIsTheOnlyReplicaHealthRecoveryPath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("starts a raft node")
+	}
+
+	ctx := context.Background()
+	cluster := newTestCluster(t, 1)
+	leader := cluster.leader(10 * time.Second)
+	authoritativeTopic, err := leader.node.Store().CreateTopic(ctx, &queue.CreateTopicRequest{TopicName: "snapshot-authority"})
+	if err != nil {
+		t.Fatalf("create authoritative snapshot state: %v", err)
+	}
+	encoded := persistClusterFSMSnapshot(t, leader.node)
+	healthyGeneration := leader.node.replicaHealth.generation.Load()
+
+	inventoryErr := errors.New("post-commit restored inventory unavailable")
+	leader.replicated.setInventoryError(inventoryErr)
+	err = leader.node.fsm.Restore(io.NopCloser(bytes.NewReader(encoded)))
+	if !errors.Is(err, inventoryErr) {
+		t.Fatalf("Restore() = %v, want %v", err, inventoryErr)
+	}
+	if leader.node.replicaHealth.generation.Load() <= healthyGeneration {
+		t.Fatal("failed restore did not advance replica health generation")
+	}
+	if _, err := leader.node.Store().ListTopics(ctx); !errors.Is(err, pqerr.ErrUnavailable) {
+		t.Fatalf("Store.ListTopics() after failed restore = %v, want unavailable", err)
+	}
+	if err := leader.node.Health(ctx); !errors.Is(err, pqerr.ErrUnavailable) {
+		t.Fatalf("Node.Health() after failed restore = %v, want unavailable", err)
+	}
+	_, leaderAddr, err := leader.node.consensus.Leader()
+	if err != nil {
+		t.Fatalf("consensus Leader() = %v", err)
+	}
+	if _, err := leader.node.peerClient.Forward(ctx, leaderAddr, []byte("{}")); !errors.Is(err, pqerr.ErrUnavailable) {
+		t.Fatalf("peer Forward() after failed restore = %v, want unavailable", err)
+	}
+	snapshotsBefore := countClusterSnapshots(t, leader.node.cfg.DataDir)
+	if err := leader.node.Snapshot(ctx); err == nil || !strings.Contains(err.Error(), "quarantined") {
+		t.Errorf("quarantined leader Snapshot() = %v, want quarantined error", err)
+	}
+	if snapshotsAfter := countClusterSnapshots(t, leader.node.cfg.DataDir); snapshotsAfter != snapshotsBefore {
+		t.Errorf("persisted snapshots after quarantined source = %d, want unchanged %d", snapshotsAfter, snapshotsBefore)
+	}
+
+	if err := leader.node.Close(); err != nil {
+		t.Fatalf("close quarantined node: %v", err)
+	}
+	var reopened *replicaHealth
+	if err := raftengine.WithStableStore(leader.node.cfg.DataDir, func(stableStore hraft.StableStore) error {
+		var openErr error
+		reopened, openErr = newReplicaHealth(leader.node.cfg.DataDir, stableStore)
+		return openErr
+	}); err != nil {
+		t.Fatalf("reopen replica health: %v", err)
+	}
+	if err := reopened.Check(); !errors.Is(err, pqerr.ErrUnavailable) {
+		t.Fatalf("reopened replica Check() = %v, want unavailable", err)
+	}
+
+	reopenedGeneration := reopened.generation.Load()
+	leader.replicated.setInventoryError(nil)
+	recoveryFSM := clusterfsm.New(
+		leader.replicated,
+		nil,
+		reopened,
+		func(fatalErr error) { panic(fatalErr) },
+		clusterfsm.WithReplicaFaultReporter(reopened.Fail),
+		clusterfsm.WithReplicaRecoveryReporter(reopened.Recover),
+	)
+	if err := recoveryFSM.Restore(io.NopCloser(bytes.NewReader(encoded))); err != nil {
+		t.Fatalf("verified recovery Restore() = %v", err)
+	}
+	if err := reopened.Check(); err != nil {
+		t.Fatalf("recovered replica Check() = %v", err)
+	}
+	if reopened.generation.Load() <= reopenedGeneration {
+		t.Fatal("successful verified restore did not advance replica health generation")
+	}
+	recoveredStore := NewStore(leader.replicated, nil, nil, WithReplicaHealth(reopened))
+	recoveredTopics, err := recoveredStore.ListTopics(ctx)
+	if err != nil {
+		t.Fatalf("recovered Store.ListTopics() = %v", err)
+	}
+	if len(recoveredTopics.Topics) != 1 || recoveredTopics.Topics[0].TopicID != authoritativeTopic.TopicID {
+		t.Fatalf("recovered topics = %#v, want authoritative topic %q", recoveredTopics.Topics, authoritativeTopic.TopicID)
+	}
+}
+
+type clusterSnapshotSink struct {
+	bytes.Buffer
+}
+
+func (*clusterSnapshotSink) ID() string    { return "cluster-test" }
+func (*clusterSnapshotSink) Cancel() error { return nil }
+func (*clusterSnapshotSink) Close() error  { return nil }
+
+func countClusterSnapshots(t *testing.T, dataDir string) int {
+	t.Helper()
+
+	entries, err := os.ReadDir(filepath.Join(dataDir, "snapshots"))
+	if err != nil {
+		t.Fatalf("read cluster snapshot directory: %v", err)
+	}
+
+	count := 0
+	for _, entry := range entries {
+		if entry.IsDir() && !strings.HasSuffix(entry.Name(), ".tmp") {
+			count++
+		}
+	}
+
+	return count
+}
+
+func persistClusterFSMSnapshot(t *testing.T, node *Node) []byte {
+	t.Helper()
+
+	snapshot, err := node.fsm.Snapshot()
+	if err != nil {
+		t.Fatalf("FSM Snapshot() = %v", err)
+	}
+	sink := new(clusterSnapshotSink)
+	if err := snapshot.Persist(sink); err != nil {
+		t.Fatalf("persist FSM snapshot: %v", err)
+	}
+	snapshot.Release()
+
+	return append([]byte(nil), sink.Bytes()...)
+}
+
+func createClusterPublishFixture(t *testing.T, storage queue.Storage) string {
+	t.Helper()
+	ctx := context.Background()
+	createdQueue, err := storage.CreateQueue(ctx, &v1.CreateQueueRequest{QueueName: "partial-target"})
+	td.Require(t).CmpNoError(err)
+	createdTopic, err := storage.CreateTopic(ctx, &queue.CreateTopicRequest{TopicName: "partial-topic"})
+	td.Require(t).CmpNoError(err)
+	_, err = storage.Subscribe(ctx, createdTopic.TopicID, &queue.SubscribeRequest{QueueID: createdQueue.QueueId})
+	td.Require(t).CmpNoError(err)
+	return createdTopic.TopicID
+}
+
+func waitForClusterSubscription(t *testing.T, cluster *testCluster, topicID string) {
+	t.Helper()
+	cluster.waitFor(10*time.Second, func() bool {
+		for _, node := range cluster.nodes {
+			inventory, err := node.storage.TopicInventory(context.Background())
+			if err != nil || inventory.SubscriptionCounts[topicID] != 1 {
+				return false
+			}
+		}
+		return true
+	}, "publish fixture reaches every replica")
+}
+
+func partialPublishFault(queueID string, cause error) publishFault {
+	return func(_ context.Context, topicID string, request *queue.PublishRequest) (*queue.PublishResponse, error) {
+		response := &queue.PublishResponse{TopicID: topicID}
+		return response, &queue.PartialPublishError{
+			Outcome: queue.PublishOutcome{
+				Response:           response,
+				Partial:            true,
+				SelectedQueues:     1,
+				FailedDeliveries:   uint64(len(request.Messages)),
+				FailedDestinations: 1,
+				DeliveryFailures: []queue.PublishDeliveryFailure{{
+					QueueID:  queueID,
+					Messages: uint64(len(request.Messages)),
+					Cause:    cause.Error(),
+				}},
+			},
+			Causes: []error{cause},
+		}
+	}
 }
 
 // The headline test: three nodes discover each other, elect a leader, and
@@ -626,9 +966,40 @@ func TestLeaveRemovesTheNodeFromTheConfiguration(t *testing.T) {
 
 	cluster := newTestCluster(t, 3)
 
-	cluster.leader(30 * time.Second)
+	var departing *testNode
 
-	departing := cluster.follower()
+	// Do not race the assertion against bootstrap itself. The selected
+	// follower must see the same leader whose committed configuration contains
+	// all three voters before it begins the leave protocol.
+	cluster.waitFor(30*time.Second, func() bool {
+		var leader *testNode
+
+		for _, node := range cluster.nodes {
+			if node.node.consensus.IsLeader() && node.node.Status().Voters == 3 {
+				leader = node
+
+				break
+			}
+		}
+		if leader == nil {
+			return false
+		}
+
+		for _, node := range cluster.nodes {
+			if node.id == leader.id || node.stopped() {
+				continue
+			}
+
+			leaderID, leaderAddr, err := node.node.consensus.Leader()
+			if err == nil && leaderID == leader.id && leaderAddr != "" {
+				departing = node
+
+				return true
+			}
+		}
+
+		return false
+	}, "a follower observes a leader with all three voters")
 
 	td.Require(t).CmpNoError(departing.node.Leave(ctx), "leave the cluster")
 

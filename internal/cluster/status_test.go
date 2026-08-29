@@ -22,8 +22,19 @@ func TestStatusReportsBothViews(t *testing.T) {
 	leader := cluster.leader(30 * time.Second)
 
 	cluster.waitFor(30*time.Second, func() bool {
-		return len(leader.node.Status().Members) == 3
-	}, "every node is in the configuration")
+		status := leader.node.Status()
+		if len(status.Members) != 3 || status.Voters != 3 || !status.Healthy {
+			return false
+		}
+
+		for _, member := range status.Members {
+			if member.Suffrage == consensus.SuffrageVoter && !member.Reachable {
+				return false
+			}
+		}
+
+		return true
+	}, "every voter is configured and reachable")
 
 	status := leader.node.Status()
 
@@ -78,23 +89,39 @@ func TestStatusShowsAnUnreachableMember(t *testing.T) {
 	leader := cluster.leader(30 * time.Second)
 
 	cluster.waitFor(30*time.Second, func() bool {
-		return len(leader.node.Status().Members) == 3
-	}, "every node is in the configuration")
+		status := leader.node.Status()
+		if len(status.Members) != 3 || status.Voters != 3 || !status.Healthy {
+			return false
+		}
+
+		for _, member := range status.Members {
+			if member.Suffrage == consensus.SuffrageVoter && !member.Reachable {
+				return false
+			}
+		}
+
+		return true
+	}, "every voter is configured and reachable")
 
 	departing := cluster.follower()
 	td.Require(t).CmpNoError(departing.node.Close())
 
+	var status Status
+
 	cluster.waitFor(30*time.Second, func() bool {
-		for _, member := range leader.node.Status().Members {
+		status = leader.node.Status()
+		if status.Voters != 3 || !status.Healthy {
+			return false
+		}
+
+		for _, member := range status.Members {
 			if member.ID == departing.id {
 				return !member.Reachable
 			}
 		}
 
 		return false
-	}, "the stopped node reads as unreachable")
-
-	status := leader.node.Status()
+	}, "the stopped node reads as unreachable while the remaining voters retain quorum")
 
 	td.Cmp(t, status.Voters, 3, "it is still in the configuration")
 	td.Cmp(t, status.Healthy, true, "two of three is still a quorum")
@@ -107,6 +134,31 @@ func TestDisabledClusterStatusShape(t *testing.T) {
 
 	td.Cmp(t, status.Enabled, false)
 	td.Cmp(t, status.Members, td.Nil())
+}
+
+func TestNodeHealthAndStatusFailWhileReplicaIsQuarantined(t *testing.T) {
+	cluster := newTestCluster(t, 1)
+	leader := cluster.leader(10 * time.Second)
+	if err := leader.node.Health(context.Background()); err != nil {
+		t.Fatalf("healthy node Health() = %v", err)
+	}
+	if err := leader.node.replicaHealth.Fail(errors.New("replica-local partial")); err != nil {
+		t.Fatalf("replica Fail() = %v", err)
+	}
+
+	if err := leader.node.Health(context.Background()); err == nil {
+		t.Fatal("quarantined node Health() = nil, want failure")
+	}
+	status := leader.node.Status()
+	if !status.ReplicaQuarantined {
+		t.Fatal("Status().ReplicaQuarantined = false, want true")
+	}
+	if !status.Healthy {
+		t.Fatal("Status().Healthy changed with quarantine; it must retain consensus/quorum meaning")
+	}
+	if !leader.node.sample().ReplicaQuarantined {
+		t.Fatal("metrics sample does not expose replica quarantine")
+	}
 }
 
 func TestJoinAndRemoveThroughTheNode(t *testing.T) {
@@ -147,6 +199,11 @@ func TestJoinAndRemoveThroughTheNode(t *testing.T) {
 
 		return true
 	}, "the node is removed again")
+
+	// Removing a member that is already absent is a successful no-op. Leave
+	// may repeat a request after an election changes the leader, so the
+	// membership operation must be idempotent.
+	td.Require(t).CmpNoError(leader.node.Remove(ctx, "node-9"), "remove the absent node again")
 }
 
 // A follower cannot change the configuration, and the error says so in the one

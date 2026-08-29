@@ -76,6 +76,13 @@ plainq
 ├── send           Send one or more messages to a queue
 ├── receive        Receive messages from a queue
 ├── delete-message Acknowledge (delete) messages by ID
+├── topic          Manage stable queue-backed publish/subscribe
+│   ├── list       List topics and subscriptions
+│   ├── create     Create a uniquely named topic
+│   ├── delete     Delete a topic and its subscriptions
+│   ├── subscribe  Subscribe an existing queue
+│   ├── unsubscribe Remove a subscription
+│   └── publish    Fan a batch out to every subscribed queue
 ├── cluster        Inspect and administer the cluster
 │   ├── status     Show this node's view of the cluster
 │   ├── members    List cluster members
@@ -247,6 +254,96 @@ plainq delete-message <queue-id> <message-id> [<message-id>...]
 Deletes (acknowledges) the given messages so they are not redelivered. Text
 output prints `deleted\t<id>` per success and `failed\t<id>\t<error>` per
 failure; `-json` returns the full `DeleteResponse`.
+
+## Publish/subscribe
+
+The stable `topic` group uses the same gRPC address and JSON flags as the queue
+commands. Topic IDs, queue IDs, and subscription IDs are 20-character XIDs.
+Topic names must be nonblank and unique. Flags can appear before or after the
+positional arguments.
+
+### `plainq topic list`
+
+```shell
+plainq topic list [--json]
+```
+
+Text output is one `<topic-id> | <topic-name>` line. `--json` includes each
+topic's complete subscription objects and timestamps, which is how scripts find
+the subscription ID required by `unsubscribe`.
+
+### `plainq topic create`
+
+```shell
+TID=$(plainq topic create <topic-name>)
+```
+
+Prints the new topic ID. With `--json`, the response is
+`{"topicId":"..."}`.
+
+### `plainq topic delete`
+
+```shell
+plainq topic delete <topic-id>
+```
+
+Deletes the topic and all of its subscriptions, but never deletes the queues or
+messages already delivered to them. Text output is `deleted<TAB><topic-id>`.
+
+### `plainq topic subscribe`
+
+```shell
+SID=$(plainq topic subscribe <topic-id> <queue-id>)
+```
+
+The queue must already exist. A queue may have only one subscription to a given
+topic. Text output is the new subscription ID.
+
+### `plainq topic unsubscribe`
+
+```shell
+plainq topic unsubscribe <topic-id> <subscription-id>
+```
+
+Stops future deliveries through that subscription. Existing queue messages stay
+available. Text output is `unsubscribed<TAB><subscription-id>`.
+
+### `plainq topic publish`
+
+```shell
+plainq topic publish -message='{"order_id":42}' <topic-id>
+plainq topic publish -message=one -message=two <topic-id>
+plainq topic publish -file=messages.ndjson <topic-id>
+generate-events | plainq topic publish -file=- <topic-id>
+```
+
+At least one body is required. Repeat `--message`, use a newline-delimited
+`--file`, or combine both. Empty file lines are ignored, each non-empty line is
+one message with a 4 MiB maximum, and stdin is read only when `--file=-` is
+explicit. Text output is `delivered<TAB><count>`; `--json` returns the stable
+protobuf JSON response.
+
+Publishing to a topic with no subscribers succeeds with zero deliveries. With
+subscribers, PlainQ synchronously attempts the complete batch for every selected
+queue. The operation is not atomic across queues: a nonzero exit can still mean
+some queues retained copies, so an unchanged retry can create duplicates.
+
+A complete CLI-first flow is:
+
+```shell
+QA=$(plainq create email-workers)
+QB=$(plainq create analytics-workers)
+TID=$(plainq topic create signups)
+plainq topic subscribe "$TID" "$QA"
+plainq topic subscribe "$TID" "$QB"
+plainq topic publish -message='{"user":42}' "$TID"
+plainq receive -batch=10 "$QA"
+plainq delete-message "$QA" <message-id>
+```
+
+All six leaves use the normal exit codes: `0` success, `1` an attempted command
+failed, and `2` invalid flags, arity, IDs, or publish input. Treat an exit `1`
+from `publish` as a possibly partial delivery, not proof that nothing happened.
 
 ## Introspection
 

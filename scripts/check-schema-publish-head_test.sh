@@ -68,6 +68,12 @@ git -C "$writer" push --quiet origin main
 expect_rejected "$unrelated_sha" "stale SHA followed by a relevant schema change" 'publication-relevant'
 run_guard "$relevant_sha" >/dev/null
 
+printf '%s\n' 'module example.invalid/schema-guard' > "$writer/go.mod"
+git -C "$writer" add go.mod
+git -C "$writer" commit --quiet -m generation-input-only
+git -C "$writer" push --quiet origin main
+run_guard "$relevant_sha" >/dev/null
+
 git -C "$writer" switch --quiet -c docs-branch "$unrelated_sha"
 printf '%s\n' side-branch-unrelated > "$writer/README.md"
 git -C "$writer" add README.md
@@ -105,9 +111,10 @@ require_file_block "$workflow" \
   "      - 'internal/server/schema/**'" \
   "      - 'scripts/check-schema-*.sh'" \
   "      - 'Makefile'" \
+  "      - 'go.mod'" \
   "      - '.github/workflows/schema-release.yaml'"
 require_file_block "$guard" \
-  '      (schema/*|internal/server/schema/*|scripts/check-schema-*.sh|Makefile|.github/workflows/schema-release.yaml)'
+  '      (schema/*)'
 require_file_block "$guard" \
   'if ! git log --first-parent --diff-merges=first-parent --no-renames --format= --name-only -z \'
 require_file_block "$workflow" \
@@ -118,4 +125,4 @@ require_file_block "$workflow" \
 require_file_block "$workflow" \
   '          ./scripts/check-schema-publish-head.sh "$server_git_sha" origin >/dev/null' \
   '          buf push schema \'
-echo "schema publication guard accepted exact, linear-unrelated, and merged-unrelated descendants; rejected relevant/reverted/divergent/invalid heads; and is immediately before buf push"
+echo "schema publication guard accepted exact, generation-input-only, linear-unrelated, and merged-unrelated descendants; rejected relevant/reverted/divergent/invalid heads; and is immediately before buf push"

@@ -1,6 +1,11 @@
 import { api } from "@/lib/api-client";
-import { isTelemetryUnavailableError, transformRateMetrics } from "@/lib/metrics";
-import type { TopicMetricsOverview, TopicMetricsRow } from "@/lib/types";
+import { isTelemetryUnavailableError } from "@/lib/metrics";
+import type {
+  TopicMetricsOverview,
+  TopicMetricsRow,
+  TopicSeriesResponse,
+  TopicSubscriptionsResponse,
+} from "@/lib/types";
 
 /**
  * Pub/Sub telemetry.
@@ -41,60 +46,117 @@ export function topicMetricsFor(
   return state.overview.topicMetrics.find((row) => row.topicId === topicId) ?? null;
 }
 
-/**
- * One sample of the two series the plot draws, keyed as the chart wants them.
- * A key the sample did not carry is left off rather than set to 0.
- */
-export type PublishDeliveryRow = { t: number } & Record<string, number>;
+export type TopicTelemetryRange = "5m" | "15m" | "1h" | "6h" | "24h";
 
-export type TopicRatesState =
-  | { status: "loading" }
-  | { status: "ready"; rows: PublishDeliveryRow[] }
-  | { status: "unavailable" }
-  | { status: "error"; message: string };
+export type Ranged<T> = { data: T; range: TopicTelemetryRange };
 
 /**
- * A missing reading stays missing. `transformRateMetrics` only writes the keys
- * a sample actually carried, and a key it left out is left out here too, so
- * the line breaks — filling it with 0 would draw a dip the collector never
- * recorded.
+ * Every retained payload carries the range that produced it. That provenance
+ * is what prevents a slow or failed 24h request from relabelling a 1h graph.
  */
-export async function loadTopicRates(
-  topicId: string,
-  range: string,
-): Promise<TopicRatesState> {
+export type SeriesLoad<T> =
+  | { status: "loading"; lastGood?: Ranged<T> }
+  | ({ status: "ready" } & Ranged<T>)
+  | ({ status: "refreshing" } & Ranged<T>)
+  | { status: "unavailable"; lastGood?: Ranged<T> }
+  | { status: "error"; message: string; lastGood?: Ranged<T> };
+
+export interface TopicTelemetryLoads {
+  rates: SeriesLoad<TopicSeriesResponse>;
+  subscriptions: SeriesLoad<TopicSubscriptionsResponse>;
+}
+
+export interface TopicTelemetryLastGood {
+  rates?: Ranged<TopicSeriesResponse>;
+  subscriptions?: Ranged<TopicSubscriptionsResponse>;
+}
+
+export interface TopicTelemetryRequests {
+  rates: Promise<SeriesLoad<TopicSeriesResponse>>;
+  subscriptions: Promise<SeriesLoad<TopicSubscriptionsResponse>>;
+}
+
+export type TopicTelemetryApi = Pick<
+  typeof api.metrics,
+  "topicRates" | "topicSubscriptions"
+>;
+
+export function lastGoodFor<T>(
+  load: SeriesLoad<T>,
+  range: TopicTelemetryRange,
+): Ranged<T> | undefined {
+  const retained =
+    load.status === "ready" || load.status === "refreshing"
+      ? { data: load.data, range: load.range }
+      : load.lastGood;
+
+  return retained?.range === range ? retained : undefined;
+}
+
+function beginSeriesLoad<T>(
+  load: SeriesLoad<T>,
+  range: TopicTelemetryRange,
+): SeriesLoad<T> {
+  const retained = lastGoodFor(load, range);
+  return retained
+    ? { status: "refreshing", ...retained }
+    : { status: "loading" };
+}
+
+export function beginTopicTelemetryLoad(
+  current: TopicTelemetryLoads,
+  range: TopicTelemetryRange,
+): TopicTelemetryLoads {
+  return {
+    rates: beginSeriesLoad(current.rates, range),
+    subscriptions: beginSeriesLoad(current.subscriptions, range),
+  };
+}
+
+async function settleSeries<T>(
+  request: () => Promise<T>,
+  range: TopicTelemetryRange,
+  lastGood?: Ranged<T>,
+): Promise<SeriesLoad<T>> {
+  const retained = lastGood?.range === range ? lastGood : undefined;
+
   try {
-    const response = await api.metrics.topicRates(topicId, range);
-    const rows = transformRateMetrics(response.metrics ?? []).map((sample) => {
-      const row: PublishDeliveryRow = { t: sample.timestamp };
-      if (sample.publish !== undefined) row.publish = sample.publish;
-      if (sample.delivery !== undefined) row.delivery = sample.delivery;
-      return row;
-    });
-
-    return { status: "ready", rows };
+    return { status: "ready", data: await request(), range };
   } catch (error) {
-    if (isTelemetryUnavailableError(error)) return { status: "unavailable" };
-    return {
-      status: "error",
-      message: error instanceof Error ? error.message : "Failed to load topic rates",
-    };
+    if (isTelemetryUnavailableError(error)) {
+      return retained
+        ? { status: "unavailable", lastGood: retained }
+        : { status: "unavailable" };
+    }
+
+    const message =
+      error instanceof Error ? error.message : "Failed to load topic telemetry";
+    return retained
+      ? { status: "error", message, lastGood: retained }
+      : { status: "error", message };
   }
 }
 
 /**
- * Why the plot has nothing to draw. Every branch says something the operator
- * can act on; none of them claims the rate was zero.
+ * The two routes settle independently. A subscription-store failure does not
+ * throw away delivery history, and vice versa.
  */
-export function plotReason(state: TopicRatesState): string {
-  switch (state.status) {
-    case "unavailable":
-      return "Telemetry is disabled on this server. Enable it with --telemetry and restart.";
-    case "error":
-      return state.message;
-    case "ready":
-      return "The collector recorded no publish or delivery samples in this window.";
-    default:
-      return "";
-  }
+export function loadTopicTelemetry(
+  metricsApi: TopicTelemetryApi,
+  topicId: string,
+  range: TopicTelemetryRange,
+  lastGood: TopicTelemetryLastGood = {},
+): TopicTelemetryRequests {
+  return {
+    rates: settleSeries(
+      () => metricsApi.topicRates(topicId, range),
+      range,
+      lastGood.rates,
+    ),
+    subscriptions: settleSeries(
+      () => metricsApi.topicSubscriptions(topicId, range),
+      range,
+      lastGood.subscriptions,
+    ),
+  };
 }

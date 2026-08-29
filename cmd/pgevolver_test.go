@@ -246,6 +246,7 @@ func TestPGEvolverUpgradeFromVersionFourPreservesData(t *testing.T) {
 
 	ctx := context.Background()
 	var version, users, subscriptions, roles, teams, sessions, denied, principals int
+	var queueIndex *string
 	if err := pool.QueryRow(ctx, `SELECT version FROM schema_version WHERE id = 0`).Scan(&version); err != nil {
 		t.Fatalf("read upgraded schema version: %v", err)
 	}
@@ -270,8 +271,11 @@ func TestPGEvolverUpgradeFromVersionFourPreservesData(t *testing.T) {
 	if err := pool.QueryRow(ctx, `SELECT count(*) FROM security_principals WHERE principal_kind = 'human'`).Scan(&principals); err != nil {
 		t.Fatalf("read projected human principals: %v", err)
 	}
-	if version != 6 || users != 1 || subscriptions != 1 || roles != 1 || teams != 1 || sessions != 0 ||
-		denied != 0 || principals != 2 {
+	if err := pool.QueryRow(ctx, `SELECT to_regclass('topic_subscriptions_queue_id_index')::text`).Scan(&queueIndex); err != nil {
+		t.Fatalf("read queue-leading subscription index: %v", err)
+	}
+	if version != 7 || users != 1 || subscriptions != 1 || roles != 1 || teams != 1 || sessions != 0 ||
+		denied != 0 || principals != 2 || queueIndex == nil {
 		t.Fatalf("upgrade state = version %d users %d subscriptions %d roles %d teams %d sessions %d denied %d principals %d",
 			version, users, subscriptions, roles, teams, sessions, denied, principals)
 	}

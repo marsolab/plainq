@@ -55,7 +55,9 @@ rendered workload therefore contains only references, never plaintext values.
 - -agent.enable=false
 {{- end }}
 - -log.level={{ .Values.config.logLevel }}
+- -health={{ .Values.config.healthEnabled }}
 - -health.route={{ .Values.config.healthRoute }}
+- -health.liveness.route={{ .Values.config.healthLivenessRoute }}
 - -metrics.route={{ .Values.config.metricsRoute }}
 {{- if .Values.cluster.enabled }}
 {{- include "plainq.clusterArgs" . | nindent 0 }}
@@ -185,6 +187,28 @@ plainq.containerSpec renders the shared PlainQ container definition for both the
 StatefulSet (sqlite) and the Deployment (postgres).
 */}}
 {{- define "plainq.containerSpec" -}}
+{{- $livenessProbe := .Values.livenessProbe -}}
+{{- if and .Values.config.healthEnabled (kindIs "map" $livenessProbe) (empty $livenessProbe) -}}
+{{- $livenessProbe = dict "httpGet" (dict "port" "http" "path" .Values.config.healthLivenessRoute) "initialDelaySeconds" 10 "periodSeconds" 15 "timeoutSeconds" 3 "failureThreshold" 3 -}}
+{{- else if kindIs "map" $livenessProbe -}}
+{{- $livenessProbe = deepCopy $livenessProbe -}}
+{{- with get $livenessProbe "httpGet" -}}
+{{- if not (hasKey . "path") -}}
+{{- $_ := set . "path" $.Values.config.healthLivenessRoute -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $readinessProbe := .Values.readinessProbe -}}
+{{- if and .Values.config.healthEnabled (kindIs "map" $readinessProbe) (empty $readinessProbe) -}}
+{{- $readinessProbe = dict "httpGet" (dict "port" "http" "path" .Values.config.healthRoute) "initialDelaySeconds" 5 "periodSeconds" 10 "timeoutSeconds" 3 "failureThreshold" 3 -}}
+{{- else if kindIs "map" $readinessProbe -}}
+{{- $readinessProbe = deepCopy $readinessProbe -}}
+{{- with get $readinessProbe "httpGet" -}}
+{{- if not (hasKey . "path") -}}
+{{- $_ := set . "path" $.Values.config.healthRoute -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 - name: {{ .Chart.Name }}
   securityContext:
     {{- toYaml .Values.securityContext | nindent 4 }}
@@ -220,10 +244,14 @@ StatefulSet (sqlite) and the Deployment (postgres).
       containerPort: {{ .Values.cluster.gossipPort }}
       protocol: UDP
     {{- end }}
+  {{- with $livenessProbe }}
   livenessProbe:
-    {{- toYaml .Values.livenessProbe | nindent 4 }}
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with $readinessProbe }}
   readinessProbe:
-    {{- toYaml .Values.readinessProbe | nindent 4 }}
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   resources:
     {{- toYaml .Values.resources | nindent 4 }}
   volumeMounts:

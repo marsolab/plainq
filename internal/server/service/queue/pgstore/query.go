@@ -46,8 +46,11 @@ func queryCreateQueueTable(queueID string) string {
 	)
 }
 
-func queryInsertMessages(queueID string) string {
-	return fmt.Sprintf(`INSERT INTO %s (msg_id, msg_body) VALUES ($1, $2);`, quoteIdent(queueID))
+func queryInsertDeadLetterMessage(queueID string) string {
+	return fmt.Sprintf(
+		`INSERT INTO %s (msg_id, msg_body, created_at, visible_at) VALUES ($1, $2, $3, now());`,
+		quoteIdent(queueID),
+	)
 }
 
 // queryInsertMessagesBatch builds a single multi-row INSERT for n messages so
@@ -122,6 +125,10 @@ func queryDeleteMessages(queueID string) string {
 	return fmt.Sprintf(`DELETE FROM %s WHERE msg_id = ANY($1) RETURNING msg_id;`, quoteIdent(queueID))
 }
 
+func queryDeleteMessagesNoReturning(queueID string) string {
+	return fmt.Sprintf(`DELETE FROM %s WHERE msg_id = ANY($1);`, quoteIdent(queueID))
+}
+
 // queryPeekMessages reads a window of messages oldest-first WITHOUT touching
 // visibility or retry count — a pure read for the admin browser. The in_flight
 // flag reuses the same `visible_at > now()` predicate as Receive so a peek
@@ -153,13 +160,10 @@ func queryDropMessages(queueID string) string {
 
 func querySelectMoveToDLQ(queueID string) string {
 	return fmt.Sprintf(
-		`SELECT msg_id, msg_body FROM %s WHERE retries >= $1 OR created_at + make_interval(secs => $2) <= now();`,
+		`SELECT msg_id, msg_body, created_at FROM %s `+
+			`WHERE retries >= $1 OR created_at + make_interval(secs => $2) <= now() FOR UPDATE;`,
 		quoteIdent(queueID),
 	)
-}
-
-func queryDeleteMessagesNoReturning(queueID string) string {
-	return fmt.Sprintf(`DELETE FROM %s WHERE msg_id = ANY($1);`, quoteIdent(queueID))
 }
 
 type queueCursor struct {

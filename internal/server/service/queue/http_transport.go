@@ -4,6 +4,7 @@ package queue
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -109,12 +110,6 @@ func (s *Service) describeQueueHandler(w http.ResponseWriter, r *http.Request) {
 func (s *Service) deleteQueueHandler(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
-	if err := validateQueueID(id); err != nil {
-		queueHTTPError(w, r, fmt.Errorf("validation error: %w", err))
-
-		return
-	}
-
 	force, parseErr := strconv.ParseBool(r.URL.Query().Get("force"))
 	if parseErr != nil {
 		force = false
@@ -125,9 +120,9 @@ func (s *Service) deleteQueueHandler(w http.ResponseWriter, r *http.Request) {
 		Force:   force,
 	}
 
-	output, deleteErr := s.policyOperations().DeleteQueue(s.policyHTTPContext(r), &input)
+	_, deleteErr := s.pubsub.deleteQueue(s.policyHTTPContext(r), &input)
 	if deleteErr != nil {
-		if pqerr.IsFailedPrecondition(deleteErr) {
+		if errors.Is(deleteErr, pqerr.ErrFailedPrecondition) {
 			queueHTTPError(w, r, deleteErr, httpkit.WithStatus(http.StatusConflict))
 
 			return
@@ -138,9 +133,7 @@ func (s *Service) deleteQueueHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.reconcileTopicSubscriptionCounts(r.Context())
-
-	httpkit.JSON(w, r, output, httpkit.WithStatus(http.StatusOK))
+	httpkit.JSON(w, r, &v1.DeleteQueueResponse{}, httpkit.WithStatus(http.StatusOK))
 }
 
 func (s *Service) purgeQueueHandler(w http.ResponseWriter, r *http.Request) {

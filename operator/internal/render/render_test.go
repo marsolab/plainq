@@ -112,6 +112,59 @@ func TestServeArgsSingleNodeSQLite(t *testing.T) {
 	}
 }
 
+func TestOperatorUsesSeparateLivenessAndReadinessRoutes(t *testing.T) {
+	t.Parallel()
+
+	pq := instance(t, func(pq *plainqv1alpha1.PlainQ) {
+		pq.Spec.Observability.Health.Route = "/ready"
+	})
+	container := render.StatefulSet(pq, defaultRefs()).Spec.Template.Spec.Containers[0]
+
+	if got := argValue(t, container.Args, "health.route"); got != "/ready" {
+		t.Fatalf("health.route = %q, want /ready", got)
+	}
+	if got := argValue(t, container.Args, "health.liveness.route"); got != "/live" {
+		t.Fatalf("health.liveness.route = %q, want /live", got)
+	}
+	if got := container.ReadinessProbe.HTTPGet.Path; got != "/ready" {
+		t.Fatalf("readiness path = %q, want /ready", got)
+	}
+	if got := container.LivenessProbe.HTTPGet.Path; got != "/live" {
+		t.Fatalf("liveness path = %q, want /live", got)
+	}
+}
+
+func TestOperatorHealthDisabledOmitsDefaultProbesAndPreservesOverrides(t *testing.T) {
+	t.Parallel()
+
+	disabled := false
+	pq := instance(t, func(pq *plainqv1alpha1.PlainQ) {
+		pq.Spec.Observability.Health.Enabled = &disabled
+	})
+	container := render.StatefulSet(pq, defaultRefs()).Spec.Template.Spec.Containers[0]
+	if container.LivenessProbe != nil || container.ReadinessProbe != nil {
+		t.Fatalf("disabled health installed default probes: liveness=%#v readiness=%#v",
+			container.LivenessProbe, container.ReadinessProbe)
+	}
+
+	override := &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{
+			Exec: &corev1.ExecAction{Command: []string{"/probe"}},
+		},
+	}
+	pq = instance(t, func(pq *plainqv1alpha1.PlainQ) {
+		pq.Spec.Observability.Health.Enabled = &disabled
+		pq.Spec.Pod.LivenessProbe = override
+		pq.Spec.Pod.ReadinessProbe = override.DeepCopy()
+	})
+	container = render.StatefulSet(pq, defaultRefs()).Spec.Template.Spec.Containers[0]
+	if container.LivenessProbe == nil || container.LivenessProbe.Exec == nil ||
+		container.ReadinessProbe == nil || container.ReadinessProbe.Exec == nil {
+		t.Fatalf("disabled health discarded explicit probes: liveness=%#v readiness=%#v",
+			container.LivenessProbe, container.ReadinessProbe)
+	}
+}
+
 func TestServeArgsPostgresUsesDSNReference(t *testing.T) {
 	t.Parallel()
 

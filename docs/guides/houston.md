@@ -18,6 +18,8 @@ when you run `plainq serve`, Houston is already there.
 - **OAuth** — configure external identity providers and organizations/teams.
 - **Metrics** — charts and rate/in-flight views backed by the
   [telemetry subsystem](observability.md#telemetry--houston-dashboards).
+- **Pub/sub** — topic summaries plus delivery and subscription history for the
+  public subscribe functionality.
 - **System** — the running instance's sanitized configuration, with secrets
   named and withheld rather than shown.
 
@@ -30,6 +32,33 @@ Two limits are worth knowing before you rely on the Access screens:
   middleware and does not mount it on the queue routes, so a grant records intent
   and does not yet restrict who can send, receive, purge or delete. Houston says
   so on both screens that show grants.
+
+## Pub/sub telemetry
+
+The Pub/Sub page contains two historical graphs:
+
+- **Delivery activity** plots publish, delivery, and delivery-failure rates.
+- **Active subscriptions** plots the exact active count together with
+  subscription create/remove rates.
+
+Rates use linear interpolation only between adjacent known samples. The active
+count uses step-after interpolation because a count remains in effect until the
+next observation. `notRecorded` and `outsideRetention` ranges become visible
+gaps; unavailable data is never changed to zero or bridged by a line. Tooltips,
+tables, averages, and peaks treat missing values as unavailable.
+
+The page distinguishes telemetry disabled, a genuinely empty range, loading,
+and failure. A refresh error keeps the last valid graph visible with a stale
+notice and retry action instead of replacing it with an invented empty chart.
+Both graphs use the server-provided `sampleIntervalMs` and accessible chart
+descriptions.
+
+The scope label is **This node**. In cluster mode, Houston shows the local
+collector attached to the server you opened; use Prometheus for deliberate
+cross-node aggregation. Authenticated topic and overview responses expose
+decoded request `operationSummaries` separately from storage
+`storageOperationSummaries`. Houston neither combines nor plots the storage
+family.
 
 ## First run: onboarding
 
@@ -86,8 +115,9 @@ API and CLI still work — only the dashboard is absent.
 - Put Houston behind a **TLS-terminating reverse proxy** — it's a browser app
   handling credentials. See [Deployment](deployment.md#network-exposure).
 - Houston and the queue gRPC API are separate listeners. Exposing Houston
-  (`:8081`) does **not** expose the privileged gRPC port (`:8080`); keep the
-  latter private.
+  (`:8081`) does **not** expose gRPC (`:8080`). Built-in gRPC TLS is active with
+  agent APIs; for a legacy-only server, use a TLS-terminating mesh/proxy and keep
+  the listener private while anonymous compatibility is enabled.
 
 ## Next steps
 

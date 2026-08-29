@@ -228,11 +228,450 @@ func Test_RecordOperation_labelsTheOutcome(t *testing.T) {
 	)
 }
 
+func TestTelemetryCollectorDroppedCountersExposeExactDeltas(t *testing.T) {
+	const metricName = "plainq_topic_fanout"
+	eventCounter := vm.GetOrCreateCounter(render(
+		Namespace+"_telemetry_event_buffer_dropped_total",
+		[]string{labelMetric},
+		[]string{metricName},
+	))
+	terminalCounter := vm.GetOrCreateCounter(Namespace + "_telemetry_terminal_state_dropped_total")
+	eventBefore := eventCounter.Get()
+	terminalBefore := terminalCounter.Get()
+
+	RecordTelemetryEventBufferDropped(metricName)
+	RecordTelemetryEventBufferDrops(metricName, 2)
+	RecordTelemetryTerminalStateDropped(4)
+
+	td.Cmp(t, eventCounter.Get()-eventBefore, uint64(3))
+	td.Cmp(t, terminalCounter.Get()-terminalBefore, uint64(4))
+}
+
+func TestTelemetryCollectorHealthMetricsCatalogAndMetadata(t *testing.T) {
+	want := map[string]Definition{
+		Namespace + "_telemetry_event_buffer_dropped_total": {
+			Name: Namespace + "_telemetry_event_buffer_dropped_total", Kind: KindCounter,
+			Help:   "Internal telemetry event samples dropped because bounded collector buffers were full.",
+			Labels: []string{labelMetric},
+		},
+		Namespace + "_telemetry_terminal_state_dropped_total": {
+			Name: Namespace + "_telemetry_terminal_state_dropped_total", Kind: KindCounter,
+			Help:   "Terminal topic states dropped because the bounded completion ledger was full or unavailable.",
+			Labels: []string{},
+		},
+	}
+
+	got := make(map[string]Definition, len(want))
+	for _, definition := range Catalog() {
+		if _, expected := want[definition.Name]; expected {
+			got[definition.Name] = definition
+		}
+	}
+	td.Cmp(t, got, want)
+
+	RecordTelemetryEventBufferDropped("plainq_topic_fanout")
+	RecordTelemetryTerminalStateDropped(1)
+	exposeMetadataForTest(t)
+	out := scrape()
+	for name := range want {
+		td.Cmp(t, strings.Contains(out, "# HELP "+name+"\n"), true)
+		td.Cmp(t, strings.Contains(out, "# TYPE "+name+" counter"), true)
+	}
+}
+
+func TestRecordTopicRequestIsSeparateFromStorageOperation(t *testing.T) {
+	request := topicRequests.With(BackendCluster, OpCreateTopic, ResultOK)
+	storage := topicOperations.With(BackendCluster, OpCreateTopic, ResultOK)
+	requestBefore := request.Get()
+	storageBefore := storage.Get()
+
+	RecordTopicRequest(BackendCluster, OpCreateTopic, ResultOK, 2*time.Millisecond)
+
+	td.Cmp(t, request.Get(), requestBefore+1)
+	td.Cmp(t, storage.Get(), storageBefore,
+		"a decoded request is not itself a storage operation",
+	)
+
+	RecordTopicOperation(BackendCluster, OpCreateTopic, ResultOK, 3*time.Millisecond)
+
+	td.Cmp(t, request.Get(), requestBefore+1,
+		"recording storage work must not duplicate the public request",
+	)
+	td.Cmp(t, storage.Get(), storageBefore+1)
+}
+
+func TestRecordTopicRequestExportsClassicDurationHistogram(t *testing.T) {
+	exposeMetadataForTest(t)
+
+	RecordTopicRequest(BackendTurso, OpListTopics, ResultOK, 5*time.Millisecond)
+
+	out := scrape()
+	for _, want := range []string{
+		"# HELP plainq_topic_requests_total\n",
+		"# TYPE plainq_topic_requests_total counter\n",
+		"# HELP plainq_topic_request_duration_seconds\n",
+		"# TYPE plainq_topic_request_duration_seconds histogram\n",
+		`plainq_topic_request_duration_seconds_bucket{backend="turso",operation="list_topics",le="`,
+		`plainq_topic_requests_total{backend="turso",operation="list_topics",result="ok"}`,
+	} {
+		td.Cmp(t, strings.Contains(out, want), true, "scrape should contain "+want)
+	}
+}
+
+func TestPubSubExpositionContract(t *testing.T) {
+	exposeMetadataForTest(t)
+
+	const topicID = "TMETRICEXPOSITION"
+
+	RecordTopicRequest(BackendPostgres, OpSubscribe, ResultOK, 2*time.Millisecond)
+	RecordTopicOperation(BackendPostgres, OpSubscribe, ResultOK, 3*time.Millisecond)
+	RecordPublish(topicID, 2, 12, 3, 5, 1)
+	RecordSubscriptionCreated(topicID)
+	RecordSubscriptionDeleted(topicID)
+	SetTopicSubscriptions(topicID, 3)
+	SetTopicsExist(1)
+
+	type familyContract struct {
+		kind       string
+		sampleName string
+		labels     []string
+		bucket     bool
+	}
+
+	families := map[string]familyContract{
+		"plainq_topic_requests_total": {
+			kind: "counter", labels: []string{"backend", "operation", "result"},
+		},
+		"plainq_topic_request_duration_seconds": {
+			kind: "histogram", sampleName: "plainq_topic_request_duration_seconds_count",
+			labels: []string{"backend", "operation"}, bucket: true,
+		},
+		"plainq_topic_operations_total": {
+			kind: "counter", labels: []string{"backend", "operation", "result"},
+		},
+		"plainq_topic_operation_duration_seconds": {
+			kind: "histogram", sampleName: "plainq_topic_operation_duration_seconds_count",
+			labels: []string{"backend", "operation"}, bucket: true,
+		},
+		"plainq_topic_messages_published_total": {
+			kind: "counter", labels: []string{"topic"},
+		},
+		"plainq_topic_published_bytes_total": {
+			kind: "counter", labels: []string{"topic"},
+		},
+		"plainq_topic_deliveries_total": {
+			kind: "counter", labels: []string{"topic"},
+		},
+		"plainq_topic_delivery_failures_total": {
+			kind: "counter", labels: []string{"topic"},
+		},
+		"plainq_topic_fanout": {
+			kind: "histogram", sampleName: "plainq_topic_fanout_count",
+			labels: []string{"topic"}, bucket: true,
+		},
+		"plainq_topic_subscriptions": {
+			kind: "gauge", labels: []string{"topic"},
+		},
+		"plainq_topic_subscriptions_created_total": {
+			kind: "counter", labels: []string{"topic"},
+		},
+		"plainq_topic_subscriptions_deleted_total": {
+			kind: "counter", labels: []string{"topic"},
+		},
+		"plainq_topics_exist": {
+			kind: "gauge", labels: []string{},
+		},
+	}
+	td.Require(t).Cmp(len(families), 13, "the stable pub/sub exposition has thirteen families")
+
+	out := scrape()
+	for family, contract := range families {
+		t.Run(family, func(t *testing.T) {
+			td.Cmp(t, metadataLine(out, "HELP", family), "# HELP "+family,
+				"VictoriaMetrics v1.44 emits name-only HELP metadata",
+			)
+			td.Cmp(t, metadataLine(out, "TYPE", family), "# TYPE "+family+" "+contract.kind)
+
+			sampleName := contract.sampleName
+			if sampleName == "" {
+				sampleName = family
+			}
+
+			td.Cmp(t, sampleLabelKeys(t, out, sampleName), contract.labels)
+
+			if contract.bucket {
+				wantBucketLabels := append(append([]string(nil), contract.labels...), "le")
+				td.Cmp(t, sampleLabelKeys(t, out, family+"_bucket"), wantBucketLabels,
+					"classic Prometheus histograms expose cumulative le buckets",
+				)
+			}
+		})
+	}
+}
+
+func TestRecordPublishUsesSelectedDestinationWidth(t *testing.T) {
+	const topicID = "TMETRICFANOUTSELECTED"
+
+	topicFanout.With(topicID).Reset()
+
+	// Two message deliveries succeeded and two failed, but the publish selected
+	// three subscriber queues. Fan-out is queue width, not delivery arithmetic.
+	RecordPublish(topicID, 2, 14, 3, 2, 2)
+
+	td.Cmp(t, strings.Contains(scrape(),
+		`plainq_topic_fanout_sum{topic="`+topicID+`"} 3`), true,
+	)
+}
+
+func TestRecordPublishObservesZeroFanout(t *testing.T) {
+	const topicID = "TMETRICFANOUTZERO"
+
+	topicFanout.With(topicID).Reset()
+
+	RecordPublish(topicID, 1, 7, 0, 0, 0)
+
+	out := scrape()
+	td.Cmp(t, strings.Contains(out,
+		`plainq_topic_fanout_count{topic="`+topicID+`"} 1`), true,
+		"a publish with no subscribers is still a fan-out observation",
+	)
+	td.Cmp(t, strings.Contains(out,
+		`plainq_topic_fanout_sum{topic="`+topicID+`"} 0`), true,
+	)
+}
+
+func TestSubscriptionLifecycleDoesNotImplicitlyMutateGauge(t *testing.T) {
+	const topicID = "TMETRICLIFECYCLEGAUGE"
+
+	SetTopicSubscriptions(topicID, 7)
+
+	RecordSubscriptionCreated(topicID)
+	RecordSubscriptionDeleted(topicID)
+
+	td.Cmp(t, topicSubscriptions.With(topicID).Get(), float64(7),
+		"lifecycle totals and exact current state have separate owners",
+	)
+}
+
+func TestTopicMetricVocabularyRejectsUnknownValues(t *testing.T) {
+	td.Cmp(t, []string{BackendSQLite, BackendTurso, BackendPostgres, BackendCluster},
+		[]string{"sqlite", "turso", "postgres", "cluster"},
+	)
+	td.Cmp(t, []string{OpCreateTopic, OpDeleteTopic, OpListTopics, OpPublish, OpSubscribe, OpUnsubscribe},
+		[]string{"create_topic", "delete_topic", "list_topics", "publish", "subscribe", "unsubscribe"},
+	)
+	td.Cmp(t, []string{ResultOK, ResultError}, []string{"ok", "error"})
+
+	tests := map[string]func(){
+		"unknown backend": func() {
+			RecordTopicRequest("other", OpListTopics, ResultOK, time.Millisecond)
+		},
+		"unknown request operation": func() {
+			RecordTopicRequest(BackendSQLite, "other", ResultOK, time.Millisecond)
+		},
+		"unknown request result": func() {
+			RecordTopicRequest(BackendSQLite, OpListTopics, "other", time.Millisecond)
+		},
+		"unknown storage backend": func() {
+			RecordTopicOperation("other", OpListTopics, ResultOK, time.Millisecond)
+		},
+		"unknown storage operation": func() {
+			RecordTopicOperation(BackendSQLite, "other", ResultOK, time.Millisecond)
+		},
+		"unknown storage result": func() {
+			RecordTopicOperation(BackendSQLite, OpListTopics, "other", time.Millisecond)
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				td.Cmp(t, recover() != nil, true, "unknown vocabulary must panic")
+			}()
+
+			test()
+		})
+	}
+}
+
+func TestTopicRequestAndStorageDefinitionsHaveNoTopicLabel(t *testing.T) {
+	tests := map[string]struct {
+		labels []string
+		help   string
+	}{
+		Namespace + "_topic_requests_total": {
+			labels: []string{labelBackend, labelOperation, labelResult},
+			help:   "Decoded topic requests by outcome.",
+		},
+		Namespace + "_topic_request_duration_seconds": {
+			labels: []string{labelBackend, labelOperation},
+			help:   "How long a decoded topic request took at the application boundary.",
+		},
+		Namespace + "_topic_operations_total": {
+			labels: []string{labelBackend, labelOperation, labelResult},
+			help:   "Topic operations by outcome.",
+		},
+		Namespace + "_topic_operation_duration_seconds": {
+			labels: []string{labelBackend, labelOperation},
+			help:   "How long a topic operation took inside the storage layer.",
+		},
+	}
+
+	definitions := make(map[string]Definition)
+	for _, def := range Catalog() {
+		definitions[def.Name] = def
+	}
+
+	for name, want := range tests {
+		t.Run(name, func(t *testing.T) {
+			got, ok := definitions[name]
+			td.Require(t).Cmp(ok, true, "metric must be declared")
+			td.Cmp(t, got.Labels, want.labels)
+			td.Cmp(t, got.Help, want.help)
+			td.Cmp(t, strings.Contains(strings.Join(got.Labels, ","), labelTopic), false)
+		})
+	}
+}
+
+// exposeMetadataForTest serially enables VictoriaMetrics metadata and restores
+// the process-global setting that was in effect when the test started.
+func exposeMetadataForTest(t *testing.T) {
+	t.Helper()
+
+	const probe = "plainq_test_metadata_state_total"
+
+	vm.GetOrCreateCounter(probe)
+	wasEnabled := strings.Contains(scrape(), "# TYPE "+probe+" counter")
+
+	ExposeMetadata(true)
+	t.Cleanup(func() { ExposeMetadata(wasEnabled) })
+}
+
+func metadataLine(exposition, directive, family string) string {
+	prefix := "# " + directive + " "
+
+	for line := range strings.SplitSeq(exposition, "\n") {
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+
+		fields := strings.Fields(line)
+		if len(fields) >= 3 && fields[2] == family {
+			return line
+		}
+	}
+
+	return ""
+}
+
+func sampleLabelKeys(t *testing.T, exposition, wantName string) []string {
+	t.Helper()
+
+	for line := range strings.SplitSeq(exposition, "\n") {
+		name, labels, ok := parsePrometheusSample(t, line)
+		if ok && name == wantName {
+			return labels
+		}
+	}
+
+	t.Fatalf("sample %s is absent from exposition", wantName)
+
+	return nil
+}
+
+func parsePrometheusSample(t *testing.T, line string) (string, []string, bool) {
+	t.Helper()
+
+	if line == "" || strings.HasPrefix(line, "#") {
+		return "", nil, false
+	}
+
+	headEnd := prometheusSampleHeadEnd(line)
+	if headEnd < 0 {
+		t.Fatalf("malformed Prometheus sample line %q", line)
+	}
+
+	head := line[:headEnd]
+	open := strings.IndexByte(head, '{')
+	if open < 0 {
+		return head, []string{}, true
+	}
+
+	if !strings.HasSuffix(head, "}") {
+		t.Fatalf("malformed Prometheus labels in %q", line)
+	}
+
+	name := head[:open]
+	labels := head[open+1 : len(head)-1]
+	keys := make([]string, 0, strings.Count(labels, ",")+1)
+
+	for len(labels) > 0 {
+		equals := strings.IndexByte(labels, '=')
+		if equals <= 0 || equals+1 >= len(labels) || labels[equals+1] != '"' {
+			t.Fatalf("malformed Prometheus label in %q", line)
+		}
+
+		keys = append(keys, labels[:equals])
+		labels = labels[equals+2:]
+
+		escaped := false
+		closingQuote := -1
+		for i := range len(labels) {
+			switch {
+			case escaped:
+				escaped = false
+			case labels[i] == '\\':
+				escaped = true
+			case labels[i] == '"':
+				closingQuote = i
+			}
+
+			if closingQuote >= 0 {
+				break
+			}
+		}
+
+		if closingQuote < 0 {
+			t.Fatalf("unterminated Prometheus label in %q", line)
+		}
+
+		labels = labels[closingQuote+1:]
+		if labels == "" {
+			break
+		}
+		if labels[0] != ',' {
+			t.Fatalf("malformed Prometheus label separator in %q", line)
+		}
+		labels = labels[1:]
+	}
+
+	return name, keys, true
+}
+
+func prometheusSampleHeadEnd(line string) int {
+	inQuotes := false
+	escaped := false
+
+	for i := range len(line) {
+		switch {
+		case escaped:
+			escaped = false
+		case inQuotes && line[i] == '\\':
+			escaped = true
+		case line[i] == '"':
+			inQuotes = !inQuotes
+		case !inQuotes && (line[i] == ' ' || line[i] == '\t'):
+			return i
+		}
+	}
+
+	return -1
+}
+
 // Test_exposition_carriesTypeMetadata checks that a human pointing a browser
 // at /metrics can tell a counter from a gauge.
 func Test_exposition_carriesTypeMetadata(t *testing.T) {
-	ExposeMetadata(true)
-	defer ExposeMetadata(false)
+	exposeMetadataForTest(t)
 
 	RecordSend("QTESTMETADATA", 1, 1)
 
@@ -242,14 +681,15 @@ func Test_exposition_carriesTypeMetadata(t *testing.T) {
 func Test_RegisterClusterNode_exportsTheClusterView(t *testing.T) {
 	RegisterClusterNode("node-a", "v1.2.3", "raft", func() ClusterSample {
 		return ClusterSample{
-			Leader:      true,
-			Healthy:     true,
-			Term:        7,
-			CommitIndex: 42,
-			Voters:      3,
-			Quorum:      2,
-			Reachable:   3,
-			LastContact: 250 * time.Millisecond,
+			Leader:             true,
+			Healthy:            true,
+			ReplicaQuarantined: true,
+			Term:               7,
+			CommitIndex:        42,
+			Voters:             3,
+			Quorum:             2,
+			Reachable:          3,
+			LastContact:        250 * time.Millisecond,
 		}
 	})
 
@@ -259,6 +699,7 @@ func Test_RegisterClusterNode_exportsTheClusterView(t *testing.T) {
 		`plainq_cluster_node_info{node_id="node-a",version="v1.2.3",engine="raft"} 1`,
 		`plainq_cluster_leader{node_id="node-a"} 1`,
 		`plainq_cluster_healthy{node_id="node-a"} 1`,
+		`plainq_cluster_replica_quarantined{node_id="node-a"} 1`,
 		`plainq_cluster_term{node_id="node-a"} 7`,
 		`plainq_cluster_commit_index{node_id="node-a"} 42`,
 		`plainq_cluster_quorum{node_id="node-a"} 2`,
@@ -266,6 +707,35 @@ func Test_RegisterClusterNode_exportsTheClusterView(t *testing.T) {
 	} {
 		td.Cmp(t, strings.Contains(out, want), true, "scrape should contain "+want)
 	}
+}
+
+func TestReplicaQuarantineMetricCatalogAndMetadata(t *testing.T) {
+	const (
+		name = "plainq_cluster_replica_quarantined"
+		help = "1 when this replica is quarantined after a non-deterministic state-machine result and must not serve data; 0 otherwise."
+	)
+	var found *Definition
+	for _, definition := range Catalog() {
+		if definition.Name == name {
+			copy := definition
+			found = &copy
+			break
+		}
+	}
+	if found == nil {
+		t.Fatalf("%s missing from catalog", name)
+	}
+	td.Cmp(t, found.Kind, KindGauge)
+	td.Cmp(t, found.Help, help)
+	td.Cmp(t, found.Labels, []string{labelNodeID})
+
+	RegisterClusterNode("metadata-node", "test", "raft", func() ClusterSample {
+		return ClusterSample{}
+	})
+	exposeMetadataForTest(t)
+	out := scrape()
+	td.Cmp(t, strings.Contains(out, "# HELP "+name+"\n"), true)
+	td.Cmp(t, strings.Contains(out, "# TYPE "+name+" gauge"), true)
 }
 
 // Test_RegisterPoolCollector_readsThroughAtScrapeTime proves the pool gauges
@@ -338,6 +808,13 @@ func Test_Catalog_isFullyDocumented(t *testing.T) {
 		td.Cmp(t, strings.Contains(documented, "`"+def.Name+"`"), true,
 			def.Name+" is exposed but missing from "+guide,
 		)
+
+		if def.Name == Namespace+"_topic_requests_total" ||
+			def.Name == Namespace+"_topic_request_duration_seconds" {
+			td.Cmp(t, strings.Contains(documented, def.Help), true,
+				def.Name+" declaration prose is missing from "+guide,
+			)
+		}
 	}
 }
 
