@@ -215,6 +215,7 @@ func podTemplate(pq *plainqv1alpha1.PlainQ, refs SecretRefs) corev1.PodTemplateS
 func serverContainerSpec(pq *plainqv1alpha1.PlainQ, refs SecretRefs) corev1.Container {
 	spec := pq.Spec
 	livenessProbe := spec.Pod.LivenessProbe
+
 	readinessProbe := spec.Pod.ReadinessProbe
 	if plainqv1alpha1.BoolValue(spec.Observability.Health.Enabled, true) {
 		livenessProbe = probeOr(livenessProbe, defaultProbe(plainqv1alpha1.DefaultLivenessRoute, 10, 15))
