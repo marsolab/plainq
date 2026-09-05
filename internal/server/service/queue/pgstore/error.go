@@ -92,6 +92,15 @@ func normalizePostgresError(err error, pgErr *pgconn.PgError, operation pubSubEr
 	}
 }
 
+func retryablePostgresTransaction(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+
+	return pgErr.Code == "40001" || pgErr.Code == "40P01"
+}
+
 func normalizeUniqueViolation(err error, constraint string, operation pubSubErrorContext) error {
 	switch operation {
 	case pubSubCreateTopic:

@@ -91,16 +91,25 @@ func (s *Storage) ListTopics(ctx context.Context) (*queue.ListTopicsResponse, er
 			return nil, fmt.Errorf("scan topic: %w", normalizePubSubError(err, pubSubListTopics))
 		}
 
+		out.Topics = append(out.Topics, topic)
+	}
+
+	// Release the query connection before loading subscriptions. Keeping these
+	// rows open while issuing another query through the same pool deadlocks a
+	// one-connection pool and can starve every connection under concurrent load.
+	rows.Close()
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate topics: %w", normalizePubSubError(err, pubSubListTopics))
+	}
+
+	for index := range out.Topics {
+		topic := &out.Topics[index]
+
 		topic.Subscriptions, err = listSubscriptions(ctx, s.pool, topic.TopicID, pubSubListTopics)
 		if err != nil {
 			return nil, fmt.Errorf("list subscriptions for topic %q: %w", topic.TopicID, err)
 		}
-
-		out.Topics = append(out.Topics, topic)
-	}
-
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate topics: %w", normalizePubSubError(err, pubSubListTopics))
 	}
 
 	return out, nil

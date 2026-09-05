@@ -74,16 +74,27 @@ func (s *Storage) ListTopics(ctx context.Context) (*queue.ListTopicsResponse, er
 			return nil, fmt.Errorf("scan topic: %w", normalizePubSubError(err, pubSubListTopics))
 		}
 
-		topic.Subscriptions, err = listSubscriptions(ctx, s.db, topic.TopicID, pubSubListTopics)
-		if err != nil {
-			return nil, fmt.Errorf("list subscriptions for topic %q: %w", topic.TopicID, err)
-		}
-
 		out.Topics = append(out.Topics, topic)
 	}
 
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate topics: %w", normalizePubSubError(err, pubSubListTopics))
+	}
+
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close topics: %w", normalizePubSubError(err, pubSubListTopics))
+	}
+
+	// Drain the outer cursor before resolving subscriptions. This avoids holding
+	// one pooled connection while each topic performs another query and keeps
+	// the method safe with a bounded connection pool.
+	for index := range out.Topics {
+		topic := &out.Topics[index]
+
+		topic.Subscriptions, err = listSubscriptions(ctx, s.db, topic.TopicID, pubSubListTopics)
+		if err != nil {
+			return nil, fmt.Errorf("list subscriptions for topic %q: %w", topic.TopicID, err)
+		}
 	}
 
 	return out, nil

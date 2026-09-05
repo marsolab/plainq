@@ -1,12 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/url"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,10 +23,436 @@ import (
 	"github.com/marsolab/plainq/internal/server/config"
 	v1 "github.com/marsolab/plainq/internal/server/schema/v1"
 	"github.com/marsolab/plainq/internal/server/service/queue"
+	queuestore "github.com/marsolab/plainq/internal/server/service/queue/litestore"
 	"github.com/marsolab/plainq/internal/server/service/telemetry"
 	"github.com/marsolab/servekit/dbkit/litekit"
 	"github.com/marsolab/servekit/logkit"
 )
+
+func TestSQLiteBackendSupportsConcurrentQueueMutations(t *testing.T) {
+	cfg := config.Config{
+		StorageDriver: storageDriverSQLite,
+		StorageDBPath: filepath.Join(t.TempDir(), "concurrent.db"),
+	}
+	backend, err := initStorageBackend(&cfg, logkit.NewNop())
+	if err != nil {
+		t.Fatalf("initialize SQLite backend: %v", err)
+	}
+	t.Cleanup(func() { _ = backend.Close() })
+
+	store, err := queuestore.New(backend.sqlite, queuestore.WithoutGC())
+	if err != nil {
+		t.Fatalf("initialize queue storage: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	const clients = 32
+	start := make(chan struct{})
+	errs := make(chan error, clients)
+	var wg sync.WaitGroup
+
+	for clientID := 0; clientID < clients; clientID++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			name := fmt.Sprintf("concurrent-%02d", clientID)
+			created, err := store.CreateQueue(ctx, &v1.CreateQueueRequest{QueueName: name})
+			if err != nil {
+				errs <- fmt.Errorf("client %d create queue: %w", clientID, err)
+
+				return
+			}
+
+			body := []byte(name)
+			sent, err := store.Send(ctx, &v1.SendRequest{
+				QueueId: created.GetQueueId(), Messages: []*v1.SendMessage{{Body: body}},
+			})
+			if err != nil {
+				errs <- fmt.Errorf("client %d send: %w", clientID, err)
+
+				return
+			}
+
+			received, err := store.Receive(ctx, &v1.ReceiveRequest{QueueId: created.GetQueueId(), BatchSize: 1})
+			if err != nil {
+				errs <- fmt.Errorf("client %d receive: %w", clientID, err)
+
+				return
+			}
+			if len(received.GetMessages()) != 1 || len(sent.GetMessageIds()) != 1 ||
+				received.GetMessages()[0].GetId() != sent.GetMessageIds()[0] ||
+				!bytes.Equal(received.GetMessages()[0].GetBody(), body) {
+				errs <- fmt.Errorf("client %d received an unexpected message", clientID)
+
+				return
+			}
+
+			deleted, err := store.Delete(ctx, &v1.DeleteRequest{
+				QueueId: created.GetQueueId(), MessageIds: sent.GetMessageIds(),
+			})
+			if err != nil {
+				errs <- fmt.Errorf("client %d delete: %w", clientID, err)
+
+				return
+			}
+			if len(deleted.GetSuccessful()) != 1 || len(deleted.GetFailed()) != 0 {
+				errs <- fmt.Errorf("client %d delete result = %+v", clientID, deleted)
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Error(err)
+	}
+}
+
+func TestSQLiteBackendConcurrentlyReceivesEachMessageOnce(t *testing.T) {
+	cfg := config.Config{
+		StorageDriver: storageDriverSQLite,
+		StorageDBPath: filepath.Join(t.TempDir(), "shared-queue.db"),
+	}
+	backend, err := initStorageBackend(&cfg, logkit.NewNop())
+	if err != nil {
+		t.Fatalf("initialize SQLite backend: %v", err)
+	}
+	t.Cleanup(func() { _ = backend.Close() })
+
+	store, err := queuestore.New(backend.sqlite, queuestore.WithoutGC())
+	if err != nil {
+		t.Fatalf("initialize queue storage: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	created, err := store.CreateQueue(ctx, &v1.CreateQueueRequest{QueueName: "shared"})
+	if err != nil {
+		t.Fatalf("create queue: %v", err)
+	}
+
+	const clients = 32
+	messages := make([]*v1.SendMessage, clients)
+	wantBodies := make(map[string]string, clients)
+	for index := range clients {
+		body := fmt.Sprintf("message-%02d", index)
+		messages[index] = &v1.SendMessage{Body: []byte(body)}
+	}
+
+	sent, err := store.Send(ctx, &v1.SendRequest{QueueId: created.GetQueueId(), Messages: messages})
+	if err != nil {
+		t.Fatalf("send messages: %v", err)
+	}
+	if len(sent.GetMessageIds()) != clients {
+		t.Fatalf("sent IDs = %d, want %d", len(sent.GetMessageIds()), clients)
+	}
+	for index, id := range sent.GetMessageIds() {
+		wantBodies[id] = string(messages[index].GetBody())
+	}
+
+	type result struct {
+		id   string
+		body string
+		err  error
+	}
+	start := make(chan struct{})
+	results := make(chan result, clients)
+	var wg sync.WaitGroup
+
+	for clientID := range clients {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+
+			requestCtx, requestCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer requestCancel()
+
+			received, receiveErr := store.Receive(requestCtx, &v1.ReceiveRequest{
+				QueueId: created.GetQueueId(), BatchSize: 1,
+			})
+			if receiveErr != nil {
+				results <- result{err: fmt.Errorf("client %d receive: %w", clientID, receiveErr)}
+
+				return
+			}
+			if len(received.GetMessages()) != 1 {
+				results <- result{err: fmt.Errorf(
+					"client %d received %d messages, want 1", clientID, len(received.GetMessages()),
+				)}
+
+				return
+			}
+
+			message := received.GetMessages()[0]
+			deleted, deleteErr := store.Delete(requestCtx, &v1.DeleteRequest{
+				QueueId: created.GetQueueId(), MessageIds: []string{message.GetId()},
+			})
+			if deleteErr != nil {
+				results <- result{err: fmt.Errorf("client %d delete: %w", clientID, deleteErr)}
+
+				return
+			}
+			if len(deleted.GetSuccessful()) != 1 || len(deleted.GetFailed()) != 0 {
+				results <- result{err: fmt.Errorf("client %d delete result = %+v", clientID, deleted)}
+
+				return
+			}
+
+			results <- result{id: message.GetId(), body: string(message.GetBody())}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+	close(results)
+
+	seen := make(map[string]struct{}, clients)
+	for got := range results {
+		if got.err != nil {
+			t.Error(got.err)
+
+			continue
+		}
+		wantBody, ok := wantBodies[got.id]
+		if !ok {
+			t.Errorf("received unknown message ID %q", got.id)
+
+			continue
+		}
+		if got.body != wantBody {
+			t.Errorf("message %q body = %q, want %q", got.id, got.body, wantBody)
+		}
+		if _, duplicate := seen[got.id]; duplicate {
+			t.Errorf("message %q was received more than once", got.id)
+		}
+		seen[got.id] = struct{}{}
+	}
+	if len(seen) != clients {
+		t.Fatalf("received unique IDs = %d, want %d", len(seen), clients)
+	}
+
+	empty, err := store.Receive(ctx, &v1.ReceiveRequest{QueueId: created.GetQueueId(), BatchSize: 1})
+	if err != nil {
+		t.Fatalf("receive from drained queue: %v", err)
+	}
+	if len(empty.GetMessages()) != 0 {
+		t.Fatalf("drained queue returned %d messages, want 0", len(empty.GetMessages()))
+	}
+}
+
+func TestSQLiteReadOnlySnapshotDoesNotReserveWriter(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "snapshot-writer.db")
+	cfg := config.Config{StorageDriver: storageDriverSQLite, StorageDBPath: dbPath}
+	backend, err := initStorageBackend(&cfg, logkit.NewNop())
+	if err != nil {
+		t.Fatalf("initialize SQLite backend: %v", err)
+	}
+	t.Cleanup(func() { _ = backend.Close() })
+
+	store, err := queuestore.New(backend.sqlite, queuestore.WithoutGC())
+	if err != nil {
+		t.Fatalf("initialize queue storage: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := backend.sqlite.ExecContext(ctx, `CREATE TABLE snapshot_writer_probe (id INTEGER PRIMARY KEY)`); err != nil {
+		t.Fatalf("create writer probe: %v", err)
+	}
+
+	snapshot, err := store.BeginSnapshot(ctx)
+	if err != nil {
+		t.Fatalf("begin read-only snapshot: %v", err)
+	}
+	defer func() {
+		if err := snapshot.Release(); err != nil {
+			t.Errorf("release snapshot: %v", err)
+		}
+	}()
+
+	// Use an independent zero-wait writer so this test observes the lock held
+	// by the still-open snapshot rather than waiting out the production busy
+	// timeout. A WAL read transaction must not reserve the single writer slot.
+	contender, err := sql.Open("sqlite3", (&url.URL{
+		Scheme: "file",
+		Path:   dbPath,
+		RawQuery: url.Values{
+			"_busy_timeout": []string{"0"},
+			"_journal":      []string{journalModeWAL},
+		}.Encode(),
+	}).String())
+	if err != nil {
+		t.Fatalf("open independent writer: %v", err)
+	}
+	t.Cleanup(func() { _ = contender.Close() })
+
+	if _, err := contender.ExecContext(ctx, `INSERT INTO snapshot_writer_probe (id) VALUES (1)`); err != nil {
+		t.Fatalf("read-only snapshot blocked concurrent WAL writer: %v", err)
+	}
+}
+
+func TestSQLiteCommitFailureRollsBackPooledConnection(t *testing.T) {
+	cfg := config.Config{
+		StorageDriver: storageDriverSQLite,
+		StorageDBPath: filepath.Join(t.TempDir(), "failed-commit.db"),
+	}
+	backend, err := initStorageBackend(&cfg, logkit.NewNop())
+	if err != nil {
+		t.Fatalf("initialize SQLite backend: %v", err)
+	}
+	t.Cleanup(func() { _ = backend.Close() })
+	backend.sqlite.SetMaxOpenConns(1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := backend.sqlite.ExecContext(ctx, `
+		CREATE TABLE commit_parent (id INTEGER PRIMARY KEY);
+		CREATE TABLE commit_child (
+			id INTEGER PRIMARY KEY,
+			parent_id INTEGER NOT NULL,
+			FOREIGN KEY (parent_id) REFERENCES commit_parent(id)
+				DEFERRABLE INITIALLY DEFERRED
+		);`); err != nil {
+		t.Fatalf("create deferred foreign-key schema: %v", err)
+	}
+
+	tx, err := backend.sqlite.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin failing transaction: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO commit_child (id, parent_id) VALUES (1, 404)`); err != nil {
+		t.Fatalf("stage deferred foreign-key violation: %v", err)
+	}
+	if err := tx.Commit(); err == nil {
+		t.Fatal("deferred foreign-key commit unexpectedly succeeded")
+	}
+
+	clean, err := backend.sqlite.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin transaction after failed commit: %v", err)
+	}
+	defer func() { _ = clean.Rollback() }()
+	var orphans int
+	if err := clean.QueryRowContext(ctx, `SELECT count(*) FROM commit_child`).Scan(&orphans); err != nil {
+		t.Fatalf("query after failed commit: %v", err)
+	}
+	if orphans != 0 {
+		t.Fatalf("failed transaction left %d orphan rows", orphans)
+	}
+}
+
+func TestSQLiteSerializedBackendListsExistingSubscriptions(t *testing.T) {
+	cfg := config.Config{
+		StorageDriver: storageDriverSQLite,
+		StorageDBPath: filepath.Join(t.TempDir(), "subscriptions.db"),
+	}
+	backend, err := initStorageBackend(&cfg, logkit.NewNop())
+	if err != nil {
+		t.Fatalf("initialize SQLite backend: %v", err)
+	}
+	t.Cleanup(func() { _ = backend.Close() })
+	backend.sqlite.SetMaxOpenConns(1)
+
+	store, err := queuestore.New(backend.sqlite, queuestore.WithoutGC())
+	if err != nil {
+		t.Fatalf("initialize queue storage: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	createdQueue, err := store.CreateQueue(ctx, &v1.CreateQueueRequest{QueueName: "subscribed"})
+	if err != nil {
+		t.Fatalf("create queue: %v", err)
+	}
+	createdTopic, err := store.CreateTopic(ctx, &queue.CreateTopicRequest{TopicName: "events"})
+	if err != nil {
+		t.Fatalf("create topic: %v", err)
+	}
+	createdSubscription, err := store.Subscribe(ctx, createdTopic.TopicID, &queue.SubscribeRequest{
+		QueueID: createdQueue.GetQueueId(),
+	})
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+
+	listed, err := store.ListTopics(ctx)
+	if err != nil {
+		t.Fatalf("list topics: %v", err)
+	}
+	if len(listed.Topics) != 1 || len(listed.Topics[0].Subscriptions) != 1 {
+		t.Fatalf("listed topics = %+v, want one topic with one subscription", listed.Topics)
+	}
+	if listed.Topics[0].Subscriptions[0].SubscriptionID != createdSubscription.SubscriptionID {
+		t.Fatalf("listed subscription = %q, want %q",
+			listed.Topics[0].Subscriptions[0].SubscriptionID, createdSubscription.SubscriptionID)
+	}
+}
+
+func TestSQLiteBackendConnectionPolicySurvivesReplacement(t *testing.T) {
+	cfg := config.Config{
+		StorageDriver: storageDriverSQLite,
+		StorageDBPath: filepath.Join(t.TempDir(), "connection-policy.db"),
+	}
+	backend, err := initStorageBackend(&cfg, logkit.NewNop())
+	if err != nil {
+		t.Fatalf("initialize SQLite backend: %v", err)
+	}
+	t.Cleanup(func() { _ = backend.Close() })
+
+	backend.sqlite.SetConnMaxLifetime(time.Nanosecond)
+	time.Sleep(time.Millisecond)
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	conn, err := backend.sqlite.Conn(ctx)
+	if err != nil {
+		t.Fatalf("acquire replacement connection: %v", err)
+	}
+
+	var foreignKeys int
+	if err := conn.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil {
+		_ = conn.Close()
+		t.Fatalf("read replacement foreign_keys: %v", err)
+	}
+	var busyTimeout int
+	if err := conn.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&busyTimeout); err != nil {
+		_ = conn.Close()
+		t.Fatalf("read replacement busy_timeout: %v", err)
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatalf("release replacement connection: %v", err)
+	}
+	backend.sqlite.SetConnMaxLifetime(0)
+
+	if foreignKeys != 1 {
+		t.Fatalf("replacement foreign_keys = %d, want 1", foreignKeys)
+	}
+	if busyTimeout != int(sqliteBusyTimeout/time.Millisecond) {
+		t.Fatalf("replacement busy_timeout = %dms, want %dms",
+			busyTimeout, sqliteBusyTimeout/time.Millisecond)
+	}
+
+	_, err = backend.sqlite.ExecContext(ctx, `
+		INSERT INTO topic_subscriptions (subscription_id, topic_id, queue_id, created_at)
+		VALUES ('orphan', 'missing-topic', 'missing-queue', CURRENT_TIMESTAMP)`)
+	if err == nil || !strings.Contains(strings.ToUpper(err.Error()), "FOREIGN KEY") {
+		t.Fatalf("replacement connection orphan insert error = %v, want foreign-key rejection", err)
+	}
+}
 
 func TestTursoUsesTursoTelemetryBackend(t *testing.T) {
 	if got := telemetryBackend(storageDriverTurso); got != metrics.BackendTurso {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,8 +26,11 @@ import (
 )
 
 const (
-	queuePolicyIdempotencyTTL = 24 * time.Hour
-	auditMetadataMessageCount = "message_count"
+	queuePolicyIdempotencyTTL           = 24 * time.Hour
+	auditMetadataMessageCount           = "message_count"
+	maxQueuePolicyTransactionAttempts   = 32
+	baseQueuePolicyTransactionRetryWait = 2 * time.Millisecond
+	maxQueuePolicyTransactionRetryWait  = 50 * time.Millisecond
 )
 
 var _ queue.PolicyStorage = (*Storage)(nil)
@@ -49,7 +53,11 @@ func (s *Storage) CreateQueuePolicy(
 	input *v1.CreateQueueRequest,
 	mutation policytx.Mutation,
 ) (*v1.CreateQueueResponse, error) {
-	return s.CreateQueue(withPostgresQueueMutation(ctx, mutation), input)
+	policyCtx := withPostgresQueueMutation(ctx, mutation)
+
+	return retryPostgresQueuePolicy(ctx, mutation, func() (*v1.CreateQueueResponse, error) {
+		return s.CreateQueue(policyCtx, input)
+	})
 }
 
 func (s *Storage) PurgeQueuePolicy(
@@ -73,7 +81,11 @@ func (s *Storage) SendPolicy(
 	input *v1.SendRequest,
 	mutation policytx.Mutation,
 ) (*v1.SendResponse, error) {
-	return s.Send(withPostgresQueueMutation(ctx, mutation), input)
+	policyCtx := withPostgresQueueMutation(ctx, mutation)
+
+	return retryPostgresQueuePolicy(ctx, mutation, func() (*v1.SendResponse, error) {
+		return s.Send(policyCtx, input)
+	})
 }
 
 func (s *Storage) ReceivePolicy(
@@ -81,7 +93,11 @@ func (s *Storage) ReceivePolicy(
 	input *v1.ReceiveRequest,
 	mutation policytx.Mutation,
 ) (*v1.ReceiveResponse, error) {
-	return s.Receive(withPostgresQueueMutation(ctx, mutation), input)
+	policyCtx := withPostgresQueueMutation(ctx, mutation)
+
+	return retryPostgresQueuePolicy(ctx, mutation, func() (*v1.ReceiveResponse, error) {
+		return s.Receive(policyCtx, input)
+	})
 }
 
 func (s *Storage) DeletePolicy(
@@ -89,7 +105,11 @@ func (s *Storage) DeletePolicy(
 	input *v1.DeleteRequest,
 	mutation policytx.Mutation,
 ) (*v1.DeleteResponse, error) {
-	return s.Delete(withPostgresQueueMutation(ctx, mutation), input)
+	policyCtx := withPostgresQueueMutation(ctx, mutation)
+
+	return retryPostgresQueuePolicy(ctx, mutation, func() (*v1.DeleteResponse, error) {
+		return s.Delete(policyCtx, input)
+	})
 }
 
 func (s *Storage) CreateTopicPolicy(
@@ -97,7 +117,11 @@ func (s *Storage) CreateTopicPolicy(
 	input *queue.CreateTopicRequest,
 	mutation policytx.Mutation,
 ) (*queue.CreateTopicResponse, error) {
-	return s.CreateTopic(withPostgresQueueMutation(ctx, mutation), input)
+	policyCtx := withPostgresQueueMutation(ctx, mutation)
+
+	return retryPostgresQueuePolicy(ctx, mutation, func() (*queue.CreateTopicResponse, error) {
+		return s.CreateTopic(policyCtx, input)
+	})
 }
 
 func (s *Storage) DeleteTopicPolicy(
@@ -114,7 +138,11 @@ func (s *Storage) SubscribePolicy(
 	input *queue.SubscribeRequest,
 	mutation policytx.Mutation,
 ) (*queue.SubscribeResponse, error) {
-	return s.Subscribe(withPostgresQueueMutation(ctx, mutation), topicID, input)
+	policyCtx := withPostgresQueueMutation(ctx, mutation)
+
+	return retryPostgresQueuePolicy(ctx, mutation, func() (*queue.SubscribeResponse, error) {
+		return s.Subscribe(policyCtx, topicID, input)
+	})
 }
 
 func (s *Storage) UnsubscribePolicy(
@@ -131,7 +159,68 @@ func (s *Storage) PublishPolicy(
 	input *queue.PublishRequest,
 	mutation policytx.Mutation,
 ) (*queue.PublishResponse, error) {
-	return s.Publish(withPostgresQueueMutation(ctx, mutation), topicID, input)
+	policyCtx := withPostgresQueueMutation(ctx, mutation)
+
+	return retryPostgresQueuePolicy(ctx, mutation, func() (*queue.PublishResponse, error) {
+		return s.Publish(policyCtx, topicID, input)
+	})
+}
+
+// retryPostgresQueuePolicy reruns the complete policy transaction after a
+// PostgreSQL serialization failure or deadlock. Those errors always abort the
+// current transaction, so replaying from the public policy boundary is safe;
+// the mutation's idempotency record remains in the same atomic transaction.
+func retryPostgresQueuePolicy[T any](
+	ctx context.Context,
+	mutation policytx.Mutation,
+	operation func() (T, error),
+) (T, error) {
+	var (
+		zero    T
+		lastErr error
+	)
+
+	for attempt := range maxQueuePolicyTransactionAttempts {
+		result, err := operation()
+		if err == nil || !retryablePostgresTransaction(err) {
+			return result, err
+		}
+
+		lastErr = err
+
+		if attempt == maxQueuePolicyTransactionAttempts-1 {
+			break
+		}
+
+		if err := waitPostgresQueuePolicyRetry(ctx, mutation.IdempotencyKey, attempt); err != nil {
+			return zero, fmt.Errorf("retry postgres %s transaction: %w", mutation.Action, err)
+		}
+	}
+
+	return zero, fmt.Errorf(
+		"postgres %s transaction retries exhausted after %d attempts: %w",
+		mutation.Action,
+		maxQueuePolicyTransactionAttempts,
+		lastErr,
+	)
+}
+
+func waitPostgresQueuePolicyRetry(ctx context.Context, retrySeed string, attempt int) error {
+	ceiling := baseQueuePolicyTransactionRetryWait << min(attempt, 5)
+	ceiling = min(ceiling, maxQueuePolicyTransactionRetryWait)
+	digest := sha256.Sum256([]byte(retrySeed + "\x00" + strconv.Itoa(attempt)))
+	randomValue := int64(binary.BigEndian.Uint32(digest[:4]))
+	delay := time.Duration(randomValue%(ceiling.Milliseconds()+1)) * time.Millisecond
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (s *Storage) ResolveQueueResource(

@@ -24,9 +24,8 @@ func registerRuntimeMetrics(backend *storageBackend) {
 // registerPoolMetrics exposes the storage driver's connection-pool counters.
 //
 // For SQLite this is the most direct read available on the thing that
-// actually limits a queue server: writes serialize on one connection, so
-// `in_use` sitting at the pool ceiling is what "the queue is slow" looks like
-// from the inside.
+// actually limits a queue server: writes serialize inside SQLite, so pool
+// pressure is useful context when the queue is slow.
 func registerPoolMetrics(backend *storageBackend) {
 	switch {
 	case backend.sqlite != nil:

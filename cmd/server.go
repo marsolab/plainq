@@ -10,9 +10,11 @@ import (
 	"math"
 	"net"
 	"net/netip"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -66,6 +68,8 @@ const (
 	storageDriverTurso    = "turso"
 	journalModeDelete     = "delete"
 	journalModeWAL        = "wal"
+	sqliteForeignKeys     = "on"
+	sqliteBusyTimeout     = 5 * time.Second
 )
 
 func telemetryBackend(driver string) string {
@@ -154,7 +158,7 @@ func replayStartupTopicInventory(
 // initStorageBackend returns.
 type storageBackend struct {
 	driver string
-	sqlite *litekit.Conn
+	sqlite *sql.DB
 	turso  *sql.DB
 	pgpool *pgxpool.Pool
 }
@@ -1092,8 +1096,7 @@ func initStorageBackend(cfg *config.Config, logger *slog.Logger) (*storageBacken
 	}
 }
 
-//nolint:cyclop // Database initialization involves multiple setup steps.
-func initSQLiteBackend(cfg *config.Config, logger *slog.Logger) (*litekit.Conn, error) {
+func initSQLiteBackend(cfg *config.Config, logger *slog.Logger) (*sql.DB, error) {
 	if cfg.StorageDBPath == "" {
 		pwd, pwdErr := os.Getwd()
 		if pwdErr != nil {
@@ -1108,29 +1111,22 @@ func initSQLiteBackend(cfg *config.Config, logger *slog.Logger) (*litekit.Conn, 
 		cfg.StorageDBPath = dbPath
 	}
 
-	connOption := make([]litekit.Option, 0, 2)
-
-	if cfg.StorageAccessMode != "" {
-		mode, err := litekit.AccessModeFromString(cfg.StorageAccessMode)
-		if err != nil {
-			return nil, fmt.Errorf("parse storage access mode: %w", err)
-		}
-
-		connOption = append(connOption, litekit.WithAccessMode(mode))
+	dsn, err := sqliteConnectionString(cfg)
+	if err != nil {
+		return nil, err
 	}
 
-	if cfg.StorageJournalMode != "" {
-		mode, err := sqliteJournalMode(cfg.StorageJournalMode)
-		if err != nil {
-			return nil, fmt.Errorf("parse storage journal mode: %w", err)
+	conn := sql.OpenDB(newSQLiteConnector(dsn))
+
+	connectCtx, connectCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer connectCancel()
+
+	if err := conn.PingContext(connectCtx); err != nil {
+		if closeErr := conn.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close sqlite connection: %w", closeErr))
 		}
 
-		connOption = append(connOption, litekit.WithJournalMode(mode))
-	}
-
-	conn, conErr := litekit.New(cfg.StorageDBPath, connOption...)
-	if conErr != nil {
-		return nil, fmt.Errorf("connect to database: %w", conErr)
+		return nil, fmt.Errorf("connect to sqlite database: %w", err)
 	}
 
 	logger.Info("SQLite database connection has been initialized",
@@ -1160,6 +1156,44 @@ func initSQLiteBackend(cfg *config.Config, logger *slog.Logger) (*litekit.Conn, 
 	)
 
 	return conn, nil
+}
+
+// sqliteConnectionString applies connection-local safety policy through the
+// driver DSN. PRAGMA foreign_keys is connection-local, so setting it once at
+// startup is not enough when database/sql replaces a connection. The bounded
+// busy timeout lets concurrent writers wait for SQLite's single writer instead
+// of failing immediately with SQLITE_BUSY. Transaction mode is selected by
+// newSQLiteConnector so read-only WAL snapshots remain non-blocking.
+func sqliteConnectionString(cfg *config.Config) (string, error) {
+	dbPath, err := filepath.Abs(cfg.StorageDBPath)
+	if err != nil {
+		return "", fmt.Errorf("determine absolute sqlite database path: %w", err)
+	}
+
+	accessMode := litekit.ReadWriteCreate
+	if cfg.StorageAccessMode != "" {
+		accessMode, err = litekit.AccessModeFromString(cfg.StorageAccessMode)
+		if err != nil {
+			return "", fmt.Errorf("parse storage access mode: %w", err)
+		}
+	}
+
+	journalMode := litekit.WAL
+	if cfg.StorageJournalMode != "" {
+		journalMode, err = sqliteJournalMode(cfg.StorageJournalMode)
+		if err != nil {
+			return "", fmt.Errorf("parse storage journal mode: %w", err)
+		}
+	}
+
+	params := url.Values{
+		"mode":          []string{accessMode.String()},
+		"_journal":      []string{journalMode.String()},
+		"_foreign_keys": []string{sqliteForeignKeys},
+		"_busy_timeout": []string{strconv.FormatInt(sqliteBusyTimeout.Milliseconds(), 10)},
+	}
+
+	return (&url.URL{Scheme: "file", Path: dbPath, RawQuery: params.Encode()}).String(), nil
 }
 
 func sqliteJournalMode(value string) (litekit.JournalMode, error) {
