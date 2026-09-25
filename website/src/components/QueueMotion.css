@@ -55,6 +55,7 @@
 
 .queue-motion__map {
   display: grid;
+  flex: 1;
   min-height: 324px;
   grid-template-columns: minmax(144px, 0.8fr) minmax(76px, 0.55fr) minmax(332px, 1.5fr) minmax(76px, 0.55fr) minmax(170px, 0.9fr);
   align-items: center;
@@ -121,6 +122,7 @@
 
 .queue-motion__packet {
   position: absolute;
+  z-index: 1;
   top: -5px;
   left: 0;
   width: 11px;
@@ -129,6 +131,26 @@
   border-radius: 999px;
   background: var(--color-accent);
   box-shadow: 0 0 0 1px rgba(49, 92, 255, 0.2), 0 3px 10px rgba(49, 92, 255, 0.24);
+}
+
+.queue-motion__packet.is-success {
+  background: var(--color-success);
+  box-shadow: 0 0 0 1px rgba(14, 159, 110, 0.2), 0 3px 10px rgba(14, 159, 110, 0.24);
+}
+
+.queue-motion__trace {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: calc(100% - 4px);
+  height: 1px;
+  background: linear-gradient(90deg, rgba(49, 92, 255, 0), var(--color-accent));
+  transform-origin: left center;
+}
+
+.queue-motion__trace.is-reverse {
+  background: linear-gradient(270deg, rgba(14, 159, 110, 0), var(--color-success));
+  transform-origin: right center;
 }
 
 .queue-motion__queue {
@@ -169,12 +191,22 @@
 }
 
 .queue-motion__numbers strong {
+  position: relative;
   display: block;
+  height: 1em;
+  overflow: hidden;
+  font-variant-numeric: tabular-nums;
   font: 600 30px/1 var(--font-display);
   letter-spacing: -0.055em;
 }
 
-.queue-motion__numbers span {
+.queue-motion__count > span {
+  top: 0;
+  left: 0;
+  display: block;
+}
+
+.queue-motion__numbers > div > span {
   display: block;
   margin-top: 8px;
   color: var(--color-muted-foreground);
@@ -184,6 +216,7 @@
 }
 
 .queue-motion__bar {
+  display: flex;
   height: 5px;
   background: var(--color-muted);
 }
@@ -191,7 +224,14 @@
 .queue-motion__bar span {
   display: block;
   height: 100%;
+}
+
+.queue-motion__bar-ready {
   background: var(--color-accent);
+}
+
+.queue-motion__bar-flight {
+  background: repeating-linear-gradient(135deg, #8fa5ff 0 4px, #b8c6ff 4px 8px);
 }
 
 .queue-motion__workers {
@@ -200,6 +240,7 @@
 }
 
 .queue-motion__worker {
+  overflow: hidden;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -212,8 +253,13 @@
   background: #a9aea7;
 }
 
-.queue-motion__worker.is-active .queue-motion__worker-light {
-  background: var(--color-success);
+.queue-motion__worker-progress {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 2px;
+  transform-origin: left center;
 }
 
 .queue-motion__worker strong {
@@ -269,10 +315,6 @@
   text-align: right;
 }
 
-.queue-motion__scene.is-compact {
-  min-height: 590px;
-}
-
 .queue-motion__scene.is-compact .queue-motion__titlebar {
   min-height: 52px;
   padding: 0 16px;
@@ -321,6 +363,13 @@
   left: -5px;
 }
 
+.queue-motion__scene.is-compact .queue-motion__trace {
+  width: 1px;
+  height: calc(100% - 4px);
+  background: linear-gradient(180deg, rgba(49, 92, 255, 0), var(--color-accent));
+  transform-origin: center top;
+}
+
 .queue-motion__scene.is-compact .queue-motion__queue-head {
   padding: 16px 17px;
   font-size: 14px;
@@ -339,7 +388,7 @@
   font-size: 27px;
 }
 
-.queue-motion__scene.is-compact .queue-motion__numbers span {
+.queue-motion__scene.is-compact .queue-motion__numbers > div > span {
   margin-top: 7px;
   font-size: 9px;
 }
