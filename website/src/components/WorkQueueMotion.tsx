@@ -1,12 +1,41 @@
-import { Player } from "@remotion/player";
-import { Easing, interpolate, useCurrentFrame } from "remotion";
-import { useEffect, useState, type CSSProperties } from "react";
+import { interpolate, interpolateColors, useCurrentFrame } from "remotion";
+import type { CSSProperties } from "react";
+import {
+  LoopPlayer,
+  alongPath,
+  clamp,
+  motionEase,
+  pulse,
+  travelEase,
+  useMediaQuery,
+  type Point,
+} from "./motionKit";
 import "./WorkQueueMotion.css";
 
-const FPS = 30;
-const DURATION_IN_FRAMES = 300;
+const DURATION_IN_FRAMES = 390;
 const DESKTOP_COMPOSITION = { width: 1200, height: 340 };
 const MOBILE_COMPOSITION = { width: 390, height: 270 };
+const workers = ["worker 1", "worker 2", "worker 3"];
+
+// One job per loop: delivered to worker 1, not acknowledged before its
+// visibility timeout, returned to the queue, then acknowledged by worker 3.
+const SEND = [10, 58] as const;
+const DISPATCH_FIRST = [96, 146] as const;
+const TIMEOUT = [146, 206] as const;
+const RETURN = [212, 258] as const;
+const DISPATCH_RETRY = [282, 326] as const;
+const ACKED = 348;
+const SETTLE = [364, 388] as const;
+
+const BORDER = "#dfe3dc";
+const ACTIVE_BORDER = "#bfc9ff";
+const WARNING_BORDER = "#f1cf9c";
+const SUCCESS_BORDER = "#a7dcc7";
+const ACCENT = "#315cff";
+const WARNING = "#d97706";
+const SUCCESS = "#0e9f6e";
+const MUTED = "#646a63";
+const PACKET_RADIUS = 6;
 
 type WorkQueueMotionProps = {
   compact: boolean;
@@ -16,124 +45,137 @@ type WorkQueueSceneProps = WorkQueueMotionProps & {
   frame: number;
 };
 
-const clamp = {
-  extrapolateLeft: "clamp" as const,
-  extrapolateRight: "clamp" as const,
+type Routes = {
+  incoming: Point[];
+  toFirst: Point[];
+  toRetry: Point[];
 };
 
-const motionEase = Easing.bezier(0.16, 1, 0.3, 1);
+const desktopRoutes: Routes = {
+  incoming: [[116, 173], [402, 173]],
+  toFirst: [[530, 173], [724, 173], [724, 117], [816, 117]],
+  toRetry: [[530, 173], [724, 173], [724, 229], [816, 229]],
+};
 
-function useMediaQuery(query: string) {
-  const [matches, setMatches] = useState(false);
+const compactRoutes: Routes = {
+  incoming: [[195, 65], [195, 85]],
+  toFirst: [[195, 149], [195, 169], [76, 169], [76, 181]],
+  toRetry: [[195, 149], [195, 169], [314, 169], [314, 181]],
+};
 
-  useEffect(() => {
-    const mediaQuery = window.matchMedia(query);
-    const update = () => setMatches(mediaQuery.matches);
+const ease = (frame: number, range: readonly [number, number]) =>
+  interpolate(frame, range, [0, 1], { ...clamp, easing: motionEase });
 
-    update();
-    mediaQuery.addEventListener("change", update);
+const visible = (frame: number, range: readonly [number, number]) =>
+  interpolate(frame, [range[0] - 4, range[0] + 4, range[1] - 4, range[1] + 4], [0, 1, 1, 0], clamp);
 
-    return () => mediaQuery.removeEventListener("change", update);
-  }, [query]);
+function packetStyle(
+  frame: number,
+  route: readonly Point[],
+  range: readonly [number, number],
+  reverse = false,
+): CSSProperties {
+  const progress = interpolate(frame, range, [0, 1], { ...clamp, easing: travelEase });
+  const [x, y] = alongPath(route, reverse ? 1 - progress : progress);
 
-  return matches;
+  return {
+    translate: `${x - PACKET_RADIUS}px ${y - PACKET_RADIUS}px`,
+    opacity: visible(frame, range),
+  };
+}
+
+function workerState(frame: number, index: number) {
+  if (index === 0) {
+    const active =
+      ease(frame, [DISPATCH_FIRST[1] - 8, DISPATCH_FIRST[1] + 8]) *
+      (1 - ease(frame, [RETURN[0] + 20, RETURN[1] + 10]));
+    const warning = ease(frame, [TIMEOUT[1] - 6, TIMEOUT[1] + 6]);
+    const label =
+      frame >= TIMEOUT[1] && frame < RETURN[1] + 6
+        ? "timed out"
+        : frame >= DISPATCH_FIRST[1] && frame < TIMEOUT[1]
+          ? "processing"
+          : "idle";
+
+    return {
+      active,
+      tone: interpolateColors(warning, [0, 1], [ACCENT, WARNING]),
+      border: interpolateColors(warning, [0, 1], [ACTIVE_BORDER, WARNING_BORDER]),
+      progress: interpolate(frame, TIMEOUT, [0, 1], clamp),
+      label,
+    };
+  }
+
+  if (index === 2) {
+    const active =
+      ease(frame, [DISPATCH_RETRY[1] - 8, DISPATCH_RETRY[1] + 8]) * (1 - ease(frame, SETTLE));
+    const done = ease(frame, [ACKED - 6, ACKED + 6]);
+    const label =
+      frame >= ACKED && frame < SETTLE[1] - 8
+        ? "acked"
+        : frame >= DISPATCH_RETRY[1] && frame < SETTLE[1] - 8
+          ? "processing"
+          : "idle";
+
+    return {
+      active,
+      tone: interpolateColors(done, [0, 1], [ACCENT, SUCCESS]),
+      border: interpolateColors(done, [0, 1], [ACTIVE_BORDER, SUCCESS_BORDER]),
+      progress: interpolate(frame, [DISPATCH_RETRY[1], ACKED], [0, 1], clamp),
+      label,
+    };
+  }
+
+  return { active: 0, tone: ACCENT, border: ACTIVE_BORDER, progress: 0, label: "idle" };
 }
 
 function WorkQueueScene({ compact, frame }: WorkQueueSceneProps) {
+  const routes = compact ? compactRoutes : desktopRoutes;
+
   const queueLevel = interpolate(
     frame,
-    [0, 58, 86, 154, 212, 276, 300],
-    [0.72, 0.72, 1, 0.56, 0.56, 1, 0.72],
+    [
+      SEND[1] - 4,
+      SEND[1] + 20,
+      DISPATCH_FIRST[0],
+      DISPATCH_FIRST[0] + 20,
+      RETURN[1] - 4,
+      RETURN[1] + 20,
+      DISPATCH_RETRY[0],
+      DISPATCH_RETRY[0] + 20,
+    ],
+    [0.72, 1, 1, 0.72, 0.72, 1, 1, 0.72],
     { ...clamp, easing: motionEase },
   );
-  const queueGlow = interpolate(
-    frame,
-    [54, 82, 196, 228, 276],
-    [0, 1, 0.22, 0.2, 1],
-    { ...clamp, easing: motionEase },
+  const queueGlow = Math.max(
+    interpolate(frame, [SEND[1] - 4, SEND[1] + 12, DISPATCH_FIRST[0] + 10, DISPATCH_FIRST[0] + 36], [0, 1, 1, 0], clamp),
+    interpolate(frame, [RETURN[1] - 4, RETURN[1] + 12, DISPATCH_RETRY[0] + 10, DISPATCH_RETRY[0] + 36], [0, 1, 1, 0], clamp),
   );
-  const activeWorker = interpolate(
-    frame,
-    [146, 172, 216, 244],
-    [0, 1, 1, 0],
-    { ...clamp, easing: motionEase },
-  );
-
-  const incomingPacket: CSSProperties = compact
-    ? {
-        left: "190px",
-        top: `${interpolate(frame, [8, 64], [59, 82], {
-          ...clamp,
-          easing: motionEase,
-        })}px`,
-        opacity: interpolate(frame, [2, 10, 58, 66], [0, 1, 1, 0], clamp),
-      }
-    : {
-        left: `${interpolate(frame, [8, 64], [116, 392], {
-          ...clamp,
-          easing: motionEase,
-        })}px`,
-        top: "169px",
-        opacity: interpolate(frame, [2, 10, 58, 66], [0, 1, 1, 0], clamp),
-      };
-
-  const dispatchPacket: CSSProperties = compact
-    ? {
-        left: `${interpolate(frame, [102, 160, 182], [190, 74, 74], {
-          ...clamp,
-          easing: motionEase,
-        })}px`,
-        top: `${interpolate(frame, [102, 160, 182], [151, 174, 174], {
-          ...clamp,
-          easing: motionEase,
-        })}px`,
-        opacity: interpolate(frame, [94, 104, 178, 186], [0, 1, 1, 0], clamp),
-      }
-    : {
-        left: `${interpolate(frame, [102, 162, 182], [532, 808, 808], {
-          ...clamp,
-          easing: motionEase,
-        })}px`,
-        top: `${interpolate(frame, [102, 162, 182], [169, 169, 114], {
-          ...clamp,
-          easing: motionEase,
-        })}px`,
-        opacity: interpolate(frame, [94, 104, 178, 186], [0, 1, 1, 0], clamp),
-      };
-
-  const returnPacket: CSSProperties = compact
-    ? {
-        left: `${interpolate(frame, [218, 236, 278], [74, 190, 190], {
-          ...clamp,
-          easing: motionEase,
-        })}px`,
-        top: `${interpolate(frame, [218, 236, 278], [174, 151, 151], {
-          ...clamp,
-          easing: motionEase,
-        })}px`,
-        opacity: interpolate(frame, [212, 222, 272, 284], [0, 1, 1, 0], clamp),
-      }
-    : {
-        left: `${interpolate(frame, [218, 236, 278], [808, 808, 532], {
-          ...clamp,
-          easing: motionEase,
-        })}px`,
-        top: `${interpolate(frame, [218, 236, 278], [114, 169, 169], {
-          ...clamp,
-          easing: motionEase,
-        })}px`,
-        opacity: interpolate(frame, [212, 222, 272, 284], [0, 1, 1, 0], clamp),
-      };
+  const retryTag = interpolate(frame, [RETURN[1] - 2, RETURN[1] + 12, SETTLE[0], SETTLE[1]], [0, 1, 1, 0], {
+    ...clamp,
+    easing: motionEase,
+  });
 
   return (
     <div className={`work-queue-motion__scene${compact ? " is-compact" : ""}`}>
-      <div className="work-queue-motion__node work-queue-motion__app">app</div>
+      <div
+        className="work-queue-motion__node work-queue-motion__app"
+        style={{
+          borderColor: interpolateColors(
+            interpolate(frame, [4, 12, 40, 64], [0, 1, 1, 0], clamp),
+            [0, 1],
+            [BORDER, ACTIVE_BORDER],
+          ),
+        }}
+      >
+        app
+      </div>
       <span className="work-queue-motion__rail work-queue-motion__rail--in" />
 
       <div
         className="work-queue-motion__queue"
         style={{
-          borderColor: queueGlow > 0.5 ? "#bfc9ff" : "var(--color-border)",
+          borderColor: interpolateColors(queueGlow, [0, 1], [BORDER, ACTIVE_BORDER]),
           boxShadow: `0 14px 30px rgba(49, 92, 255, ${queueGlow * 0.11})`,
         }}
       >
@@ -150,38 +192,72 @@ function WorkQueueScene({ compact, frame }: WorkQueueSceneProps) {
           style={{ scale: `${queueLevel * 0.84} 1` }}
         />
         <span className="work-queue-motion__jobs-label">jobs</span>
+        <span
+          className="work-queue-motion__retry"
+          style={{ opacity: retryTag, translate: `0 ${(1 - retryTag) * 4}px` }}
+        >
+          attempt 2
+        </span>
       </div>
 
       <span className="work-queue-motion__rail work-queue-motion__rail--out" />
+      <span className="work-queue-motion__bus" />
+      {workers.map((worker, index) => (
+        <span
+          className={`work-queue-motion__branch work-queue-motion__branch--${index}`}
+          key={worker}
+        />
+      ))}
 
       <div className="work-queue-motion__workers">
-        {['worker 1', 'worker 2', 'worker 3'].map((worker, index) => (
-          <span
-            className={`work-queue-motion__worker${index === 0 ? " is-active" : ""}`}
-            key={worker}
-            style={
-              index === 0
-                ? {
-                    borderColor:
-                      activeWorker > 0.5 ? "#bfc9ff" : "var(--color-border)",
-                    backgroundColor: `rgba(49, 92, 255, ${activeWorker * 0.035})`,
-                    boxShadow: `0 8px 18px rgba(49, 92, 255, ${activeWorker * 0.08})`,
-                    color:
-                      activeWorker > 0.5
-                        ? "var(--color-accent)"
-                        : "var(--color-muted-foreground)",
-                  }
-                : undefined
-            }
-          >
-            {worker}
-          </span>
-        ))}
+        {workers.map((worker, index) => {
+          const state = workerState(frame, index);
+
+          return (
+            <span
+              className="work-queue-motion__worker"
+              key={worker}
+              style={{
+                borderColor: interpolateColors(state.active, [0, 1], [BORDER, state.border]),
+                backgroundColor: `rgba(49, 92, 255, ${state.active * 0.025})`,
+                boxShadow: `0 8px 18px rgba(17, 19, 16, ${state.active * 0.06})`,
+                color: interpolateColors(state.active, [0, 1], [MUTED, state.tone]),
+              }}
+            >
+              <span className="work-queue-motion__worker-name">{worker}</span>
+              <span className="work-queue-motion__worker-status" style={{ opacity: 0.45 + state.active * 0.55 }}>
+                <span
+                  className="work-queue-motion__worker-light"
+                  style={{
+                    backgroundColor: interpolateColors(state.active, [0, 1], ["#c4c9c1", state.tone]),
+                    boxShadow:
+                      state.label === "processing"
+                        ? `0 0 0 ${1 + pulse(frame, 24) * 3}px rgba(49, 92, 255, 0.14)`
+                        : "none",
+                  }}
+                />
+                {state.label}
+              </span>
+              <span
+                className="work-queue-motion__worker-progress"
+                style={{
+                  scale: `${state.progress} 1`,
+                  opacity: state.active,
+                  backgroundColor: state.tone,
+                }}
+              />
+            </span>
+          );
+        })}
       </div>
 
-      <span className="work-queue-motion__packet" style={incomingPacket} />
-      <span className="work-queue-motion__packet" style={dispatchPacket} />
-      <span className="work-queue-motion__packet" style={returnPacket} />
+      <span className="work-queue-motion__packet" style={packetStyle(frame, routes.incoming, SEND)} />
+      <span className="work-queue-motion__packet" style={packetStyle(frame, routes.toFirst, DISPATCH_FIRST)} />
+      <span
+        className="work-queue-motion__packet is-warning"
+        style={packetStyle(frame, routes.toFirst, RETURN, true)}
+      />
+      <span className="work-queue-motion__packet" style={packetStyle(frame, routes.toRetry, DISPATCH_RETRY)} />
     </div>
   );
 }
@@ -201,34 +277,21 @@ export default function WorkQueueMotion() {
     <div
       className={`work-queue-motion${compact ? " is-compact" : ""}`}
       role="img"
-      aria-label="An app sends one job to a queue, which delivers it to one worker and returns it to the queue when it is not acknowledged."
+      aria-label="An app sends one job to a queue. Worker 1 does not acknowledge it before the visibility timeout, so the job returns to the queue and worker 3 processes and acknowledges it."
     >
       {prefersReducedMotion ? (
         <div className="work-queue-motion__static">
-          <WorkQueueScene compact={compact} frame={190} />
+          <WorkQueueScene compact={compact} frame={ACKED + 8} />
         </div>
       ) : (
-        <div aria-hidden="true">
-          <Player
-            component={WorkQueueComposition}
-            inputProps={{ compact }}
-            durationInFrames={DURATION_IN_FRAMES}
-            fps={FPS}
-            compositionWidth={composition.width}
-            compositionHeight={composition.height}
-            numberOfSharedAudioTags={0}
-            autoPlay
-            initiallyMuted
-            loop
-            controls={false}
-            clickToPlay={false}
-            doubleClickToFullscreen={false}
-            spaceKeyToPlayOrPause={false}
-            allowFullscreen={false}
-            className="work-queue-motion__player"
-            style={{ width: "100%" }}
-          />
-        </div>
+        <LoopPlayer
+          component={WorkQueueComposition}
+          inputProps={{ compact }}
+          durationInFrames={DURATION_IN_FRAMES}
+          width={composition.width}
+          height={composition.height}
+          className="work-queue-motion__player"
+        />
       )}
     </div>
   );

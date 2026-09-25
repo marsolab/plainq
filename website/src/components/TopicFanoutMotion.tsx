@@ -1,13 +1,47 @@
-import { Player } from "@remotion/player";
-import { Easing, interpolate, useCurrentFrame } from "remotion";
-import { useEffect, useState, type CSSProperties } from "react";
+import { interpolate, interpolateColors, useCurrentFrame } from "remotion";
+import type { CSSProperties } from "react";
+import {
+  LoopPlayer,
+  alongPath,
+  clamp,
+  motionEase,
+  pathLength,
+  travelEase,
+  useMediaQuery,
+  type Point,
+} from "./motionKit";
 import "./TopicFanoutMotion.css";
 
-const FPS = 30;
 const DURATION_IN_FRAMES = 300;
 const DESKTOP_COMPOSITION = { width: 1200, height: 340 };
 const MOBILE_COMPOSITION = { width: 390, height: 270 };
 const subscribers = ["email-q", "analytics-q", "audit-q"];
+
+// The event is published once; the topic writes one copy per subscription,
+// so the copies travel together until the bus and then split.
+const PUBLISH = [8, 60] as const;
+const FANOUT = [100, 158] as const;
+const SETTLE = [252, 292] as const;
+
+const BORDER = "#dfe3dc";
+const ACTIVE_BORDER = "#bfc9ff";
+const MUTED = "#646a63";
+const ACCENT = "#315cff";
+const PACKET_RADIUS = 6;
+
+const desktopRoutes = {
+  incoming: [[134, 172], [394, 172]] as Point[],
+  deliveries: [116, 172, 228].map(
+    (y): Point[] => [[586, 172], [724, 172], [724, y], [822, y]],
+  ),
+};
+
+const compactRoutes = {
+  incoming: [[195, 65], [195, 85]] as Point[],
+  deliveries: [75, 195, 315].map(
+    (x): Point[] => [[195, 126], [195, 156], [x, 156], [x, 181]],
+  ),
+};
 
 type TopicFanoutMotionProps = {
   compact: boolean;
@@ -17,27 +51,20 @@ type TopicFanoutSceneProps = TopicFanoutMotionProps & {
   frame: number;
 };
 
-const clamp = {
-  extrapolateLeft: "clamp" as const,
-  extrapolateRight: "clamp" as const,
-};
+const ease = (frame: number, range: readonly [number, number]) =>
+  interpolate(frame, range, [0, 1], { ...clamp, easing: motionEase });
 
-const motionEase = Easing.bezier(0.16, 1, 0.3, 1);
+// Shared distance travelled by every copy, so they overlap on the common
+// segment and each one stops when its own route ends.
+const fanoutDistance = (frame: number, longest: number) =>
+  interpolate(frame, FANOUT, [0, longest], { ...clamp, easing: travelEase });
 
-function useMediaQuery(query: string) {
-  const [matches, setMatches] = useState(false);
+function arrivalFrame(length: number, longest: number) {
+  for (let frame = FANOUT[0]; frame <= FANOUT[1]; frame += 1) {
+    if (fanoutDistance(frame, longest) >= length) return frame;
+  }
 
-  useEffect(() => {
-    const mediaQuery = window.matchMedia(query);
-    const update = () => setMatches(mediaQuery.matches);
-
-    update();
-    mediaQuery.addEventListener("change", update);
-
-    return () => mediaQuery.removeEventListener("change", update);
-  }, [query]);
-
-  return matches;
+  return FANOUT[1];
 }
 
 function ArrowHead() {
@@ -49,32 +76,33 @@ function ArrowHead() {
 }
 
 function TopicFanoutScene({ compact, frame }: TopicFanoutSceneProps) {
-  const topicGlow = interpolate(frame, [54, 86, 204, 236], [0, 1, 1, 0], {
+  const routes = compact ? compactRoutes : desktopRoutes;
+  const lengths = routes.deliveries.map(pathLength);
+  const longest = Math.max(...lengths);
+  const distance = fanoutDistance(frame, longest);
+  const settle = ease(frame, SETTLE);
+
+  const eventActive = interpolate(frame, [2, 10, 40, 66], [0, 1, 1, 0], clamp);
+  const topicGlow = interpolate(frame, [PUBLISH[1] - 6, PUBLISH[1] + 18, FANOUT[0] + 16, FANOUT[1] + 20], [0, 1, 1, 0], {
     ...clamp,
     easing: motionEase,
   });
 
-  const incomingPacket: CSSProperties = compact
-    ? {
-        left: "190px",
-        top: `${interpolate(frame, [8, 64], [59, 82], {
-          ...clamp,
-          easing: motionEase,
-        })}px`,
-        opacity: interpolate(frame, [2, 10, 58, 66], [0, 1, 1, 0], clamp),
-      }
-    : {
-        left: `${interpolate(frame, [8, 64], [134, 392], {
-          ...clamp,
-          easing: motionEase,
-        })}px`,
-        top: "166px",
-        opacity: interpolate(frame, [2, 10, 58, 66], [0, 1, 1, 0], clamp),
-      };
+  const publishProgress = interpolate(frame, PUBLISH, [0, 1], { ...clamp, easing: travelEase });
+  const [inX, inY] = alongPath(routes.incoming, publishProgress);
+  const incomingPacket: CSSProperties = {
+    translate: `${inX - PACKET_RADIUS}px ${inY - PACKET_RADIUS}px`,
+    opacity: interpolate(frame, [PUBLISH[0] - 4, PUBLISH[0] + 4, PUBLISH[1] - 4, PUBLISH[1] + 4], [0, 1, 1, 0], clamp),
+  };
 
   return (
     <div className={`topic-fanout-motion__scene${compact ? " is-compact" : ""}`}>
-      <div className="topic-fanout-motion__node topic-fanout-motion__event">event</div>
+      <div
+        className="topic-fanout-motion__node topic-fanout-motion__event"
+        style={{ borderColor: interpolateColors(eventActive, [0, 1], [BORDER, ACTIVE_BORDER]) }}
+      >
+        event
+      </div>
       <span className="topic-fanout-motion__rail topic-fanout-motion__rail--in">
         <ArrowHead />
       </span>
@@ -82,50 +110,32 @@ function TopicFanoutScene({ compact, frame }: TopicFanoutSceneProps) {
       <div
         className="topic-fanout-motion__node topic-fanout-motion__topic"
         style={{
-          borderColor: topicGlow > 0.5 ? "#bfc9ff" : "var(--color-border)",
-          boxShadow: `0 12px 28px rgba(49, 92, 255, ${topicGlow * 0.1})`,
+          borderColor: interpolateColors(topicGlow, [0, 1], [BORDER, ACTIVE_BORDER]),
+          boxShadow: `0 12px 28px rgba(49, 92, 255, ${0.02 + topicGlow * 0.1})`,
         }}
       >
         order.created
+        <span
+          className="topic-fanout-motion__copies"
+          style={{ opacity: topicGlow, translate: `0 ${(1 - topicGlow) * 3}px` }}
+        >
+          ×3
+        </span>
       </div>
 
       <span className="topic-fanout-motion__spine" />
       <span className="topic-fanout-motion__bus" />
 
       {subscribers.map((subscriber, index) => {
-        const start = 104 + index * 20;
-        const end = start + 66;
-        const branchY = [119, 175, 231][index];
-        const mobileX = [75, 195, 315][index];
-        const subscriberActivity = interpolate(
-          frame,
-          [end - 16, end, end + 34, end + 46],
-          [0, 1, 1, 0],
-          { ...clamp, easing: motionEase },
-        );
-        const deliveryPacket: CSSProperties = compact
-          ? {
-              left: `${interpolate(frame, [start, start + 20, start + 44, end], [190, 190, mobileX - 6, mobileX - 6], {
-                ...clamp,
-                easing: motionEase,
-              })}px`,
-              top: `${interpolate(frame, [start, start + 20, start + 44, end], [123, 150, 150, 175], {
-                ...clamp,
-                easing: motionEase,
-              })}px`,
-              opacity: interpolate(frame, [start - 6, start, end - 5, end + 7], [0, 1, 1, 0], clamp),
-            }
-          : {
-              left: `${interpolate(frame, [start, start + 22, start + 44, end], [586, 724, 724, 818], {
-                ...clamp,
-                easing: motionEase,
-              })}px`,
-              top: `${interpolate(frame, [start, start + 22, start + 44, end], [166, 166, branchY - 6, branchY - 6], {
-                ...clamp,
-                easing: motionEase,
-              })}px`,
-              opacity: interpolate(frame, [start - 6, start, end - 5, end + 7], [0, 1, 1, 0], clamp),
-            };
+        const route = routes.deliveries[index];
+        const length = lengths[index];
+        const arrival = arrivalFrame(length, longest);
+        const activity = ease(frame, [arrival - 8, arrival + 8]) * (1 - settle);
+        const [x, y] = alongPath(route, distance / length);
+        const deliveryPacket: CSSProperties = {
+          translate: `${x - PACKET_RADIUS}px ${y - PACKET_RADIUS}px`,
+          opacity: interpolate(frame, [FANOUT[0] - 4, FANOUT[0] + 4, arrival - 3, arrival + 5], [0, 1, 1, 0], clamp),
+        };
 
         return (
           <span key={subscriber}>
@@ -135,17 +145,19 @@ function TopicFanoutScene({ compact, frame }: TopicFanoutSceneProps) {
             <span
               className="topic-fanout-motion__subscriber"
               style={{
-                borderColor:
-                  subscriberActivity > 0.5 ? "#bfc9ff" : "var(--color-border)",
-                backgroundColor: `rgba(49, 92, 255, ${subscriberActivity * 0.03})`,
-                boxShadow: `0 8px 18px rgba(49, 92, 255, ${subscriberActivity * 0.07})`,
-                color:
-                  subscriberActivity > 0.5
-                    ? "var(--color-accent)"
-                    : "var(--color-muted-foreground)",
+                borderColor: interpolateColors(activity, [0, 1], [BORDER, ACTIVE_BORDER]),
+                backgroundColor: `rgba(49, 92, 255, ${activity * 0.03})`,
+                boxShadow: `0 8px 18px rgba(49, 92, 255, ${activity * 0.07})`,
+                color: interpolateColors(activity, [0, 1], [MUTED, ACCENT]),
               }}
             >
-              {subscriber}
+              <span className="topic-fanout-motion__subscriber-name">{subscriber}</span>
+              <span
+                className="topic-fanout-motion__delivered"
+                style={{ opacity: activity, translate: `${(1 - activity) * -4}px 0` }}
+              >
+                +1 copy
+              </span>
             </span>
             <span className="topic-fanout-motion__packet" style={deliveryPacket} />
           </span>
@@ -176,30 +188,17 @@ export default function TopicFanoutMotion() {
     >
       {prefersReducedMotion ? (
         <div className="topic-fanout-motion__static">
-          <TopicFanoutScene compact={compact} frame={270} />
+          <TopicFanoutScene compact={compact} frame={FANOUT[1] + 30} />
         </div>
       ) : (
-        <div aria-hidden="true">
-          <Player
-            component={TopicFanoutComposition}
-            inputProps={{ compact }}
-            durationInFrames={DURATION_IN_FRAMES}
-            fps={FPS}
-            compositionWidth={composition.width}
-            compositionHeight={composition.height}
-            numberOfSharedAudioTags={0}
-            autoPlay
-            initiallyMuted
-            loop
-            controls={false}
-            clickToPlay={false}
-            doubleClickToFullscreen={false}
-            spaceKeyToPlayOrPause={false}
-            allowFullscreen={false}
-            className="topic-fanout-motion__player"
-            style={{ width: "100%" }}
-          />
-        </div>
+        <LoopPlayer
+          component={TopicFanoutComposition}
+          inputProps={{ compact }}
+          durationInFrames={DURATION_IN_FRAMES}
+          width={composition.width}
+          height={composition.height}
+          className="topic-fanout-motion__player"
+        />
       )}
     </div>
   );

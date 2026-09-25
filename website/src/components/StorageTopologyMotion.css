@@ -61,7 +61,8 @@
 }
 
 .storage-trunk__signal,
-.backend-node__connector-signal {
+.backend-node__connector-signal,
+.backend-list__bus-signal {
   position: absolute;
   display: block;
   background: #fff;
@@ -95,26 +96,39 @@
   stroke-width: 1.35;
 }
 
-.storage-trunk__arrow-signal,
-.backend-node__connector-arrow-signal {
-  filter: drop-shadow(0 0 4px rgba(49, 92, 255, 0.55));
-  stroke: #fff !important;
-}
-
 .backend-list {
   position: relative;
   display: grid;
   gap: 9px;
 }
 
+/* Row centres: three equal rows separated by two 9px gaps. */
 .backend-list::before {
   position: absolute;
-  top: 26px;
-  bottom: 26px;
+  top: calc((100% - 18px) / 6);
+  bottom: calc((100% - 18px) / 6);
   left: -1px;
   width: 1px;
   background: #c7d2ff;
   content: "";
+}
+
+.backend-list__bus-signal {
+  z-index: 1;
+  left: -2px;
+  width: 3px;
+}
+
+.backend-list__bus-signal.is-up {
+  top: calc((100% - 18px) / 6);
+  bottom: 50%;
+  transform-origin: center bottom;
+}
+
+.backend-list__bus-signal.is-down {
+  top: 50%;
+  bottom: calc((100% - 18px) / 6);
+  transform-origin: center top;
 }
 
 .backend-node {
@@ -159,6 +173,7 @@
 }
 
 .backend-light {
+  display: block;
   width: 8px;
   height: 8px;
   flex: 0 0 auto;
@@ -201,6 +216,14 @@
     width: 3px;
     height: 100%;
     transform-origin: center top;
+  }
+
+  .storage-trunk__arrow {
+    top: auto;
+    right: auto;
+    bottom: -4px;
+    left: -4px;
+    rotate: 90deg;
   }
 
   .backend-list::before,
